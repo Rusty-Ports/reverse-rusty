@@ -166,6 +166,11 @@ path = "src/bin/segbench.rs"
 test = false
 
 [[bin]]
+name = "tagbench"
+path = "src/bin/tagbench.rs"
+test = false
+
+[[bin]]
 name = "snapbench"
 path = "src/bin/snapbench.rs"
 test = false

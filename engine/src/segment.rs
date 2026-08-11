@@ -57,6 +57,7 @@ mod persistence;
 mod ranked_batch;
 mod seg;
 mod snapshot;
+mod tag_summary;
 
 #[cfg(test)]
 mod wal_failure_tests;
@@ -75,16 +76,18 @@ pub use outcomes::{
     AliasApplyReport, AliasDiscoveryReport, AliasFeedbackApplyReport, CompactionReport,
     IngestItemStatus, IngestReport, InsertOutcome, UpsertOutcome,
 };
+pub(crate) use tag_summary::TagSummary;
 
 /// One immutable (or, for the memtable, mutable) slice of the index. Owns the
 /// per-segment SoA + candidate indexes + liveness; the shared dict/norm stay on
 /// the Engine. Local ids are segment-local (indexes into this segment's SoA).
 ///
 /// Sealed (immutable) segments carry an anchor filter — a bloom filter over the
-/// signature keys present in main + broad indexes. The filter lets `match_into`
-/// skip probes that would definitely miss, cutting read amplification when
-/// multiple segments exist. The memtable (mutable) has no filter; it's built
-/// at seal time (flush / bulk_ingest / compaction).
+/// signature keys present in main + broad + hot indexes — and an exact union of their
+/// stored tag IDs. The former skips signature probes that would definitely miss;
+/// for filtered requests the latter can reject a whole segment when one required
+/// tag group is absent. The mutable memtable has neither structure and always
+/// fails open; both are built at seal time (flush / bulk ingest / compaction).
 #[derive(Debug, Clone)]
 pub struct Segment {
     main: CandidateIndex,
@@ -106,6 +109,10 @@ pub struct Segment {
     /// Anchor filter: present only on sealed (immutable) base segments.
     /// `None` for the memtable (mutable, entries added dynamically).
     filter: Option<SegmentFilter>,
+    /// Exact union of stored `TagId`s, present only after sealing. A request
+    /// predicate may use it to prove that no row in this segment is acceptable;
+    /// `None` (the mutable memtable) always fails open.
+    tag_summary: Option<TagSummary>,
     /// Vocab epoch at which this segment's queries were compiled.
     pub vocab_epoch: u64,
     /// AST→compiled-query lowering semantics baked into this segment. Mechanical

@@ -50,6 +50,16 @@ fn filtered_percolation_matches_single_node_and_oracle() {
             let cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags)
                 .expect("tagged cluster build");
 
+            let unknown = vec![("category".to_string(), vec!["never-ingested".to_string()])];
+            let (none, skip_stats) = cluster
+                .percolate_filtered_with_stats(&titles[0], &unknown, true)
+                .expect("filtered cluster stats");
+            assert!(none.is_empty());
+            assert!(
+                skip_stats.tag_segments_skipped > 0,
+                "K={k} RF={rf}: shard-local summary skips must merge through fan-out"
+            );
+
             for (ti, title) in titles.iter().enumerate() {
                 let unfiltered: HashSet<u64> =
                     cluster.percolate(title).unwrap().into_iter().collect();
@@ -132,6 +142,7 @@ fn live_tagged_add_is_filterable_with_post_freeze_tag() {
             &[("category".to_string(), "coins".to_string())],
         )
         .expect("tagged live add");
+    cluster.flush().expect("seal synthetic-tag memtables");
 
     let items = vec![("category".to_string(), vec!["items".to_string()])];
     let coins = vec![("category".to_string(), vec!["coins".to_string()])];

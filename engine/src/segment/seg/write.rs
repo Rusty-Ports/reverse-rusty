@@ -15,6 +15,7 @@ impl Segment {
             alive_counter: 0,
             live_phrase_predicates: 0,
             filter: None,
+            tag_summary: None,
             vocab_epoch: 0,
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
             logical_index: crate::util::fast_map(),
@@ -57,6 +58,7 @@ impl Segment {
         keys.extend(self.broad.keys());
         keys.extend(self.hot.keys());
         self.filter = Some(SegmentFilter::build(&keys));
+        self.tag_summary = Some(crate::segment::TagSummary::build(self.exact.tag_blobs()));
         // Sealing also retires the building-time body index (dedup Stage A):
         // sealed read paths and the merges consult only `dup_of`/`dup_members`
         // (a merge regroups into the DEST's fresh index), so keeping ~one map

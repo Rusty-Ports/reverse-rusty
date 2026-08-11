@@ -44,7 +44,8 @@ subsequent lock-free reads.
 
 - **Dynamic (runtime-tunable):** `max_segments`, `memtable_flush_threshold`, `max_query_length`,
   `max_query_clauses`, `max_anyof_group_size`, `max_tags`, `holes_ratio_threshold`,
-  `compaction_fixed_cost`,
+  `compaction_fixed_cost`, `tag_segment_skipping` (ADR-174 — default on; exact sealed-segment tag
+  unions skip only when a request-filter group is absent; `false` is a result-preserving kill switch),
   `auto_compact_on_flush`, `auto_compact_on_ingest`, `compaction_reanchor` (re-anchor drifted queries
   on the next merge, ADR-056), the broad-lane batch knobs `broad_batch_size`, `max_percolate_batch`,
   `broad_columnar`, `broad_materialize` (ADR-026), `broad_prefilter` (the batch count-gate

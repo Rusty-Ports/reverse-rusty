@@ -198,9 +198,11 @@ impl<'a> TitleView<'a> {
 /// A compiled tag filter (ADR-049): a conjunction of per-key value-sets, each value-set a
 /// sorted, deduped list of `TagId`s. A query passes iff EVERY group shares at least one
 /// `TagId` with the query's sorted tag set (AND across keys, OR within a key). Compiled
-/// once per request from the REST filter; tested only in the post-candidate verify stage,
-/// never in candidate retrieval — so it can only ever *remove* queries the caller did not
-/// ask for, never drop a wanted match (the "tags never gate" invariant, matching.md §5.3).
+/// once per request from the REST filter; tested authoritatively in the post-candidate
+/// verify stage. A sealed segment's exact tag union may first prove that a whole segment
+/// cannot satisfy one of these groups (ADR-174), but tags never enter semantic signatures
+/// or per-row candidate retrieval. The predicate can therefore only remove queries the
+/// caller did not ask for, never drop a wanted in-scope match (matching.md §5.3).
 ///
 /// - **Empty** (`groups` empty) ⇒ no filter ⇒ every query passes. The verify clause is a
 ///   single never-taken branch, so the no-filter path is unchanged from before tags.

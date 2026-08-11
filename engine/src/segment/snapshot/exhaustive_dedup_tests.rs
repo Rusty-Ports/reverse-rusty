@@ -248,6 +248,7 @@ mod bounded_deadline_tests {
             segments: &snapshot.segments,
             memtable: &snapshot.memtable,
             has_phrase_predicates: snapshot.has_phrase_predicates,
+            tag_segment_skipping: snapshot.config.tag_segment_skipping,
             pred: &pred,
         };
         let checks = AtomicUsize::new(0);
@@ -318,6 +319,7 @@ mod bounded_deadline_tests {
             segments: &snapshot.segments,
             memtable: &snapshot.memtable,
             has_phrase_predicates: snapshot.has_phrase_predicates,
+            tag_segment_skipping: snapshot.config.tag_segment_skipping,
             pred: &pred,
         };
         let checks = AtomicUsize::new(0);

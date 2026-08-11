@@ -20,8 +20,10 @@
   the build.
 - **Current outcome:** ADR-055 carried tags and filters through cluster placement, persistence, and
   gRPC; ADR-059 added local ranking/pagination; ADR-075 added cluster ranking; and ADR-107–114 added
-  bounded ranked and exhaustive delivery contracts. The implementation-time deferrals below remain
-  useful history, not the current feature matrix.
+  bounded ranked and exhaustive delivery contracts. ADR-174 later implemented the deferred
+  filter-driven segment optimization as exact fail-open tag unions, without admitting tags to
+  semantic signatures. The implementation-time deferrals below remain useful history, not the
+  current feature matrix.
 - **Context:** Reverse Rusty matches titles to stored queries and returns a bare set of matched
   `logical_id`s. Real percolator deployments — captured abstractly in
   [`research/percolator-workload.md`](../research/percolator-workload.md) — do more: each stored query
@@ -79,6 +81,7 @@
 - **See also:** ADR-006 (forbidden-never-gates — the invariant this mirrors), ADR-001/002 (semantic
   signatures + integer-exact verify — the two-stage subsumption), ADR-026 (`/_mpercolate` batch — where
   pagination/ranking attach), ADR-046 (the feature dictionary whose interning is reused for tag ids).
+  ADR-174 records the later exact segment-summary optimization.
   Design: [`design/matching.md`](../design/matching.md) §5,
   [`design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §11. Workload:
   [`research/percolator-workload.md`](../research/percolator-workload.md). Shipped history:

@@ -69,6 +69,7 @@ impl Segment {
             alive_counter,
             live_phrase_predicates,
             filter: None,
+            tag_summary: None,
             vocab_epoch: 0,
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
             logical_index,
@@ -132,6 +133,25 @@ impl Segment {
         self.filter
             .as_ref()
             .map_or(0, crate::filter::SegmentFilter::heap_bytes)
+    }
+
+    /// Whether this sealed segment's exact tag union is compatible with the
+    /// request predicate. An absent summary (the mutable memtable) fails open.
+    #[inline]
+    pub(in crate::segment) fn tag_summary_may_match(
+        &self,
+        pred: &crate::exact::TagPredicate,
+    ) -> bool {
+        self.tag_summary
+            .as_ref()
+            .is_none_or(|summary| summary.may_match(pred))
+    }
+
+    /// Resident bytes for the immutable exact tag union.
+    pub fn tag_summary_bytes(&self) -> usize {
+        self.tag_summary
+            .as_ref()
+            .map_or(0, crate::segment::TagSummary::heap_bytes)
     }
 
     /// Resident heap bytes used by the logical→local reverse index. This is

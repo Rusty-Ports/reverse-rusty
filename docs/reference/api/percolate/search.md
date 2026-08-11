@@ -118,7 +118,8 @@ curl -X POST localhost:9200/_search \
         "postings_scanned": 47,
         "matches": 1,
         "probes_attempted": 28,
-        "probes_skipped": 12
+        "probes_skipped": 12,
+        "tag_segments_skipped": 1
       }
     },
     {
@@ -133,7 +134,8 @@ curl -X POST localhost:9200/_search \
         "postings_scanned": 22,
         "matches": 1,
         "probes_attempted": 18,
-        "probes_skipped": 8
+        "probes_skipped": 8,
+        "tag_segments_skipped": 1
       }
     }
   ]
@@ -143,7 +145,9 @@ curl -X POST localhost:9200/_search \
 The `stats` object per slot shows how much work the engine did: how many candidates were retrieved
 from the index (`broad_candidates` is the subset that came from the quarantined broad lane), how many
 posting lists were scanned, how many bloom-filter probes were skipped, and how many candidates
-survived to become confirmed matches. See [`../design/matching.md`](../../../design/matching.md) §6
+survived to become confirmed matches. `tag_segments_skipped` counts immutable-segment traversals
+that the request filter proved could not contain an acceptable tag row (ADR-174); zero is normal for
+an unfiltered request or mixed-tag segments. See [`../design/matching.md`](../../../design/matching.md) §6
 for per-query match tracing.
 For a stored quoted clause, `_explanation.required_phrases` or
 `_explanation.forbidden_phrases` contains its analyzed `positions` and
@@ -158,6 +162,10 @@ to a percolate request to keep only the matches whose stored query carries the r
 [metadata tags](../documents/put-document.md#per-query-metadata-tags-adr-049). The filter is a **conjunction across
 keys** (AND) of **value sets** (OR within a key). It intentionally narrows the exact Boolean-match
 set and is evaluated during verification; it never participates in semantic candidate retrieval.
+A sealed segment may first be rejected when its exact tag union proves that one requested group is
+absent; missing or inconclusive summaries probe normally, and per-row verification remains
+authoritative (ADR-174). Disable only this optimization dynamically with
+`tag_segment_skipping=false`; membership is result-identical either way.
 A filter value never seen at ingest matches nothing (the safe `terms` semantics). Filter values
 take the **same canonical scalar coercion as ingest** (ADR-073):
 strings, numbers, and bools are accepted everywhere a value is (`{"category": 7}` matches a tag

@@ -254,7 +254,8 @@ but a general multi-generation feature model with blue/green serving is still pr
 > segment v3 and WAL v2 and remain present in the current segment v10 / WAL v7 formats; segment v1/v2
 > reopen as untagged. The complete version matrix is in
 > [`rolling-upgrade.md`](../operations/rolling-upgrade.md). Decided in
-> [ADR-049](../decisions/adr-049-percolator-parity-tags.md); the cluster extension is ADR-055.
+> [ADR-049](../decisions/adr-049-percolator-parity-tags.md); the cluster extension is ADR-055 and
+> exact fail-open segment summaries are ADR-174.
 
 The reference workload ([`../research/percolator-workload.md`](../research/percolator-workload.md))
 attaches structured tags (a category, a status, secondary keys) to every stored query. Storing them
@@ -273,11 +274,15 @@ follows the existing query-storage model with no new moving parts:
 - **Persistence + reopen.** The tag column is part of the immutable `.seg` payload (ADR-012), so it
   mmaps back on `Engine::open()` / attach-and-mmap (ADR-032) with no rebuild — the same durability story
   as the required/forbidden columns. The segment format gains one versioned section; older segments
-  without it read back as "no tags" (an empty column), so the change is backward-compatible.
+  without it read back as "no tags" (an empty column), so the change is backward-compatible. ADR-174's
+  resident segment summary is not another persisted section: seal and mmap open deduplicate the
+  already-validated tag blob and sort the distinct `TagId` union. Consequently the optimization required no
+  format or compatibility-stamp change; a pre-v3 segment has a known empty union.
 - **What does *not* change.** The candidate index (matching.md §2), the signature optimizer, and the
-  common-mask gate are untouched — tags are verify-stage data only (matching.md §5.3). The
+  common-mask gate are untouched — tags never enter semantic retrieval (matching.md §5.3). The
   lossless-cover contract and the segment / compaction lifecycle are unaffected; a compaction (§7)
-  simply carries the tag column through the merge like any other SoA column.
+  carries the tag column through the merge and rebuilds the destination's exact union. Tombstoned or
+  mixed tag values may make a summary conservatively inconclusive, never incorrectly exclusive.
 
 ---
 

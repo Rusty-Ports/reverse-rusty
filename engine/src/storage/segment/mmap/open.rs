@@ -375,7 +375,7 @@ impl MmapSegment {
         // Tag section (ADR-049): v3 borrows the SoA tag columns straight from the mmap;
         // v1/v2 have no section, so the columns read back empty (every query untagged).
         // A non-null dangling pointer keeps the empty-slice accessors sound.
-        let (tag_off_s, tag_len_s, tag_blob_ptr, tag_blob_len, tag_count) = if format_version >= 3 {
+        let (tag_off_s, tag_len_s, tag_blob_s) = if format_version >= 3 {
             let toff = read_u64_at(data_for_parse, 64)? as usize;
             let (tag_off_s, after) = read_u32_slice(data_for_parse, toff)?;
             let (tag_len_s, after2) = read_u16_slice(data_for_parse, after)?;
@@ -386,21 +386,16 @@ impl MmapSegment {
                     "tag column length mismatch",
                 ));
             }
-            (
-                tag_off_s,
-                tag_len_s,
-                tag_blob_s.as_ptr(),
-                tag_blob_s.len(),
-                tag_off_s.len(),
-            )
+            (tag_off_s, tag_len_s, tag_blob_s)
         } else {
-            (
-                &[][..],
-                &[][..],
-                std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const(),
-                0usize,
-                0usize,
-            )
+            (&[][..], &[][..], &[][..])
+        };
+        let tag_count = tag_off_s.len();
+        let tag_blob_len = tag_blob_s.len();
+        let tag_blob_ptr = if tag_blob_s.is_empty() {
+            std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const()
+        } else {
+            tag_blob_s.as_ptr()
         };
         let tag_off_ptr = if tag_count != 0 {
             tag_off_s.as_ptr()
@@ -450,6 +445,10 @@ impl MmapSegment {
                 }
             })
             .count();
+        // ADR-174: the summary is derived only after the tag columns have passed
+        // their cross-section bounds checks. Pre-v3 rows are known untagged, so
+        // their exact empty summary can safely reject every non-empty filter.
+        let tag_summary = crate::segment::TagSummary::build(tag_blob_s);
 
         Ok(MmapSegment {
             format_version,
@@ -478,6 +477,7 @@ impl MmapSegment {
             tag_blob: tag_blob_ptr,
             tag_blob_len,
             tag_count,
+            tag_summary,
             version_arr: version_s.as_ptr(),
             logical_arr: logical_s.as_ptr(),
             priority_arr: priority_ptr,

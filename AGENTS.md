@@ -53,9 +53,10 @@ and the principal differential suites live under `engine/tests/oracle/` and
   matching uses `P(T)`; forbidden checks use canonical `N(T)`.
 - **Keep the matching core integer-only and allocation-free.** Strings, regex, AST interpretation,
   and source lookup belong outside candidate retrieval and exact verification.
-- **Apply metadata filters, unique-emission ownership, ranking, pagination, and delivery only after
-  Boolean matching.** These layers may intentionally select or order confirmed matches; they must
-  not weaken semantic candidate retrieval.
+- **Keep metadata filtering authoritative in exact verification.** Before Boolean matching, an
+  immutable segment may be skipped only when an exact request-driven tag summary proves a predicate
+  group absent; missing or inconclusive summaries fail open. Tags never enter semantic signatures.
+  Apply unique-emission ownership, ranking, pagination, and delivery only after Boolean matching.
 - **Distributed exact reads fail loud.** Do not return a successful partial top-K or exhaustive
   result when a required shard, winner source, completion summary, or ownership attestation is
   missing.
@@ -117,9 +118,10 @@ COMPILE (off the hot path)
 
 MATCH
   title → P(T) + N(T) → title signatures
+        → optional exact request-tag proof skips irrelevant sealed segments
         → main/hot/broad/universal candidate lanes
-        → integer exact verification
-        → metadata + unique ownership
+        → integer exact Boolean + metadata verification
+        → unique ownership
         → optional integer ranking
         → all/top-K/exhaustive delivery
 ```

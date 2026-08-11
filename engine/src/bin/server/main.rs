@@ -689,6 +689,7 @@ async fn main() {
             exact_bytes = final_metrics.exact_bytes,
             index_bytes = final_metrics.index_bytes,
             filter_bytes = final_metrics.filter_bytes,
+            tag_summary_bytes = final_metrics.tag_summary_bytes,
             "final engine state"
         );
     }

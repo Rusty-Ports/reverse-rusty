@@ -137,21 +137,6 @@ as prior art, not a default.
 **Completion.** Scalar/columnar result equality, a stable density threshold across repeated
 captures, bounded scratch memory, and a demonstrated broad or hot batch improvement.
 
-### Tag-aware segment skipping
-
-**Problem.** Metadata filtering is the dominant percolator read pattern, but the engine still opens
-every candidate-bearing segment even when the request predicate cannot accept any tag row in that
-segment.
-
-**Direction.** Add immutable per-segment tag summaries or partitions that can prove a segment has no
-acceptable row. The optimization must be request-filter-driven and fail open: an absent, stale, or
-inconclusive summary probes the segment normally. Tags remain outside semantic signature generation,
-and negative query features remain unavailable.
-
-**Completion.** Filtered result equality with skipping enabled and disabled across writes,
-compaction, recovery, synthetic tag IDs, and cluster fan-out; a format-compatible persistence plan;
-and representative evidence that avoided segment work exceeds summary lookup cost.
-
 ### Memory headroom for 100M-query deployments
 
 **Problem.** The shipped durable `retain_source=false` profile already leaves canonical source text

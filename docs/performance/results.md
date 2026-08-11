@@ -225,6 +225,29 @@ so it does not quantify the current filter benefit (see
 [`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §6). Run time ~6.5s
 (<40s budget). Reproduce: `cargo run --release --bin segbench -- 300000 3000 0.0`.
 
+### 7.1 Request-filter segment skipping (tagbench)
+
+ADR-174 adds an exact sorted `TagId` union to each sealed segment. For a filtered request, absence
+of any required value group proves that no row in that segment can pass, so the engine avoids the
+segment before candidate probing; inconclusive summaries still run the exact per-row filter.
+
+The 2026-08-10 seed-fixed capture used 160k queries, 2k titles, eight category-local immutable
+segments, 5% broad intent, seed 372, and a filter selecting one category. The benchmark toggles the
+dynamic kill switch over the same engine, asserts every per-title result, and then measures:
+
+| Mode | Skipped segments/title | Candidates/title | Postings/title | Summary payload |
+|---|---:|---:|---:|---:|
+| Disabled | 0.00 | 55.84 | 55.88 | 32 B present, bypassed |
+| Enabled | 7.00 | 6.97 | 6.98 | 32 B |
+
+Exact totals were 111,673 → 13,945 candidates and 111,769 → 13,957 postings, both an 87.5%
+reduction. The 11,349 result rows and checksum `ad565c28a2dadd64` were identical. Three paired runs
+on the loaded capture host improved throughput by 3.27–3.60×; those timings are advisory, while the
+result equality and work totals are deterministic. Mixed-tag or post-compaction segments can be
+inconclusive and fall through, so this is evidence for the category-local workload shape rather
+than a universal speedup claim. Reproduce with
+`cargo run --release --bin tagbench -- 160000 2000 8 0.05 372`.
+
 ---
 
 ## 8. Behaviour under skew and adversarial inputs

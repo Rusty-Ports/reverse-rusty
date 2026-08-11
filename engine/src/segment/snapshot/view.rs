@@ -67,6 +67,9 @@ pub(in crate::segment) struct MatchView<'a> {
     pub(in crate::segment) memtable: &'a Segment,
     /// Cached aggregate capability from the owning engine/snapshot.
     pub(in crate::segment) has_phrase_predicates: bool,
+    /// ADR-174 result-preserving kill switch captured from the owning engine or
+    /// snapshot configuration.
+    pub(in crate::segment) tag_segment_skipping: bool,
     /// Request-scoped tag filter (ADR-049). `TagPredicate::empty()` ⇒ no filtering, so
     /// every existing (unfiltered) caller is byte-identical to before tags.
     pub(in crate::segment) pred: &'a crate::exact::TagPredicate,
@@ -389,6 +392,7 @@ impl MatchView<'_> {
         }
 
         let mut deadline = DeadlinePoll::new(dl);
+        let tag_segment_skipping = self.tag_segment_skipping && !self.pred.is_empty();
 
         // Cooperative-deadline entry check (ADR-099): a match that spent its whole
         // budget queued on the rayon pool dies here, before doing any work. The
@@ -491,6 +495,13 @@ impl MatchView<'_> {
             if let Err(c) = deadline.check_now() {
                 cancelled = Some(c);
                 break;
+            }
+            // Request-filter proof, not semantic signature gating: `false`
+            // means one predicate group has no TagId anywhere in this immutable
+            // segment. Absent or inconclusive summaries probe normally.
+            if tag_segment_skipping && !base.tag_summary_may_match(self.pred) {
+                stats.tag_segments_skipped += 1;
+                continue;
             }
             collector.begin_source(i);
             if let Err(c) = base.match_collect(

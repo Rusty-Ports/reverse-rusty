@@ -32,6 +32,7 @@ pub(in crate::segment::broad_batch) fn match_batch_chunk<
     if b == 0 {
         return Ok(());
     }
+    let tag_segment_skipping = view.tag_segment_skipping && !view.pred.is_empty();
     let mut deadline = DeadlinePoll::new(dl);
     let words = b.div_ceil(64);
     // ADR-061: the columnar kernel is single-view, so while multi-word aliases are
@@ -189,6 +190,10 @@ pub(in crate::segment::broad_batch) fn match_batch_chunk<
                 title_index: ti,
             };
             for (i, base) in view.segments.iter().enumerate() {
+                if tag_segment_skipping && !base.tag_summary_may_match(view.pred) {
+                    stats.tag_segments_skipped += 1;
+                    continue;
+                }
                 if let Err(c) = base.match_collect(
                     &tview,
                     view.dict,
@@ -309,6 +314,12 @@ pub(in crate::segment::broad_batch) fn match_batch_chunk<
         if let Err(c) = deadline.check_now() {
             collector.abort();
             return Err(c);
+        }
+        if tag_segment_skipping && !base.tag_summary_may_match(view.pred) {
+            // One columnar segment traversal covers the whole title chunk. The
+            // scalar main-lane traversals above are counted independently.
+            stats.tag_segments_skipped += 1;
+            continue;
         }
         if columnar {
             let epoch = next_epoch(broad_epoch, broad_seen);

@@ -38,6 +38,7 @@ impl EngineSnapshot {
                 segments: &self.segments,
                 memtable: &self.memtable,
                 has_phrase_predicates: self.has_phrase_predicates,
+                tag_segment_skipping: self.config.tag_segment_skipping,
                 pred: &TagPredicate::empty(),
             }
             .candidate_hit(title, logical_id, s, include_broad, NoDeadline),
@@ -62,6 +63,7 @@ impl EngineSnapshot {
                 segments: &self.segments,
                 memtable: &self.memtable,
                 has_phrase_predicates: self.has_phrase_predicates,
+                tag_segment_skipping: self.config.tag_segment_skipping,
                 pred,
             }
             .match_title(title, s, out, include_broad, NoDeadline),
@@ -86,6 +88,7 @@ impl EngineSnapshot {
                 segments: &self.segments,
                 memtable: &self.memtable,
                 has_phrase_predicates: self.has_phrase_predicates,
+                tag_segment_skipping: self.config.tag_segment_skipping,
                 pred,
             }
             .match_title_with_policy(
@@ -120,6 +123,7 @@ impl EngineSnapshot {
             segments: &self.segments,
             memtable: &self.memtable,
             has_phrase_predicates: self.has_phrase_predicates,
+            tag_segment_skipping: self.config.tag_segment_skipping,
             pred,
         };
         match deadline {
@@ -237,6 +241,7 @@ impl EngineSnapshot {
             segments: &self.segments,
             memtable: &self.memtable,
             has_phrase_predicates: self.has_phrase_predicates,
+            tag_segment_skipping: self.config.tag_segment_skipping,
             pred,
         };
         let mut stats = match deadline {

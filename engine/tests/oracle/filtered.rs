@@ -1,6 +1,7 @@
 //! Filtered percolation (ADR-049) differential oracle.
 
 use crate::harness::*;
+use reverse_rusty::config::EngineConfig;
 use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
@@ -125,4 +126,88 @@ fn filtered_percolation_matches_oracle_and_only_removes() {
         nonempty_filtered > 0,
         "degenerate: no filter ever matched anything"
     );
+}
+
+#[test]
+fn tag_segment_skip_is_result_equivalent_and_avoids_irrelevant_segments() {
+    let config = EngineConfig {
+        auto_compact_on_ingest: false,
+        tag_segment_skipping: true,
+        ..EngineConfig::default()
+    };
+    let mut eng = Engine::with_config(
+        Normalizer::default_vocab().expect("default vocabulary"),
+        config,
+    );
+    let categories = ["items", "coins", "stamps"];
+    for (segment, category) in categories.iter().enumerate() {
+        let base = segment as u64 * 10;
+        let queries = vec![
+            (base + 1, "acme chrome".to_string()),
+            (base + 2, "acme chrome".to_string()),
+        ];
+        let tags = vec![
+            vec![("category".to_string(), (*category).to_string())],
+            vec![("category".to_string(), (*category).to_string())],
+        ];
+        if segment == 0 {
+            eng.try_build_from_queries_with_tags(&queries, &tags)
+                .expect("first tagged segment");
+        } else {
+            eng.try_bulk_ingest_detailed_with_tags(&queries, &tags)
+                .expect("additional tagged segment");
+        }
+    }
+
+    let filter = vec![("category".to_string(), vec!["items".to_string()])];
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+    let on = eng.snapshot();
+    let pred = on.compile_tag_predicate(&filter);
+    let on_stats = on.match_title_filtered(
+        "2020 acme chrome update",
+        &mut scratch,
+        &mut out,
+        true,
+        &pred,
+    );
+    let mut on_ids = out.clone();
+    on_ids.sort_unstable();
+    assert_eq!(on_ids, vec![1, 2]);
+    assert_eq!(on_stats.tag_segments_skipped, 2);
+    assert!(on_stats.postings_scanned > 0);
+    assert!(on.metrics().tag_summary_bytes > 0);
+
+    let unknown =
+        on.compile_tag_predicate(&[("category".to_string(), vec!["never-ingested".to_string()])]);
+    let unknown_stats = on.match_title_filtered(
+        "2020 acme chrome update",
+        &mut scratch,
+        &mut out,
+        true,
+        &unknown,
+    );
+    assert!(out.is_empty());
+    assert_eq!(unknown_stats.tag_segments_skipped, 3);
+    assert_eq!(unknown_stats.postings_scanned, 0);
+    assert_eq!(unknown_stats.unique_candidates, 0);
+
+    let mut disabled = eng.config().clone();
+    disabled.tag_segment_skipping = false;
+    eng.set_config(disabled);
+    let off = eng.snapshot();
+    let pred = off.compile_tag_predicate(&filter);
+    let off_stats = off.match_title_filtered(
+        "2020 acme chrome update",
+        &mut scratch,
+        &mut out,
+        true,
+        &pred,
+    );
+    let mut off_ids = out.clone();
+    off_ids.sort_unstable();
+    assert_eq!(off_ids, on_ids, "the kill switch may change only work");
+    assert_eq!(off_stats.tag_segments_skipped, 0);
+    assert!(off_stats.postings_scanned > on_stats.postings_scanned);
+    assert!(off_stats.unique_candidates > on_stats.unique_candidates);
 }

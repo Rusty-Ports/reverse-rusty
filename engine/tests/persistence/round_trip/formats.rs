@@ -375,8 +375,13 @@ fn tagged_queries_survive_reopen_and_filter_on_mmap() {
 
     // A value never ingested matches nothing (safe `terms` semantics).
     let none = snap.compile_tag_predicate(&[("category".to_string(), vec!["stamps".to_string()])]);
-    snap.match_title_filtered(title, &mut s, &mut out, true, &none);
+    let stats = snap.match_title_filtered(title, &mut s, &mut out, true, &none);
     assert!(out.is_empty(), "an unseen filter value returns ∅");
+    assert_eq!(
+        stats.tag_segments_skipped, 1,
+        "the mmap-opened summary must reject the irrelevant durable segment"
+    );
+    assert!(snap.metrics().tag_summary_bytes > 0);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

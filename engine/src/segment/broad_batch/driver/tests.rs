@@ -54,6 +54,7 @@ fn counter_deadline_stops_inside_one_columnar_body_group() {
         segments: &snapshot.segments,
         memtable: &snapshot.memtable,
         has_phrase_predicates: snapshot.has_phrase_predicates,
+        tag_segment_skipping: snapshot.config.tag_segment_skipping,
         pred: &pred,
     };
     let mut match_scratch = MatchScratch::new();
@@ -132,6 +133,7 @@ fn ranked_columnar_metadata_walk_uses_the_active_sampler_and_aborts() {
         segments: &snapshot.segments,
         memtable: &snapshot.memtable,
         has_phrase_predicates: snapshot.has_phrase_predicates,
+        tag_segment_skipping: snapshot.config.tag_segment_skipping,
         pred: &pred,
     };
     let title_features = [crate::rank::RankTitleFeatures::from_title("alpha")];

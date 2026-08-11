@@ -43,6 +43,7 @@ fn sample_metrics() -> EngineMetrics {
         exact_bytes: 11,
         index_bytes: 22,
         filter_bytes: 33,
+        tag_summary_bytes: 34,
         stale_segments: 1,
         dict_bytes: 44,
         query_store_bytes: 55,
