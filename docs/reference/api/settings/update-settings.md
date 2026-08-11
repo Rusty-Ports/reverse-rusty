@@ -88,7 +88,8 @@ Attempting to set a static or unknown key returns `400`:
 Coordinator mode validates this same query, media, JSON, size, and patch contract, then returns
 `501 not_supported_in_cluster_mode` for an otherwise valid request. Per-shard configuration is fixed
 when the cluster is assembled; restart the coordinator and every consistently configured shard node
-with the new flags.
+with the new flags. In particular, the ADR-174 kill switch is
+`--tag-segment-skipping <true|false>` on both `server --cluster` and `shardserver`.
 
 This native API does not accept `settings`, `persistent`, or `transient` wrapper objects, and does
 not accept `null` reset. Elasticsearch's

@@ -35,7 +35,7 @@ segment kind     entries docs.count docs.deleted holes.percent vocab.epoch stale
 | `stale` | `st` | Whether the segment predates the live vocabulary epoch |
 | `size.memory` | `memory`, `sm` | Saturating sum of attributed resident payload and overhead bytes |
 | `memory.payload` | `resident`, `resident_bytes`, `mp` | Exact/index/filter payload heap; zero for mmap-backed payloads |
-| `memory.overhead` | `overhead`, `overhead_bytes`, `mo` | Always-resident logical-index and liveness-overlay heap |
+| `memory.overhead` | `overhead`, `overhead_bytes`, `mo` | Always-resident tag-summary, logical-index, and liveness-overlay heap |
 
 `docs.count`, `docs.deleted`, and `size.memory` use familiar CAT names because their meanings map
 cleanly. The remaining columns stay native: Reverse Rusty has no honest values for the ES/OS

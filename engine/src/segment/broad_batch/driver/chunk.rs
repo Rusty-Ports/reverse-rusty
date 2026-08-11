@@ -191,6 +191,10 @@ pub(in crate::segment::broad_batch) fn match_batch_chunk<
             };
             for (i, base) in view.segments.iter().enumerate() {
                 if tag_segment_skipping && !base.tag_summary_may_match(view.pred) {
+                    if let Err(c) = deadline.check_now() {
+                        cancelled = Some(c);
+                        break;
+                    }
                     stats.tag_segments_skipped += 1;
                     continue;
                 }

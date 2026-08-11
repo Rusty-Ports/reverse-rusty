@@ -34,6 +34,11 @@ shardCount: 3
 # in the runbook; left at 1 here so the value isn't a silent no-op.
 replicationFactor: 1
 
+# Exact sealed-segment tag-summary optimization (ADR-174). False is a
+# result-preserving operational kill switch. The chart passes the same startup
+# value to the coordinator and every shard node.
+tagSegmentSkipping: true
+
 ports:
   shardGrpc: 50051
   shardHealth: 50052 # plaintext gRPC health (k8s probes, ADR-084)

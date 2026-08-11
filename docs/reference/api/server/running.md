@@ -47,6 +47,7 @@ Options:
 | `--broad-batch-size` | 256 | Title sub-batch size for the columnar broad lane on `POST /_mpercolate` (ADR-026) — larger amortizes broad-posting scans over more titles. Dynamic via `/_settings` |
 | `--hot-anchor-threshold` | 0 (off) | The hot-anchor threshold θ (class H, ADR-105; recommended 1024): a query whose deciding anchor has no top-64 mask bit but frequency ≥ θ is stored in the always-probed, columnar-evaluated hot tier instead of fattening the realtime lane. Dynamic via `/_settings`; in remote cluster mode run every `shardserver` with the same value (divergence is cost-only, never correctness) |
 | `--broad-columnar` | true | Use the columnar broad evaluator (once per batch); set `false` to fall back to the inline per-title broad probe — the kill-switch (identical results, no amortization). Dynamic via `/_settings` |
+| `--tag-segment-skipping <true\|false>` | true | Consult exact sealed-segment tag unions before filtered reads (ADR-174); `false` bypasses the optimization without changing results or stored state. Dynamic via `/_settings` in single-node mode; in remote cluster mode restart the coordinator and every `shardserver` with the same value |
 | `--broad-materialize` | true | Use the pure-anchor materialization fast path (emit pure-anchor broad queries straight from the anchor bitmap, skipping verification). Dynamic via `/_settings` |
 | `--max-percolate-batch` | 10000 | Maximum documents accepted in one `/_mpercolate` or multi-document `/_search` request; larger requests are rejected with 400. Dynamic via `/_settings` |
 

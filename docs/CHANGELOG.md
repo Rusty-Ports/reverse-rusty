@@ -16,7 +16,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
   cross-group-inconclusive summaries fail open, the memtable always probes, and per-row exact tag
   verification remains authoritative ([ADR-174](decisions/adr-174-fail-open-tag-segment-summaries.md)).
 - Rebuild summaries at seal, compaction, and mmap open without changing the segment format; expose a
-  dynamic result-preserving kill switch, merged local/gRPC skip telemetry, and resident-memory
+  dynamic single-node and cluster-startup result-preserving kill switch, merged local/gRPC skip
+  telemetry, and resident-memory
   accounting. Differential coverage spans writes, compaction, reopen, synthetic tag IDs, batch
   evaluation, cluster fan-out, and real gRPC transport.
 - Added `tagbench`; its eight-segment seeded capture preserved all 11,349 result rows while reducing

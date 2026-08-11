@@ -126,6 +126,8 @@ spec:
             {{- if .Values.coordinator.acceptClassD }}
             - --accept-class-d
             {{- end }}
+            - --tag-segment-skipping
+            - {{ .Values.tagSegmentSkipping | quote }}
             {{- if $rankingProfilesEnabled }}
             - --ranking-profiles-file
             - /ranking-profiles/{{ .Values.rankingProfiles.key }}

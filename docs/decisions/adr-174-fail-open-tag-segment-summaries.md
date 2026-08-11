@@ -31,8 +31,9 @@ unlikely to exist.
 4. Tombstones do not delete IDs from a summary. Dead or replaced rows can only make the union more
    permissive, which loses a skip opportunity but cannot create an incorrect rejection. Compaction
    naturally rebuilds the union from its surviving destination rows.
-5. `tag_segment_skipping` is a dynamic, default-on read-path kill switch. `false` bypasses summaries
-   without changing stored state. `MatchStats.tag_segments_skipped` counts avoided immutable-segment
+5. `tag_segment_skipping` is a default-on read-path kill switch: dynamic in single-node mode and
+   startup-wired on both cluster binaries. `false` bypasses summaries without changing stored state.
+   `MatchStats.tag_segments_skipped` counts avoided immutable-segment
    traversals and is merged across shards; protobuf field 21 carries it additively. Resident summary
    payload is exposed as `tag_summary_bytes` in engine, REST, CAT, and Prometheus memory accounting.
 6. Scalar, ranked, exhaustive, and batch entry points share the same segment proof. In the columnar

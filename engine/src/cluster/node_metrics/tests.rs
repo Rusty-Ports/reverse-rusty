@@ -83,6 +83,7 @@ fn render_shard_emits_named_gauges() {
     assert!(out.contains("reverse_rusty_dict_features{shard=\"3\"} 99"));
     assert!(out.contains("reverse_rusty_memory_bytes{shard=\"3\",component=\"exact\"} 11"));
     assert!(out.contains("reverse_rusty_memory_bytes{shard=\"3\",component=\"filter\"} 33"));
+    assert!(out.contains("reverse_rusty_memory_bytes{shard=\"3\",component=\"tag_summary\"} 34"));
     // c is the broad lane; 3rd class slot.
     assert!(out.contains("reverse_rusty_class_queries{shard=\"3\",class=\"c\"} 3"));
     // tombstoned = sum of segment `deleted` (3 + 2).

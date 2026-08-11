@@ -26,6 +26,61 @@ impl DeadlineCheck for CancelOnCheck<'_> {
 }
 
 #[test]
+fn tag_summary_skip_preserves_the_segment_deadline_boundary() {
+    let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
+    let queries = vec![(1, "anchorw".to_string())];
+    let tags = vec![vec![("category".to_string(), "items".to_string())]];
+    assert_eq!(
+        engine
+            .try_build_from_queries_with_tags(&queries, &tags)
+            .expect("tagged segment")
+            .ingested,
+        1
+    );
+    let snapshot = engine.snapshot();
+    let pred =
+        snapshot.compile_tag_predicate(&[("category".to_string(), vec!["coins".to_string()])]);
+    let view = MatchView {
+        norm: &snapshot.norm,
+        dict: &snapshot.dict,
+        segments: &snapshot.segments,
+        memtable: &snapshot.memtable,
+        has_phrase_predicates: snapshot.has_phrase_predicates,
+        tag_segment_skipping: snapshot.config.tag_segment_skipping,
+        pred: &pred,
+    };
+    let mut match_scratch = MatchScratch::new();
+    let mut broad_scratch = BroadBatchScratch::new();
+    let mut outs = vec![Vec::new()];
+    let mut emissions = vec![0];
+    let mut collector = AllBatchCollector::new(&mut outs, &mut emissions);
+    let mut stats = MatchStats::default();
+    let checks = AtomicUsize::new(0);
+
+    let result = match_batch_chunk(
+        &view,
+        &["anchorw"],
+        BatchMatchOptions::default(),
+        &mut match_scratch,
+        &mut broad_scratch,
+        &mut collector,
+        &mut stats,
+        CancelOnCheck {
+            checks: &checks,
+            // The title boundary is first. Even though the only immutable
+            // segment is summary-skipped, its boundary must remain second.
+            cancel_at: 2,
+        },
+        EmitAll,
+    );
+
+    assert_eq!(result, Err(MatchCancelled));
+    assert_eq!(checks.load(Ordering::Relaxed), 2);
+    assert!(outs[0].is_empty());
+    assert_eq!(emissions[0], 0);
+}
+
+#[test]
 fn counter_deadline_stops_inside_one_columnar_body_group() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
     let queries = (0..4_096)

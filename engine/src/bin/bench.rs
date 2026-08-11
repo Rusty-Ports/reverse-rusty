@@ -468,7 +468,11 @@ fn report_persistent_memory(queries: &[(u64, String)], retain: bool, label: &str
     let perq = |b: usize| b as f64 / n as f64;
     // Resident = the structures that stay in RAM even when segments are mmap'd.
     // exact/index/filter are file-backed for mmap segments (report 0 heap).
-    let resident = m.dict_bytes + m.query_store_bytes + m.logical_index_bytes + m.alive_bytes;
+    let resident = m.dict_bytes
+        + m.query_store_bytes
+        + m.logical_index_bytes
+        + m.tag_summary_bytes
+        + m.alive_bytes;
 
     println!(
         "\n===== MEMORY (persistent / mmap, {label}; {} base seg, {} queries) =====",
@@ -500,6 +504,11 @@ fn report_persistent_memory(queries: &[(u64, String)], retain: bool, label: &str
         perq(m.logical_index_bytes)
     );
     println!(
+        "tag summaries           : {:.1} MB   ({:.1} B/query)",
+        mb(m.tag_summary_bytes),
+        perq(m.tag_summary_bytes)
+    );
+    println!(
         "alive overlay           : {:.1} MB   ({:.1} B/query)",
         mb(m.alive_bytes),
         perq(m.alive_bytes)
@@ -515,11 +524,12 @@ fn report_persistent_memory(queries: &[(u64, String)], retain: bool, label: &str
             "process VmRSS           : {rss:.1} MB   (whole process: also holds the corpus + the in-memory throughput engine — not a clean attribution)"
         );
     }
-    // Extrapolate the corpus-scaling resident components to 100M (dict is bounded
-    // by vocabulary, so it is held ~constant, not multiplied).
+    // Extrapolate the row-scaling resident components to 100M. Dict is bounded
+    // by vocabulary; tag summaries scale with distinct per-segment tag IDs, so
+    // both remain separately reported rather than multiplied per query.
     let scaling = m.query_store_bytes + m.logical_index_bytes + m.alive_bytes;
     println!(
-        "--- extrapolation to 100M queries ---\nscaling resident @100M  : ~{:.1} GB  ({:.0} B/query) + ~{:.0} MB dict (bounded)",
+        "--- extrapolation to 100M queries ---\nscaling resident @100M  : ~{:.1} GB  ({:.0} B/query) + ~{:.0} MB dict + tag summaries",
         perq(scaling) * 100e6 / 1e9,
         perq(scaling),
         mb(m.dict_bytes)

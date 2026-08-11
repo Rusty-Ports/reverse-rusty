@@ -65,6 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SAME value as the coordinator; divergence can never drop a match (both lanes are
     // always visible), it only decides which node re-inherits the un-quarantined scans.
     let mut hot_anchor_threshold: u32 = 0;
+    // Default-on exact sealed-segment tag summaries (ADR-174). This is a
+    // result-preserving read-path optimization and can be disabled at startup.
+    let mut tag_segment_skipping = true;
     // Exact protobuf bound for every result-bearing unary reply and each
     // FetchMatches stream item. The builder enforces the hard 4 MiB ceiling.
     let mut max_grpc_result_bytes = DEFAULT_MAX_GRPC_RESULT_BYTES;
@@ -105,6 +108,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .parse()
                         .map_err(|e| format!("--hot-anchor-threshold {v}: {e}"))?;
                 }
+                i += 1;
+            }
+            "--tag-segment-skipping" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--tag-segment-skipping requires true or false")?;
+                tag_segment_skipping = v
+                    .parse::<bool>()
+                    .map_err(|e| format!("--tag-segment-skipping {v}: {e}"))?;
                 i += 1;
             }
             "--max-grpc-result-bytes" => {
@@ -189,6 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let norm = Arc::new(Normalizer::default_vocab()?);
     let engine_cfg = EngineConfig {
         hot_anchor_threshold,
+        tag_segment_skipping,
         ..EngineConfig::default()
     };
     let rt = tokio::runtime::Runtime::new()?;

@@ -66,6 +66,7 @@ services:
     <<: *shard-base
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tag-segment-skipping ${RR_TAG_SEGMENT_SKIPPING:-true}
       --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:
@@ -75,6 +76,7 @@ services:
     <<: *shard-base
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tag-segment-skipping ${RR_TAG_SEGMENT_SKIPPING:-true}
       --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:
@@ -84,6 +86,7 @@ services:
     <<: *shard-base
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tag-segment-skipping ${RR_TAG_SEGMENT_SKIPPING:-true}
       --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:
@@ -132,6 +135,7 @@ services:
     networks: [rrmesh]
     command: >
       server --cluster --host 0.0.0.0 --port 9200
+      --tag-segment-skipping ${RR_TAG_SEGMENT_SKIPPING:-true}
       ${RR_COORDINATOR_TOPOLOGY_ARGS:---shard-endpoint https://shard0:50051 --shard-endpoint https://shard1:50051 --shard-endpoint https://shard2:50051}
       --control-endpoint https://control0:50061
       --control-endpoint https://control1:50061
