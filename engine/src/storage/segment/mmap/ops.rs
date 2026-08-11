@@ -427,6 +427,17 @@ impl MmapSegment {
         self.alive_overlay.capacity() * std::mem::size_of::<bool>()
     }
 
+    /// Whether the immutable tag union can rule this request predicate out.
+    #[inline]
+    pub(crate) fn tag_summary_may_match(&self, pred: &crate::exact::TagPredicate) -> bool {
+        self.tag_summary.may_match(pred)
+    }
+
+    /// Resident bytes for the exact tag union rebuilt at mmap open.
+    pub fn tag_summary_bytes(&self) -> usize {
+        self.tag_summary.heap_bytes()
+    }
+
     #[inline]
     pub(crate) fn logical(&self, id: u32) -> u64 {
         // SAFETY: `logical_arr` is the `num_queries`-long u64 array parsed from the

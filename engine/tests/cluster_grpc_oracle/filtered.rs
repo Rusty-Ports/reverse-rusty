@@ -135,6 +135,16 @@ fn grpc_filtered_percolation_matches_single_node_and_oracle() {
     }
     assert!(nonempty > 0, "degenerate: no filter ever matched over gRPC");
 
+    let unknown = vec![("category".to_string(), vec!["never-ingested".to_string()])];
+    let (none, skip_stats) = cluster
+        .percolate_filtered_with_stats(&titles[0], &unknown, true)
+        .expect("filtered stats over gRPC");
+    assert!(none.is_empty());
+    assert!(
+        skip_stats.tag_segments_skipped > 0,
+        "ADR-174 skip telemetry must survive the additive stats wire field"
+    );
+
     // A tagged add over the gRPC insert RPC is filterable too (raw tags ride the wire).
     cluster
         .add_query_with_tags(

@@ -42,10 +42,11 @@ MATCH TIME (per incoming title; retrieval + verification core is allocation-free
     → normalize (in-place, into a reusable scratch buffer)
     → extract sorted/deduplicated feature IDs into reusable scratch
     → enumerate the title's arity-1/arity-2 signature keys
+    → optional request-tag proof skips sealed segments only when one filter group is absent
     → probe candidate index → union of candidate SegmentLocalQueryIds
-    → exact integer verification (mask + sorted-slice/phrase checks)
+    → exact integer verification (Boolean mask/slices/phrases + authoritative tag predicate)
     → map survivors to GlobalLogicalQueryId
-    → post-match metadata filters + optional integer ranking
+    → unique-emission ownership + optional integer ranking
     → exact all/top-K/paginated delivery
 ```
 

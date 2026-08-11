@@ -41,6 +41,8 @@ HOW TO RUN
   cargo run --release --bin bench -- 1000000 20000 0.05     # +broad lane: inline cost AND the
                                                             #   columnar batch win + amortization sweep
   cargo run --release --bin segbench -- 300000 3000 0.0     # read-amp vs 1/2/4/8 segments
+  cargo run --release --bin tagbench -- 160000 2000 8 0.05 372
+                                                            # ADR-174 category-local tag skip
   cargo run --release --bin snapbench -- 1000000 200        # snapshot-publish cost (ADR-016)
   cargo run --release --bin clusterbench -- 100000 5000 8 0.05  # CLUSTER fan-out + candidate structure
   cargo run --release --bin rankbench -- 20000 500 8 275775489  # local/distributed bounded top-K + fetch
@@ -54,11 +56,12 @@ HOW TO RUN
 
   bench args:        <num_queries> <num_titles> <broad_frac> <skew> [seed] [reps] [hot_theta] [dedup]
   segbench args:     <num_queries> <num_titles> <broad_frac> <seed>
+  tagbench args:     <num_queries> <num_titles> <segments> <broad_frac> <seed>
   snapbench args:    <num_queries> <iters>
   clusterbench args: <num_queries> <num_titles> <num_shards> <broad_frac> <seed>
   rankbench args:    <num_queries> <num_titles> <num_shards> <seed> [profile_file] [profile_name]
-  Seeds default to 0x00C0FFEE so runs are reproducible. Budget: each is <~30s except the 5M+
-  bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
+  Most seeds default to 0x00C0FFEE; tagbench defaults to 0x174. Budget: each is <~30s except the
+  5M+ bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
 
 --------------------------------------------------------------------------------------------
 ADR-124 AUTOMATED GATE — merge-blocking on pinned ubuntu-24.04 x64 / 4 vCPU
@@ -100,6 +103,13 @@ BROADER INVARIANTS — machine-INDEPENDENT; manual outside the automated subset
 
   FILTER SKIP %  (per-segment anchor filter; rises with segment count):
     segbench K=1/2/4/8   ->   ~46% / ~63% / ~76% / ~86%      (filter heap 0.02–0.07 MB)
+
+  TAG SEGMENT SKIP  (tagbench 160000 2000 8 0.05 372; ADR-174):
+    exact result rows/checksum: 11,349 / ad565c28a2dadd64, identical with skip disabled/enabled
+    disabled: candidates=111,673; postings=111,769; tag segments skipped=0
+    enabled:  candidates=13,945; postings=13,957; tag segments skipped=14,000 (7.00/title)
+    reduction: candidates=87.5%; postings=87.5%; exact summary payload=32 B
+    These equality/work/memory values are seed-fixed. Throughput is advisory and machine-specific.
 
   COST-CLASS SPLIT  (bench 1000000 20000 0.05):   ~99.5% A | ~0.2% B | ~0.2% C | 0 D
     (broad_frac=0.0 -> 100% A.  class D must always be 0 for generated data.)
@@ -185,6 +195,23 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-08-10] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64, rustc 1.95.0.
+              ADR-174 FAIL-OPEN TAG SEGMENT SUMMARIES. Release+LTO; tagbench
+              160000 2000 8 0.05 372; eight category-local immutable segments;
+              filter category=segment-0. Three consecutive paired final-binary runs
+              on a loaded interactive workstation.
+  INVARIANTS (all three runs identical):
+    per-title output equality asserted in-process; 11,349 result rows;
+      checksum ad565c28a2dadd64
+    disabled: candidates=111,673; postings=111,769; skipped segment traversals=0
+    enabled:  candidates=13,945; postings=13,957; skipped traversals=14,000 (7.00/title)
+    candidates/title 55.84 -> 6.97; postings/title 55.88 -> 6.98; both -87.5%
+    summary payload=32 B (one TagId per segment)
+  TIMING (indicative paired medians inside each run):
+    disabled 277,437–280,923 titles/s; enabled 917,375–998,191 titles/s;
+      speedup 3.27–3.60x. Absolute variance confirms why these timings are not a gate;
+      every paired run establishes that avoided segment work exceeded union lookup cost.
+
 [2026-07-28] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64, rustc 1.95.0.
               ADR-157 VERSIONED CPU RANKING PROFILES. Release+LTO,
               RAYON_NUM_THREADS=4; sequential rankbench runs:

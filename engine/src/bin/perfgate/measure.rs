@@ -156,6 +156,7 @@ fn measure_resources(queries: &[(u64, String)]) -> Result<ResourceMetrics, Box<d
         .dict_bytes
         .saturating_add(metrics.query_store_bytes)
         .saturating_add(metrics.logical_index_bytes)
+        .saturating_add(metrics.tag_summary_bytes)
         .saturating_add(metrics.alive_bytes);
     let (durable_bytes, durable_files) = logical_tree_size(&dir.0)?;
     Ok(ResourceMetrics {

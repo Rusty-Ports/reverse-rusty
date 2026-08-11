@@ -146,6 +146,7 @@ impl EngineSnapshot {
             segments: &self.segments,
             memtable: &self.memtable,
             has_phrase_predicates: self.has_phrase_predicates,
+            tag_segment_skipping: self.config.tag_segment_skipping,
             pred,
         };
         let mut opts = batch_opts;

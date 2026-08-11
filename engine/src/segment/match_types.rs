@@ -19,6 +19,10 @@ pub struct MatchStats {
     pub duplicate_emissions: u64,
     pub probes_attempted: u32, // total signature probes (before filter)
     pub probes_skipped: u32,   // probes skipped by anchor filter (definitely-not-present)
+    /// Base-segment traversals rejected by an exact immutable tag summary
+    /// (ADR-174). A scalar/parallel title contributes once per skipped segment;
+    /// a columnar batch contributes once for each skipped segment pass.
+    pub tag_segments_skipped: u32,
     // ---- broad-lane batch/columnar accounting (0 on the per-title path) ----
     pub broad_queries_evaluated: u32, // distinct broad queries exact-checked via bitmap eval
     pub broad_anchors_scanned: u32,   // distinct broad anchors (postings) probed per batch
@@ -60,6 +64,7 @@ impl MatchStats {
         self.duplicate_emissions += other.duplicate_emissions;
         self.probes_attempted += other.probes_attempted;
         self.probes_skipped += other.probes_skipped;
+        self.tag_segments_skipped += other.tag_segments_skipped;
         self.broad_queries_evaluated += other.broad_queries_evaluated;
         self.broad_anchors_scanned += other.broad_anchors_scanned;
         self.broad_batches += other.broad_batches;

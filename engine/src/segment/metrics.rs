@@ -95,7 +95,7 @@ pub(in crate::segment) fn collect_segment_infos(
                 + seg.broad_bytes()
                 + seg.hot_bytes()
                 + seg.filter_bytes(),
-            overhead_bytes: seg.logical_index_bytes() + seg.alive_bytes(),
+            overhead_bytes: seg.tag_summary_bytes() + seg.logical_index_bytes() + seg.alive_bytes(),
         });
     }
     // The memtable is the live tail — always reported, even when empty, so an
@@ -117,7 +117,9 @@ pub(in crate::segment) fn collect_segment_infos(
             + memtable.broad_bytes()
             + memtable.hot_bytes()
             + memtable.filter_bytes(),
-        overhead_bytes: memtable.logical_index_bytes() + memtable.alive_bytes(),
+        overhead_bytes: memtable.tag_summary_bytes()
+            + memtable.logical_index_bytes()
+            + memtable.alive_bytes(),
     });
     infos
 }
@@ -269,6 +271,7 @@ impl Engine {
             exact_bytes: self.exact_bytes(),
             index_bytes: self.main_bytes() + self.broad_bytes() + self.hot_bytes(),
             filter_bytes: self.filter_bytes(),
+            tag_summary_bytes: self.tag_summary_bytes(),
             stale_segments: self.stale_segment_count(),
             dict_bytes: self.dict.heap_bytes(),
             query_store_bytes: self.query_store.resident_bytes(),
@@ -303,6 +306,13 @@ impl Engine {
             .iter()
             .map(|s| s.filter_bytes())
             .sum::<usize>()
+    }
+    pub fn tag_summary_bytes(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|s| s.tag_summary_bytes())
+            .sum::<usize>()
+            + self.memtable.tag_summary_bytes()
     }
     pub fn dict_len(&self) -> usize {
         self.dict.len()

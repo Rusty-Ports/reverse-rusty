@@ -429,6 +429,9 @@ pub(crate) fn apply_settings_patch(
             "compaction_fixed_cost" => {
                 set_f64(&mut cfg.compaction_fixed_cost, key, val, &mut errors);
             }
+            "tag_segment_skipping" => {
+                set_bool(&mut cfg.tag_segment_skipping, key, val, &mut errors);
+            }
             "auto_compact_on_flush" => {
                 set_bool(&mut cfg.auto_compact_on_flush, key, val, &mut errors);
             }

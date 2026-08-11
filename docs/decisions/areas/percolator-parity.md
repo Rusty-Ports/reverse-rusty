@@ -6,7 +6,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 
 | ADR | Decision | Summary | Status |
 |---|---|---|---|
-| [049](../adr-049-percolator-parity-tags.md) | Metadata + filtered percolation | Stores integer tag columns and applies request filters during verification, never candidate gating. | Accepted |
+| [049](../adr-049-percolator-parity-tags.md) | Metadata + filtered percolation | Stores integer tag columns and applies request filters authoritatively during verification, outside semantic signatures. | Accepted |
 | [055](../adr-055-cluster-tags-filtered-percolation.md) | Cluster tags + filtering | Shares one tag dictionary across shards and resolves filters once before fan-out. | Accepted |
 | [059](../adr-059-percolate-ranking-pagination.md) | Ranking + pagination | Reorders the final match set by request boosts and priority, then applies `from` and `size`. | Accepted |
 | [060](../adr-060-learned-alias-evolution.md) | Learned-alias governance | Tracks provenance and confidence, auto-activating only structurally safe single-token aliases. | Accepted |
@@ -30,6 +30,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [135](../adr-135-mpercolate-api-contract.md) | Compatibility batch-percolate API contract | Makes full-result batches strict, ES/OS-familiar where truthful, and generation-consistent during enrichment. | Accepted |
 | [162](../adr-162-versioned-cpu-ranking-profiles.md) | Versioned CPU ranking profiles | Adds fingerprinted static, linear, and quantized-tree profiles after exact matching. | Accepted |
 | [163](../adr-163-distributed-ranking-profile-attestation.md) | Distributed ranking-profile attestation | Resolves and echoes the selected semantic fingerprint across every ranked gRPC path. | Accepted |
+| [174](../adr-174-fail-open-tag-segment-summaries.md) | Filtered segment skipping | Uses exact fail-open tag unions to avoid immutable segments that cannot satisfy a request filter. | Done |
 
 ---
 

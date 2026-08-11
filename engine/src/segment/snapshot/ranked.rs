@@ -144,6 +144,7 @@ impl EngineSnapshot {
             segments: &self.segments,
             memtable: &self.memtable,
             has_phrase_predicates: self.has_phrase_predicates,
+            tag_segment_skipping: self.config.tag_segment_skipping,
             pred,
         };
         let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;

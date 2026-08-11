@@ -216,6 +216,7 @@ fn collect_rows(snapshot: &EngineSnapshot) -> Vec<CatRow> {
         cat_row!("memory.exact_bytes", stats.memory.exact_bytes),
         cat_row!("memory.index_bytes", stats.memory.index_bytes),
         cat_row!("memory.filter_bytes", stats.memory.filter_bytes),
+        cat_row!("memory.tag_summary_bytes", stats.memory.tag_summary_bytes),
         cat_row!("memory.dict_bytes", stats.memory.dict_bytes),
         cat_row!("memory.query_store_bytes", stats.memory.query_store_bytes),
         cat_row!(
@@ -240,6 +241,7 @@ fn collect_rows(snapshot: &EngineSnapshot) -> Vec<CatRow> {
         cat_row!("broad.batch_size", config.broad_batch_size),
         cat_row!("broad.materialize", config.broad_materialize),
         cat_row!("broad.prefilter", config.broad_prefilter),
+        cat_row!("filter.tag_segment_skipping", config.tag_segment_skipping),
         cat_row!("batch.max", config.max_percolate_batch),
     ]);
     for (ordinal, (&entries, &holes)) in stats

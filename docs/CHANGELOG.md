@@ -9,6 +9,20 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-08-10 — Fail-open filtered segment skipping
+
+- Added exact immutable per-segment `TagId` unions that let filtered scalar, ranked, exhaustive, and
+  columnar reads skip a segment only when a request predicate group is provably absent. Missing and
+  cross-group-inconclusive summaries fail open, the memtable always probes, and per-row exact tag
+  verification remains authoritative ([ADR-174](decisions/adr-174-fail-open-tag-segment-summaries.md)).
+- Rebuild summaries at seal, compaction, and mmap open without changing the segment format; expose a
+  dynamic single-node and cluster-startup result-preserving kill switch, merged local/gRPC skip
+  telemetry, and resident-memory
+  accounting. Differential coverage spans writes, compaction, reopen, synthetic tag IDs, batch
+  evaluation, cluster fan-out, and real gRPC transport.
+- Added `tagbench`; its eight-segment seeded capture preserved all 11,349 result rows while reducing
+  postings and candidates by 87.5% with 32 bytes of summary payload.
+
 ## 2026-08-05 — Cluster GC API hardening
 
 - Hardened native `POST /_cluster/gc` with strict bodyless transport, assignment-routed topology

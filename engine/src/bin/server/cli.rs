@@ -206,6 +206,14 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = true)]
     pub(crate) broad_columnar: bool,
 
+    /// Consult exact sealed-segment tag unions before filtered reads (ADR-174).
+    /// Set false to bypass summary skipping without changing results or stored
+    /// state. Dynamic via `PUT /_settings` in single-node mode; in remote
+    /// cluster mode restart the coordinator and every `shardserver` with the
+    /// same value.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub(crate) tag_segment_skipping: bool,
+
     /// Use the pure-anchor materialization fast path (emit pure-anchor broad
     /// queries straight from the anchor bitmap, skipping verification). Dynamic
     /// via `PUT /_settings`.
@@ -350,4 +358,18 @@ pub(crate) struct Cli {
     /// (ADR-085); writes never retry. Default: 2.
     #[arg(long)]
     pub(crate) grpc_read_retries: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn tag_segment_skipping_accepts_an_explicit_false_value() {
+        let cli = Cli::try_parse_from(["reverse-rusty-server", "--tag-segment-skipping", "false"])
+            .expect("explicit kill-switch value");
+
+        assert!(!cli.tag_segment_skipping);
+    }
 }

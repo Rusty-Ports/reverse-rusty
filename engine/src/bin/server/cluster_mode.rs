@@ -114,6 +114,7 @@ pub(crate) async fn run(
         broad_batch_size: cli.broad_batch_size,
         hot_anchor_threshold: cli.hot_anchor_threshold,
         broad_columnar: cli.broad_columnar,
+        tag_segment_skipping: cli.tag_segment_skipping,
         broad_materialize: cli.broad_materialize,
         max_percolate_batch: cli.max_percolate_batch,
         accept_class_d: cli.accept_class_d,
@@ -169,6 +170,12 @@ pub(crate) async fn run(
         warn!(
             theta = cli.hot_anchor_threshold,
             "--hot-anchor-threshold in remote cluster mode: ensure every shardserver runs              the same --hot-anchor-threshold (divergence is cost-only, never correctness)"
+        );
+    }
+    if !in_process && !cli.tag_segment_skipping {
+        warn!(
+            "--tag-segment-skipping=false in remote cluster mode: restart every shardserver with \
+             --tag-segment-skipping false; mixed values preserve results but produce mixed cost and telemetry"
         );
     }
     // --control-endpoint attaches the coordinator to a durable control-plane quorum (ADR-083). It is

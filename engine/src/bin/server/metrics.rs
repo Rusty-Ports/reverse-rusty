@@ -134,6 +134,9 @@ impl PrometheusMetrics {
         self.memory_bytes
             .with_label_values(&["filter"])
             .set(usize_gauge(m.filter_bytes));
+        self.memory_bytes
+            .with_label_values(&["tag_summary"])
+            .set(usize_gauge(m.tag_summary_bytes));
         self.wal_size_bytes.set(u64_gauge(m.wal_size_bytes));
         self.wal_pending_entries
             .set(u64_gauge(m.wal_pending_entries));

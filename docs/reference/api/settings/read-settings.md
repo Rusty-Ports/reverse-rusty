@@ -40,7 +40,8 @@ Representative fields from the full response:
     "cooperative_cancel": true,
     "max_percolate_batch": 10000,
     "accept_class_d": false,
-    "compaction_fixed_cost": 1000.0
+    "compaction_fixed_cost": 1000.0,
+    "tag_segment_skipping": true
   }
 }
 ```

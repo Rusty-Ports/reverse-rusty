@@ -61,6 +61,8 @@ spec:
             - --pending
             - --data-dir
             - /data
+            - --tag-segment-skipping
+            - {{ .Values.tagSegmentSkipping | quote }}
             - --health-addr
             - 0.0.0.0:{{ .Values.ports.shardHealth }}
             {{- if .Values.metrics.enabled }}

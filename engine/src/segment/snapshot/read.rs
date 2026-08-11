@@ -309,6 +309,12 @@ impl EngineSnapshot {
                 .iter()
                 .map(|s| s.filter_bytes())
                 .sum::<usize>(),
+            tag_summary_bytes: self
+                .segments
+                .iter()
+                .map(|s| s.tag_summary_bytes())
+                .sum::<usize>()
+                + self.memtable.tag_summary_bytes(),
             stale_segments: self.stale_segment_count(),
             dict_bytes: self.dict.heap_bytes(),
             query_store_bytes: self.query_store.resident_bytes(),

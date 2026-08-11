@@ -195,6 +195,7 @@ struct StatsResponse {
     matches: u64,
     probes_attempted: u64,
     probes_skipped: u64,
+    tag_segments_skipped: u64,
 }
 
 impl From<MatchStats> for StatsResponse {
@@ -206,6 +207,7 @@ impl From<MatchStats> for StatsResponse {
             matches: u64::from(s.matches),
             probes_attempted: u64::from(s.probes_attempted),
             probes_skipped: u64::from(s.probes_skipped),
+            tag_segments_skipped: u64::from(s.tag_segments_skipped),
         }
     }
 }
@@ -218,6 +220,7 @@ impl StatsResponse {
         self.matches += u64::from(stats.matches);
         self.probes_attempted += u64::from(stats.probes_attempted);
         self.probes_skipped += u64::from(stats.probes_skipped);
+        self.tag_segments_skipped += u64::from(stats.tag_segments_skipped);
     }
 }
 

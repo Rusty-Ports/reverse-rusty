@@ -43,11 +43,12 @@ loudly rather than being ignored. Responses are marked `Cache-Control: no-store`
     "exact_bytes": 1024,
     "index_bytes": 2048,
     "filter_bytes": 512,
+    "tag_summary_bytes": 16,
     "dict_bytes": 768,
     "query_store_bytes": 256,
     "logical_index_bytes": 128,
     "alive_bytes": 8,
-    "total_resident_bytes": 4744
+    "total_resident_bytes": 4760
   },
   "translog": {"operations": 0, "size_in_bytes": 0}
 }
@@ -82,9 +83,10 @@ loudly rather than being ignored. Responses are marked `Cache-Control: no-store`
   wait asynchronously, and the scan runs off Tokio request workers
 - **segment_holes** — fraction of tombstoned entries per segment (drives compaction decisions)
 - **memory** — resident-byte breakdown across exact predicates, candidate indexes, filters,
-  dictionary, retained source store, logical-id indexes, and liveness overlays.
-  `total_resident_bytes` is the saturating sum of those seven fields; file-backed mmap pages are
-  not counted as resident heap
+  exact sealed-segment tag-summary payloads, dictionary, retained source store, logical-id indexes,
+  and liveness overlays. `tag_summary_bytes` is four bytes per distinct `TagId` per sealed segment
+  (ADR-174; allocator metadata is not included). `total_resident_bytes` is the saturating sum of
+  those eight fields; file-backed mmap pages are not counted as resident heap
 - **translog** — ES/OpenSearch-familiar names for the native WAL backlog:
   `operations` is the number of mutations since the last checkpoint and `size_in_bytes` is the
   current WAL file size. Both are zero for an in-memory engine

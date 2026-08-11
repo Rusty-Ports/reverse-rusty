@@ -26,7 +26,7 @@ class.b                    1
 class.c                    0
 class.d                    0
 class.h                    0
-memory.total_resident_bytes 4744
+memory.total_resident_bytes 4760
 translog.operations        0
 translog.size_in_bytes     0
 segment.0.entries          4

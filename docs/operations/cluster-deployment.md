@@ -85,6 +85,11 @@ cp deploy/cluster.env.example deploy/cluster.env
 $EDITOR deploy/cluster.env          # fill in RR_CLUSTER_TOKEN and RR_AUTH_TOKEN
 ```
 
+`RR_TAG_SEGMENT_SKIPPING` defaults to `true` in the shipped Compose topology. Set it to `false`
+and recreate the coordinator plus every shard to activate the ADR-174 result-preserving kill switch.
+The Helm equivalent is `--set tagSegmentSkipping=false`. Mixed values cannot change matches, but
+they produce inconsistent work and skip telemetry, so keep the setting uniform.
+
 ### 2.5 Optional named ranking profiles
 
 To use a linear or tree profile, point the Compose overlay at one absolute host file. The same

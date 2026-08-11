@@ -222,6 +222,7 @@ async fn main() {
         broad_batch_size: cli.broad_batch_size,
         hot_anchor_threshold: cli.hot_anchor_threshold,
         broad_columnar: cli.broad_columnar,
+        tag_segment_skipping: cli.tag_segment_skipping,
         broad_materialize: cli.broad_materialize,
         max_percolate_batch: cli.max_percolate_batch,
         accept_class_d: cli.accept_class_d,
@@ -689,6 +690,7 @@ async fn main() {
             exact_bytes = final_metrics.exact_bytes,
             index_bytes = final_metrics.index_bytes,
             filter_bytes = final_metrics.filter_bytes,
+            tag_summary_bytes = final_metrics.tag_summary_bytes,
             "final engine state"
         );
     }

@@ -17,8 +17,9 @@ correctness contract this section must uphold.*
 > anchor probe drops the whole cluster's candidates. An explicit query-family / shared-prefix-DAG
 > structure (subtree pruning) was evaluated and deliberately **not** pursued; see
 > [DECISIONS](../DECISIONS.md) ADR-019 for the reasoning. **Per-query metadata, filtered percolation,
-> ranking, and pagination (§5) are built end-to-end in standalone and cluster modes**
-> ([DECISIONS](../DECISIONS.md) ADR-049/055/059/075/107/108/110).
+> ranking, pagination, and fail-open filtered segment skipping (§5) are built end-to-end in
+> standalone and cluster modes**
+> ([DECISIONS](../DECISIONS.md) ADR-049/055/059/075/107/108/110/174).
 
 **TL;DR (for agents)**
 - **Owns:** signature optimizer (`compile.rs`), candidate index (`index.rs`), exact matcher (`exact.rs`), explain (`explain.rs`)
@@ -324,12 +325,13 @@ between shard reads.
 
 ## 5. Per-query metadata, filtered percolation, and ranking
 
-> **Status:** metadata, filtered percolation, compatibility ranking, bounded top-K ranking, pagination,
-> and exhaustive bounded delivery are implemented in standalone and cluster paths. One frozen
+> **Status:** metadata, filtered percolation, fail-open segment skipping, compatibility ranking,
+> bounded top-K ranking, pagination, and exhaustive bounded delivery are implemented in standalone
+> and cluster paths. One frozen
 > `TagDict` is shared into every shard; the coordinator resolves each filter/rank program once and
 > fans integer IDs to the shards. The design is motivated by the reference workload in
 > [`../research/percolator-workload.md`](../research/percolator-workload.md). Code:
-> `src/tagdict.rs` (tag interning),
+> `src/tagdict.rs` (tag interning), `src/segment/tag_summary.rs` (sealed-segment filter proofs),
 > `src/exact.rs` (`TagPredicate` + SoA tag column + verify-stage filter), `src/rank.rs` (the post-match
 > scorer — ADR-059/108), `src/segment/` (ingest/match threading + `EngineSnapshot::{rank,
 > try_match_title_top_k}`), `src/storage/segment.rs` + `src/wal.rs` (durable tag, priority, predicate,
@@ -340,7 +342,8 @@ between shard reads.
 
 Production percolators store **structured tags** alongside each query (a category, a status, secondary
 keys) and at match time **filter and optionally rank matches by those tags**. Reverse Rusty implements
-that model without touching the lossless-cover contract: tags never participate in candidate gating.
+that model without touching the lossless-cover contract: tags never enter semantic signatures or
+title-driven candidate retrieval.
 
 ### 5.1 Metadata model — interned integer tags in the SoA
 
@@ -351,7 +354,7 @@ after it is frozen) — the same move used for `FeatureId`s, so **no strings rea
 `tag_blob: [u32]`, exactly parallel to the `required_blob` layout. Tags are written on insert / update /
 bulk, persist in the `.seg` format, and survive reopen (see [`ingestion-and-updates.md`](ingestion-and-updates.md) §11).
 
-### 5.2 Filtered percolation — push the filter into verification
+### 5.2 Filtered percolation — exact verification with fail-open segment proofs
 
 A percolate request may carry a **tag predicate** — a conjunction of "key ∈ {values}" terms (e.g.
 `category ∈ {A,B} AND status ∈ {X}`). Compile it once per request to required `TagId`s, then, **during
@@ -360,15 +363,24 @@ predicate — a sorted-slice / membership check that reuses the cursor already w
 required/forbidden tails. Candidates failing the predicate are dropped before they reach the output: no
 extra pass, no per-hit metadata lookup, allocation-free.
 
-### 5.3 The load-bearing invariant — tags never gate (mirror MUST_NOT)
+ADR-174 adds one earlier, request-filter-driven proof. Every sealed segment carries the exact sorted
+union of its stored `TagId`s. Before probing that segment, the matcher checks whether each predicate
+group intersects the union. If any group is absent, no row in the segment can satisfy the filter and
+the whole traversal is skipped. Otherwise the summary is inconclusive and the normal retrieval plus
+per-row check above remains authoritative. Separate groups appearing somewhere in the segment do not
+prove that they coexist on one row. The mutable memtable has no summary and always probes; tombstoned
+tags can only retain extra union members and therefore fail open.
 
-**Tags are checked only in the post-candidate verify stage — never in the signature optimizer.** This is
+### 5.3 The load-bearing invariant — tags never enter semantic signature gating
+
+**Tags never enter the signature optimizer, title signatures, or cost-class placement.** This is
 structurally the same rule as "forbidden features never gate" (ADR-006, §1 invariant): signatures stay
 built **only** from required features + any-of groups, so the title→query **lossless-cover contract
-([overview](README.md) §2) is untouched**. A tag filter only ever *removes* queries the caller did not
-ask for; it cannot drop a query the caller *did* want, so it introduces **no false negative** within the
-requested tag scope. An implementer must not "optimize" by letting a tag influence candidate retrieval —
-that would couple a caller-supplied filter to the cover proof.
+([overview](README.md) §2) is untouched**. Per-row tags remain authoritative after Boolean candidate
+retrieval. ADR-174's sole pre-retrieval exception is an exact whole-segment proof derived from the
+request predicate: if one required tag group is absent from the union of all rows, every row would
+fail exact filtering. Missing or inconclusive summaries probe normally. A tag filter can therefore
+only remove queries outside the caller's requested scope; it cannot drop a wanted in-scope match.
 
 ### 5.4 Ranking — an optional layer *over* the boolean-correct set
 
@@ -561,12 +573,10 @@ mid-stream. `resync` and live shard mutations hold the shared side.
 - **Post-match external filter** (return everything, look up each id's metadata afterward) — effectively
   what callers did before ADR-049. Rejected as the long-term design: it still verifies every match
   and needs an external metadata store; 5.2 is strictly better now that tags live in the SoA.
-- **Tag-partitioned segment skip** — for the *dominant* single-key filter (the `category` tag), index or
-  route queries by that tag so a filtered probe skips whole segments (composing with the entity-anchor
-  sharding in [`clustering-and-scaling.md`](clustering-and-scaling.md)). A real optimization, but it must
-  be **filter-driven and fail-open** (skip only when the request's filter proves a segment irrelevant;
-  when unsure, probe) so it can never drop a wanted query. The full proposal and completion test live
-  in [`Tag-aware segment skipping`](../roadmap.md#tag-aware-segment-skipping).
+- **Physically tag-partitioned segments or routing** — still a possible extension for the dominant
+  single-key filter, but it couples layout and movement to one metadata key. ADR-174 instead ships an
+  exact union summary over the existing layout: it is filter-driven, skips only on proof, and probes
+  whenever group correlation or mixed segments are inconclusive.
 
 ---
 

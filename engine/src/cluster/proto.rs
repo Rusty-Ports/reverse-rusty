@@ -230,6 +230,7 @@ pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
         duplicate_emissions: p.duplicate_emissions,
         probes_attempted: p.probes_attempted,
         probes_skipped: p.probes_skipped,
+        tag_segments_skipped: p.tag_segments_skipped,
         broad_queries_evaluated: p.broad_queries_evaluated,
         broad_anchors_scanned: p.broad_anchors_scanned,
         broad_batches: p.broad_batches,
@@ -254,6 +255,7 @@ pub(crate) fn stats_from_engine(s: EngineStats) -> MatchStats {
         matches: s.matches,
         probes_attempted: s.probes_attempted,
         probes_skipped: s.probes_skipped,
+        tag_segments_skipped: s.tag_segments_skipped,
         broad_queries_evaluated: s.broad_queries_evaluated,
         broad_anchors_scanned: s.broad_anchors_scanned,
         broad_batches: s.broad_batches,
@@ -333,8 +335,8 @@ mod tests {
     // Distinct values, so any field swap in either mapper changes the result — a pure
     // round-trip alone would miss a *symmetric* transposition present in both directions,
     // which the per-field, by-name assertions below catch.
-    const VALS: [u32; 18] = [
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    const VALS: [u32; 19] = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
     ];
 
     fn engine_sample() -> EngineStats {
@@ -345,8 +347,8 @@ mod tests {
             main_candidates: VALS[3],
             broad_candidates: VALS[4],
             matches: VALS[5],
-            logical_emissions: 19,
-            duplicate_emissions: 20,
+            logical_emissions: 20,
+            duplicate_emissions: 21,
             probes_attempted: VALS[6],
             probes_skipped: VALS[7],
             broad_queries_evaluated: VALS[8],
@@ -359,6 +361,7 @@ mod tests {
             hot_anchors_scanned: VALS[15],
             hot_batches: VALS[16],
             hot_prefilter_skipped: VALS[17],
+            tag_segments_skipped: VALS[18],
         }
     }
 
@@ -383,8 +386,9 @@ mod tests {
         assert_eq!(p.hot_anchors_scanned, VALS[15]);
         assert_eq!(p.hot_batches, VALS[16]);
         assert_eq!(p.hot_prefilter_skipped, VALS[17]);
-        assert_eq!(p.logical_emissions, 19);
-        assert_eq!(p.duplicate_emissions, 20);
+        assert_eq!(p.tag_segments_skipped, VALS[18]);
+        assert_eq!(p.logical_emissions, 20);
+        assert_eq!(p.duplicate_emissions, 21);
     }
 
     #[test]
@@ -408,8 +412,9 @@ mod tests {
             hot_anchors_scanned: VALS[15],
             hot_batches: VALS[16],
             hot_prefilter_skipped: VALS[17],
-            logical_emissions: 19,
-            duplicate_emissions: 20,
+            logical_emissions: 20,
+            duplicate_emissions: 21,
+            tag_segments_skipped: VALS[18],
         };
         let e = stats_to_engine(p);
         assert_eq!(e.unique_candidates, VALS[0]);
@@ -430,8 +435,9 @@ mod tests {
         assert_eq!(e.hot_anchors_scanned, VALS[15]);
         assert_eq!(e.hot_batches, VALS[16]);
         assert_eq!(e.hot_prefilter_skipped, VALS[17]);
-        assert_eq!(e.logical_emissions, 19);
-        assert_eq!(e.duplicate_emissions, 20);
+        assert_eq!(e.tag_segments_skipped, VALS[18]);
+        assert_eq!(e.logical_emissions, 20);
+        assert_eq!(e.duplicate_emissions, 21);
     }
 
     #[test]

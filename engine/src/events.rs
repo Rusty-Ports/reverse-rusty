@@ -277,6 +277,9 @@ pub struct EngineMetrics {
     pub index_bytes: usize,
     /// Heap bytes used by per-segment anchor filters (bloom filters).
     pub filter_bytes: usize,
+    /// Resident heap bytes used by immutable per-segment `TagId` unions
+    /// (ADR-174), including mmap-backed segments.
+    pub tag_summary_bytes: usize,
     /// Segments compiled against an older vocab epoch (need reingestion).
     pub stale_segments: usize,
     /// Resident heap bytes used by the shared feature dictionary. Unlike
@@ -399,8 +402,8 @@ pub struct SegmentInfo {
     /// paged through the OS cache, not the heap (matching the byte accounting in
     /// [`EngineMetrics`]). A 0 here is informative: the segment is off-heap.
     pub resident_bytes: usize,
-    /// Resident heap bytes for the always-in-RAM overhead: the logical→local
-    /// reverse index + the liveness overlay. Real for **both** kinds (an mmap'd
-    /// segment still keeps these structures resident).
+    /// Resident heap bytes for the always-in-RAM overhead: tag summary,
+    /// logical→local reverse index, and liveness overlay. Real for **both** kinds
+    /// (an mmap'd segment still keeps these structures resident).
     pub overhead_bytes: usize,
 }

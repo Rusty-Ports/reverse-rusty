@@ -350,6 +350,7 @@ fn patch_policy_is_complete_atomic_and_range_checked() {
             "broad_columnar":false,
             "broad_materialize":false,
             "broad_prefilter":false,
+            "tag_segment_skipping":false,
             "dedup_bodies":false,
             "max_percolate_batch":50000,
             "compaction_reanchor":true,
@@ -365,6 +366,7 @@ fn patch_policy_is_complete_atomic_and_range_checked() {
     assert!(!cfg.broad_columnar);
     assert!(!cfg.broad_materialize);
     assert!(!cfg.broad_prefilter);
+    assert!(!cfg.tag_segment_skipping);
     assert!(!cfg.dedup_bodies);
     assert_eq!(cfg.max_percolate_batch, 50_000);
     assert!(cfg.compaction_reanchor);

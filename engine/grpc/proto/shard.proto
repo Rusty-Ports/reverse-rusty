@@ -380,7 +380,7 @@ message FetchMatch {
   uint32 num_shards = 4;
 }
 
-// Field order pinned to engine `segment.rs` MatchStats (11 u32 fields). The
+// Field order pinned to engine `segment.rs` MatchStats. The
 // engine-side mapper in src/cluster/proto.rs converts field-by-field; keep in sync.
 message MatchStats {
   uint32 unique_candidates       = 1;
@@ -407,6 +407,8 @@ message MatchStats {
   // ADR-107/114 result-delivery telemetry. Additive: absent from an older peer ⇒ 0.
   uint64 logical_emissions       = 19;
   uint64 duplicate_emissions     = 20;
+  // ADR-174 fail-open tag-summary skips. Additive: absent from an older peer ⇒ 0.
+  uint32 tag_segments_skipped    = 21;
 }
 
 // One query to (re)compile on the server, identified by logical id. `dsl` is the

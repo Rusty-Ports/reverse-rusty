@@ -202,6 +202,20 @@ pub struct EngineConfig {
     /// Default: `1000.0`
     pub compaction_fixed_cost: f64,
 
+    // ---- request-filter segment skipping (ADR-174) ----
+    /// Consult sealed segments' exact `TagId` unions before probing them for a
+    /// filtered request. A segment is skipped only when at least one predicate
+    /// group has no ID anywhere in the segment; absent or inconclusive summaries
+    /// fail open and ordinary per-row verification remains authoritative.
+    /// Result-identical for every setting; `false` is the operational and
+    /// differential-test kill switch.
+    ///
+    /// Dynamic (`PUT /_settings`) and read-path-only. It never changes signature
+    /// construction, semantic visibility, persistence, or compaction output.
+    ///
+    /// Default: `true`
+    pub tag_segment_skipping: bool,
+
     // ---- broad-lane batch evaluation (ADR-026) ----
     // These govern the columnar broad lane used by `POST /_mpercolate`. They are
     // performance/observability knobs only: none change the match result set (the
@@ -383,6 +397,7 @@ impl Default for EngineConfig {
             max_anyof_group_size: crate::dsl::MAX_ANY_OF_SIZE,
             max_tags: u16::MAX as usize,
             compaction_fixed_cost: 1000.0,
+            tag_segment_skipping: true,
             broad_batch_size: 256,
             broad_columnar: true,
             broad_materialize: true,

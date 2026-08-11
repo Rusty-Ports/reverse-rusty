@@ -272,6 +272,27 @@ impl BaseSegment {
         }
     }
 
+    /// Whether this sealed segment might contain a row accepted by `pred`.
+    /// `false` is an exact whole-segment rejection proof; `true` is inconclusive.
+    #[inline]
+    pub(in crate::segment) fn tag_summary_may_match(
+        &self,
+        pred: &crate::exact::TagPredicate,
+    ) -> bool {
+        match self {
+            BaseSegment::Memory(s) => s.tag_summary_may_match(pred),
+            BaseSegment::Mmap(s) => s.tag_summary_may_match(pred),
+        }
+    }
+
+    /// Resident bytes for the immutable tag union (real for both backings).
+    pub fn tag_summary_bytes(&self) -> usize {
+        match self {
+            BaseSegment::Memory(s) => s.tag_summary_bytes(),
+            BaseSegment::Mmap(s) => s.tag_summary_bytes(),
+        }
+    }
+
     /// Resident reverse-index bytes. Unlike the file-backed accounting above,
     /// this returns the REAL value for both arms — the reverse index is resident
     /// heap even for mmap segments (rebuilt at open).

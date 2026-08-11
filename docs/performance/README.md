@@ -16,6 +16,9 @@ counts, and serialized/accounted sizes are deterministic for the pinned workload
   historical in-memory capture, canonical-body sharing reduced repeated body candidates from
   6,616.65 to 53.75 per title while leaving the emitted match set unchanged. Flush still expands
   members into the current mmap format, so the durable cluster does not retain that Stage-A saving.
+- **Filtered segment skipping:** on the pinned eight-segment category-local `tagbench` shape, exact
+  tag unions preserve every result while skipping 7.00 segments/title and reducing postings and
+  verifier candidates by 87.5%; the summaries occupy 32 payload bytes (ADR-174).
 - **Memory and disk:** the current generic 1M `retain_source=false` baseline accounts for **6.01
   B/query resident** and **244.59 B/query durable**. Historical 20M accounting was about 5.2 B/query
   without retained source and 109 B/query with it. These are engine-accounted values, not host RSS
@@ -51,6 +54,7 @@ cargo run --release --bin rankbench -- 20000 500 8 275775489 \
   ../deploy/ranking-profiles.example.json ltr_v1             # ADR-162 selected CPU profile
 cargo run --release --bin learn -- 500000 50 0.30            # corpus feature learner
 cargo run --release --bin segbench -- 300000 3000 0.0        # read-amplification vs segment count
+cargo run --release --bin tagbench -- 160000 2000 8 0.05 372 # filtered segment-skip work/cost
 
 # Diagnostic capture on any machine (only pinned CI may make a gate verdict):
 RAYON_NUM_THREADS=4 cargo run --release --bin perfgate -- \

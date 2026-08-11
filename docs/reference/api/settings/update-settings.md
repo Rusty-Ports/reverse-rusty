@@ -44,7 +44,8 @@ subsequent lock-free reads.
 
 - **Dynamic (runtime-tunable):** `max_segments`, `memtable_flush_threshold`, `max_query_length`,
   `max_query_clauses`, `max_anyof_group_size`, `max_tags`, `holes_ratio_threshold`,
-  `compaction_fixed_cost`,
+  `compaction_fixed_cost`, `tag_segment_skipping` (ADR-174 — default on; exact sealed-segment tag
+  unions skip only when a request-filter group is absent; `false` is a result-preserving kill switch),
   `auto_compact_on_flush`, `auto_compact_on_ingest`, `compaction_reanchor` (re-anchor drifted queries
   on the next merge, ADR-056), the broad-lane batch knobs `broad_batch_size`, `max_percolate_batch`,
   `broad_columnar`, `broad_materialize` (ADR-026), `broad_prefilter` (the batch count-gate
@@ -87,7 +88,8 @@ Attempting to set a static or unknown key returns `400`:
 Coordinator mode validates this same query, media, JSON, size, and patch contract, then returns
 `501 not_supported_in_cluster_mode` for an otherwise valid request. Per-shard configuration is fixed
 when the cluster is assembled; restart the coordinator and every consistently configured shard node
-with the new flags.
+with the new flags. In particular, the ADR-174 kill switch is
+`--tag-segment-skipping <true|false>` on both `server --cluster` and `shardserver`.
 
 This native API does not accept `settings`, `persistent`, or `transient` wrapper objects, and does
 not accept `null` reset. Elasticsearch's

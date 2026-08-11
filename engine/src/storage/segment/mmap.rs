@@ -93,6 +93,9 @@ pub struct MmapSegment {
     tag_blob: *const u32,
     tag_blob_len: usize,
     tag_count: usize,
+    /// Resident exact union of the immutable tag blob (ADR-174). Rebuilt at
+    /// open from the existing format, so no new persisted section is required.
+    tag_summary: crate::segment::TagSummary,
     version_arr: *const u32,
     logical_arr: *const u64,
     // Optional v6 fixed typed-priority column. `priority_count == 0` pre-v6.
@@ -344,6 +347,7 @@ impl Clone for MmapSegment {
             tag_blob: self.tag_blob,
             tag_blob_len: self.tag_blob_len,
             tag_count: self.tag_count,
+            tag_summary: self.tag_summary.clone(),
             version_arr: self.version_arr,
             logical_arr: self.logical_arr,
             priority_arr: self.priority_arr,

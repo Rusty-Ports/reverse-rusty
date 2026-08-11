@@ -80,7 +80,7 @@ presentation-layer concern** that never needs to touch the matching core.
 | **exclude-only (pure-negative) queries** | class D: rejected by default or stored with `accept_class_d` as an opt-in universal broad row | ✅ explicit ES-style match-all-except semantics when enabled — ADR-068/080 |
 | write visibility / read-your-writes | every write publishes a fresh snapshot before responding | ✅ **better** — immediate, no refresh interval |
 | **per-query structured tags** | interned `(key,value)` tags, SoA column | ✅ **built** — ADR-049 (single-node) + ADR-055 (cluster); scalar values coerce to canonical JSON text on ingest AND filter (numbers/bools, the ES keyword behavior), structured values fail loud ([ADR-073](../DECISIONS.md)) |
-| **filter candidates by tag** | ES `bool`/`terms` + native filter, pushed into verify | ✅ **built** — ADR-049/055. AND-across-keys / OR-within-a-key only (no cross-key OR / `must_not` — covered by two calls + client union) |
+| **filter candidates by tag** | ES `bool`/`terms` + native filter, exact per-row verification, fail-open sealed-segment summaries | ✅ **built** — ADR-049/055/174. AND-across-keys / OR-within-a-key only (no cross-key OR / `must_not` — covered by two calls + client union) |
 | rank / boost / `_score` | additive request boosts + typed priority, `(score desc, _id asc)`, bounded top-K | ✅ built standalone and cluster — ADR-059/075/107/108/110. Multiplicative score arithmetic is intentionally outside this workload |
 | pagination (limit / offset) | `from`/`size` on `/_search` + `/_mpercolate`, untruncated `total` | ✅ **built** — ADR-059 |
 
@@ -95,7 +95,7 @@ establishes and the ADR-064 PoC verified empirically.
 
 **The dominant-read-pattern needs** — **per-query metadata**, **filtered percolation**, and **ranking +
 pagination** — are **built and oracle-proven** in standalone and cluster paths (ADR-049/055/059/075/
-107/108/110; specified in
+107/108/110/174; specified in
 [`../design/matching.md`](../design/matching.md) §5 and
 [`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §11). ADR-064 preserves
 the drop-in audit and translation contract that drove the follow-on parity decisions.

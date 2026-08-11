@@ -231,6 +231,7 @@ pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
             ("exact", s.metrics.exact_bytes),
             ("index", s.metrics.index_bytes),
             ("filter", s.metrics.filter_bytes),
+            ("tag_summary", s.metrics.tag_summary_bytes),
             ("dict", s.metrics.dict_bytes),
             ("query_store", s.metrics.query_store_bytes),
             ("logical_index", s.metrics.logical_index_bytes),
