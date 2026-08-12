@@ -1,12 +1,16 @@
 //! Crash-boundary proofs for durable reassignment startup recovery.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use reverse_rusty::cluster::{
-    recover_durable_moves, ClientSecurity, ClusterConfig, ClusterEngine, ControlPlane,
-    InMemoryControlPlane, MoveCommand, MoveInitialAuthority, MoveIntent, MoveIntentPhase,
-    MoveMemberEvidence, MoveMemberIdentity, MoveRecoveryEvidence, NodeDescriptor, NodeId, NodeRole,
-    RemoteShard, ShardAssignment, MOVE_INTENT_VERSION,
+    recover_durable_moves, ClientSecurity, ClusterConfig, ClusterEngine, ClusterState,
+    ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane, MoveCommand,
+    MoveInitialAuthority, MoveIntent, MoveIntentPhase, MoveMemberEvidence, MoveMemberIdentity,
+    MoveProposalResult, MoveRecoveryEvidence, NodeDescriptor, NodeId, NodeRole, RemoteShard,
+    ShardAssignment, StateVersion, MOVE_INTENT_VERSION,
 };
 use reverse_rusty::dict::Dict;
 use reverse_rusty::normalize::Normalizer;
@@ -20,6 +24,47 @@ struct Scenario {
     norm: Arc<Normalizer>,
     dict: Arc<Dict>,
     tags: Arc<TagDict>,
+}
+
+/// A deterministic stand-in for losing control-write quorum after target evidence is durable. Reads
+/// remain available, while every conditional commit retry fails until the test restores writes.
+#[derive(Clone)]
+struct CommitWriteGate {
+    inner: Arc<InMemoryControlPlane>,
+    commits_available: Arc<AtomicBool>,
+}
+
+impl ControlPlane for CommitWriteGate {
+    fn cluster_state(&self) -> Result<Arc<ClusterState>, ControlError> {
+        self.inner.cluster_state()
+    }
+
+    fn version(&self) -> Result<StateVersion, ControlError> {
+        self.inner.version()
+    }
+
+    fn propose(&self, change: ClusterStateChange) -> Result<StateVersion, ControlError> {
+        self.inner.propose(change)
+    }
+
+    fn propose_move(&self, command: MoveCommand) -> Result<MoveProposalResult, ControlError> {
+        if matches!(&command, MoveCommand::Commit { .. })
+            && !self.commits_available.load(Ordering::SeqCst)
+        {
+            return Err(ControlError::Backend(
+                "injected control-write quorum loss before move commit".into(),
+            ));
+        }
+        self.inner.propose_move(command)
+    }
+
+    fn change_membership(&self, voters: Vec<NodeId>) -> Result<StateVersion, ControlError> {
+        self.inner.change_membership(voters)
+    }
+
+    fn leader(&self) -> Result<Option<NodeId>, ControlError> {
+        self.inner.leader()
+    }
 }
 
 fn scenario(tag: &str, rt: &tokio::runtime::Runtime) -> Scenario {
@@ -331,6 +376,77 @@ fn startup_commits_exact_ready_evidence_before_serving() {
     assert_eq!(state.assignments[0].primary, NodeId(2));
     assert!(state.moves.intents.is_empty());
     cleanup(&scenario);
+}
+
+#[test]
+fn startup_recovers_ready_move_after_control_write_quorum_returns_without_request_retry() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let scenario = scenario("durable_quorum_recovery", &rt);
+    let control = Arc::new(InMemoryControlPlane::new(
+        scenario.cluster.control_state().expect("state"),
+    ));
+    let commits_available = Arc::new(AtomicBool::new(false));
+    let gate = CommitWriteGate {
+        inner: Arc::clone(&control),
+        commits_available: Arc::clone(&commits_available),
+    };
+    let cluster = scenario.cluster.with_control_plane(Box::new(gate.clone()));
+
+    let error = cluster
+        .reassign_and_move(0, NodeId(2), rt.handle())
+        .expect_err("conditional commit must fail while control writes are unavailable");
+    assert!(error.to_string().contains("quorum loss"), "{error}");
+    let interrupted = gate.cluster_state().expect("interrupted state");
+    assert_eq!(interrupted.assignments[0].primary, NodeId(1));
+    assert!(matches!(
+        interrupted.moves.intents[0].phase,
+        MoveIntentPhase::Ready(_)
+    ));
+
+    // Restore the control path and invoke only cold-start recovery: no second reassignment request.
+    commits_available.store(true, Ordering::SeqCst);
+    let coordinator_id = RemoteShard::new_coordinator_id();
+    assert_eq!(
+        recover_durable_moves(
+            &gate,
+            &scenario.dict,
+            &scenario.tags,
+            1,
+            rt.handle(),
+            coordinator_id,
+            &ClientSecurity::default(),
+        )
+        .expect("startup completes the ready transition"),
+        1
+    );
+    let recovered = gate.cluster_state().expect("recovered state");
+    assert_eq!(recovered.assignments[0].primary, NodeId(2));
+    assert!(recovered.moves.intents.is_empty());
+
+    let restarted = ClusterEngine::connect_remote_exclusive(
+        Arc::clone(&scenario.norm),
+        Arc::clone(&scenario.dict),
+        Arc::clone(&scenario.tags),
+        &ClusterConfig {
+            num_shards: 1,
+            ..ClusterConfig::default()
+        },
+        std::slice::from_ref(&scenario.nodes.tgt_ep),
+        rt.handle(),
+        coordinator_id,
+    )
+    .expect("assemble from the recovered committed assignment");
+    assert!(restarted
+        .percolate("nike shoe")
+        .expect("target query after recovery")
+        .contains(&11));
+    assert!(restarted
+        .percolate("sony tv")
+        .expect("target query after recovery")
+        .contains(&12));
+
+    let _ = std::fs::remove_dir_all(&scenario.nodes.src_dir);
+    let _ = std::fs::remove_dir_all(&scenario.nodes.tgt_dir);
 }
 
 #[test]
