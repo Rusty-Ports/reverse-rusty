@@ -511,8 +511,9 @@ fn grpc_group_move_promotion_zero_fn() {
 }
 
 /// Fail-closed: `handoff_final_drain_cap = 0` forces the freeze-probe abort mid-move. The position
-/// rolls back fully — committed map, epoch, and routing untouched; the fenced source auto-unfences
-/// (a subsequent write succeeds) — and every read stays zero-FN throughout.
+/// rolls back fully — committed map and routing untouched; the fenced source auto-unfences and the
+/// durable Preparing intent is removed (two audited control transitions) — and every read stays
+/// zero-FN throughout.
 #[test]
 fn grpc_group_move_abort_rolls_back() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -542,7 +543,15 @@ fn grpc_group_move_abort_rolls_back() {
         (1, BTreeSet::from([2])),
         "committed map untouched by the aborted move"
     );
-    assert_eq!(state.epoch, epoch_before, "epoch untouched");
+    assert_eq!(
+        state.epoch,
+        epoch_before + 2,
+        "Begin + clean Abort are both durable audit transitions"
+    );
+    assert!(
+        state.moves.intents.is_empty(),
+        "a proven clean rollback removes its durable preparation"
+    );
     assert_eq!(
         cluster.handoff_generations(),
         gens_before,

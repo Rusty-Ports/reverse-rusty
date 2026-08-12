@@ -26,6 +26,7 @@ mod class_d;
 mod colocation;
 mod core;
 mod dict_shipping;
+mod durable_move;
 mod exhaustive;
 mod filtered;
 mod fingerprint;

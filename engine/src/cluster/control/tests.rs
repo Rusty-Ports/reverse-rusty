@@ -243,6 +243,13 @@ fn durable_move_is_idempotent_and_commits_assignment_conditionally() {
         MoveCommandOutcome::Applied
     );
     assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent.clone()))
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::AlreadyApplied,
+        "Begin retries must remain idempotent after the phase advances"
+    );
+    assert_eq!(
         cp.propose_move(MoveCommand::Commit { operation_id: 41 })
             .unwrap()
             .outcome,
@@ -253,6 +260,13 @@ fn durable_move_is_idempotent_and_commits_assignment_conditionally() {
             .unwrap()
             .outcome,
         MoveCommandOutcome::AlreadyApplied
+    );
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent.clone()))
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::AlreadyApplied,
+        "a lost Commit response must not make the original Begin conflict"
     );
     let state = cp.cluster_state().unwrap();
     assert_eq!(state.assignments, vec![intent.desired]);
@@ -431,6 +445,54 @@ fn desired_authority_and_ready_intents_cannot_be_aborted() {
             .outcome,
         MoveCommandOutcome::Conflict
     );
+}
+
+#[test]
+fn abort_and_finish_preserve_intent_after_identity_drift() {
+    let (cp, intent) = move_control_with_target(2, 631);
+    let operation_id = intent.operation_id;
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent)).unwrap().outcome,
+        MoveCommandOutcome::Applied
+    );
+    cp.propose(ClusterStateChange::AddNode(NodeDescriptor {
+        id: NodeId(1),
+        addr: Some("http://127.0.0.1:59999".into()),
+        role: NodeRole::Data,
+    }))
+    .unwrap();
+    assert_eq!(
+        cp.propose_move(MoveCommand::Abort { operation_id })
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Conflict
+    );
+    assert_eq!(cp.cluster_state().unwrap().moves.intents.len(), 1);
+
+    let (cp, intent) = move_control_with_target(2, 632);
+    let operation_id = intent.operation_id;
+    let evidence = recovery_evidence(2);
+    cp.propose_move(MoveCommand::Begin(intent)).unwrap();
+    cp.propose_move(MoveCommand::MarkReady {
+        operation_id,
+        evidence,
+    })
+    .unwrap();
+    cp.propose_move(MoveCommand::Commit { operation_id })
+        .unwrap();
+    cp.propose(ClusterStateChange::AddNode(NodeDescriptor {
+        id: NodeId(2),
+        addr: Some("http://127.0.0.1:59998".into()),
+        role: NodeRole::Data,
+    }))
+    .unwrap();
+    assert_eq!(
+        cp.propose_move(MoveCommand::Finish { operation_id })
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Conflict
+    );
+    assert_eq!(cp.cluster_state().unwrap().moves.intents.len(), 1);
 }
 
 #[test]

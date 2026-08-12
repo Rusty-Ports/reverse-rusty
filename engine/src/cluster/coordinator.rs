@@ -76,7 +76,7 @@ mod reconcile;
 #[cfg(feature = "distributed")]
 pub use gc::{GcReport, OrphanSlot};
 #[cfg(feature = "distributed")]
-pub use reassign::{ReassignOutcome, RebalanceMoveReport};
+pub use reassign::{recover_durable_moves, ReassignOutcome, RebalanceMoveReport};
 #[cfg(feature = "distributed")]
 pub use reconcile::{ReconcileConfig, ReconcileReport};
 

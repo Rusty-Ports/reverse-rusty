@@ -5,54 +5,35 @@
 //! Design: docs/design/clustering-and-scaling.md §9. Builds on ADR-086 (route by the committed map +
 //! the boot guard) and ADR-044/043/048 (`execute_handoff` + `HandoffShard` + auto-unfence).
 //!
-//! ## The gap this closes
-//! [`execute_handoff`](super::ClusterEngine::execute_handoff) moves a shard's data and flips live
-//! routing but never touches the committed map; [`reassign_shard`](super::ClusterEngine::reassign_shard)
-//! / [`rebalance`](super::ClusterEngine::rebalance) commit a new map but move no data. So on a
-//! populated remote cluster routing could not follow a reassignment — the
-//! [`route_topology`](super::route_topology) boot guard refuses a non-position-preserving committed
-//! map (it would route a position to a node holding different data: a false negative). This module
-//! composes the two into ONE operation that keeps committed-map ⟺ live-routing ⟺
-//! physical-data-location consistent.
+//! ## Durable cutover
+//! Each move first commits a versioned intent containing the exact assignment generation,
+//! placement identity, normalized endpoint identities, and future live generation. Recovery then
+//! prepares the target, fences the old primary, and drains to convergence. While that fence still
+//! makes the old routing write-quiescent, the mover records every desired member's exact live-set
+//! fingerprint and conditionally commits the assignment. Only after that atomic decision does the
+//! local [`HandoffShard`](super::super::handoff::HandoffShard) swap live routing. A crash therefore
+//! leaves one durable phase that startup can resume; live routing never gets ahead of consensus.
 //!
-//! ## Move-then-commit
-//! [`reassign_and_move`](ClusterEngine::reassign_and_move) runs `execute_handoff` FIRST (peer-recover
-//! target → fence source → drain to convergence → flip routing), THEN commits
-//! `AssignShard{position, primary: to}`. The order is load-bearing for crash safety: in the window
-//! after the flip but before the commit, the committed map still names `from`, which holds the
-//! move-time snapshot and still SERVES READS (the source fence is write-only). This avoids ever
-//! committing an empty target. It does not make an uncommitted flip restart-safe indefinitely:
-//! later writes reach only `to`, so the stale map must be reconciled before a coordinator restart.
-//! The opposite order (commit-then-move) is unsafe: a crash after the commit but before the move
-//! points routing at an empty `to` — a silent false negative.
-//!
-//! ## Serialization & supported topology
-//! **The supported topology is a single active coordinator** (the v1 deployment — Compose/Helm run
-//! one coordinator). Every data-moving op here — plus the autoscaler-driven handoff
-//! ([`drive_autoscaled_handoff`](super::ClusterEngine::drive_autoscaled_handoff)) and a raw
-//! [`execute_handoff`](super::ClusterEngine::execute_handoff) — reserves its resolved endpoint
-//! footprint in the busy-endpoint [`MoveLedger`](ledger::MoveLedger) for the whole move-then-commit
-//! (ADR-095, replacing ADR-090's whole-coordinator `reassign_serial` mutex): moves sharing a node
-//! serialize exactly as before (so two moves of one position — both reserving its committed
-//! primary — cannot interleave their flip + commit and invert the map vs routing), while moves over
-//! disjoint node sets may run in parallel (the opt-in
-//! [`reconcile_with`](super::ClusterEngine::reconcile_with) /
-//! [`rebalance_and_move_with`](super::ClusterEngine::rebalance_and_move_with) waves). A
-//! compare-and-set on the committed primary just before the commit is a best-effort guard against a
-//! *second* coordinator; making it truly atomic across horizontally-scaled stateless coordinators
-//! needs a control-plane **conditional-propose** (compare-and-set `AssignShard`) primitive. ADR-092
-//! adds the opt-in unattended reconcile loop, but it does not make the final proposal conditional;
-//! the supported deployment therefore remains one active coordinator.
+//! The local [`MoveLedger`](ledger::MoveLedger) still schedules conflict-free waves efficiently.
+//! Cross-coordinator safety comes from the control state machine: active intents reserve their
+//! complete normalized endpoint footprints, and MarkReady/Commit compare the full immutable
+//! predicate rather than a read-then-blind-write check. Shard-process coordinator leases prevent a
+//! second process from duplicating the same physical work. Disjoint positions may still move in
+//! parallel.
 //! The whole module is `distributed`-gated; the in-process/default path never compiles it and is
 //! byte-identical.
 
+use std::cell::Cell;
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::runtime::Handle;
 
-use crate::cluster::control::{NodeId, ShardAssignment};
+use crate::cluster::control::{
+    ClusterState, MoveCommand, MoveInitialAuthority, NodeId, ShardAssignment,
+};
+use crate::cluster::remote::RemoteShard;
 use crate::cluster::shard::{Shard, ShardError};
-use crate::events::{DurabilityOp, EngineEvent};
 
 use super::distributed::handoff::{normalized_endpoint, HandoffRoute};
 use super::ClusterEngine;
@@ -61,6 +42,13 @@ use super::ClusterEngine;
 /// `ClusterEngine::reassign_group_and_move` (ADR-094).
 mod group;
 pub(in crate::cluster::coordinator) use group::rebalance_group_targets;
+
+/// Durable intent construction, deterministic operation identity, evidence, and bounded command
+/// retries shared by the RF=1 and replica-group movers.
+mod intent;
+
+mod recovery;
+pub use recovery::recover_durable_moves;
 
 /// The busy-endpoint move ledger + RAII ticket (ADR-095) — the per-node concurrency guard every
 /// data-moving op reserves its footprint in.
@@ -71,11 +59,6 @@ pub(in crate::cluster::coordinator) use ledger::MoveLedger;
 /// (ADR-095). Scheduling-only — safety lives in the ledger.
 mod parallel;
 pub(in crate::cluster::coordinator) use parallel::plan_waves;
-
-/// Bounded retries of the `AssignShard` commit after a successful move, so a transient control-plane
-/// blip (e.g. a real quorum mid-leader-change) doesn't strand a successful move uncommitted. The
-/// in-memory control plane commits on the first attempt.
-const COMMIT_ATTEMPTS: usize = 3;
 
 /// Bounded plan→reserve→revalidate attempts (ADR-095): a move plans its endpoint footprint from a
 /// committed read, reserves it in the ledger (possibly waiting out a conflicting in-flight move),
@@ -111,13 +94,9 @@ pub enum ReassignOutcome {
         to: NodeId,
         generation: u64,
     },
-    /// Live routing reaches `to`, but committing the new owner FAILED (a control-plane error or a
-    /// concurrent durable change). The live path remains exact, but the durable map is stale and a
-    /// restart can resolve back to the old owner after newer writes reached `to`. A loud
-    /// [`DurabilityFailure`](EngineEvent::DurabilityFailure) is emitted and the caller should retry
-    /// promptly. On the single-target path, the retry attests `to` as the current live primary and
-    /// commits it without copying again from the potentially stale committed owner. A durable
-    /// intent protocol that generalizes this recovery across group moves is tracked separately.
+    /// Legacy public outcome retained for source/API compatibility. Durable reassignment no longer
+    /// produces it: failures return `Err` with a resumable intent, and startup resolves that intent
+    /// before serving instead of acknowledging live/durable divergence.
     MovedButNotCommitted {
         position: u32,
         from: NodeId,
@@ -148,6 +127,8 @@ pub struct RebalanceMoveReport {
 }
 
 struct PlannedReassign<'a> {
+    state: ClusterState,
+    expected: ShardAssignment,
     committed_from: NodeId,
     committed_from_endpoint: String,
     live_from_endpoint: String,
@@ -159,25 +140,18 @@ struct PlannedReassign<'a> {
 impl ClusterEngine {
     /// Move shard `position`'s data to node `to` AND commit the new owner — the data-moving analogue
     /// of [`reassign_shard`](Self::reassign_shard) (ADR-090). Resolves `from` (the current committed
-    /// primary) and `to` to endpoints from membership, then **move-then-commit**: run
-    /// [`execute_handoff`](Self::execute_handoff) (peer-recover → fence → drain to convergence → flip
-    /// routing) and only on success commit `AssignShard{position, primary: to}` (bare — the replica
-    /// guard below rejects a replicated position, so the entry this replaces is replica-free).
+    /// primary) and `to` to endpoints from membership, persists a durable intent, then runs
+    /// peer-recover → fence → drain → fingerprint → conditional assignment commit → live swap →
+    /// cleanup. The replica guard below rejects a replicated position; the group method owns that
+    /// shape.
     ///
     /// Fail-closed before a live flip and exact on the running coordinator after it:
-    /// - a failed move propagates `Err` and commits nothing (the source auto-unfenced, routing + the
-    ///   committed map untouched — a consistent rollback);
-    /// - the commit is bounded-retried (a transient quorum blip self-heals; the in-memory control
-    ///   plane commits first try); on persistent failure it returns
-    ///   [`ReassignOutcome::MovedButNotCommitted`] and emits a loud durability event, keeping live
-    ///   routing on the authoritative target. The durable map is then stale and restart-unsafe after
-    ///   newer writes; a prompt re-run attests the live target and commits it without stale recopy.
-    ///
-    /// **Supported topology: a single active coordinator** (the v1 deployment). The busy-endpoint
-    /// ledger (ADR-095) serializes this coordinator's CONFLICTING moves (any shared node — see the
-    /// module docs) while disjoint moves may run in parallel; cross-coordinator atomicity of the
-    /// primary check + commit needs a control-plane conditional-propose primitive (deferred — see
-    /// the module docs).
+    /// - a pre-cutover physical failure auto-unfences the source, removes the Preparing intent when
+    ///   that cleanup is proven, and leaves routing plus assignment untouched;
+    /// - an outcome-ambiguous control/fence failure preserves the intent and returns `Err`; cold
+    ///   startup resumes or fails closed from its recorded phase before serving;
+    /// - the target cannot receive live writes until consensus has named it, so no successful call
+    ///   can leave a stale bare assignment.
     /// **A position with committed replicas is rejected** (a single-target move would de-replicate
     /// it) — the group-aware [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094)
     /// moves a replicated position. Requires a
@@ -235,8 +209,8 @@ impl ClusterEngine {
         // committed read, reserve it in the busy-endpoint ledger — blocking until every
         // CONFLICTING in-flight move completes (the ADR-090 serialization, now per-node) — then
         // confirm the committed entry, endpoint resolution, AND current live primary did not change
-        // while we waited. The live-primary check is essential after a raw handoff or an earlier
-        // move whose commit failed: recovery must seed from the authoritative live owner, never the
+        // while we waited. The live-primary check is essential after a raw handoff: recovery must
+        // seed from the authoritative live owner, never the
         // potentially stale owner still named by the committed map.
         let mut planned: Option<PlannedReassign<'_>> = None;
         for _ in 0..PLAN_ATTEMPTS {
@@ -340,6 +314,8 @@ impl ClusterEngine {
             if entry_unchanged && eps_unchanged && live_unchanged {
                 let route = self.validate_handoff_route(position, &live_ep, &tgt_ep)?;
                 planned = Some(PlannedReassign {
+                    state: now,
+                    expected: assignment.clone(),
                     committed_from: from,
                     committed_from_endpoint: from_ep,
                     live_from_endpoint: live_ep,
@@ -353,6 +329,8 @@ impl ClusterEngine {
             // iteration re-plans from the fresh state.
         }
         let Some(PlannedReassign {
+            state,
+            expected,
             committed_from: from,
             committed_from_endpoint: from_ep,
             live_from_endpoint: live_ep,
@@ -371,128 +349,181 @@ impl ClusterEngine {
             return Ok(None);
         }
 
-        let (generation, moved) = match route {
-            HandoffRoute::AlreadyAtTarget { generation } => (generation, false),
-            HandoffRoute::Move => (
-                self.execute_handoff_inner(position, &live_ep, &tgt_ep, handle)?,
-                true,
-            ),
-        };
-        // Live routing now reaches `to` (either before this invocation or after its move).
-        // COMPARE-AND-SET before committing: confirm the durable primary is still `from`.
-        let now = self.control_state()?;
-        let still_from = now
-            .assignments
-            .iter()
-            .find(|a| a.position == pos)
-            .is_some_and(|a| a.primary == from && a.replicas.is_empty());
-        if !still_from {
-            self.emit(EngineEvent::DurabilityFailure {
-                op: DurabilityOp::ReplicaDesync,
-                detail: format!(
-                    "reassign_and_move made shard {position} live on node {} but the committed \
-                     primary changed under it (a concurrent reassign); not overwriting the map. \
-                     Re-run to reconcile.",
-                    to.0
-                ),
-                error: "committed assignment changed during reassign".into(),
-            });
-            return Ok(Some(ReassignOutcome::MovedButNotCommitted {
-                position: pos,
-                from,
-                to,
-                generation,
-                moved,
-            }));
-        }
-
         // A committed target still needs a physical repair when raw handoff left live routing
-        // elsewhere, but it does not need another control proposal afterward. This return comes
-        // only after the durable-primary recheck above, so a second coordinator cannot change the
-        // assignment during the move and still receive an acknowledged result. A different NodeId
-        // aliasing the same live endpoint DOES need a commit so the requested identity becomes
-        // durable.
+        // elsewhere, but it does not need an assignment transition. This pre-existing divergent
+        // state is outside the normal durable-move path; repair it in place and keep the already
+        // authoritative committed target.
         if from == to && normalized_endpoint(&from_ep) == normalized_endpoint(&tgt_ep) {
-            let outcome = if moved {
-                ReassignOutcome::Moved {
+            if state
+                .moves
+                .intents
+                .iter()
+                .any(|intent| intent.position == pos)
+            {
+                return Err(ShardError::ControlPlane(format!(
+                    "reassign_and_move: shard position {position} has an unresolved committed \
+                     move intent; restart the coordinator so startup can attest the recorded \
+                     cutover before repairing live routing"
+                )));
+            }
+            let outcome = match route {
+                HandoffRoute::AlreadyAtTarget { generation } => ReassignOutcome::NoChange {
+                    position: pos,
+                    generation,
+                },
+                HandoffRoute::Move => ReassignOutcome::Moved {
                     position: pos,
                     from,
                     to,
-                    generation,
-                }
-            } else {
-                ReassignOutcome::NoChange {
-                    position: pos,
-                    generation,
-                }
+                    generation: self.execute_handoff_inner(position, &live_ep, &tgt_ep, handle)?,
+                },
             };
             return Ok(Some(outcome));
         }
 
-        // COMMIT (move-then-commit): name the new owner. The entry's replica set is provably empty
-        // here (the replica guard rejected a replicated position at plan time and the post-reserve
-        // revalidation re-checked it), so the committed entry is written bare — an `AssignShard`
-        // replaces the whole entry. Bounded-retry the proposal so a transient control-plane blip
-        // (e.g. a real quorum mid-leader-change) doesn't strand a successful move uncommitted; the
-        // in-memory control plane commits on the first attempt (no behavior change).
-        let mut last_err: Option<ShardError> = None;
-        for attempt in 0..COMMIT_ATTEMPTS {
-            match self.reassign_shard(ShardAssignment {
-                position: pos,
-                primary: to,
-                replicas: Vec::new(),
-            }) {
-                Ok(()) => {
-                    let outcome = if moved {
-                        ReassignOutcome::Moved {
-                            position: pos,
-                            from,
-                            to,
-                            generation,
+        let (generation, initial_authority) = match route {
+            HandoffRoute::AlreadyAtTarget { generation } => {
+                (generation, MoveInitialAuthority::Desired)
+            }
+            HandoffRoute::Move => {
+                let handoff = self.handoffs.get(position).ok_or_else(|| {
+                    ShardError::Config(format!(
+                        "reassign_and_move: shard position {position} is not handoff-capable"
+                    ))
+                })?;
+                (handoff.generation() + 1, MoveInitialAuthority::Expected)
+            }
+        };
+        let desired = ShardAssignment {
+            position: pos,
+            primary: to,
+            replicas: Vec::new(),
+        };
+        let move_intent =
+            intent::build_intent(&state, expected, desired, generation, initial_authority)?;
+        intent::propose(
+            self.control.as_ref(),
+            MoveCommand::Begin(move_intent.clone()),
+            "reassign_and_move: persist intent",
+        )?;
+
+        let moved = matches!(route, HandoffRoute::Move);
+        let cutover = Cell::new(false);
+        let result = match route {
+            HandoffRoute::AlreadyAtTarget { .. } => {
+                let target = RemoteShard::connect_for_coordinator_with_security(
+                    &tgt_ep,
+                    handle.clone(),
+                    self.dict.fingerprint(),
+                    self.tag_dict.fingerprint(),
+                    pos,
+                    self.coordinator_id,
+                    &self.client_security,
+                )?
+                .with_metrics(Arc::clone(&self.transport_metrics));
+                cutover.set(true);
+                let evidence = intent::recovery_evidence(
+                    generation,
+                    vec![intent::member_evidence(to, &target)?],
+                );
+                intent::propose(
+                    self.control.as_ref(),
+                    MoveCommand::MarkReady {
+                        operation_id: move_intent.operation_id,
+                        evidence,
+                    },
+                    "reassign_and_move: persist target evidence",
+                )?;
+                intent::propose(
+                    self.control.as_ref(),
+                    MoveCommand::Commit {
+                        operation_id: move_intent.operation_id,
+                    },
+                    "reassign_and_move: conditional assignment commit",
+                )?;
+                Ok(generation)
+            }
+            HandoffRoute::Move => self.execute_handoff_inner_with_cutover(
+                position,
+                &live_ep,
+                &tgt_ep,
+                handle,
+                |target, prepared_generation| {
+                    cutover.set(true);
+                    let evidence = intent::recovery_evidence(
+                        prepared_generation,
+                        vec![intent::member_evidence(to, target)?],
+                    );
+                    intent::propose(
+                        self.control.as_ref(),
+                        MoveCommand::MarkReady {
+                            operation_id: move_intent.operation_id,
+                            evidence,
+                        },
+                        "reassign_and_move: persist target evidence",
+                    )?;
+                    intent::propose(
+                        self.control.as_ref(),
+                        MoveCommand::Commit {
+                            operation_id: move_intent.operation_id,
+                        },
+                        "reassign_and_move: conditional assignment commit",
+                    )
+                },
+            ),
+        };
+        let generation = match result {
+            Ok(generation) => generation,
+            Err(error) => {
+                // Physical errors auto-unfence in the handoff layer. Remove the still-preparing
+                // intent only when a fence probe proves that cleanup completed; otherwise preserve
+                // it so startup can inspect the ambiguity and fail closed.
+                if !cutover.get() {
+                    if let Ok(source) = RemoteShard::connect_for_coordinator_with_security(
+                        &live_ep,
+                        handle.clone(),
+                        self.dict.fingerprint(),
+                        self.tag_dict.fingerprint(),
+                        pos,
+                        self.coordinator_id,
+                        &self.client_security,
+                    ) {
+                        if source.fence(0).is_ok_and(|fence| fence == 0) {
+                            intent::abort(
+                                self,
+                                &move_intent,
+                                "reassign_and_move: abort clean preparation",
+                            );
                         }
-                    } else {
-                        ReassignOutcome::Reconciled {
-                            position: pos,
-                            from,
-                            to,
-                            generation,
-                        }
-                    };
-                    return Ok(Some(outcome));
-                }
-                Err(e) => {
-                    last_err = Some(e);
-                    if attempt + 1 < COMMIT_ATTEMPTS {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                 }
+                return Err(error);
             }
-        }
-        // Persistent commit failure (only reachable with a real quorum that cannot accept the
-        // proposal; the in-memory backend never gets here). The move already succeeded, so `to` is
-        // authoritative: KEEP live routing on it and surface a loud event. The durable map remains
-        // stale. After any newer write reaches `to`, restarting an assignment-routed coordinator
-        // before reconciliation can return to a stale source. A retry therefore attests the current
-        // live primary and commits it without copying from the old durable owner. A durable move
-        // intent / conditional-propose protocol is the remaining way to close this restart window.
-        self.emit(EngineEvent::DurabilityFailure {
-            op: DurabilityOp::ReplicaDesync,
-            detail: format!(
-                "reassign_and_move made shard {position} live on node {} but committing the new \
-                 owner failed after {COMMIT_ATTEMPTS} attempts; live routing stays on node {} and \
-                 the committed map still names node {}. Re-run promptly to reconcile before a \
-                 coordinator restart.",
-                to.0, to.0, from.0
-            ),
-            error: last_err.map(|e| e.to_string()).unwrap_or_default(),
-        });
-        Ok(Some(ReassignOutcome::MovedButNotCommitted {
-            position: pos,
-            from,
-            to,
-            generation,
-            moved,
-        }))
+        };
+
+        intent::propose(
+            self.control.as_ref(),
+            MoveCommand::Finish {
+                operation_id: move_intent.operation_id,
+            },
+            "reassign_and_move: finish durable move",
+        )?;
+        let outcome = if moved {
+            ReassignOutcome::Moved {
+                position: pos,
+                from,
+                to,
+                generation,
+            }
+        } else {
+            ReassignOutcome::Reconciled {
+                position: pos,
+                from,
+                to,
+                generation,
+            }
+        };
+        Ok(Some(outcome))
     }
 
     /// Data-moving analogue of [`rebalance`](Self::rebalance) (ADR-090/094): recompute the desired

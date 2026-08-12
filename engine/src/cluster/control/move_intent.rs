@@ -292,6 +292,19 @@ fn member_endpoints_overlap(left: &MoveIntent, right: &MoveIntent) -> bool {
     })
 }
 
+fn same_move_identity(left: &MoveIntent, right: &MoveIntent) -> bool {
+    left.intent_version == right.intent_version
+        && left.operation_id == right.operation_id
+        && left.position == right.position
+        && left.expected_assignment_generation == right.expected_assignment_generation
+        && left.placement_generation == right.placement_generation
+        && left.expected == right.expected
+        && left.desired == right.desired
+        && left.members == right.members
+        && left.live_generation == right.live_generation
+        && left.initial_authority == right.initial_authority
+}
+
 fn replace_assignment(state: &mut ClusterState, assignment: ShardAssignment) {
     let position = assignment.position;
     state
@@ -321,7 +334,7 @@ pub(super) fn apply_move(state: &mut ClusterState, command: MoveCommand) -> Move
                 .iter()
                 .find(|current| current.operation_id == intent.operation_id)
             {
-                return if current == &intent {
+                return if same_move_identity(current, &intent) {
                     MoveCommandOutcome::AlreadyApplied
                 } else {
                     MoveCommandOutcome::Conflict
@@ -341,7 +354,7 @@ pub(super) fn apply_move(state: &mut ClusterState, command: MoveCommand) -> Move
                 .iter()
                 .find(|current| current.position == intent.position)
             {
-                return if current == &intent {
+                return if same_move_identity(current, &intent) {
                     MoveCommandOutcome::AlreadyApplied
                 } else {
                     MoveCommandOutcome::Conflict
@@ -436,6 +449,7 @@ pub(super) fn apply_move(state: &mut ClusterState, command: MoveCommand) -> Move
             let intent = &state.moves.intents[index];
             if intent.initial_authority != MoveInitialAuthority::Expected
                 || !matches!(intent.phase, MoveIntentPhase::Preparing)
+                || !assignment_matches_expected(state, intent)
             {
                 return MoveCommandOutcome::Conflict;
             }
@@ -458,6 +472,10 @@ pub(super) fn apply_move(state: &mut ClusterState, command: MoveCommand) -> Move
                     .iter()
                     .find(|assignment| assignment.position == intent.position)
                     != Some(&intent.desired)
+                || state.moves.assignment_generation(intent.position)
+                    != intent.expected_assignment_generation.saturating_add(1)
+                || state.placement_generation != intent.placement_generation
+                || !identities_match(state, intent)
             {
                 return MoveCommandOutcome::Conflict;
             }
