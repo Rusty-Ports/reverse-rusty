@@ -381,8 +381,8 @@ Higher-level reassignment uses the current live primary as data authority but ma
 replicated control-plane document (ADR-175). Before physical work it commits a versioned intent with
 the expected assignment and per-position generation, placement generation, normalized logical-node
 endpoint identities, future live generation, exact source-fence generation, and complete desired
-assignment. Active intents reserve their endpoint footprints across coordinators; the local move
-ledger remains the efficient scheduler for one process.
+assignment. Active intents reserve every endpoint in the expected and desired assignments across
+coordinators; the local move ledger uses the same footprint when scheduling one process.
 
 The normal cutover is **intent → recover → fence/drain → evidence → conditional assignment commit →
 live swap → cleanup**. Recovery establishes every desired member from the frozen source. While the

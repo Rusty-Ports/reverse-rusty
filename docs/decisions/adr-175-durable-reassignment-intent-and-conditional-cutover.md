@@ -54,10 +54,11 @@ Normal RF=1 and RF>1 movement uses this order:
 6. swap the coordinator's live routing to the already-complete desired backing; and
 7. clear retained-source fences and `Finish` the intent.
 
-The target cannot accept live writes before consensus names it, so live routing never gets ahead of
-the durable assignment. A clean pre-ready failure with expected authority proves an unfence, then
-aborts the intent. An ambiguous control or fence outcome returns a typed error and preserves the
-intent for startup; it is not converted to a successful degraded result.
+For a normal expected-authority move, the target cannot accept live writes before consensus names
+it, so live routing never gets ahead of the durable assignment. A clean pre-ready failure with
+expected authority proves an unfence, then aborts the intent. An ambiguous control or fence outcome
+returns a typed error and preserves the intent for startup; it is not converted to a successful
+degraded result.
 
 An RF=1 target that is already live—because of raw handoff or earlier map/live divergence—begins an
 intent with desired authority before fencing or adopting anything. The intent records and re-probes
@@ -74,14 +75,18 @@ Assignment-routed startup resolves all intents before assembling routes or servi
 - `Preparing` with expected authority proves the source unfenced and aborts;
 - `Preparing` with desired authority re-establishes the recorded source fence, attests the desired
   side, and commits;
-- `Ready` requires the exact recorded fence and unchanged recovery evidence before commit; and
+- `Ready` requires the exact recorded fence. Expected-authority moves also require unchanged
+  recovery evidence; a desired-authority target may legitimately advance after readiness because
+  it was already the recorded live write authority, so the stored evidence remains its completeness
+  proof while recovery re-attests its endpoint, placement, and fence identity before commit; and
 - `Committed` treats consensus as the authority decision, attests every recorded endpoint,
   placement, and source fence, clears any retained-source fence, then finishes. Post-cutover writes
   may legitimately advance the desired fingerprints.
 
 Endpoint replacement, assignment/placement drift, missing quorum, unexpected fence generation,
-changed ready evidence, overlapping intents, or any other ambiguity fails coordinator startup. No
-branch selects an authority merely because an endpoint is reachable.
+changed ready evidence for a non-live expected-authority target, overlapping intents, or any other
+ambiguity fails coordinator startup. No branch selects an authority merely because an endpoint is
+reachable.
 
 The first move command atomically rewrites a legacy Raft log to the one-way `RRL4` header before
 appending. Snapshots carrying move state require move-control format 4. Pre-release `RRL2`/`RRL3`
@@ -130,7 +135,9 @@ source/API-compatible but the built-in durable mover no longer produces that out
 Control-state tests cover command idempotence, complete conditional predicates, endpoint overlap,
 logical aliases, snapshots, log replay, unsupported format rejection, and concurrent proposals.
 Localhost gRPC tests cover RF=1 restart recovery at preparing, ready, committed, live-swap, and
-cleanup boundaries; RF=1 injected commit-quorum loss; placement/member/fence/evidence ambiguity;
-exact source authority; and chained third-source reconciliation. Separate RF>1 suites cover
-end-to-end group cutover, reconciliation, failover, concurrent writes, and coordinator restart after
-completed moves. Both shapes preserve acknowledged matches.
+cleanup boundaries; RF=1 injected commit-quorum loss; desired-authority writes after readiness;
+placement/member/fence/evidence ambiguity; exact source authority; and chained third-source
+reconciliation. Parallel-planner tests prove the local `C ∪ D` footprint matches replicated Begin,
+including a shared dropped replica. Separate RF>1 suites cover end-to-end group cutover,
+reconciliation, failover, concurrent writes, and coordinator restart after completed moves. Both
+shapes preserve acknowledged matches.

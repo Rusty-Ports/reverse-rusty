@@ -302,7 +302,7 @@ fn startup_fences_an_unadopted_map_only_source_after_intent_replay() {
 }
 
 #[test]
-fn startup_ready_evidence_mismatch_fails_loud() {
+fn startup_ready_expected_authority_evidence_mismatch_fails_loud() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let scenario = scenario("durable_ready_mismatch", &rt);
     scenario
@@ -315,7 +315,8 @@ fn startup_ready_evidence_mismatch_fails_loud() {
         )
         .expect("raw handoff");
     let control = InMemoryControlPlane::new(scenario.cluster.control_state().expect("state"));
-    let move_intent = intent(&control.cluster_state().expect("state"), &scenario.nodes);
+    let mut move_intent = intent(&control.cluster_state().expect("state"), &scenario.nodes);
+    move_intent.initial_authority = MoveInitialAuthority::Expected;
     control
         .propose_move(MoveCommand::Begin(move_intent.clone()))
         .expect("begin intent");
@@ -328,7 +329,7 @@ fn startup_ready_evidence_mismatch_fails_loud() {
     scenario
         .cluster
         .add_query(14, "+sony")
-        .expect("change desired authority after recorded evidence");
+        .expect("change the non-authoritative target after recorded evidence");
 
     let error = recover(&control, &scenario, &rt, RemoteShard::new_coordinator_id())
         .expect_err("evidence drift must fail startup");
@@ -339,6 +340,68 @@ fn startup_ready_evidence_mismatch_fails_loud() {
         MoveIntentPhase::Ready(_)
     ));
     assert_eq!(state.assignments[0].primary, NodeId(1));
+    cleanup(&scenario);
+}
+
+#[test]
+fn startup_ready_desired_authority_accepts_post_ready_writes() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let scenario = scenario("durable_ready_desired_progress", &rt);
+    scenario
+        .cluster
+        .execute_handoff(
+            0,
+            &scenario.nodes.src_ep,
+            &scenario.nodes.tgt_ep,
+            rt.handle(),
+        )
+        .expect("make the desired target the live authority");
+    let control = InMemoryControlPlane::new(scenario.cluster.control_state().expect("state"));
+    let move_intent = intent(&control.cluster_state().expect("state"), &scenario.nodes);
+    control
+        .propose_move(MoveCommand::Begin(move_intent.clone()))
+        .expect("begin desired-authority intent");
+    control
+        .propose_move(MoveCommand::MarkReady {
+            operation_id: move_intent.operation_id,
+            evidence: target_evidence(&scenario, &rt),
+        })
+        .expect("mark desired authority ready");
+    scenario
+        .cluster
+        .add_query(14, "+sony")
+        .expect("acknowledged write after readiness");
+
+    let coordinator_id = RemoteShard::new_coordinator_id();
+    assert_eq!(
+        recover(&control, &scenario, &rt, coordinator_id)
+            .expect("commit advanced desired authority"),
+        1
+    );
+    let recovered = control.cluster_state().expect("recovered state");
+    assert_eq!(recovered.assignments[0].primary, NodeId(2));
+    assert!(recovered.moves.intents.is_empty());
+
+    let restarted = ClusterEngine::connect_remote_exclusive(
+        Arc::clone(&scenario.norm),
+        Arc::clone(&scenario.dict),
+        Arc::clone(&scenario.tags),
+        &ClusterConfig {
+            num_shards: 1,
+            ..ClusterConfig::default()
+        },
+        std::slice::from_ref(&scenario.nodes.tgt_ep),
+        rt.handle(),
+        coordinator_id,
+    )
+    .expect("assemble the committed desired authority");
+    assert!(
+        restarted
+            .percolate("sony television")
+            .expect("read post-ready write")
+            .contains(&14),
+        "the desired authority's acknowledged post-ready write must survive recovery"
+    );
     cleanup(&scenario);
 }
 

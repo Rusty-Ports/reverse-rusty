@@ -345,14 +345,28 @@ impl RecoveryContext<'_> {
             MoveIntentPhase::Ready(expected) => {
                 self.require_source_fence(intent, false)?;
                 let actual = self.desired_evidence(intent)?;
-                if &actual != expected {
+                // With expected-side authority, Ready was captured while the desired side was
+                // non-live and write-quiescent; any later change is therefore unexplained and
+                // ambiguous. A desired-authority intent is different: the desired side was already
+                // the live write authority before Begin, so acknowledged writes may legitimately
+                // advance it after MarkReady while a control Commit is unavailable. The recorded
+                // evidence remains the proof that this authority was complete at readiness; the
+                // current probe attests that the same endpoint/fence/placement identity still holds.
+                if intent.initial_authority == MoveInitialAuthority::Expected && &actual != expected
+                {
                     return Err(ShardError::ControlPlane(format!(
                         "durable move {} target evidence changed after readiness; refusing \
                          ambiguous cutover",
                         intent.operation_id
                     )));
                 }
-                self.commit_with_evidence(intent, actual)?;
+                intent::propose(
+                    self.control,
+                    &MoveCommand::Commit {
+                        operation_id: intent.operation_id,
+                    },
+                    "startup: conditionally commit ready move",
+                )?;
                 self.clear_retained_source(intent)?;
                 self.finish(intent)
             }

@@ -14,8 +14,9 @@
 //! - **Same position** — flip-vs-commit interleaving (the hazard `reassign_serial` was built for):
 //!   any two moves of one position both name its current committed primary, so both reserve that
 //!   node — serialized by construction.
-//! - **Replicated composite installs** — a group move reserves every desired member, so no second
-//!   move touches a member mid-assembly (ADR-094).
+//! - **Replicated durable intents** — a group move reserves every expected and desired member,
+//!   including replicas it will drop, so the local guard matches replicated Begin's cross-
+//!   coordinator conflict predicate (ADR-175).
 //!
 //! ## Why endpoints, not `NodeId`s
 //! The conflicts above are per *server process* (the fence, the slot map, the adopt handshake), and

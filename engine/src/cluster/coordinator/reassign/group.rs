@@ -10,9 +10,10 @@
 //! ADR-092 landing).
 //!
 //! ## The algorithm (one position; C = committed group, D = desired group)
-//! Everything below runs under a busy-endpoint ledger reservation of `{cp} ∪ D` (ADR-095 — moves
-//! sharing a node serialize, per the chained-reshuffle constraint; disjoint moves may run in
-//! parallel) and under ONE retention lease on the source, exactly like `execute_handoff` — with
+//! Everything below runs under a busy-endpoint ledger reservation of `C ∪ D` (ADR-175 widens the
+//! ADR-095 physical-work footprint to match replicated Begin's complete intent reservation; moves
+//! sharing a node serialize, while disjoint moves may run in parallel) and under ONE retention
+//! lease on the source, exactly like `execute_handoff` — with
 //! two member-entry disciplines the multi-member shape adds (both codex findings on this ADR):
 //! **stale fences are cleared on every member entering the group** (serve-then-drop leaves a
 //! dropped primary fenced forever, and `RecoverFrom` preserves the fence — a re-entering member
@@ -131,12 +132,14 @@ impl ClusterEngine {
             )));
         }
 
-        // Plan → reserve → revalidate (ADR-095): resolve the move's endpoint footprint
-        // (`{cp} ∪ D` — the source we fence + every member we establish/install) from a committed
-        // read, reserve it in the busy-endpoint ledger — blocking until every CONFLICTING in-flight
-        // move completes — then confirm the position's committed GROUP did not change while we
-        // waited. A change re-plans from the fresh state (bounded); Begin/Commit repeat the full
-        // predicate inside the replicated state machine.
+        // Plan → reserve → revalidate (ADR-095/175): resolve the move's complete `C ∪ D` endpoint
+        // footprint from a committed read. This includes dropped expected replicas even though the
+        // physical copier never contacts them, because replicated Begin reserves every recorded
+        // endpoint and the local scheduler must use the same conflict predicate. Reserve it in the
+        // busy-endpoint ledger — blocking until every CONFLICTING in-flight move completes — then
+        // confirm the committed group and all endpoint identities did not change while we waited. A
+        // change re-plans from fresh state (bounded); Begin/Commit repeat the full predicate inside
+        // the replicated state machine.
         let mut planned: Option<PlannedGroupMove<'_>> = None;
         for _ in 0..PLAN_ATTEMPTS {
             let state = self.control_state()?;
@@ -197,7 +200,15 @@ impl ClusterEngine {
                         ))
                     })
             };
-            let cp_ep = addr_of(committed.primary)?;
+            // C's members in composite order. The complete set participates in the durable
+            // reservation even though only the primary is the physical recovery source.
+            let mut c_members: Vec<(NodeId, String)> =
+                Vec::with_capacity(1 + committed.replicas.len());
+            c_members.push((committed.primary, addr_of(committed.primary)?));
+            for replica in &committed.replicas {
+                c_members.push((*replica, addr_of(*replica)?));
+            }
+            let cp_ep = c_members[0].1.clone();
             // D's members in composite order (primary first, then replicas), each with its
             // endpoint.
             let mut d_members: Vec<(NodeId, String)> =
@@ -219,8 +230,8 @@ impl ClusterEngine {
                 }
             }
 
-            let mut footprint: Vec<&str> = Vec::with_capacity(1 + d_members.len());
-            footprint.push(cp_ep.as_str());
+            let mut footprint: Vec<&str> = Vec::with_capacity(c_members.len() + d_members.len());
+            footprint.extend(c_members.iter().map(|(_, endpoint)| endpoint.as_str()));
             footprint.extend(d_members.iter().map(|(_, e)| e.as_str()));
             let ticket = self.move_ledger.reserve(&footprint);
             // Revalidate BOTH the committed group AND every member's endpoint resolution (codex
@@ -238,7 +249,9 @@ impl ClusterEngine {
             };
             let group_unchanged =
                 now.assignments.iter().find(|a| a.position == pos) == Some(&committed);
-            let eps_unchanged = addr_now(committed.primary) == Some(cp_ep.as_str())
+            let eps_unchanged = c_members
+                .iter()
+                .all(|(nid, ep)| addr_now(*nid) == Some(ep.as_str()))
                 && d_members
                     .iter()
                     .all(|(nid, ep)| addr_now(*nid) == Some(ep.as_str()));

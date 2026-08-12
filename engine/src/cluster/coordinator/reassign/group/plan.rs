@@ -97,6 +97,7 @@ pub(super) struct PlannedGroupMove<'a> {
     pub(super) cp_ep: String,
     /// D's members in composite order (primary first), each with its endpoint.
     pub(super) d_members: Vec<(NodeId, String)>,
-    /// The held local reservation of `{cp} ∪ D` — alive for the whole durable transition.
+    /// The held local reservation of `C ∪ D` — alive for the whole durable transition and equal
+    /// to replicated Begin's complete endpoint conflict predicate (ADR-175).
     pub(super) ticket: MoveTicket<'a>,
 }
