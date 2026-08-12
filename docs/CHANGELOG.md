@@ -19,9 +19,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
   the assignment, and only then expose the new live route. Cold startup resolves every recorded
   phase before serving, preserves already-live and third-source authority without stale recopy, and
   fails loud on missing quorum or ambiguous endpoint, placement, fence, or evidence state.
-- Added the one-way `RRL4`/move-control-format-4 compatibility fence and crash/race coverage across
-  control replay, snapshots, move phases, aliases, injected commit-quorum loss, and localhost gRPC
-  restart recovery
+- Added the one-way `RRL4`/move-control-format-4 compatibility fence, control replay/snapshot/race
+  coverage, RF=1 phase and commit-quorum crash recovery, and RF>1 cutover, reconcile, failover, and
+  post-move restart coverage
   ([ADR-175](decisions/adr-175-durable-reassignment-intent-and-conditional-cutover.md)).
 
 ## 2026-08-10 — Fail-open filtered segment skipping

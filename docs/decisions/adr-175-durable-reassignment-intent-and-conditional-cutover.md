@@ -129,7 +129,8 @@ source/API-compatible but the built-in durable mover no longer produces that out
 
 Control-state tests cover command idempotence, complete conditional predicates, endpoint overlap,
 logical aliases, snapshots, log replay, unsupported format rejection, and concurrent proposals.
-Localhost gRPC tests cover RF=1 and RF>1 restart recovery at preparing, ready, committed, live-swap,
-and cleanup boundaries; injected commit-quorum loss; placement/member/fence/evidence ambiguity;
-exact source authority; chained third-source reconciliation; and preservation of acknowledged
-matches.
+Localhost gRPC tests cover RF=1 restart recovery at preparing, ready, committed, live-swap, and
+cleanup boundaries; RF=1 injected commit-quorum loss; placement/member/fence/evidence ambiguity;
+exact source authority; and chained third-source reconciliation. Separate RF>1 suites cover
+end-to-end group cutover, reconciliation, failover, concurrent writes, and coordinator restart after
+completed moves. Both shapes preserve acknowledged matches.
