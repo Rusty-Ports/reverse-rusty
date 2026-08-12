@@ -506,7 +506,7 @@ fn durable_move_intent_resumes_after_control_restart() {
 
     assert_eq!(
         &std::fs::read(dir.join("raft-log.bin")).expect("read raft log")[..4],
-        b"RRL2",
+        b"RRL3",
         "the first durable move installs the old-binary rejection fence"
     );
 

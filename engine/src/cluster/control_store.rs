@@ -40,10 +40,11 @@ use serde::Serialize;
 
 use crate::storage::crc32;
 
-/// Header of the record log: magic + format version. V2 is a one-way compatibility fence: an old
-/// binary knows only `RRRL` and therefore rejects a log once it may contain durable move commands.
+/// Header of the record log: magic + format version. V3 is a one-way compatibility fence: an old
+/// binary knows only `RRRL` (or the unsupported move prototype's `RRL2`) and therefore rejects a
+/// log once it may contain placement-generation-bound durable move commands.
 const LOG_MAGIC_V1: [u8; 4] = *b"RRRL"; // Reverse-Rusty Raft Log
-const LOG_MAGIC_V2: [u8; 4] = *b"RRL2";
+const LOG_MAGIC_V3: [u8; 4] = *b"RRL3";
 const LOG_HEADER: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +57,7 @@ impl LogFormat {
     fn header(self) -> ([u8; 4], u32) {
         match self {
             Self::Legacy => (LOG_MAGIC_V1, 1),
-            Self::DurableMoves => (LOG_MAGIC_V2, 2),
+            Self::DurableMoves => (LOG_MAGIC_V3, 3),
         }
     }
 }
@@ -74,7 +75,7 @@ fn parse_log_format(data: &[u8]) -> io::Result<LogFormat> {
         })?);
     match (data[0..4].try_into().ok(), version) {
         (Some(LOG_MAGIC_V1), 1) => Ok(LogFormat::Legacy),
-        (Some(LOG_MAGIC_V2), 2) => Ok(LogFormat::DurableMoves),
+        (Some(LOG_MAGIC_V3), 3) => Ok(LogFormat::DurableMoves),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("raft log: unsupported magic/version {version}"),
@@ -368,6 +369,20 @@ mod tests {
         assert!(
             ensure_log(&path, LogFormat::Legacy).is_err(),
             "a legacy binary must reject the fenced log"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn predecessor_move_log_format_is_rejected() {
+        let dir = scratch("move_v2_rejected");
+        let path = dir.join("raft-log.bin");
+        let mut predecessor = Vec::from(*b"RRL2");
+        predecessor.extend_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&path, predecessor).unwrap();
+        assert!(
+            read_records::<(u64, String)>(&path).is_err(),
+            "the pre-placement-generation move format must fail loud"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

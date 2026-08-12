@@ -9,9 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{ClusterState, NodeId, ShardAssignment};
 
-pub const MOVE_INTENT_VERSION: u32 = 1;
+pub const MOVE_INTENT_VERSION: u32 = 2;
 pub const MOVE_CONTROL_FORMAT_LEGACY: u32 = 1;
-pub const MOVE_CONTROL_FORMAT_CURRENT: u32 = 2;
+// Format 2 was the pre-placement-generation prototype. It is deliberately unsupported: replaying
+// one of those intents under the stronger predicate would make mixed-version state machines apply
+// the same log differently.
+pub const MOVE_CONTROL_FORMAT_CURRENT: u32 = 3;
 
 /// Per-position assignment generation used by the move compare-and-set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +125,7 @@ pub struct MoveIntent {
     pub position: u32,
     pub expected_assignment_generation: u64,
     /// Logical row-placement identity under which recovery and fingerprints are valid.
+    #[serde(default)]
     pub placement_generation: u64,
     pub expected: ShardAssignment,
     pub desired: ShardAssignment,
@@ -145,20 +149,19 @@ impl MoveIntent {
 /// Idempotent commands whose preconditions are evaluated atomically by the control state machine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MoveCommand {
+    #[serde(rename = "BeginV2")]
     Begin(MoveIntent),
+    #[serde(rename = "MarkReadyV2")]
     MarkReady {
         operation_id: u64,
         evidence: MoveRecoveryEvidence,
     },
-    Commit {
-        operation_id: u64,
-    },
-    Abort {
-        operation_id: u64,
-    },
-    Finish {
-        operation_id: u64,
-    },
+    #[serde(rename = "CommitV2")]
+    Commit { operation_id: u64 },
+    #[serde(rename = "AbortV2")]
+    Abort { operation_id: u64 },
+    #[serde(rename = "FinishV2")]
+    Finish { operation_id: u64 },
 }
 
 impl MoveCommand {

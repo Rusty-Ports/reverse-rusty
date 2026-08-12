@@ -230,7 +230,7 @@ impl Serialize for ClusterStateResponse {
     {
         use serde::ser::SerializeStruct;
 
-        let mut response = serializer.serialize_struct("ClusterStateResponse", 12)?;
+        let mut response = serializer.serialize_struct("ClusterStateResponse", 11)?;
         response.serialize_field("version", &self.version)?;
         response.serialize_field("epoch", &self.state.epoch)?;
         response.serialize_field("nodes", &self.state.nodes)?;

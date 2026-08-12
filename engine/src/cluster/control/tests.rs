@@ -349,6 +349,36 @@ fn move_state_uses_a_fail_loud_epoch_encoding_after_upgrade() {
 }
 
 #[test]
+fn placement_bound_move_schema_rejects_the_predecessor_format() {
+    let (cp, intent) = move_control_with_target(2, 610);
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent.clone()))
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Applied
+    );
+
+    let current_command = serde_json::to_value(MoveCommand::Begin(intent.clone())).unwrap();
+    assert!(current_command.get("BeginV2").is_some());
+    assert!(
+        serde_json::from_value::<MoveCommand>(serde_json::json!({ "Begin": intent })).is_err(),
+        "the predecessor wire variant must not enter a mixed-version state machine"
+    );
+
+    let mut predecessor = serde_json::to_value(cp.cluster_state().unwrap().as_ref()).unwrap();
+    predecessor["epoch"]["control_format_version"] = serde_json::json!(2);
+    predecessor["moves"]["format_version"] = serde_json::json!(2);
+    predecessor["moves"]["intents"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("placement_generation");
+    let error = serde_json::from_value::<ClusterState>(predecessor).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unsupported move control format 2"));
+}
+
+#[test]
 fn generic_propose_refuses_to_hide_a_move_outcome() {
     let (cp, _) = move_control_with_target(2, 62);
     let before = cp.cluster_state().unwrap();
