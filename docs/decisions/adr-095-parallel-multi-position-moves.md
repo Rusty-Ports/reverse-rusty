@@ -39,6 +39,13 @@ zero threads spawned.
   position both reserve its committed primary** (the flip-vs-commit interleave `reassign_serial`
   was built for — serialized by construction); a replicated install holds all of D, so no second
   move touches a member mid-assembly.
+
+**Outcome (ADR-175, 2026-08-12).** Durable replicated `Begin` now reserves every endpoint in the
+complete expected and desired assignments. The local group-move ledger and wave planner therefore
+use `endpoints(C) ∪ endpoints(D)` too, including dropped expected replicas: although the copier does
+not contact those replicas, matching the consensus conflict predicate prevents an otherwise-valid
+parallel sweep from manufacturing a predictable `Begin` conflict.
+
 - **Plan → reserve → revalidate.** Each move resolves its footprint from a committed read, reserves
   it, then **re-reads and confirms both the position's committed entry AND every member's endpoint
   resolution did not change** while it waited (the conflicting move it waited on may have committed

@@ -349,8 +349,8 @@ fn finish_cluster_reconcile_worker(
                     position,
                     from: from.0,
                     to: to.0,
-                    warning: "live routing reached the target but the durable assignment did not; \
-                              retry promptly before coordinator restart",
+                    warning: "legacy uncommitted outcome retained for response compatibility; \
+                              restore control availability and retry",
                 })
                 .collect();
             let failed = success

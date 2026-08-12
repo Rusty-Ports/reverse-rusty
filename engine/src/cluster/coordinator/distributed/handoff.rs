@@ -187,6 +187,30 @@ impl ClusterEngine {
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
+        self.execute_handoff_inner_with_cutover(
+            position,
+            source_endpoint,
+            target_endpoint,
+            handle,
+            |_target, _generation| Ok(()),
+        )
+    }
+
+    /// Prepare a target under the source fence, run one durable cutover callback, and only then
+    /// swap live routing. A callback error deliberately leaves the source fenced: the callback is
+    /// used after a durable move intent exists, so startup must inspect that intent and decide the
+    /// authority rather than this process guessing after an outcome-ambiguous control write.
+    pub(in crate::cluster::coordinator) fn execute_handoff_inner_with_cutover<F>(
+        &self,
+        position: usize,
+        source_endpoint: &str,
+        target_endpoint: &str,
+        handle: &tokio::runtime::Handle,
+        cutover: F,
+    ) -> Result<u64, ShardError>
+    where
+        F: FnOnce(&RemoteShard, u64) -> Result<(), ShardError>,
+    {
         // Drain caps (ADR-044/048), tunable via `ClusterConfig` and retained on the engine.
         // `drain_passes` bounds the pre-fence drain (best-effort, while writes still flow);
         // correctness rests on the post-fence drain CONVERGING, not on this. `final_drain_cap`
@@ -335,6 +359,10 @@ impl ClusterEngine {
                 }
                 return Err(e);
             }
+            // The target is now complete and the source remains fenced. Durable reassignment uses
+            // this boundary to persist exact recovery evidence and conditionally commit the new
+            // assignment. Live routing cannot get ahead of that authoritative decision.
+            cutover(&target, new_gen)?;
             // FLIP: re-point `position` at the target (reuse the recovery `target` as the new
             // backing). The old source backing is dropped from routing — serve-then-drop — and
             // writes to `position` now reach the target, ending the quiesce.

@@ -89,12 +89,15 @@ pub(super) fn retained_member_is_complete(
 
 /// The validated output of the group move's plan→reserve→revalidate loop (ADR-095).
 pub(super) struct PlannedGroupMove<'a> {
-    /// The committed group the plan (and the phase-9 CAS) compares against.
+    /// Exact revalidated control document used to construct the conditional intent.
+    pub(super) state: ClusterState,
+    /// The committed group embedded in the state-machine conditional predicate.
     pub(super) committed: ShardAssignment,
     /// The committed primary's endpoint — the fenced recovery source.
     pub(super) cp_ep: String,
     /// D's members in composite order (primary first), each with its endpoint.
     pub(super) d_members: Vec<(NodeId, String)>,
-    /// The held reservation of `{cp} ∪ D` — alive for the whole move-then-commit.
+    /// The held local reservation of `C ∪ D` — alive for the whole durable transition and equal
+    /// to replicated Begin's complete endpoint conflict predicate (ADR-175).
     pub(super) ticket: MoveTicket<'a>,
 }

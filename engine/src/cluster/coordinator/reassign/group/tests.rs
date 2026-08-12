@@ -28,6 +28,7 @@ fn state_with(
         dict_fingerprint: 0,
         model_version: 0,
         placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
+        moves: crate::cluster::control::MoveControlState::default(),
     }
 }
 

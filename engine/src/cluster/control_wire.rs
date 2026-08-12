@@ -9,7 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::control::{ClusterState, ClusterStateChange, ControlError, NodeId};
+use super::control::{
+    ClusterState, ClusterStateChange, ControlError, MoveCommand, MoveCommandOutcome, NodeId,
+};
 
 /// One client-facing control-plane operation — the [`ControlPlane`](super::control::ControlPlane)
 /// trait, projected onto the wire. `distributed`-gated like the rest of the gRPC transport. The
@@ -22,6 +24,8 @@ pub(crate) enum ClientControlRequest {
     Version,
     /// Commit one non-membership transition.
     Propose(ClusterStateChange),
+    /// Commit an idempotent durable-move transition and retain its compare-and-set outcome.
+    ProposeMove(MoveCommand),
     /// Change the Raft voter set (joint consensus).
     ChangeMembership(Vec<NodeId>),
     /// The current leader as the serving node sees it.
@@ -35,6 +39,10 @@ pub(crate) enum ClientControlReply {
     State(Box<ClusterState>),
     Version(u64),
     Committed(u64),
+    MoveCommitted {
+        version: u64,
+        outcome: MoveCommandOutcome,
+    },
     Leader(Option<NodeId>),
     Err(WireControlError),
 }

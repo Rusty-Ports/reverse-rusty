@@ -1,6 +1,6 @@
 //! Group-aware data-moving reassignment (ADR-094, `distributed` feature): move a REPLICATED
 //! position's whole group — primary + replicas — to its HRW-desired placement with zero false
-//! negatives, generalizing [`ClusterEngine::reassign_and_move`]'s single-shard move-then-commit.
+//! negatives, generalizing [`ClusterEngine::reassign_and_move`]'s durable conditional cutover.
 //!
 //! ## Why the single-shard move cannot be reused at RF>1
 //! [`ClusterEngine::execute_handoff`] swaps the position's backing to a SINGLE `RemoteShard` for the
@@ -10,9 +10,10 @@
 //! ADR-092 landing).
 //!
 //! ## The algorithm (one position; C = committed group, D = desired group)
-//! Everything below runs under a busy-endpoint ledger reservation of `{cp} ∪ D` (ADR-095 — moves
-//! sharing a node serialize, per the chained-reshuffle constraint; disjoint moves may run in
-//! parallel) and under ONE retention lease on the source, exactly like `execute_handoff` — with
+//! Everything below runs under a busy-endpoint ledger reservation of `C ∪ D` (ADR-175 widens the
+//! ADR-095 physical-work footprint to match replicated Begin's complete intent reservation; moves
+//! sharing a node serialize, while disjoint moves may run in parallel) and under ONE retention
+//! lease on the source, exactly like `execute_handoff` — with
 //! two member-entry disciplines the multi-member shape adds (both codex findings on this ADR):
 //! **stale fences are cleared on every member entering the group** (serve-then-drop leaves a
 //! dropped primary fenced forever, and `RecoverFrom` preserves the fence — a re-entering member
@@ -51,23 +52,20 @@
 //!    composite (reads may fail over to it), and a segments-at-`P` install would serve a state
 //!    missing the tail until its drain converged. `cp ∈ D` is never recovered — it IS the frozen
 //!    authority (promotion and demotion fall out of the uniform algorithm, no special case).
-//! 7. **Assemble + swap.** Build the new backing in D's shape (a `ReplicatedShard` over the
+//! 7. **Prove + commit.** Capture every D member's exact live-set fingerprint while `cp` remains
+//!    fenced, persist Ready, and atomically replace C with D only if the full assignment generation,
+//!    endpoint identities, placement generation, and intent phase still match.
+//! 8. **Assemble + swap.** Build the new backing in D's shape (a `ReplicatedShard` over the
 //!    per-member connections, or a bare `RemoteShard` when D has no replicas — an rf REDUCTION
 //!    falls out for free), install the coordinator's observer as its event sink FIRST
 //!    (`set_observer` fans sinks only at install time, so a later-swapped composite would
 //!    otherwise buffer its `ReplicaDesync` events forever), then `swap_backing` at the new
 //!    generation.
-//! 8. **Unfence `cp` iff `cp ∈ D`, AFTER the swap** — before it, the write window would reopen on
+//! 9. **Unfence `cp` iff `cp ∈ D`, AFTER the swap** — before it, the write window would reopen on
 //!    the old composite; without it, a retained/demoted `cp` would fail its first fan-out and
-//!    silently drop out of the new in-sync set. An unfence-RPC failure is degraded-but-zero-FN
-//!    (loud event, first fan-out desyncs it). `cp ∉ D` stays fenced forever: serve-then-drop +
-//!    stale-coordinator write protection, the ADR-090 posture. Orphan slots on `C ∖ D` nodes are
-//!    unrouted post-swap and post-restart (the committed map is what `resolve_topology` reads);
-//!    ADR-096 reclaims them separately through the opt-in, fence-probed orphan-slot GC.
-//! 9. **Move-then-commit.** Re-read the committed state and compare the FULL group against the `C`
-//!    we planned from (strictly stronger than the RF=1 primary-only compare), then commit the full
-//!    `AssignShard(desired)` with bounded retries. Outcomes reuse [`ReassignOutcome`] (`from`/`to`
-//!    = the primaries); `MovedButNotCommitted` re-drives idempotently on the next pass.
+//!    silently drop out of the new in-sync set. An ambiguous unfence preserves the Committed intent
+//!    and fails loud so startup can attest and finish. `cp ∉ D` stays fenced forever:
+//!    serve-then-drop protection. Only after retained-source cleanup succeeds is the intent removed.
 //!
 //! ## Cost (ADR-094, mitigated by ADR-097)
 //! The fence window included an `O(corpus)` re-copy per RETAINED member — the price of provable
@@ -81,20 +79,23 @@
 //! (shadow install, atomic promote) that would move even the genuinely-desynced member's copy
 //! out of the fence window.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::sync::{Arc, PoisonError};
 
 use tokio::runtime::Handle;
 
 use crate::cluster::clog::LogPos;
-use crate::cluster::control::{NodeId, ShardAssignment};
+use crate::cluster::control::{
+    MoveCommand, MoveInitialAuthority, MoveIntentPhase, NodeId, ShardAssignment,
+};
 use crate::cluster::remote::RemoteShard;
 use crate::cluster::replica::{catch_up_replica, ReplicatedShard};
 use crate::cluster::shard::{Shard, ShardError};
 use crate::events::{DurabilityOp, EngineEvent};
 
 use super::super::distributed::handoff::clear_stale_fence;
-use super::{ClusterEngine, ReassignOutcome, COMMIT_ATTEMPTS, PLAN_ATTEMPTS};
+use super::{intent, ClusterEngine, ReassignOutcome, PLAN_ATTEMPTS};
 
 /// The pure planning layer: target computation, group equality, the stale-fence clear, and the
 /// validated plan type (split for the <650-line budget).
@@ -103,7 +104,7 @@ pub(in crate::cluster::coordinator) use plan::{groups_equal, rebalance_group_tar
 use plan::{retained_member_is_complete, PlannedGroupMove};
 
 impl ClusterEngine {
-    /// Move a position's whole replica GROUP to `desired` (ADR-094) — data first, commit second.
+    /// Move a position's whole replica GROUP to `desired` under a durable conditional cutover.
     /// See the module docs for the phase-by-phase algorithm and its zero-FN argument. Returns the
     /// same [`ReassignOutcome`] contract as [`reassign_and_move`](Self::reassign_and_move)
     /// (`from`/`to` are the old/new primaries); a clean failure rolls the position fully back
@@ -131,12 +132,14 @@ impl ClusterEngine {
             )));
         }
 
-        // Plan → reserve → revalidate (ADR-095): resolve the move's endpoint footprint
-        // (`{cp} ∪ D` — the source we fence + every member we establish/install) from a committed
-        // read, reserve it in the busy-endpoint ledger — blocking until every CONFLICTING in-flight
-        // move completes — then confirm the position's committed GROUP did not change while we
-        // waited. A change re-plans from the fresh state (bounded); the phase-9 CAS stays the
-        // final backstop.
+        // Plan → reserve → revalidate (ADR-095/175): resolve the move's complete `C ∪ D` endpoint
+        // footprint from a committed read. This includes dropped expected replicas even though the
+        // physical copier never contacts them, because replicated Begin reserves every recorded
+        // endpoint and the local scheduler must use the same conflict predicate. Reserve it in the
+        // busy-endpoint ledger — blocking until every CONFLICTING in-flight move completes — then
+        // confirm the committed group and all endpoint identities did not change while we waited. A
+        // change re-plans from fresh state (bounded); Begin/Commit repeat the full predicate inside
+        // the replicated state machine.
         let mut planned: Option<PlannedGroupMove<'_>> = None;
         for _ in 0..PLAN_ATTEMPTS {
             let state = self.control_state()?;
@@ -154,6 +157,18 @@ impl ClusterEngine {
 
             // The idempotent no-op: the committed group already IS the desired placement.
             if groups_equal(&committed, desired) {
+                if state
+                    .moves
+                    .intents
+                    .iter()
+                    .any(|intent| intent.position == pos)
+                {
+                    return Err(ShardError::ControlPlane(format!(
+                        "reassign_group_and_move: shard position {position} has an unresolved \
+                         committed move intent; restart the coordinator so startup can attest \
+                         the recorded cutover before declaring the group unchanged"
+                    )));
+                }
                 let generation = self
                     .handoffs
                     .get(position)
@@ -185,7 +200,15 @@ impl ClusterEngine {
                         ))
                     })
             };
-            let cp_ep = addr_of(committed.primary)?;
+            // C's members in composite order. The complete set participates in the durable
+            // reservation even though only the primary is the physical recovery source.
+            let mut c_members: Vec<(NodeId, String)> =
+                Vec::with_capacity(1 + committed.replicas.len());
+            c_members.push((committed.primary, addr_of(committed.primary)?));
+            for replica in &committed.replicas {
+                c_members.push((*replica, addr_of(*replica)?));
+            }
+            let cp_ep = c_members[0].1.clone();
             // D's members in composite order (primary first, then replicas), each with its
             // endpoint.
             let mut d_members: Vec<(NodeId, String)> =
@@ -207,8 +230,8 @@ impl ClusterEngine {
                 }
             }
 
-            let mut footprint: Vec<&str> = Vec::with_capacity(1 + d_members.len());
-            footprint.push(cp_ep.as_str());
+            let mut footprint: Vec<&str> = Vec::with_capacity(c_members.len() + d_members.len());
+            footprint.extend(c_members.iter().map(|(_, endpoint)| endpoint.as_str()));
             footprint.extend(d_members.iter().map(|(_, e)| e.as_str()));
             let ticket = self.move_ledger.reserve(&footprint);
             // Revalidate BOTH the committed group AND every member's endpoint resolution (codex
@@ -224,17 +247,17 @@ impl ClusterEngine {
                     .find(|n| n.id == id)
                     .and_then(|n| n.addr.as_deref())
             };
-            let group_unchanged = now
-                .assignments
+            let group_unchanged =
+                now.assignments.iter().find(|a| a.position == pos) == Some(&committed);
+            let eps_unchanged = c_members
                 .iter()
-                .find(|a| a.position == pos)
-                .is_some_and(|a| groups_equal(a, &committed));
-            let eps_unchanged = addr_now(committed.primary) == Some(cp_ep.as_str())
+                .all(|(nid, ep)| addr_now(*nid) == Some(ep.as_str()))
                 && d_members
                     .iter()
                     .all(|(nid, ep)| addr_now(*nid) == Some(ep.as_str()));
             if group_unchanged && eps_unchanged {
                 planned = Some(PlannedGroupMove {
+                    state: now,
                     committed,
                     cp_ep,
                     d_members,
@@ -246,6 +269,7 @@ impl ClusterEngine {
             // ticket drops here and the next iteration re-plans from the fresh committed state.
         }
         let Some(PlannedGroupMove {
+            state,
             committed,
             cp_ep,
             d_members,
@@ -259,6 +283,9 @@ impl ClusterEngine {
             )));
         };
         let cp = committed.primary;
+        let resumes_ready = state.moves.intents.iter().any(|existing| {
+            existing.position == pos && matches!(&existing.phase, MoveIntentPhase::Ready(_))
+        });
         let committed_ids: BTreeSet<u64> = std::iter::once(cp.0)
             .chain(committed.replicas.iter().map(|n| n.0))
             .collect();
@@ -274,6 +301,21 @@ impl ClusterEngine {
             })?
             .clone();
         let new_gen = handoff.generation() + 1;
+        let move_intent = intent::build_intent(
+            &state,
+            committed.clone(),
+            desired.clone(),
+            new_gen,
+            new_gen,
+            MoveInitialAuthority::Expected,
+        )?;
+        intent::propose(
+            self.control.as_ref(),
+            &MoveCommand::Begin(move_intent.clone()),
+            "reassign_group_and_move: persist intent",
+        )?;
+        let cutover_started = Cell::new(false);
+        let abortable = Cell::new(true);
         let expected = self.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         let drain_passes = self.handoff_drain_passes;
@@ -291,11 +333,24 @@ impl ClusterEngine {
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
-        // A stale fence on the SOURCE (cp was dropped from this position's group by an earlier
-        // move and later became its committed primary again) means the position is ALREADY
-        // write-broken; clearing it at move start is the repair, and lets phase 3's fence(new_gen)
-        // + the phase-8 unfence CAS operate on OUR generation.
-        clear_stale_fence(&source, "reassign_group_and_move: source")?;
+        if resumes_ready {
+            // A retry of this exact Ready intent must preserve the write-quiescent interval under
+            // which its evidence was recorded. `Begin` above proved the immutable identity is the
+            // same intent; now require its exact fence rather than treating it as stale.
+            let current = source.fence(0)?;
+            if current != new_gen {
+                return Err(ShardError::ControlPlane(format!(
+                    "reassign_group_and_move: ready move for shard position {position} expected \
+                     source fence {new_gen}, observed {current}; restart for fail-closed recovery"
+                )));
+            }
+        } else {
+            // A stale fence on the SOURCE (cp was dropped from this position's group by an earlier
+            // move and later became its committed primary again) means the position is ALREADY
+            // write-broken; clearing it at move start is the repair, and lets phase 3's
+            // fence(new_gen) + the post-swap unfence CAS operate on OUR generation.
+            clear_stale_fence(&source, "reassign_group_and_move: source")?;
+        }
         let (lease, pinned) = source.acquire_retention_lease()?;
 
         let do_move = || -> Result<u64, ShardError> {
@@ -356,16 +411,24 @@ impl ClusterEngine {
             // ---- Phase 3: FENCE the committed primary (write-quiesce for the whole group) ----
             // The CAS-safe cleanup mirrors `execute_handoff`: a lost fence RESPONSE can leave the
             // server fenced, so attempt unfence(new_gen) before propagating the fence error.
+            abortable.set(false);
             if let Err(e) = source.fence(new_gen) {
-                if let Err(ue) = source.unfence(new_gen) {
-                    self.emit(EngineEvent::DurabilityFailure {
+                match source.unfence(new_gen) {
+                    Ok(0) => abortable.set(true),
+                    Ok(current) => self.emit(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::ReplicaDesync,
+                        detail: "fence failed during a group move and cleanup observed a \
+                                 different fence; the durable intent is preserved for startup"
+                            .into(),
+                        error: format!("source remains fenced at generation {current}"),
+                    }),
+                    Err(ue) => self.emit(EngineEvent::DurabilityFailure {
                         op: DurabilityOp::ReplicaDesync,
                         detail: "fence failed during a group move and the CAS-safe unfence \
-                                 cleanup also failed; if the server had applied the fence the \
-                                 source remains fenced and needs manual recovery"
+                                 cleanup also failed; the durable intent is preserved for startup"
                             .into(),
                         error: ue.to_string(),
-                    });
+                    }),
                 }
                 return Err(e);
             }
@@ -489,7 +552,47 @@ impl ClusterEngine {
                     established.push((nid.0, t, verify));
                 }
 
-                // ---- Phase 7: assemble the new backing in D's shape and swap ----
+                // ---- Phases 7–8: persist evidence + conditionally commit, then live swap ----
+                // All desired members are complete and the old primary is still fenced. Crossing
+                // this point may produce an outcome-ambiguous control result, so no local error
+                // path may resume writes on the expected group; startup resolves the durable
+                // phase and exact member evidence first.
+                cutover_started.set(true);
+                let mut evidence = Vec::with_capacity(d_members.len());
+                for (nid, _) in &d_members {
+                    if *nid == cp {
+                        evidence.push(intent::member_evidence(*nid, &source)?);
+                    } else {
+                        let member = established
+                            .iter()
+                            .find(|(id, _, _)| *id == nid.0)
+                            .map(|(_, member, _)| member)
+                            .ok_or_else(|| {
+                                ShardError::Protocol(format!(
+                                    "reassign_group_and_move: desired member {} has no prepared \
+                                     connection",
+                                    nid.0
+                                ))
+                            })?;
+                        evidence.push(intent::member_evidence(*nid, member)?);
+                    }
+                }
+                intent::propose(
+                    self.control.as_ref(),
+                    &MoveCommand::MarkReady {
+                        operation_id: move_intent.operation_id,
+                        evidence: intent::recovery_evidence(new_gen, evidence),
+                    },
+                    "reassign_group_and_move: persist member evidence",
+                )?;
+                intent::propose(
+                    self.control.as_ref(),
+                    &MoveCommand::Commit {
+                        operation_id: move_intent.operation_id,
+                    },
+                    "reassign_group_and_move: conditional assignment commit",
+                )?;
+
                 // Per-member connections: the just-established ones, plus a dedicated connection
                 // to the source for a retained `cp` (its recovery connection stays owned by the
                 // outer scope for the lease release + unfence).
@@ -545,40 +648,45 @@ impl ClusterEngine {
             };
             match fenced_work() {
                 Ok(gen) => {
-                    // ---- Phase 8: unfence a RETAINED source, AFTER the swap ----
+                    // ---- Phase 9: unfence a RETAINED source, AFTER the swap ----
                     // Before the swap the write window would reopen on the OLD composite; without
                     // it a retained/demoted cp would fail its first fan-out and silently desync.
                     // A cp NOT in D stays fenced forever (serve-then-drop, ADR-090).
                     if d_members.iter().any(|(nid, _)| *nid == cp) {
-                        if let Err(e) = source.unfence(new_gen) {
-                            self.emit(EngineEvent::DurabilityFailure {
-                                op: DurabilityOp::ReplicaDesync,
-                                detail: format!(
-                                    "group move of shard {position}: unfencing the retained \
-                                     source (node {}) after the swap failed; its first \
-                                     replicated write will desync it (degraded redundancy, \
-                                     zero-FN) until peer re-recovery",
-                                    cp.0
-                                ),
-                                error: e.to_string(),
-                            });
+                        let current = source.unfence(new_gen)?;
+                        if current != 0 {
+                            return Err(ShardError::Remote(format!(
+                                "group move of shard {position}: retained source node {} remains \
+                                 fenced at generation {current} after committed live swap; \
+                                 preserving the durable intent for startup recovery",
+                                cp.0
+                            )));
                         }
                     }
                     Ok(gen)
                 }
                 Err(e) => {
-                    // AUTO-UNFENCE (ADR-048): the abort path lifts the fence we set so the source
-                    // resumes accepting writes; CAS-guarded server-side. Surface an unfence
-                    // failure as an event but return the ORIGINAL abort error.
-                    if let Err(ue) = source.unfence(new_gen) {
-                        self.emit(EngineEvent::DurabilityFailure {
-                            op: DurabilityOp::ReplicaDesync,
-                            detail: "auto-unfence after an aborted group move failed; the source \
-                                     remains fenced at the move generation and needs manual \
-                                     recovery"
-                                .into(),
-                            error: ue.to_string(),
-                        });
+                    // Before the durable cutover begins, restore the expected authority and make
+                    // the intent abortable. Afterwards preserve the fence + intent: guessing which
+                    // side won an ambiguous consensus write could resume two primaries.
+                    if !cutover_started.get() {
+                        match source.unfence(new_gen) {
+                            Ok(0) => abortable.set(true),
+                            Ok(current) => self.emit(EngineEvent::DurabilityFailure {
+                                op: DurabilityOp::ReplicaDesync,
+                                detail: "auto-unfence after an aborted group move observed a \
+                                         different fence; preserving the durable intent"
+                                    .into(),
+                                error: format!("source remains fenced at generation {current}"),
+                            }),
+                            Err(ue) => self.emit(EngineEvent::DurabilityFailure {
+                                op: DurabilityOp::ReplicaDesync,
+                                detail: "auto-unfence after an aborted group move failed; \
+                                         preserving the durable intent for startup"
+                                    .into(),
+                                error: ue.to_string(),
+                            }),
+                        }
                     }
                     Err(e)
                 }
@@ -595,78 +703,31 @@ impl ClusterEngine {
                 error: e.to_string(),
             });
         }
-        let generation = moved?;
-
-        // ---- Phase 9: move-then-commit ----
-        // COMPARE-AND-SET on the FULL group (strictly stronger than the RF=1 primary-only compare):
-        // if a concurrent op re-shaped this position under us (only possible across coordinators —
-        // the serial guard covers this one), do NOT overwrite its commit. Either way the data is on
-        // D and routing serves it; the durable map just isn't ours to claim.
-        let now = self.control_state()?;
-        let unchanged = now
-            .assignments
-            .iter()
-            .find(|a| a.position == pos)
-            .is_some_and(|a| groups_equal(a, &committed));
-        if !unchanged {
-            self.emit(EngineEvent::DurabilityFailure {
-                op: DurabilityOp::ReplicaDesync,
-                detail: format!(
-                    "reassign_group_and_move moved shard {position}'s group to primary node {} \
-                     and flipped routing, but the committed group changed under it (a concurrent \
-                     reassign); not overwriting the committed map. Re-run to reconcile.",
-                    desired.primary.0
-                ),
-                error: "committed assignment changed during a data-moving group reassign".into(),
-            });
-            return Ok(ReassignOutcome::MovedButNotCommitted {
-                position: pos,
-                from: cp,
-                to: desired.primary,
-                generation,
-                moved: true,
-            });
-        }
-        let mut last_err: Option<ShardError> = None;
-        for attempt in 0..COMMIT_ATTEMPTS {
-            match self.reassign_shard(desired.clone()) {
-                Ok(()) => {
-                    return Ok(ReassignOutcome::Moved {
-                        position: pos,
-                        from: cp,
-                        to: desired.primary,
-                        generation,
-                    })
+        let generation = match moved {
+            Ok(generation) => generation,
+            Err(error) => {
+                if abortable.get() {
+                    intent::abort(
+                        self,
+                        &move_intent,
+                        "reassign_group_and_move: abort clean preparation",
+                    );
                 }
-                Err(e) => {
-                    last_err = Some(e);
-                    if attempt + 1 < COMMIT_ATTEMPTS {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                }
+                return Err(error);
             }
-        }
-        // Persistent commit failure: the move already succeeded, so D is authoritative — KEEP live
-        // routing on it and surface a loud event; the committed map still names the reads-serving
-        // old group (zero-FN), and a re-run re-converges + re-commits (idempotent).
-        self.emit(EngineEvent::DurabilityFailure {
-            op: DurabilityOp::ReplicaDesync,
-            detail: format!(
-                "reassign_group_and_move moved shard {position}'s group to primary node {} and \
-                 flipped routing, but committing the new group failed after {COMMIT_ATTEMPTS} \
-                 attempts; live routing stays on the new group (which holds every acked write) \
-                 and the committed map still names the reads-serving old group — re-run to \
-                 reconcile the durable map (idempotent).",
-                desired.primary.0
-            ),
-            error: last_err.map(|e| e.to_string()).unwrap_or_default(),
-        });
-        Ok(ReassignOutcome::MovedButNotCommitted {
+        };
+        intent::propose(
+            self.control.as_ref(),
+            &MoveCommand::Finish {
+                operation_id: move_intent.operation_id,
+            },
+            "reassign_group_and_move: finish durable move",
+        )?;
+        Ok(ReassignOutcome::Moved {
             position: pos,
             from: cp,
             to: desired.primary,
             generation,
-            moved: true,
         })
     }
 }

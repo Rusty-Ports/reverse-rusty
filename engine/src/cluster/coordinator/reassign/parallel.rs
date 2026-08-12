@@ -34,12 +34,13 @@ use crate::events::{DurabilityOp, EngineEvent};
 use super::{ClusterEngine, ReassignOutcome};
 
 /// The endpoints a move of `desired` will touch — the scheduling analogue of the reservation the
-/// move itself takes: the position's COMMITTED primary (the fenced recovery source) plus every
-/// desired member (fresh and retained; a group move establishes/installs each of them). Dropped
-/// members (`C ∖ D` replicas) are never contacted, so they are not part of the footprint. An
-/// unresolvable member (no committed entry / no registered addr) is simply omitted — that move
-/// fails loudly pre-network inside `reassign_and_move`/`reassign_group_and_move`, exactly like
-/// the sequential sweep; omitting it here only affects scheduling.
+/// move itself takes: every member of the position's COMMITTED assignment plus every desired
+/// member. ADR-175's replicated Begin reserves the same `C ∪ D` endpoint set, including a dropped
+/// expected replica, so the local scheduler must not place two moves with an overlapping durable
+/// predicate in one wave. An unresolvable member (no committed entry / no registered addr) is
+/// simply omitted — that move fails loudly pre-network inside
+/// `reassign_and_move`/`reassign_group_and_move`, exactly like the sequential sweep; omitting it
+/// here only affects scheduling.
 pub(in crate::cluster::coordinator) fn move_footprint(
     state: &ClusterState,
     desired: &ShardAssignment,
@@ -58,6 +59,9 @@ pub(in crate::cluster::coordinator) fn move_footprint(
         .find(|a| a.position == desired.position)
     {
         eps.extend(addr_of(committed.primary));
+        for replica in &committed.replicas {
+            eps.extend(addr_of(*replica));
+        }
     }
     eps.extend(addr_of(desired.primary));
     for r in &desired.replicas {
@@ -250,6 +254,7 @@ mod tests {
             dict_fingerprint: 0,
             model_version: 0,
             placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
+            moves: crate::cluster::control::MoveControlState::default(),
         }
     }
 
@@ -331,10 +336,10 @@ mod tests {
         assert_eq!(plan_waves(&st, &targets, 0).len(), 5);
     }
 
-    /// A group move's footprint is the committed primary (the fenced source) plus EVERY desired
-    /// member — and NOT a dropped `C ∖ D` replica, which the move never contacts.
+    /// A group move's local footprint matches the durable Begin predicate: every committed and
+    /// desired member, including a dropped `C ∖ D` replica.
     #[test]
-    fn group_footprint_covers_primary_and_all_desired_members_not_dropped_ones() {
+    fn group_footprint_covers_complete_expected_and_desired_assignments() {
         let st = state_with(
             (1..=4).map(node).collect(),
             vec![grouped(0, 1, &[4])], // committed: primary N1, replica N4
@@ -345,10 +350,23 @@ mod tests {
         assert!(fp.contains(&addr(2)), "desired primary");
         assert!(fp.contains(&addr(3)), "desired replica");
         assert!(
-            !fp.contains(&addr(4)),
-            "a dropped C∖D replica is never contacted — not in the footprint"
+            fp.contains(&addr(4)),
+            "a dropped C∖D replica remains part of the durable intent reservation"
         );
-        assert_eq!(fp.len(), 3);
+        assert_eq!(fp.len(), 4);
+    }
+
+    /// Moves that share only a replica each intends to drop still serialize: replicated Begin
+    /// reserves that endpoint in both immutable predicates, so one wave must not manufacture a
+    /// predictable Conflict for an otherwise-valid sweep.
+    #[test]
+    fn shared_dropped_replica_serializes() {
+        let st = state_with(
+            (1..=7).map(node).collect(),
+            vec![grouped(0, 1, &[4]), grouped(1, 5, &[4])],
+        );
+        let targets = vec![(0u32, grouped(0, 2, &[3])), (1u32, grouped(1, 6, &[7]))];
+        assert_eq!(plan_waves(&st, &targets, 8), vec![vec![0], vec![1]]);
     }
 
     /// The partition is deterministic: same inputs, same waves.

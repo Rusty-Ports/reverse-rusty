@@ -286,9 +286,9 @@ and reconcile guards fail closed instead of routing a position to an empty slot.
 
 The REST rebalance boundary enforces that distinction (ADR-166). A bodyless in-process request can
 commit the advisory map because all shards remain co-resident. A bodyless resolve-only remote
-request drives the data-moving move-then-commit workflow; explicit `move:false` is rejected before
-planning. A CLI-seeded assignment-routed coordinator is rejected until its deployment removes the
-restart guard's endpoint list: otherwise a successful changed map would make its next start fail.
+request drives the durable-intent, conditional-cutover workflow; explicit `move:false` is rejected
+before planning. A CLI-seeded assignment-routed coordinator is rejected until its deployment removes
+the restart guard's endpoint list: otherwise a successful changed map would make its next start fail.
 A static endpoint-order remote coordinator is also rejected because its live source may not match
 the committed map. The public route therefore cannot create the known map-without-data state, hand
 off from a non-authoritative source, or acknowledge a topology the deployment cannot restart. The
@@ -345,7 +345,7 @@ The cluster exposes powerful primitives, but “self-tuning” is not the curren
 | Suggested shard count | `recommended_shard_count` computes an operator-invoked recommendation from configured capacity assumptions |
 | In-process shard-count change | `resize` / `resize_to_recommended` rebuild live source under a fresh ring and atomically swap; durable mode commits the new layout |
 | Remote shard-count change | not built; requires fresh/coordinated deployment or rebuild |
-| Node membership rebalance | HRW planner is built; resolve-only remote mode moves data before committing new routing, while CLI-seeded and static remote modes are refused |
+| Node membership rebalance | HRW planner is built; resolve-only remote mode durably records and proves data movement before conditionally changing routing, while CLI-seeded and static remote modes are refused |
 | Skew handoff | autoscaler can drive a fenced data-moving handoff when no conflicting rebalance ran |
 | Corpus split pressure | `RecommendSplit` is advisory; targeted online splitting is not built |
 | Scale-out recommendation | advisory; provisioning nodes is external |
@@ -377,32 +377,46 @@ Raw `execute_handoff` performs:
 4. drain the finite residual translog to convergence;
 5. swap the runtime `HandoffShard` backing.
 
-The higher-level single-target reassignment path resolves membership but treats the current live
-primary as data authority. Under the same ledger ticket it attests the committed owner, live owner,
-and target. It then moves from the live owner when necessary and commits the new assignment. If an
-earlier raw move or failed commit already put the target live, it commits that attested authority
-without recopying from the potentially stale durable owner.
+Higher-level reassignment uses the current live primary as data authority but makes the transition a
+replicated control-plane document (ADR-175). Before physical work it commits a versioned intent with
+the expected assignment and per-position generation, placement generation, normalized logical-node
+endpoint identities, future live generation, exact source-fence generation, and complete desired
+assignment. Active intents reserve every endpoint in the expected and desired assignments across
+coordinators; the local move ledger uses the same footprint when scheduling one process.
 
-The public reassignment path is **move then commit**. This ordering never commits an empty target,
-but a runtime flip followed by a failed control proposal leaves a restart window: the old committed
-owner is a complete move-time snapshot, then becomes stale after newer writes reach the live target.
-The running coordinator remains exact. The operator must restore control-plane writes and retry the
-idempotent reassignment before restart; the retry reconciles the durable map without stale recopy.
-A durable move intent / atomic conditional transition is unfinished work tracked in the roadmap.
+The normal cutover is **intent → recover → fence/drain → evidence → conditional assignment commit →
+live swap → cleanup**. Recovery establishes every desired member from the frozen source. While the
+source is still fenced, the coordinator records each target's exact content fingerprint and live-row
+count as `Ready`. The control state machine commits only if the complete assignment, assignment
+generation, placement generation, and endpoint identities remain unchanged. Consensus therefore
+names a proven-complete target before the target accepts live writes, while the in-memory swap cannot
+get ahead of the durable decision.
 
-RF>1 group moves fence the committed primary once, establish every target member from the frozen
-source, swap the composite, and CAS-commit the complete group. A retained member with an identical
-content fingerprint can be promoted without an O(corpus) recopy.
+An RF=1 target already made live by raw handoff is preserved without stale recopy: reassignment first
+records desired-side authority and an exact old-source fence, drains the coordinator mutation
+barrier, and fences the live target at a deterministic intent-derived generation. It records exact
+evidence only while that target is quiescent, conditionally commits, then unfences it. Startup can
+reconstruct the same target fence, and any changed `Ready` evidence fails loud. If a third physical
+source is live, a durable intermediate transition reconciles that authority before the requested
+move is planned. Logical node IDs may alias one physical endpoint across the old and new assignments,
+but a replica group cannot contain duplicate endpoints.
+
+RF>1 moves use the same protocol for the complete group. They fence the source once, establish every
+desired member, persist full-member evidence, conditionally commit the group, and then swap the
+composite. A retained member with an identical content fingerprint can be promoted without an
+O(corpus) recopy.
 
 ### 9.2 Concurrency and cleanup
 
 Every move reserves its full source/target endpoint set in a `MoveLedger`. Conflicting moves
-serialize; disjoint moves may execute in configured waves. Tickets are RAII and failed handoffs
-auto-unfence, preventing a forgotten fence from becoming a permanent write outage. The REST raw
-handoff can apply a manager deadline to this reservation; a deadline loss is guaranteed not to
-start recovery later. The raw route changes live routing only and is explicitly uncommitted.
-Restart-stable operator movement uses the move-then-commit reassignment path on an authoritative
-resolve-only remote coordinator; static and CLI-seeded remote topologies are refused before admission.
+serialize; disjoint moves may execute in configured waves. The replicated `Begin` transition makes
+the same normalized footprint exclusive across coordinators. Tickets are RAII and clean pre-cutover
+failures auto-unfence; if a fence or control outcome is ambiguous, the durable intent is retained
+instead of being discarded. The REST raw handoff can apply a manager deadline to its local
+reservation; a deadline loss is guaranteed not to start recovery later. That raw route changes live
+routing only and remains explicitly uncommitted. Restart-stable operator movement uses durable
+reassignment on an authoritative resolve-only remote coordinator; static and CLI-seeded remote
+topologies are refused before admission.
 
 After assignments converge, `gc_orphan_slots` can list remote slots and drop only those outside both
 the committed keep set and live routing. Unassigned positions fail safe (skip), and the drop path
@@ -416,6 +430,12 @@ drops, and deferred trash deletion all make its terminal report incomplete (ADR-
 - Lost RF=1 shard storage requires restore/rebuild from authoritative corpus; the control plane cannot
   recreate query bytes.
 - Loss of a control-plane majority blocks topology writes but does not itself erase local shard data.
+- Assignment-routed startup resolves every durable intent before route assembly. A preparing move
+  with expected authority proves an unfence and aborts; desired-authority and ready moves resume from
+  recorded source fences, a reconstructed desired-target fence, and exact evidence; a committed move
+  follows the consensus decision, clears that target fence, and finishes cleanup. Missing quorum,
+  endpoint replacement, generation drift, changed evidence, or uncertain fencing refuses startup
+  rather than selecting whichever endpoint happens to answer.
 - A fresh remote coordinator attached to populated slots lacks an authoritative logical-ID directory
   for some mutation/exhaustive operations; that authority gap remains explicit and fail-closed.
 
@@ -439,8 +459,9 @@ at the top of this page.
    recovery/movement.
 5. **Control plane.** In-memory seam, durable OpenRaft backend, remote client, HRW allocator,
    topology resolution, and generation-fenced assignments.
-6. **Elasticity and repair.** Runtime in-process resize, handoff, data-moving reassignment/rebalance,
-   reconciliation, move ledger/waves, autoscaler driver, and orphan GC.
+6. **Elasticity and repair.** Runtime in-process resize, raw handoff, durable RF=1/RF>1
+   reassignment/rebalance with conditional cutover and startup recovery, reconciliation, move
+   ledger/waves, autoscaler driver, and orphan GC.
 
 Primary differential suites live under `engine/tests/cluster_oracle/`,
 `engine/tests/cluster_durability_oracle/`, `engine/tests/cluster_grpc_oracle/`,

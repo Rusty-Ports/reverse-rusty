@@ -142,9 +142,9 @@ impl ClusterEngine {
     /// fails the enclosing `tick`. Skips silently when the cluster has no runtime handle (an
     /// in-process cluster can't hand off to a remote node) or when the recommendation is stale (a
     /// concurrent change moved `position` off `from`). A move that can't be performed (e.g. a node
-    /// without a registered endpoint) or whose commit fails surfaces as an event so the operator can
-    /// see why; routing/the durable map stay reconcilable (auto-unfence on a failed move; the source
-    /// still serves reads on an uncommitted one), so the next tick can retry.
+    /// without a registered endpoint) or whose durable transition fails surfaces as an event so the
+    /// operator can see why. A proven clean failure auto-unfences; an ambiguous failure retains its
+    /// intent for retry or cold-start resolution, so the next tick can retry without guessing authority.
     #[cfg(feature = "distributed")]
     pub(in crate::cluster::coordinator) fn drive_autoscaled_handoff(
         &self,
@@ -172,11 +172,10 @@ impl ClusterEngine {
         if !owns_position {
             return;
         }
-        // Drive the move + commit through `reassign_and_move` (ADR-090): it resolves endpoints from
-        // membership (fail-closed), runs `execute_handoff`, then commits `AssignShard{to}`. A missing
-        // endpoint or a failed move surfaces as an Err we report as a skip; an `Ok` degraded outcome
-        // (`MovedButNotCommitted`) already emitted its own event. Routing stays correct or reconcilable
-        // either way (zero false negatives), so the next tick can retry.
+        // Drive the durable move through `reassign_and_move` (ADR-175): it resolves endpoints from
+        // membership, records the transition, proves recovery under a source fence, conditionally
+        // commits, and only then swaps live routing. A missing endpoint or failed proof surfaces as
+        // an Err we report as a skip; a preserved intent makes retry/startup resolution deterministic.
         if let Err(e) = self.reassign_and_move(position as usize, to, &handle) {
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::ReplicaDesync,

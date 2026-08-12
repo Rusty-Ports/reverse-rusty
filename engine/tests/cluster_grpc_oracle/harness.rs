@@ -282,6 +282,15 @@ pub(crate) struct TwoNode {
     pub(crate) tgt_dir: PathBuf,
 }
 
+pub(crate) struct ThreeNode {
+    pub(crate) first_ep: String,
+    pub(crate) second_ep: String,
+    pub(crate) third_ep: String,
+    pub(crate) first_dir: PathBuf,
+    pub(crate) second_dir: PathBuf,
+    pub(crate) third_dir: PathBuf,
+}
+
 pub(crate) fn spin_two_servers(
     rt: &tokio::runtime::Runtime,
     norm: &Arc<Normalizer>,
@@ -320,6 +329,39 @@ pub(crate) fn spin_two_servers(
         tgt_ep: format!("http://{tgt_addr}"),
         src_dir,
         tgt_dir,
+    }
+}
+
+pub(crate) fn spin_three_servers(
+    rt: &tokio::runtime::Runtime,
+    norm: &Arc<Normalizer>,
+    tag: &str,
+) -> ThreeNode {
+    let pair = spin_two_servers(rt, norm, tag);
+    let third_dir = server_dir(&format!("{tag}_third"));
+    let third_addr = {
+        let _enter = rt.enter();
+        let incoming =
+            TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind third server");
+        let addr = incoming.local_addr().expect("third server addr");
+        rt.spawn(
+            ShardServer::pending_durable(
+                Arc::clone(norm),
+                EngineConfig::default(),
+                third_dir.clone(),
+            )
+            .serve_with_incoming(incoming),
+        );
+        addr
+    };
+    wait_until_listening(third_addr);
+    ThreeNode {
+        first_ep: pair.src_ep,
+        second_ep: pair.tgt_ep,
+        third_ep: format!("http://{third_addr}"),
+        first_dir: pair.src_dir,
+        second_dir: pair.tgt_dir,
+        third_dir,
     }
 }
 

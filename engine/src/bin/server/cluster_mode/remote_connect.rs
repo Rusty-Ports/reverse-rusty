@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 use tracing::{info, warn};
 
 use reverse_rusty::cluster::{
-    ClientSecurity, ClusterConfig, ClusterEngine, ControlPlane, RemoteControlPlane, RemoteShard,
-    ShardEndpoints, ShardError, ShardGroup,
+    recover_durable_moves, ClientSecurity, ClusterConfig, ClusterEngine, ControlPlane,
+    RemoteControlPlane, RemoteShard, ShardEndpoints, ShardError, ShardGroup,
 };
 use reverse_rusty::normalize::Normalizer;
 
@@ -163,10 +163,36 @@ pub(crate) fn connect_remote_cluster(
     // assignments we must read/seed the committed document to know which endpoints to connect. The
     // control plane is off the matching hot path, so this never affects a percolate's result.
     let control = connect_control_plane(control_endpoints, cfg, dict_fp, handle, &security)?;
+    let coordinator_id = process_coordinator_id();
+    if let Some(rcp) = control.as_ref() {
+        let state = rcp.cluster_state()?;
+        if !state.moves.intents.is_empty() && !route_by_assignments {
+            return Err(ShardError::Config(
+                "the control plane contains unresolved durable shard moves; startup must use \
+                 --route-by-assignments so recorded authority can be resolved before serving"
+                    .into(),
+            ));
+        }
+        drop(state);
+        let recovered = recover_durable_moves(
+            rcp,
+            &dict,
+            &tag_dict,
+            cfg.num_shards as u32,
+            handle,
+            coordinator_id,
+            &security,
+        )?;
+        if recovered != 0 {
+            info!(
+                recovered,
+                "resolved durable shard-move intents before coordinator assembly"
+            );
+        }
+    }
     let groups = build_groups(route_by_assignments, cli_groups, control.as_ref(), cfg)?;
 
     let plain = groups.iter().all(|g| g.replicas.is_empty());
-    let coordinator_id = process_coordinator_id();
     let cluster = if plain && cfg.replication_factor == 1 {
         let endpoints: Vec<String> = groups.into_iter().map(|g| g.primary).collect();
         ClusterEngine::connect_remote_exclusive_with_security(

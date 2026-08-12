@@ -452,8 +452,8 @@ fn finish_cluster_reassign_worker(
                         false,
                         false,
                         Some(
-                            "live routing reaches the requested node, but committing the durable \
-                             owner failed; re-run promptly before restarting the coordinator",
+                            "legacy uncommitted outcome retained for response compatibility; \
+                             restore control availability and retry",
                         ),
                     ),
                 };
@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_flags_distinguish_noop_reconciliation_and_uncommitted_state() {
+    async fn terminal_flags_retain_legacy_uncommitted_shape() {
         let no_change = response_json(ReassignOutcome::NoChange {
             position: 0,
             generation: 7,

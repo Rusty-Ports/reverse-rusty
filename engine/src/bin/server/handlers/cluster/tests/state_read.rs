@@ -7,7 +7,7 @@ use super::*;
 use axum::http::header;
 use reverse_rusty::cluster::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, NodeDescriptor, NodeId, NodeRole,
-    StateVersion,
+    StateVersion, MOVE_CONTROL_FORMAT_CURRENT,
 };
 
 struct BlockingControlPlane {
@@ -147,6 +147,22 @@ fn state_with_control(control: Box<dyn ControlPlane>) -> Arc<ClusterAppState> {
     .expect("cluster")
     .with_control_plane(control);
     state_from_cluster(cluster)
+}
+
+#[tokio::test]
+async fn upgraded_move_state_keeps_the_public_epoch_numeric() {
+    let app = test_state(&seed());
+    let mut state = app.cluster.read().control_state().expect("state");
+    state.moves.format_version = MOVE_CONTROL_FORMAT_CURRENT;
+    let epoch = state.epoch;
+    let app = state_with_control(Box::new(FixedControlPlane {
+        result: Ok(Arc::new(state)),
+    }));
+    let (status, body) = send(&app, req_empty("GET", "/_cluster/state")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["version"], epoch);
+    assert_eq!(body["epoch"], epoch);
+    assert!(body["moves"].is_object());
 }
 
 #[tokio::test]

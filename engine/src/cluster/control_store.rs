@@ -40,11 +40,48 @@ use serde::Serialize;
 
 use crate::storage::crc32;
 
-/// Header of the record log: magic + format version. A fresh/missing file has no header until
-/// the first [`ensure_log`].
-const LOG_MAGIC: [u8; 4] = *b"RRRL"; // Reverse-Rusty Raft Log
-const LOG_VERSION: u32 = 1;
+/// Header of the record log: magic + format version. V4 is a one-way compatibility fence: an old
+/// binary knows only `RRRL` (or one of the unsupported move prototypes) and therefore rejects a log
+/// once it may contain source-fence-bound durable move commands.
+const LOG_MAGIC_V1: [u8; 4] = *b"RRRL"; // Reverse-Rusty Raft Log
+const LOG_MAGIC_V4: [u8; 4] = *b"RRL4";
 const LOG_HEADER: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LogFormat {
+    Legacy,
+    DurableMoves,
+}
+
+impl LogFormat {
+    fn header(self) -> ([u8; 4], u32) {
+        match self {
+            Self::Legacy => (LOG_MAGIC_V1, 1),
+            Self::DurableMoves => (LOG_MAGIC_V4, 4),
+        }
+    }
+}
+
+fn parse_log_format(data: &[u8]) -> io::Result<LogFormat> {
+    if data.len() < LOG_HEADER {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "raft log: header is truncated",
+        ));
+    }
+    let version =
+        u32::from_le_bytes(data[4..8].try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "raft log: invalid version")
+        })?);
+    match (data[0..4].try_into().ok(), version) {
+        (Some(LOG_MAGIC_V1), 1) => Ok(LogFormat::Legacy),
+        (Some(LOG_MAGIC_V4), 4) => Ok(LogFormat::DurableMoves),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("raft log: unsupported magic/version {version}"),
+        )),
+    }
+}
 
 /// The set of files the durable control-plane store keeps under one manager node's raft dir.
 pub(super) struct RaftPaths {
@@ -79,14 +116,24 @@ impl RaftPaths {
 
 /// Ensure the log file exists with a valid header, and return an **append** handle. Creating
 /// the dir + header is idempotent; a real I/O failure surfaces.
-pub(super) fn ensure_log(path: &Path) -> io::Result<std::fs::File> {
+pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if !path.exists() {
+    if path.exists() {
+        let data = std::fs::read(path)?;
+        let found = parse_log_format(&data)?;
+        if found != format {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("raft log: expected {format:?}, found {found:?}"),
+            ));
+        }
+    } else {
         let mut f = std::fs::File::create(path)?;
-        f.write_all(&LOG_MAGIC)?;
-        f.write_all(&LOG_VERSION.to_le_bytes())?;
+        let (magic, version) = format.header();
+        f.write_all(&magic)?;
+        f.write_all(&version.to_le_bytes())?;
         f.sync_all()?;
     }
     std::fs::OpenOptions::new().append(true).open(path)
@@ -116,18 +163,15 @@ pub(super) fn append_record<T: Serialize>(
 /// Read every valid record from a log file, oldest-first (forward scan, stopping at the first
 /// bad-CRC / truncated frame — a torn tail from a crash, which was never acknowledged durable so
 /// dropping it is safe). A missing file reads as empty (a fresh node).
-pub(super) fn read_records<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
+pub(super) fn read_records<T: DeserializeOwned>(path: &Path) -> io::Result<(Vec<T>, LogFormat)> {
     let data = match std::fs::read(path) {
         Ok(d) => d,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), LogFormat::Legacy));
+        }
         Err(e) => return Err(e),
     };
-    if data.len() < LOG_HEADER || data[0..4] != LOG_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "raft log: bad magic or too small",
-        ));
-    }
+    let format = parse_log_format(&data)?;
     let get_u32 = |off: usize| -> Option<u32> {
         data.get(off..off + 4)
             .and_then(|s| s.try_into().ok())
@@ -150,13 +194,16 @@ pub(super) fn read_records<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T
         if crc32(body) != stored_crc {
             break; // bad CRC (torn tail)
         }
-        match serde_json::from_slice::<T>(body) {
-            Ok(v) => out.push(v),
-            Err(_) => break, // unparseable record — treat as torn tail, drop it + everything after
-        }
+        let value = serde_json::from_slice::<T>(body).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("raft log: valid frame has incompatible payload: {e}"),
+            )
+        })?;
+        out.push(value);
         cursor += len;
     }
-    Ok(out)
+    Ok((out, format))
 }
 
 /// Atomically rewrite the log to exactly `records` (header + framed bodies) — the durable form of
@@ -166,11 +213,13 @@ pub(super) fn rewrite_records<T: Serialize>(
     path: &Path,
     records: &[T],
     fsync: bool,
+    format: LogFormat,
 ) -> io::Result<()> {
     let tmp = path.with_extension("bin.tmp");
     let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&LOG_MAGIC)?;
-    f.write_all(&LOG_VERSION.to_le_bytes())?;
+    let (magic, version) = format.header();
+    f.write_all(&magic)?;
+    f.write_all(&version.to_le_bytes())?;
     for value in records {
         let body =
             serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -246,18 +295,19 @@ mod tests {
         let dir = scratch("log");
         let path = dir.join("raft-log.bin");
         {
-            let mut f = ensure_log(&path).unwrap();
+            let mut f = ensure_log(&path, LogFormat::Legacy).unwrap();
             append_record(&mut f, &(1u64, "a".to_string()), true).unwrap();
             append_record(&mut f, &(2u64, "b".to_string()), true).unwrap();
         }
-        let recs: Vec<(u64, String)> = read_records(&path).unwrap();
+        let (recs, format): (Vec<(u64, String)>, _) = read_records(&path).unwrap();
+        assert_eq!(format, LogFormat::Legacy);
         assert_eq!(recs, vec![(1, "a".into()), (2, "b".into())]);
         // Reopen + append keeps prior records.
         {
-            let mut f = ensure_log(&path).unwrap();
+            let mut f = ensure_log(&path, LogFormat::Legacy).unwrap();
             append_record(&mut f, &(3u64, "c".to_string()), false).unwrap();
         }
-        let recs: Vec<(u64, String)> = read_records(&path).unwrap();
+        let (recs, _): (Vec<(u64, String)>, _) = read_records(&path).unwrap();
         assert_eq!(recs.len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -267,7 +317,7 @@ mod tests {
         let dir = scratch("torn");
         let path = dir.join("raft-log.bin");
         {
-            let mut f = ensure_log(&path).unwrap();
+            let mut f = ensure_log(&path, LogFormat::Legacy).unwrap();
             append_record(&mut f, &(1u64, "alpha".to_string()), true).unwrap();
             append_record(&mut f, &(2u64, "beta".to_string()), true).unwrap();
         }
@@ -279,7 +329,7 @@ mod tests {
                 .unwrap();
             f.write_all(&[0x10, 0, 0, 0, 0xAA, 0xBB, 0xCC]).unwrap();
         }
-        let recs: Vec<(u64, String)> = read_records(&path).unwrap();
+        let (recs, _): (Vec<(u64, String)>, _) = read_records(&path).unwrap();
         assert_eq!(recs.len(), 2, "the two whole records survive a torn tail");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -289,16 +339,68 @@ mod tests {
         let dir = scratch("rewrite");
         let path = dir.join("raft-log.bin");
         {
-            let mut f = ensure_log(&path).unwrap();
+            let mut f = ensure_log(&path, LogFormat::Legacy).unwrap();
             for i in 1..=5u64 {
                 append_record(&mut f, &(i, "x".to_string()), false).unwrap();
             }
         }
         // Keep only records 2..=4 (a purge of 1 + a truncate of 5).
         let kept: Vec<(u64, String)> = vec![(2, "x".into()), (3, "x".into()), (4, "x".into())];
-        rewrite_records(&path, &kept, true).unwrap();
-        let recs: Vec<(u64, String)> = read_records(&path).unwrap();
+        rewrite_records(&path, &kept, true, LogFormat::Legacy).unwrap();
+        let (recs, _): (Vec<(u64, String)>, _) = read_records(&path).unwrap();
         assert_eq!(recs, kept);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_move_log_header_is_a_one_way_compatibility_fence() {
+        let dir = scratch("move_fence");
+        let path = dir.join("raft-log.bin");
+        rewrite_records(
+            &path,
+            &[(1u64, "legacy".to_string())],
+            true,
+            LogFormat::DurableMoves,
+        )
+        .unwrap();
+        let (records, format): (Vec<(u64, String)>, _) = read_records(&path).unwrap();
+        assert_eq!(records, vec![(1, "legacy".into())]);
+        assert_eq!(format, LogFormat::DurableMoves);
+        assert!(
+            ensure_log(&path, LogFormat::Legacy).is_err(),
+            "a legacy binary must reject the fenced log"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn predecessor_move_log_formats_are_rejected() {
+        let dir = scratch("predecessor_moves_rejected");
+        for (magic, version) in [(*b"RRL2", 2u32), (*b"RRL3", 3u32)] {
+            let path = dir.join(format!("raft-log-{version}.bin"));
+            let mut predecessor = Vec::from(magic);
+            predecessor.extend_from_slice(&version.to_le_bytes());
+            std::fs::write(&path, predecessor).unwrap();
+            assert!(
+                read_records::<(u64, String)>(&path).is_err(),
+                "predecessor move format {version} must fail loud"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_crc_with_incompatible_payload_fails_loud() {
+        let dir = scratch("incompatible");
+        let path = dir.join("raft-log.bin");
+        {
+            let mut f = ensure_log(&path, LogFormat::Legacy).unwrap();
+            append_record(&mut f, &serde_json::json!({"new_variant": true}), true).unwrap();
+        }
+        assert!(
+            read_records::<(u64, String)>(&path).is_err(),
+            "schema incompatibility is not a torn tail"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

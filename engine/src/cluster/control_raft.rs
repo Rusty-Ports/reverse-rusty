@@ -57,7 +57,8 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
 use super::control::{
-    ClusterState, ClusterStateChange, ControlError, ControlPlane, NodeId, StateVersion,
+    ClusterState, ClusterStateChange, ControlError, ControlPlane, MoveCommand, MoveCommandOutcome,
+    MoveProposalResult, NodeId, StateVersion,
 };
 
 mod builders;
@@ -80,6 +81,7 @@ use state_machine::StateMachine;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterStateResponse {
     pub version: u64,
+    pub move_outcome: Option<MoveCommandOutcome>,
 }
 
 openraft::declare_raft_types!(
@@ -159,11 +161,30 @@ impl ControlPlane for RaftControlPlane {
     }
 
     fn propose(&self, change: ClusterStateChange) -> Result<StateVersion, ControlError> {
+        if matches!(&change, ClusterStateChange::Move(_)) {
+            return Err(ControlError::Backend(
+                "move commands require ControlPlane::propose_move".into(),
+            ));
+        }
         let resp = self
             .handle
             .block_on(self.raft.client_write(change))
             .map_err(map_client_write)?;
         Ok(StateVersion(resp.data.version))
+    }
+
+    fn propose_move(&self, command: MoveCommand) -> Result<MoveProposalResult, ControlError> {
+        let resp = self
+            .handle
+            .block_on(self.raft.client_write(ClusterStateChange::Move(command)))
+            .map_err(map_client_write)?;
+        let outcome = resp.data.move_outcome.ok_or_else(|| {
+            ControlError::Backend("move proposal committed without a move outcome".into())
+        })?;
+        Ok(MoveProposalResult {
+            version: StateVersion(resp.data.version),
+            outcome,
+        })
     }
 
     fn change_membership(&self, voters: Vec<NodeId>) -> Result<StateVersion, ControlError> {

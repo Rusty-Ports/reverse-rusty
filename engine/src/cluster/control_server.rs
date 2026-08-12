@@ -242,8 +242,34 @@ impl ControlService for ControlServer {
                 Ok(_) => ClientControlReply::Version(plane.local_state().epoch),
                 Err(e) => ClientControlReply::Err(WireControlError::from(&map_check_leader(e))),
             },
-            ClientControlRequest::Propose(change) => match self.raft.client_write(change).await {
-                Ok(r) => ClientControlReply::Committed(r.data.version),
+            ClientControlRequest::Propose(change) => {
+                if matches!(&change, super::control::ClusterStateChange::Move(_)) {
+                    ClientControlReply::Err(WireControlError::Backend(
+                        "move commands require ProposeMove".into(),
+                    ))
+                } else {
+                    match self.raft.client_write(change).await {
+                        Ok(r) => ClientControlReply::Committed(r.data.version),
+                        Err(e) => {
+                            ClientControlReply::Err(WireControlError::from(&map_client_write(e)))
+                        }
+                    }
+                }
+            }
+            ClientControlRequest::ProposeMove(command) => match self
+                .raft
+                .client_write(super::control::ClusterStateChange::Move(command))
+                .await
+            {
+                Ok(r) => match r.data.move_outcome {
+                    Some(outcome) => ClientControlReply::MoveCommitted {
+                        version: r.data.version,
+                        outcome,
+                    },
+                    None => ClientControlReply::Err(WireControlError::Backend(
+                        "move proposal committed without a move outcome".into(),
+                    )),
+                },
                 Err(e) => ClientControlReply::Err(WireControlError::from(&map_client_write(e))),
             },
             ClientControlRequest::ChangeMembership(voters) => {

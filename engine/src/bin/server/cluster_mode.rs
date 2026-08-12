@@ -692,9 +692,9 @@ pub(crate) async fn run(
         );
     }
 
-    // Stop the reconcile loop before the durability flush: a pass already on the blocking pool finishes
-    // its current move-then-commit safely (handoff tolerates concurrent flushes, ADR-044), but no new
-    // pass starts racing the checkpoint.
+    // Stop the reconcile loop before the durability flush: a pass already on the blocking pool
+    // finishes its current durable move safely (handoff tolerates concurrent flushes, ADR-044), but
+    // no new pass starts racing the checkpoint.
     #[cfg(feature = "distributed")]
     if let Some(task) = reconcile_task {
         info!("stopping reconcile loop");

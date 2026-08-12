@@ -67,7 +67,10 @@ pub(crate) const GC_PROTOCOL_VERSION: u32 = 2;
 pub use autoscale::{evaluate, AutoscaleConfig, AutoscaleDecision, LoadSnapshot, ScalingAction};
 pub use control::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane,
-    NodeDescriptor, NodeId, NodeRole, ShardAssignment, StateVersion,
+    MoveCommand, MoveCommandOutcome, MoveControlState, MoveInitialAuthority, MoveIntent,
+    MoveIntentPhase, MoveMemberEvidence, MoveMemberIdentity, MoveProposalResult,
+    MoveRecoveryEvidence, NodeDescriptor, NodeId, NodeRole, ShardAssignment, StateVersion,
+    MOVE_CONTROL_FORMAT_CURRENT, MOVE_CONTROL_FORMAT_LEGACY, MOVE_INTENT_VERSION,
 };
 pub use coordinator::{
     recommended_shard_count, resolve_topology, route_topology, seed_position_preserving,
@@ -88,8 +91,8 @@ pub use control_raft::{
 pub use control_server::{ControlMetricsSource, ControlServer};
 #[cfg(feature = "distributed")]
 pub use coordinator::{
-    GcReport, HandoffOutcome, OrphanSlot, ReassignOutcome, RebalanceMoveReport, ReconcileConfig,
-    ReconcileReport, ShardGroup,
+    recover_durable_moves, GcReport, HandoffOutcome, OrphanSlot, ReassignOutcome,
+    RebalanceMoveReport, ReconcileConfig, ReconcileReport, ShardGroup,
 };
 #[cfg(feature = "distributed")]
 pub use node_metrics::{serve_metrics, MetricsHandle};
