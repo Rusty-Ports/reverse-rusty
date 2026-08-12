@@ -393,10 +393,13 @@ names a proven-complete target before the target accepts live writes, while the 
 get ahead of the durable decision.
 
 An RF=1 target already made live by raw handoff is preserved without stale recopy: reassignment first
-records desired-side authority and an exact old-source fence, attests the live target, and commits it.
-If a third physical source is live, a durable intermediate transition reconciles that authority
-before the requested move is planned. Logical node IDs may alias one physical endpoint across the
-old and new assignments, but a replica group cannot contain duplicate endpoints.
+records desired-side authority and an exact old-source fence, drains the coordinator mutation
+barrier, and fences the live target at a deterministic intent-derived generation. It records exact
+evidence only while that target is quiescent, conditionally commits, then unfences it. Startup can
+reconstruct the same target fence, and any changed `Ready` evidence fails loud. If a third physical
+source is live, a durable intermediate transition reconciles that authority before the requested
+move is planned. Logical node IDs may alias one physical endpoint across the old and new assignments,
+but a replica group cannot contain duplicate endpoints.
 
 RF>1 moves use the same protocol for the complete group. They fence the source once, establish every
 desired member, persist full-member evidence, conditionally commit the group, and then swap the
@@ -429,9 +432,10 @@ drops, and deferred trash deletion all make its terminal report incomplete (ADR-
 - Loss of a control-plane majority blocks topology writes but does not itself erase local shard data.
 - Assignment-routed startup resolves every durable intent before route assembly. A preparing move
   with expected authority proves an unfence and aborts; desired-authority and ready moves resume from
-  recorded fences/evidence; a committed move follows the consensus decision and finishes cleanup.
-  Missing quorum, endpoint replacement, generation drift, changed evidence, or uncertain fencing
-  refuses startup rather than selecting whichever endpoint happens to answer.
+  recorded source fences, a reconstructed desired-target fence, and exact evidence; a committed move
+  follows the consensus decision, clears that target fence, and finishes cleanup. Missing quorum,
+  endpoint replacement, generation drift, changed evidence, or uncertain fencing refuses startup
+  rather than selecting whichever endpoint happens to answer.
 - A fresh remote coordinator attached to populated slots lacks an authoritative logical-ID directory
   for some mutation/exhaustive operations; that authority gap remains explicit and fail-closed.
 

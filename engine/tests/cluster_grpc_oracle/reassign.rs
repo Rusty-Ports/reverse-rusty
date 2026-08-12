@@ -85,6 +85,9 @@ fn grpc_reassign_commits_a_logical_node_alias_on_the_same_endpoint() {
     let state = cluster.control_state().expect("committed state");
     assert_eq!(state.assignments[0].primary, NodeId(2));
     assert!(state.moves.intents.is_empty());
+    cluster
+        .upsert_query(11, "+nike +shoe", 2)
+        .expect("committed logical alias must be unfenced and writable");
     assert!(cluster
         .percolate("nike running shoe")
         .expect("alias read")
@@ -552,6 +555,9 @@ fn grpc_reassign_reconciles_an_existing_live_move_without_stale_recopy() {
         Some(NodeId(2)),
         "the durable assignment now names the attested live target"
     );
+    cluster
+        .upsert_query(addition.0, &addition.1, 2)
+        .expect("the committed desired authority must be unfenced and writable");
 
     let retry = cluster
         .reassign_and_move(0, NodeId(2), rt.handle())

@@ -152,15 +152,43 @@ fn intent(state: &reverse_rusty::cluster::ClusterState, nodes: &TwoNode) -> Move
     }
 }
 
-fn target_evidence(scenario: &Scenario, rt: &tokio::runtime::Runtime) -> MoveRecoveryEvidence {
-    let target = RemoteShard::connect(
+fn target_shard(scenario: &Scenario, rt: &tokio::runtime::Runtime) -> RemoteShard {
+    RemoteShard::connect(
         &scenario.nodes.tgt_ep,
         rt.handle().clone(),
         scenario.dict.fingerprint(),
         scenario.tags.fingerprint(),
         0,
     )
-    .expect("connect target evidence");
+    .expect("connect target")
+}
+
+fn desired_target_fence(move_intent: &MoveIntent) -> u64 {
+    let generation = move_intent
+        .live_generation
+        .max(move_intent.source_fence_generation)
+        .checked_add(1)
+        .expect("target fence generation");
+    assert_ne!(generation, u64::MAX, "reserved drop tombstone");
+    generation
+}
+
+fn fence_desired_target(
+    scenario: &Scenario,
+    rt: &tokio::runtime::Runtime,
+    move_intent: &MoveIntent,
+) {
+    let generation = desired_target_fence(move_intent);
+    assert_eq!(
+        target_shard(scenario, rt)
+            .fence(generation)
+            .expect("fence desired target"),
+        generation
+    );
+}
+
+fn target_evidence(scenario: &Scenario, rt: &tokio::runtime::Runtime) -> MoveRecoveryEvidence {
+    let target = target_shard(scenario, rt);
     let (fingerprint_lo, fingerprint_hi, live_count) =
         target.content_fingerprint().expect("target fingerprint");
     MoveRecoveryEvidence {
@@ -344,7 +372,7 @@ fn startup_ready_expected_authority_evidence_mismatch_fails_loud() {
 }
 
 #[test]
-fn startup_ready_desired_authority_accepts_post_ready_writes() {
+fn startup_ready_desired_authority_rejects_unfenced_evidence_drift() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let scenario = scenario("durable_ready_desired_progress", &rt);
     scenario
@@ -361,47 +389,33 @@ fn startup_ready_desired_authority_accepts_post_ready_writes() {
     control
         .propose_move(MoveCommand::Begin(move_intent.clone()))
         .expect("begin desired-authority intent");
+    fence_desired_target(&scenario, &rt, &move_intent);
     control
         .propose_move(MoveCommand::MarkReady {
             operation_id: move_intent.operation_id,
             evidence: target_evidence(&scenario, &rt),
         })
         .expect("mark desired authority ready");
+    assert_eq!(
+        target_shard(&scenario, &rt)
+            .unfence(desired_target_fence(&move_intent))
+            .expect("simulate loss of the target quiesce"),
+        0
+    );
     scenario
         .cluster
         .add_query(14, "+sony")
-        .expect("acknowledged write after readiness");
+        .expect("change the target after its recorded fence was lost");
 
-    let coordinator_id = RemoteShard::new_coordinator_id();
-    assert_eq!(
-        recover(&control, &scenario, &rt, coordinator_id)
-            .expect("commit advanced desired authority"),
-        1
-    );
-    let recovered = control.cluster_state().expect("recovered state");
-    assert_eq!(recovered.assignments[0].primary, NodeId(2));
-    assert!(recovered.moves.intents.is_empty());
-
-    let restarted = ClusterEngine::connect_remote_exclusive(
-        Arc::clone(&scenario.norm),
-        Arc::clone(&scenario.dict),
-        Arc::clone(&scenario.tags),
-        &ClusterConfig {
-            num_shards: 1,
-            ..ClusterConfig::default()
-        },
-        std::slice::from_ref(&scenario.nodes.tgt_ep),
-        rt.handle(),
-        coordinator_id,
-    )
-    .expect("assemble the committed desired authority");
-    assert!(
-        restarted
-            .percolate("sony television")
-            .expect("read post-ready write")
-            .contains(&14),
-        "the desired authority's acknowledged post-ready write must survive recovery"
-    );
+    let error = recover(&control, &scenario, &rt, RemoteShard::new_coordinator_id())
+        .expect_err("unproven desired-authority drift must fail startup");
+    assert!(error.to_string().contains("evidence changed"), "{error}");
+    let refused = control.cluster_state().expect("refused state");
+    assert_eq!(refused.assignments[0].primary, NodeId(1));
+    assert!(matches!(
+        refused.moves.intents[0].phase,
+        MoveIntentPhase::Ready(_)
+    ));
     cleanup(&scenario);
 }
 
@@ -423,6 +437,7 @@ fn startup_commits_exact_ready_evidence_before_serving() {
     control
         .propose_move(MoveCommand::Begin(move_intent.clone()))
         .expect("begin intent");
+    fence_desired_target(&scenario, &rt, &move_intent);
     control
         .propose_move(MoveCommand::MarkReady {
             operation_id: move_intent.operation_id,
@@ -530,6 +545,7 @@ fn startup_finishes_a_committed_intent_after_the_live_swap_boundary() {
     control
         .propose_move(MoveCommand::Begin(move_intent.clone()))
         .expect("begin intent");
+    fence_desired_target(&scenario, &rt, &move_intent);
     control
         .propose_move(MoveCommand::MarkReady {
             operation_id: move_intent.operation_id,
@@ -541,6 +557,12 @@ fn startup_finishes_a_committed_intent_after_the_live_swap_boundary() {
             operation_id: move_intent.operation_id,
         })
         .expect("commit before simulated crash");
+    assert_eq!(
+        target_shard(&scenario, &rt)
+            .unfence(desired_target_fence(&move_intent))
+            .expect("clear target fence after committed cutover"),
+        0
+    );
     scenario
         .cluster
         .add_query(16, "+sony")
@@ -575,6 +597,7 @@ fn startup_refuses_ready_intent_when_the_recorded_source_fence_is_gone() {
     control
         .propose_move(MoveCommand::Begin(move_intent.clone()))
         .expect("begin intent");
+    fence_desired_target(&scenario, &rt, &move_intent);
     control
         .propose_move(MoveCommand::MarkReady {
             operation_id: move_intent.operation_id,

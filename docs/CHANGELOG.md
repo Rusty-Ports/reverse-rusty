@@ -17,8 +17,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
   across coordinators and atomically compare the complete move predicate.
 - Reordered RF=1 and RF>1 cutover to recover, fence, drain, record evidence, conditionally commit
   the assignment, and only then expose the new live route. Cold startup resolves every recorded
-  phase before serving, preserves already-live and third-source authority without stale recopy, and
-  fails loud on missing quorum or ambiguous endpoint, placement, fence, or evidence state.
+  phase before serving, preserves already-live and third-source authority without stale recopy,
+  quiesces an already-live target under a reconstructible fence until commit, and fails loud on
+  missing quorum or ambiguous endpoint, placement, fence, or evidence state.
 - Added the one-way `RRL4`/move-control-format-4 compatibility fence, control replay/snapshot/race
   coverage, RF=1 phase and commit-quorum crash recovery, and RF>1 cutover, reconcile, failover, and
   post-move restart coverage

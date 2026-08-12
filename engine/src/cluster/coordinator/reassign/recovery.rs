@@ -214,7 +214,17 @@ impl RecoveryContext<'_> {
         let source = self.expected_source(intent)?;
         let actual = source.fence(0)?;
         let retained = source_is_desired_physical(intent)?;
+        let aliases_quiesced_desired =
+            if intent.initial_authority == MoveInitialAuthority::Desired && retained {
+                Some(intent::desired_authority_fence_generation(
+                    intent,
+                    "startup: derive desired-authority target fence",
+                )?)
+            } else {
+                None
+            };
         if actual == intent.source_fence_generation
+            || aliases_quiesced_desired == Some(actual)
             || (allow_retained_unfenced && retained && actual == 0)
         {
             Ok(())
@@ -227,36 +237,81 @@ impl RecoveryContext<'_> {
         }
     }
 
-    fn ensure_desired_authority_fence(&self, intent: &MoveIntent) -> Result<(), ShardError> {
+    fn ensure_desired_authority_fences(&self, intent: &MoveIntent) -> Result<u64, ShardError> {
+        let target_fence = intent::desired_authority_fence_generation(
+            intent,
+            "startup: derive desired-authority target fence",
+        )?;
+        let aliases_target = source_is_desired_physical(intent)?;
         let source = self.expected_source(intent)?;
-        let actual = if intent.source_fence_generation == 0 {
+        let actual = if intent.source_fence_generation == 0 || aliases_target {
             source.fence(0)?
         } else {
             source.fence(intent.source_fence_generation)?
         };
-        if actual != intent.source_fence_generation {
+        if actual != intent.source_fence_generation && !(aliases_target && actual == target_fence) {
             return Err(ShardError::ControlPlane(format!(
                 "durable move {} could not establish recorded source fence {}; observed {}",
                 intent.operation_id, intent.source_fence_generation, actual
             )));
         }
-        Ok(())
+        let target = self.connect(intent, intent.desired.primary)?;
+        let actual_target = target.fence(target_fence)?;
+        if actual_target != target_fence {
+            return Err(ShardError::ControlPlane(format!(
+                "durable move {} could not establish desired-authority target fence {}; observed \
+                 {}",
+                intent.operation_id, target_fence, actual_target
+            )));
+        }
+        Ok(target_fence)
     }
 
-    fn desired_evidence(&self, intent: &MoveIntent) -> Result<MoveRecoveryEvidence, ShardError> {
+    fn desired_evidence(
+        &self,
+        intent: &MoveIntent,
+        desired_authority_fence: Option<u64>,
+    ) -> Result<MoveRecoveryEvidence, ShardError> {
         let mut evidence = Vec::new();
         for node in assignment_nodes(&intent.desired) {
             let member = self.connect(intent, node)?;
             let fence = member.fence(0)?;
-            if node != intent.expected.primary && fence != 0 {
+            let expected_fence = desired_authority_fence.unwrap_or_else(|| {
+                if node == intent.expected.primary {
+                    fence
+                } else {
+                    0
+                }
+            });
+            if fence != expected_fence {
                 return Err(ShardError::ControlPlane(format!(
-                    "durable move {} desired member {} remains fenced at generation {}",
-                    intent.operation_id, node.0, fence
+                    "durable move {} desired member {} has fence generation {}; expected {}",
+                    intent.operation_id, node.0, fence, expected_fence
                 )));
             }
             evidence.push(intent::member_evidence(node, &member)?);
         }
         Ok(intent::recovery_evidence(intent.live_generation, evidence))
+    }
+
+    fn clear_desired_authority_fence(&self, intent: &MoveIntent) -> Result<(), ShardError> {
+        if intent.initial_authority != MoveInitialAuthority::Desired {
+            return Ok(());
+        }
+        let target_fence = intent::desired_authority_fence_generation(
+            intent,
+            "startup: derive desired-authority target fence",
+        )?;
+        let current = self
+            .connect(intent, intent.desired.primary)?
+            .unfence(target_fence)?;
+        if current != 0 {
+            return Err(ShardError::ControlPlane(format!(
+                "durable move {} committed desired authority remains fenced at generation {}",
+                intent.operation_id, current
+            )));
+        }
+        Ok(())
     }
 
     fn clear_retained_source(&self, intent: &MoveIntent) -> Result<(), ShardError> {
@@ -336,24 +391,22 @@ impl RecoveryContext<'_> {
                 self.abort_expected_preparation(intent)
             }
             MoveIntentPhase::Preparing => {
-                self.ensure_desired_authority_fence(intent)?;
-                let evidence = self.desired_evidence(intent)?;
+                let target_fence = self.ensure_desired_authority_fences(intent)?;
+                let evidence = self.desired_evidence(intent, Some(target_fence))?;
                 self.commit_with_evidence(intent, evidence)?;
+                self.clear_desired_authority_fence(intent)?;
                 self.clear_retained_source(intent)?;
                 self.finish(intent)
             }
             MoveIntentPhase::Ready(expected) => {
                 self.require_source_fence(intent, false)?;
-                let actual = self.desired_evidence(intent)?;
-                // With expected-side authority, Ready was captured while the desired side was
-                // non-live and write-quiescent; any later change is therefore unexplained and
-                // ambiguous. A desired-authority intent is different: the desired side was already
-                // the live write authority before Begin, so acknowledged writes may legitimately
-                // advance it after MarkReady while a control Commit is unavailable. The recorded
-                // evidence remains the proof that this authority was complete at readiness; the
-                // current probe attests that the same endpoint/fence/placement identity still holds.
-                if intent.initial_authority == MoveInitialAuthority::Expected && &actual != expected
-                {
+                let target_fence = if intent.initial_authority == MoveInitialAuthority::Desired {
+                    Some(self.ensure_desired_authority_fences(intent)?)
+                } else {
+                    None
+                };
+                let actual = self.desired_evidence(intent, target_fence)?;
+                if &actual != expected {
                     return Err(ShardError::ControlPlane(format!(
                         "durable move {} target evidence changed after readiness; refusing \
                          ambiguous cutover",
@@ -367,17 +420,19 @@ impl RecoveryContext<'_> {
                     },
                     "startup: conditionally commit ready move",
                 )?;
+                self.clear_desired_authority_fence(intent)?;
                 self.clear_retained_source(intent)?;
                 self.finish(intent)
             }
             MoveIntentPhase::Committed(_expected) => {
                 self.require_source_fence(intent, true)?;
+                self.clear_desired_authority_fence(intent)?;
                 // `expected` is the immutable proof that every desired member was complete at the
                 // atomic assignment commit. After the live swap, acknowledged writes legitimately
                 // advance those fingerprints before a crash. The committed assignment already
                 // decides authority, so startup attests every desired endpoint/placement/fence but
                 // must not mistake valid post-cutover progress for ambiguity.
-                let _current = self.desired_evidence(intent)?;
+                let _current = self.desired_evidence(intent, None)?;
                 self.clear_retained_source(intent)?;
                 self.finish(intent)
             }

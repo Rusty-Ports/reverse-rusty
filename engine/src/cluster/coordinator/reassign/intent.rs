@@ -117,6 +117,15 @@ pub(super) fn build_intent(
         phase: MoveIntentPhase::Preparing,
     };
     intent.operation_id = operation_id(&intent);
+    if intent.initial_authority == MoveInitialAuthority::Desired {
+        // Validate the derived target-quiesce generation before Begin can make this intent
+        // durable. Persisting an intent at the generation ceiling would strand startup with no
+        // legal fence below the shard-drop tombstone.
+        desired_authority_fence_generation(
+            &intent,
+            "durable move: plan desired-authority target fence",
+        )?;
+    }
     Ok(intent)
 }
 
@@ -175,6 +184,34 @@ pub(super) fn plan_live_authority_fence(
     })
 }
 
+/// Deterministic write-quiesce generation for an already-live desired authority. It is derived
+/// from the intent's immutable generations, so startup can reconstruct it without another durable
+/// field. Keep it above both recorded generations and below the shard GC tombstone (`u64::MAX`).
+pub(super) fn desired_authority_fence_generation(
+    move_intent: &MoveIntent,
+    context: &str,
+) -> Result<u64, ShardError> {
+    if move_intent.initial_authority != MoveInitialAuthority::Desired {
+        return Err(ShardError::ControlPlane(format!(
+            "{context}: target quiesce requested for a move without desired authority"
+        )));
+    }
+    let base = move_intent
+        .live_generation
+        .max(move_intent.source_fence_generation);
+    let generation = base.checked_add(1).ok_or_else(|| {
+        ShardError::ControlPlane(format!(
+            "{context}: no desired-authority target-fence generation remains after {base}"
+        ))
+    })?;
+    if generation == u64::MAX {
+        return Err(ShardError::ControlPlane(format!(
+            "{context}: desired-authority target fence would collide with the shard-drop tombstone"
+        )));
+    }
+    Ok(generation)
+}
+
 fn connect_and_adopt_source(
     engine: &ClusterEngine,
     move_intent: &MoveIntent,
@@ -198,8 +235,10 @@ fn connect_and_adopt_source(
 }
 
 /// Persist evidence and conditionally commit an RF=1 target that is already the live authority.
-/// `Begin` must have succeeded first. Re-probing the recorded source fence closes the observation →
-/// evidence race; a changed fence preserves the intent for startup instead of guessing authority.
+/// `Begin` must have succeeded first. The target is fenced at a deterministic intent-derived
+/// generation before evidence is captured, so a durable Ready fingerprint cannot be changed by
+/// either legitimate writes or rollback before Commit. Any failure leaves the target fenced and the
+/// intent resumable; only a committed assignment is allowed to clear the target fence.
 pub(super) fn commit_live_authority(
     engine: &ClusterEngine,
     move_intent: &MoveIntent,
@@ -223,18 +262,38 @@ pub(super) fn commit_live_authority(
             ))
         })?;
     let source = connect_and_adopt_source(engine, move_intent, source_endpoint, handle)?;
+    let target_fence = desired_authority_fence_generation(move_intent, context)?;
+    let aliases_target =
+        normalized_endpoint(source_endpoint) == normalized_endpoint(target_endpoint);
     let actual = if move_intent.source_fence_generation == 0 {
         source.fence(0)?
     } else {
         source.fence(move_intent.source_fence_generation)?
     };
-    if actual != move_intent.source_fence_generation {
+    if actual != move_intent.source_fence_generation && !(aliases_target && actual == target_fence)
+    {
         return Err(ShardError::ControlPlane(format!(
             "{context}: recorded source fence {} changed to {actual}",
             move_intent.source_fence_generation
         )));
     }
+    // Every supported coordinator mutation holds the read side from before its log append through
+    // complete shard fan-out. Taking the write side drains already-admitted writes and blocks new
+    // ones until the target evidence is committed. The shard fence below then preserves that
+    // quiescence across an ambiguous return and makes the same Ready phase reconstructible at
+    // startup, where no mutation entry points are serving yet.
+    let _mutations_quiesced = engine
+        .pit_open_barrier
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let target = connect(engine, target_endpoint, move_intent.position, handle)?;
+    let actual_target_fence = target.fence(target_fence)?;
+    if actual_target_fence != target_fence {
+        return Err(ShardError::ControlPlane(format!(
+            "{context}: desired authority expected target fence {target_fence}, observed \
+             {actual_target_fence}"
+        )));
+    }
     let evidence = recovery_evidence(
         move_intent.live_generation,
         vec![member_evidence(move_intent.desired.primary, &target)?],
@@ -253,7 +312,14 @@ pub(super) fn commit_live_authority(
             operation_id: move_intent.operation_id,
         },
         context,
-    )
+    )?;
+    let remaining = target.unfence(target_fence)?;
+    if remaining != 0 {
+        return Err(ShardError::ControlPlane(format!(
+            "{context}: committed desired authority remains fenced at generation {remaining}"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn member_evidence(

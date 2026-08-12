@@ -253,6 +253,12 @@ cold-start recovery; it is never acknowledged as a live-but-uncommitted success.
 quorum and retry normally, or restart resolve-only—the startup resolver completes or safely aborts
 the recorded phase before serving and refuses ambiguous authority.
 
+When raw handoff already made the requested target live, reassignment drains the coordinator's
+already-admitted mutation fan-outs and briefly fences that target from evidence capture through
+assignment commit. A failure after that fence leaves new writes failing loud and repairable from the
+coordinator log until resolve-only startup reconstructs the recorded phase; it never treats a
+changed `Ready` fingerprint as safe progress.
+
 After placement converges, bodyless `POST /_cluster/gc` reclaims slots outside both the committed
 and live-routing keep sets. It requires assignment routing but may run on the initial CLI-seeded or
 later resolve-only coordinator. Manual GC shares the reconcile/GC maintenance slot with the loop;

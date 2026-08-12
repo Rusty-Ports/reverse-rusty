@@ -29,6 +29,31 @@ fn state_with(
     }
 }
 
+#[test]
+fn desired_authority_intent_requires_a_legal_target_fence() {
+    let expected = ShardAssignment {
+        position: 0,
+        primary: NodeId(1),
+        replicas: Vec::new(),
+    };
+    let desired = ShardAssignment {
+        position: 0,
+        primary: NodeId(2),
+        replicas: Vec::new(),
+    };
+    let state = state_with(vec![node(1), node(2)], 1, vec![expected.clone()]);
+    let error = intent::build_intent(
+        &state,
+        expected,
+        desired,
+        u64::MAX - 2,
+        u64::MAX - 1,
+        MoveInitialAuthority::Desired,
+    )
+    .expect_err("the target fence must stay below the drop tombstone");
+    assert!(error.to_string().contains("drop tombstone"), "{error}");
+}
+
 /// A map already equal to the HRW desired placement moves nothing (the idempotent re-run / the
 /// single-node default ⇒ a no-op rebalance).
 #[test]

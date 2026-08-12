@@ -62,31 +62,33 @@ degraded result.
 
 An RF=1 target that is already live—because of raw handoff or earlier map/live divergence—begins an
 intent with desired authority before fencing or adopting anything. The intent records and re-probes
-the exact old-source fence, attests the live target, then commits without stale recopy. If a third
-physical source is live while both requested sides differ, the coordinator first records and
-completes a durable transition from the committed source to that authority, then plans the requested
-move from the newly committed source. A logical-ID-only alias uses a zero source fence because both
-IDs name one physical slot.
+the exact old-source fence. The coordinator then takes the exclusive mutation barrier, waits for
+already-admitted fan-outs, and fences the live target at a deterministic intent-derived generation
+before recording its evidence. `Commit` precedes both target unfencing and barrier release, so
+legitimate writes cannot change a `Ready` fingerprint and an ambiguous return leaves a
+startup-reconstructible fence rather than writable undecided authority. This attests and commits the
+live target without stale recopy. If a third physical source is live while both requested sides
+differ, the coordinator first records and completes a durable transition from the committed source
+to that authority, then plans the requested move from the newly committed source. A logical-ID-only
+alias uses a zero source fence because both IDs name one physical slot; the distinct derived target
+fence still quiesces that shared slot for evidence and commit.
 
 ### Startup recovery and compatibility
 
 Assignment-routed startup resolves all intents before assembling routes or serving reads and writes:
 
 - `Preparing` with expected authority proves the source unfenced and aborts;
-- `Preparing` with desired authority re-establishes the recorded source fence, attests the desired
-  side, and commits;
-- `Ready` requires the exact recorded fence. Expected-authority moves also require unchanged
-  recovery evidence; a desired-authority target may legitimately advance after readiness because
-  it was already the recorded live write authority, so the stored evidence remains its completeness
-  proof while recovery re-attests its endpoint, placement, and fence identity before commit; and
+- `Preparing` with desired authority re-establishes both the recorded source fence and the derived
+  target fence, records exact desired-side evidence, and commits;
+- `Ready` requires the exact recorded source fence, re-establishes the derived target fence for
+  desired authority, and requires unchanged recovery evidence for either authority side; and
 - `Committed` treats consensus as the authority decision, attests every recorded endpoint,
-  placement, and source fence, clears any retained-source fence, then finishes. Post-cutover writes
-  may legitimately advance the desired fingerprints.
+  placement, and source fence, clears a desired-authority target fence and any retained-source fence,
+  then finishes. Post-cutover writes may legitimately advance the desired fingerprints.
 
 Endpoint replacement, assignment/placement drift, missing quorum, unexpected fence generation,
-changed ready evidence for a non-live expected-authority target, overlapping intents, or any other
-ambiguity fails coordinator startup. No branch selects an authority merely because an endpoint is
-reachable.
+changed ready evidence, overlapping intents, or any other ambiguity fails coordinator startup. No
+branch selects an authority merely because an endpoint is reachable.
 
 The first move command atomically rewrites a legacy Raft log to the one-way `RRL4` header before
 appending. Snapshots carrying move state require move-control format 4. Pre-release `RRL2`/`RRL3`
@@ -96,13 +98,14 @@ format instead of silently ignoring transition state.
 
 ## Correctness argument
 
-Before `Commit`, the expected source remains the only write authority and either serves live or is
-fenced with its authority recorded. Every desired member is derived from that source and `Ready`
-binds the complete member set to exact evidence. `Commit` compares the same assignment generation,
-placement generation, assignments, and endpoint identities that `Begin` observed, so a racing
-coordinator or membership change cannot redirect the transition. After `Commit`, consensus names
-only the complete desired group; the local swap exposes that already-proven group without a write
-window on two primaries.
+Before `Commit`, the intent records the exact authority side. A normal move keeps the expected source
+as the only authority, then fences and drains it before evidence. An already-live desired-authority
+move drains coordinator mutations and fences that target before evidence. Every `Ready` member set
+is therefore write-quiescent and bound to exact evidence. `Commit` compares the same assignment
+generation, placement generation, assignments, and endpoint identities that `Begin` observed, so a
+racing coordinator or membership change cannot redirect the transition. After `Commit`, consensus
+names only the complete desired group; the local swap or target unfence exposes that already-proven
+group without a write window on two primaries.
 
 A crash lands in one durable phase. Startup either proves that a pre-ready expected-authority move
 can be discarded, completes a recorded desired-authority or ready move, or follows the already
@@ -135,8 +138,8 @@ source/API-compatible but the built-in durable mover no longer produces that out
 Control-state tests cover command idempotence, complete conditional predicates, endpoint overlap,
 logical aliases, snapshots, log replay, unsupported format rejection, and concurrent proposals.
 Localhost gRPC tests cover RF=1 restart recovery at preparing, ready, committed, live-swap, and
-cleanup boundaries; RF=1 injected commit-quorum loss; desired-authority writes after readiness;
-placement/member/fence/evidence ambiguity; exact source authority; and chained third-source
+cleanup boundaries; RF=1 injected commit-quorum loss; desired-target fence loss and evidence-drift
+refusal; placement/member/fence/evidence ambiguity; exact source authority; and chained third-source
 reconciliation. Parallel-planner tests prove the local `C ∪ D` footprint matches replicated Begin,
 including a shared dropped replica. Separate RF>1 suites cover end-to-end group cutover,
 reconciliation, failover, concurrent writes, and coordinator restart after completed moves. Both
