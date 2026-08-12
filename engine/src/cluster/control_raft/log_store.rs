@@ -115,7 +115,7 @@ fn rewrite_and_reopen(inner: &mut LogStoreInner) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Atomically install the one-way V3 log header before the first move entry is appended. The
+/// Atomically install the one-way V4 log header before the first move entry is appended. The
 /// rewrite preserves every prior entry; a crash after it but before the new append merely leaves a
 /// conservatively fenced log that old code rejects.
 fn fence_durable_moves(inner: &mut LogStoreInner) -> std::io::Result<()> {

@@ -1,21 +1,19 @@
 //! `impl ClusterEngine` — the orphan-slot GC sweep (ADR-096, `distributed` feature): reclaim the
 //! slots data-moving reassignment strands. Every move leaves its source slot behind — fenced, in
-//! the node's slot map, its `shard_<id>/` dir on disk — deliberately (serve-then-drop, ADR-090:
-//! the fenced source keeps serving reads through the `MovedButNotCommitted` crash window), but
-//! nothing ever reclaimed them, so disk + resident memory grew with every move, forever
+//! the node's slot map, its `shard_<id>/` dir on disk — deliberately (serve-then-drop, ADR-090/175),
+//! but nothing ever reclaimed them, so disk + resident memory grew with every move, forever
 //! (a durable restart re-attaches every `shard_<id>/` dir it finds).
 //!
 //! ## The keep-set (what is NEVER dropped)
 //! A hosted slot survives the sweep if ANY of:
 //! - its position has **no committed assignment** (the map cannot vouch the data lives elsewhere —
 //!   fail-safe, skip + report);
-//! - the committed map assigns its position to this node (primary or replica) — including the
-//!   `MovedButNotCommitted` window, where the committed map still names the old source;
+//! - the committed map assigns its position to this node (primary or replica);
 //! - this node's endpoint is in the position's **live routing**
 //!   ([`Shard::live_endpoints`](crate::cluster::shard::Shard::live_endpoints)) — covering every
-//!   way routing can point somewhere the map does not name (a raw `execute_handoff` flip, an
-//!   uncommitted move) — the oracle-proven flip-without-commit state serves from exactly such a
-//!   node. Endpoint comparison is normalized (trailing-slash/case) and ambiguity KEEPS.
+//!   way routing can point somewhere the map does not name (notably a raw `execute_handoff` flip,
+//!   plus legacy compatibility callers). Endpoint comparison is normalized (trailing-slash/case)
+//!   and ambiguity KEEPS.
 //!
 //! Everything else the node hosts is an orphan: unrouted by the committed map (what a restart
 //! resolves) AND by live routing. Dropping it cannot false-negative any supported read path.
@@ -69,7 +67,7 @@ pub struct GcReport {
     /// and node boot both retry the physical disk cleanup.
     pub pending_disk_cleanup: Vec<OrphanSlot>,
     /// Hosted-but-unassigned slots KEPT because the coordinator's live routing still reaches that
-    /// node for that position (a raw handoff flip / an uncommitted move) — the map alone would
+    /// node for that position (a raw handoff flip / legacy uncommitted route) — the map alone would
     /// have called them orphans.
     pub kept_live_routed: Vec<OrphanSlot>,
     /// Slots whose position has NO committed assignment — fail-safe skipped (the map cannot vouch
@@ -172,7 +170,7 @@ impl ClusterEngine {
             return Ok(report);
         }
         // Reserve EVERY data node for the whole sweep (ADR-095): strictly coarser than any move's
-        // footprint, so no move-then-commit — and no raw handoff — can interleave a fence/recover
+        // footprint, so no durable move — and no raw handoff — can interleave a fence/recover
         // with the arm-and-drop below.
         let eps: Vec<&str> = data_nodes.iter().map(|(_, a)| a.as_str()).collect();
         let _ticket = self.move_ledger.reserve(&eps);
@@ -405,7 +403,7 @@ mod tests {
     }
 
     /// A hosted-but-unassigned slot whose node LIVE ROUTING still reaches is kept — the
-    /// `MovedButNotCommitted` / raw-handoff-flip protection the committed map alone would miss.
+    /// raw-handoff-flip / legacy-route protection the committed map alone would miss.
     /// The endpoint compare is normalized (trailing slash, case) so a formatting variant still
     /// KEEPS.
     #[test]

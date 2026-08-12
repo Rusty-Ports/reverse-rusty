@@ -9,6 +9,21 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-08-12 — Durable reassignment intent and conditional cutover
+
+- Added versioned per-position move intents with assignment and placement generations, normalized
+  member identities, exact source-fence generations, and full-member recovery evidence. Replicated
+  `Begin`/`Ready`/`Commit`/`Abort`/`Finish` transitions reserve overlapping endpoint footprints
+  across coordinators and atomically compare the complete move predicate.
+- Reordered RF=1 and RF>1 cutover to recover, fence, drain, record evidence, conditionally commit
+  the assignment, and only then expose the new live route. Cold startup resolves every recorded
+  phase before serving, preserves already-live and third-source authority without stale recopy, and
+  fails loud on missing quorum or ambiguous endpoint, placement, fence, or evidence state.
+- Added the one-way `RRL4`/move-control-format-4 compatibility fence and crash/race coverage across
+  control replay, snapshots, move phases, aliases, injected commit-quorum loss, and localhost gRPC
+  restart recovery
+  ([ADR-175](decisions/adr-175-durable-reassignment-intent-and-conditional-cutover.md)).
+
 ## 2026-08-10 — Fail-open filtered segment skipping
 
 - Added exact immutable per-segment `TagId` unions that let filtered scalar, ranked, exhaustive, and

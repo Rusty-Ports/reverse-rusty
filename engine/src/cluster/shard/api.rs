@@ -359,8 +359,8 @@ pub(crate) trait Shard: Send + Sync {
     /// The endpoints of the remote node(s) this shard's LIVE routing currently reaches — empty for
     /// an in-process shard (nothing remote to protect). Read by the orphan-slot GC sweep
     /// (ADR-096) as a KEEP-set: a slot the coordinator is currently routing to is never dropped,
-    /// however routing got there (a committed reassign, a raw handoff flip, a
-    /// `MovedButNotCommitted` crash window) — the committed map alone would miss those.
+    /// however routing got there (a committed reassign, a raw handoff flip, or a legacy caller's
+    /// retained uncommitted route) — the committed map alone would miss those.
     /// `RemoteShard` reports its connect endpoint; `ReplicatedShard` its primary's plus every
     /// replica's (in-sync or not — conservative); `HandoffShard` forwards to its current backing.
     /// `distributed`-gated (its sole consumer is the gRPC GC sweep) so the lean build carries no

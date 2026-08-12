@@ -57,8 +57,8 @@ hosted slot remains from which to recover the earlier observational count. GC wi
 provides this distinction and inventory; an older ambiguous node is placed in `skipped_nodes`.
 
 `kept_live_routed` is an intentional terminal outcome. It identifies a slot not named for that node
-by the durable map but still reached by current live routing, such as a raw handoff or an
-uncommitted move. GC never drops it. A slot named as a committed primary or replica is also kept but
+by the durable map but still reached by current live routing, such as a raw handoff or a legacy
+uncommitted route. GC never drops it. A slot named as a committed primary or replica is also kept but
 omitted from the response because it is ordinary placement, not an orphan candidate.
 
 `acknowledged` and `completed` are identical. They are true only when every registered data node

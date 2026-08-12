@@ -463,7 +463,8 @@ pub struct ClusterEngine {
     /// `reassign_serial: Mutex<()>`): every DATA-MOVING op — an operator
     /// `reassign_and_move`/`reassign_group_and_move`/`rebalance_and_move`, a raw
     /// `execute_handoff`, and the autoscaler-driven handoff — reserves its resolved endpoint
-    /// footprint here for the whole move-then-commit. Conflicting moves (any shared node: chained
+    /// footprint here for the whole physical transition. Replicated move intents reserve the same
+    /// normalized endpoints across coordinators. Conflicting local moves (any shared node: chained
     /// reshuffle, shared source/destination, the same position's committed primary) serialize
     /// exactly as under the old global mutex; moves over DISJOINT node sets may now run in
     /// parallel (the opt-in `max_parallel_moves` waves). It does NOT guard the hot path

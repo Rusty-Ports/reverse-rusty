@@ -233,10 +233,12 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/reassign -H "authorization: Bear
   -H 'content-type: application/json' -d '{"position": 0, "node": 2}'
 ```
 
-This attests the current live primary, peer-recovers the target when needed, fences + drains the
-source, flips routing, then commits the new owner (**move-then-commit**) — so a coordinator restarted
+This attests the current live primary and first persists a versioned move intent. It peer-recovers
+the target when needed, fences + drains the source, records exact target evidence, conditionally
+commits the new owner, then exposes the target through live routing. A coordinator restarted
 **resolve-only** (`--route-by-assignments` + `--control-endpoint`, `--shards 3`, and no
-`--shard-endpoint`) routes to the new owner. `shard`/`to_node` are request aliases, and
+`--shard-endpoint`) resolves any unfinished phase before assembling routes. `shard`/`to_node` are
+request aliases, and
 `cluster_manager_timeout`/`master_timeout` bounds only pre-start admission; the full contract is in
 the [reassign API reference](../reference/api/cluster/reassign.md).
 
@@ -244,12 +246,12 @@ To move every reassigned position at once, call bodyless `POST /_cluster/rebalan
 send `{"move":true}`). To run the continue-past-failures controller pass, use
 `POST /_cluster/reconcile`; manual and `--reconcile-interval-secs` passes share one admission slot.
 Both reconcile forms require resolve-only startup. CLI-seeded and static endpoint-order
-coordinators reject rebalance, reassign, and reconcile before admission. Fail-closed: a failure
-before the live flip commits nothing and
-auto-unfences the source. A `committed:false` reply means live routing reached the target but the
-durable-map commit failed. The running coordinator remains exact, but the old owner becomes stale
-after newer writes; restore control-plane writes and repeat the same request promptly **before any
-coordinator restart**. The retry attests the live target and commits it without stale recopy.
+coordinators reject rebalance, reassign, and reconcile before admission. Fail-closed: a proven clean
+pre-cutover failure auto-unfences the source and aborts its preparing intent. An ambiguous quorum,
+fence, endpoint, or evidence outcome returns a non-200 response and leaves the intent for a retry or
+cold-start recovery; it is never acknowledged as a live-but-uncommitted success. Restore the control
+quorum and retry normally, or restart resolve-only—the startup resolver completes or safely aborts
+the recorded phase before serving and refuses ambiguous authority.
 
 After placement converges, bodyless `POST /_cluster/gc` reclaims slots outside both the committed
 and live-routing keep sets. It requires assignment routing but may run on the initial CLI-seeded or
@@ -274,7 +276,7 @@ flows that need a backup (volume loss, quorum-majority loss, whole-cluster loss)
 |---|---|---|
 | **A shard crashes/restarts** | Durable self-restore from its `--data-dir` (segments + translog, ADR-039); reads that route to it return `502` until it's back. | `rrc restart shardN` (or let `unless-stopped` do it). Matches resume automatically. |
 | **Rolling shard restart** | One shard at a time; the others keep serving (reads to the down shard fail loud meanwhile). | `rrc restart shardN` sequentially; wait for `/_health` green between each. |
-| **Coordinator restart** | Stateless: reconnects to the same endpoints, re-mints + re-ships the dict, re-derives placement. No data loss. A new boot ID can be rejected until the prior renewable owner lease expires (at most 30 seconds after its last admitted owner RPC), then waits for response bodies/streams already admitted under that owner to drain. | `rrc restart coordinator`; allow the restart policy to retry, then wait for green. |
+| **Coordinator restart** | Reconnects to control first and resolves every durable move intent before route assembly. It then re-mints + re-ships the dict and re-derives placement. A missing quorum or ambiguous recorded endpoint, fence, placement, or evidence fails readiness instead of serving stale routing. A new boot ID can be rejected until the prior renewable owner lease expires (at most 30 seconds after its last admitted owner RPC), then waits for response bodies/streams already admitted under that owner to drain. | Restore control quorum and required shard endpoints, then `rrc restart coordinator`; allow the restart policy to retry and wait for green. No manual pre-restart reassignment is required. |
 | **Control-plane restart** | Each node resumes from its durable Raft log/vote (ADR-041). | Restart control nodes; quorum re-forms. With control wiring on (compose/Helm default), the coordinator's thin client fails **reads** over to a live endpoint meanwhile — but admin **writes** are not retried across endpoints (a committed-but-lost write must not double-apply), so if the coordinator's connected node is the one down, writes fail loud until the coordinator reconnects to a live endpoint (a restart) — even while quorum is otherwise available (ADR-085/086). |
 | **Replica failover** (RF>1) | Reads fail over to an in-sync replica; the primary stays authoritative for writes (ADR-035). | None — automatic. |
 | **Replica replacement** (RF>1) | A replacement reusing the **same durable volume** self-restores from its own segments + translog. A **fresh-volume** replica simply listed in the endpoint group is assembled as *in-sync without recovery* — reads could then serve it empty (silent FN). | Prefer same-volume restart. A fresh replica must complete an explicit peer recovery (`RecoverFrom`, ADR-036) **before** it serves reads — not a plain "start it"; treat fresh-volume replica replacement as a care-needed v1 operation. |
@@ -394,10 +396,11 @@ touch:
 Formerly listed here and since **shipped** (capabilities now, not constraints):
 control-plane↔coordinator wiring with multi-endpoint failover + committed-assignment routing
 (ADR-082/083/086 — on by default in `compose.cluster.yml`; failover semantics in [§6](#6-recovery),
-the resolve-only restart + move-then-commit in [§5](#5-scaling), the bootstrap `--advertise-url`
+the resolve-only restart + durable conditional cutover in [§5](#5-scaling), the bootstrap `--advertise-url`
 rule in [§3](#3-bootstrap--startup-ordering)); **data-moving reassignment** (ADR-090):
-`POST /_cluster/reassign {position, node}` (or bodyless resolve-only remote `rebalance`) moves the
-data via live handoff THEN commits the new owner; both REST boundaries reject CLI-seeded
+`POST /_cluster/reassign {position, node}` (or bodyless resolve-only remote `rebalance`) records the
+transition, recovers and proves the target, conditionally commits the new owner, then swaps live
+routing; both REST boundaries reject CLI-seeded
 restart-unsafe routing and static routing, and rebalance also rejects remote map-only mode. Also shipped: the
 **Kubernetes / Helm chart**
 (ADR-084, [`kubernetes-deployment.md`](kubernetes-deployment.md)).

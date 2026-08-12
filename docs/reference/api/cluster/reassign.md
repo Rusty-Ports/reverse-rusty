@@ -3,8 +3,9 @@
 > [Cluster control APIs](../cluster.md) · [REST API hub](../../api.md)
 
 Move one global logical position to a registered data-node membership ID. The coordinator attests
-the current live primary, peer-recovers and flips live routing when needed, then commits the target
-as the durable owner.
+the current live primary, persists a versioned move intent, peer-recovers the target when needed,
+records exact recovery evidence, conditionally commits the target as durable owner, and only then
+exposes it through live routing.
 
 This operation is available only on a `distributed` build running an authoritative **resolve-only
 remote coordinator**: `--route-by-assignments`, at least one `--control-endpoint`, the committed
@@ -76,24 +77,24 @@ The independently supervised operation continues, and graceful coordinator shutd
 `Cache-Control: no-store`. Detailed membership endpoints and mesh failures stay in server logs;
 client failures preserve the typed status without exposing the internal topology.
 
-The terminal flags distinguish four states:
+The terminal flags distinguish three successful states:
 
 | State | `acknowledged` | `moved` | `committed` | `reconciled` | Meaning |
 |---|---:|---:|---:|---:|---|
 | Moved and committed | `true` | `true` | `true` | `false` | This invocation physically flipped routing; the durable target is committed, either already or by this invocation. |
 | Already converged | `true` | `false` | `true` | `false` | Live routing and the durable assignment already named the target; no new proposal was needed. |
-| Durable map reconciled | `true` | `false` | `true` | `true` | Live routing already named the target, so this invocation attested it and committed the map without copying again from the old owner. |
-| Live but uncommitted | `false` | varies | `false` | `false` | Live routing reaches the target, but the durable assignment commit failed. `moved` says whether this invocation performed the physical flip. A warning is included. |
+| Durable authority reconciled | `true` | `false` | `true` | `true` | Live routing already named a different authority, so this invocation durably reconciled it without stale recopy before completing the requested placement. |
 
-The live-but-uncommitted state is exact on the running coordinator, but it is not restart-stable:
-after newer writes reach the target, the old durable owner can be stale. Restore control-plane write
-availability and repeat the same request promptly **before restarting the coordinator**. The retry
-uses the attested live primary as authority and commits it without recopying from the stale committed
-owner.
+The `acknowledged`, `committed`, and optional `warning` fields retain their original response shape,
+but the native durable mover no longer returns a successful live-but-uncommitted state. An ambiguous
+control, fence, endpoint, or recovery-evidence outcome is a structured non-200 failure with its move
+intent preserved. Retrying after quorum/endpoint recovery is idempotent; a resolve-only coordinator
+restart also inspects and resolves the recorded phase before serving, with no manual pre-restart
+retry. Unprovable authority fails startup loud.
 
-A failure before the live flip commits nothing and automatically unfences the source. A position
-with committed replicas is rejected by this single-target route; use `/_cluster/rebalance` or
-`/_cluster/reconcile`, which dispatch the group-aware movement path.
+A proven clean failure before readiness automatically unfences the source and aborts its preparing
+intent. A position with committed replicas is rejected by this single-target route; use
+`/_cluster/rebalance` or `/_cluster/reconcile`, which dispatch the group-aware durable movement path.
 
 Common transport and topology failures include:
 
@@ -108,7 +109,7 @@ Common transport and topology failures include:
 | `415 unsupported_media_type` | Missing or non-JSON content type. |
 | `501 not_supported_in_cluster_mode` | Server was built without `distributed`. |
 | `502 shard_unreachable` / `invalid_shard_response` | Required mesh recovery or attestation failed. |
-| `503 control_plane_error` / `durability_unavailable` | Membership, assignment, or durable proposal failed before a terminal uncommitted outcome could be returned. |
+| `503 control_plane_error` / `durability_unavailable` | Membership, assignment, durable-intent, or conditional-commit proof was unavailable. No ambiguous authority is acknowledged. |
 | `503 reassign_unavailable` | Admission is closed or the worker could not start. |
 
 Cross-topology assembly is documented in [coordinator mode](../server/coordinator-mode.md), the
@@ -117,4 +118,6 @@ and the movement/failure model in
 [clustering and scaling](../../../design/clustering-and-scaling.md#9-movement-and-failure-recovery).
 Rationale and proof are recorded in
 [ADR-090](../../../decisions/adr-090-data-moving-reassignment.md) and
-[ADR-171](../../../decisions/adr-171-cluster-reassign-api-contract.md).
+[ADR-171](../../../decisions/adr-171-cluster-reassign-api-contract.md), with the durable transition
+specified by
+[ADR-175](../../../decisions/adr-175-durable-reassignment-intent-and-conditional-cutover.md).

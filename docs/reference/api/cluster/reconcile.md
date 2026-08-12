@@ -58,8 +58,8 @@ A converged response is HTTP 200:
 ```
 
 `reconciled` lists desired positions whose assignment committed during this pass. For RF=1 this
-may include a commit-only recovery when an earlier uncommitted flip already made the desired target
-the attested live authority; the retry does not copy stale source data over it. `skipped` lists
+may include durable reconciliation of an already-live raw-handoff authority; the transition records
+that authority before fencing or adoption and does not copy stale source data over it. `skipped` lists
 planned positions that another operation converged before their turn. A pass against an already
 converged map returns all four lists empty and does not advance the control version.
 
@@ -80,14 +80,7 @@ individually valid, resumable outcome:
   "took_ms": 912.41,
   "reconciled": [0, 3],
   "skipped": [4],
-  "uncommitted": [
-    {
-      "position": 5,
-      "from": 11,
-      "to": 14,
-      "warning": "live routing reached the target but the durable assignment did not; retry promptly before coordinator restart"
-    }
-  ],
+  "uncommitted": [],
   "failed": [
     {
       "position": 8,
@@ -97,11 +90,13 @@ individually valid, resumable outcome:
 }
 ```
 
-An `uncommitted` position remains exact on the running coordinator because live routing already
-reaches the target, but the durable map is stale. Restore control-plane writes and retry promptly
-before coordinator restart; newer writes can make the old durable owner stale. Detailed endpoint,
-mesh, and transport diagnostics remain in server logs. `failed` means that position did not reach
-the desired terminal state; retrying the same deterministic pass is safe.
+`uncommitted` is retained for response compatibility, but the built-in durable mover no longer
+populates it. A control, fence, endpoint, or evidence ambiguity is instead recorded in `failed` (or
+returned as a structured non-200 when the pass itself cannot be attested), with its durable intent
+preserved. Detailed endpoint, mesh, and transport diagnostics remain in server logs. Retrying the
+same deterministic pass after restoring quorum/endpoints is safe. A resolve-only coordinator
+restart resolves recorded intents before serving and fails readiness when authority cannot be
+proved, so no manual pre-restart retry is required.
 
 A planning, control-plane-read, worker, or final-version-attestation failure returns a structured
 non-200 response and directs the operator to inspect `GET /_cluster/state`. It never returns a
@@ -147,6 +142,9 @@ the entire deterministic HRW map”
 Reverse Rusty therefore keeps `/_cluster/reconcile` native and rejects `commands`, `retry_failed`,
 `dry_run`, `explain`, `metric`, and overall `timeout`. Only the manager-timeout spellings are shared
 because their admission/start meaning maps exactly.
+
+The durable transition and startup proof are specified by
+[ADR-175](../../../decisions/adr-175-durable-reassignment-intent-and-conditional-cutover.md).
 
 ---
 

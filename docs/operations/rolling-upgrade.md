@@ -27,6 +27,11 @@ starting the new binary on the same `--data-dir` — the durable formats do the 
       chart `appVersion` you are deploying (the same tripwire the release pipeline runs).
 - [ ] Upgrade at **low write traffic** if you can — the windows below are smaller and the
       coordinator restart's write outage cheaper.
+- [ ] **Quiesce topology movement for the whole roll:** stop invoking reassign, rebalance,
+      reconcile, raw handoff, or GC; pause external controllers; freeze membership; and let every
+      already-started operation return before replacing the first control member. If the reconcile
+      loop is enabled, first let placement converge and keep its membership inputs unchanged. Query
+      traffic may continue subject to the fail-loud shard restart windows below.
 
 ## 2. The compatibility-fence contract
 
@@ -92,6 +97,15 @@ pre-upgrade backup:
   source generation around ADR-108's optional priority. Legacy v1–v6 frames remain readable as
   generation-zero data. ADR-109 advances the coordinator log and per-shard translog to v4;
   clustered v1–v3 logs are rebuild-only because their writes lack placement identity.
+- **ADR-175 durable reassignment:** the first durable move command atomically rewrites the control
+  log to the one-way `RRL4` header before appending, and current snapshots carry move-control format
+  4. `RRL2`/`RRL3` and move-control formats 2/3 were unreleased weaker-predicate prototypes and are
+  rejected. Old binaries reject `RRL4` or a current move snapshot rather than ignoring transition
+  state. Keep all topology movement quiesced until every control member, shard, and coordinator is
+  upgraded; a move proposed to a mixed control quorum could otherwise ask unlike state machines to
+  interpret the entry. Assignment-routed startup then resolves any recorded phase before serving.
+  Once `RRL4` or a format-4 snapshot exists, rollback to a pre-ADR-175 binary requires the
+  pre-upgrade control-volume backup.
 - **Adopted shard state:** ADR-109 adopted feature-space v2 records placement generation and shard
   count. Legacy adopted data-node state must be wiped and reseeded.
 - **The mesh wire:** ADR-109 fields are protobuf-additive syntactically, but semantically mandatory.
@@ -146,7 +160,8 @@ Same order as bring-up ([runbook §3](cluster-deployment.md)), for the same reas
    its health `ready` (leader known) before the next; the quorum holds throughout (minority
    restart). The coordinator's thin client fails **reads** over to live members meanwhile; admin
    **writes** through a restarting member fail loud until it returns (ADR-085/086) — quiet on the
-   admin surface during this step.
+   admin surface during this step. In particular, keep ADR-175 movement commands quiesced until the
+   complete mesh is homogeneous.
 2. **Shards next, one at a time.** Each restart is a durable self-restore from its volume
    (ADR-039); reads routing to the restarting shard `502` until it is back (fail-loud). Gate on:
    the shard's gRPC readiness (`service: ready` — dict re-adopted) AND coordinator `/_health`

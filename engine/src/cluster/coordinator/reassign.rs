@@ -101,8 +101,8 @@ pub enum ReassignOutcome {
         from: NodeId,
         to: NodeId,
         generation: u64,
-        /// Whether this invocation performed the physical routing flip. `false`
-        /// means it was retrying a pre-existing uncommitted live move.
+        /// Whether this invocation performed the physical routing flip. Retained for legacy
+        /// callers; the built-in durable mover does not construct this variant.
         moved: bool,
     },
 }
@@ -113,15 +113,15 @@ pub enum ReassignOutcome {
 /// have reconciled a target that was already live.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RebalanceMoveReport {
-    /// Positions whose desired primary committed this pass, including commit-only reconciliation
-    /// when that target was already the attested live primary.
+    /// Positions whose desired primary committed this pass, including durable authority
+    /// reconciliation when that target was already the attested live primary.
     pub moved: Vec<u32>,
     /// The lowest-position failure (with the error message); the sweep stopped at its wave (at the
     /// default `max_parallel_moves = 1` this is exactly "the first position that failed").
     pub failed: Option<(u32, String)>,
     /// Changed positions left for a re-run: everything after the failing wave, plus (at
-    /// `max_parallel_moves ≥ 2`) any ADDITIONAL same-wave failure — those were attempted and rolled
-    /// back cleanly (each emitted its own event), and a re-run retries them identically.
+    /// `max_parallel_moves ≥ 2`) any ADDITIONAL same-wave failure. A proven clean failure rolled
+    /// back; an ambiguous one retained its durable intent. A re-run handles either deterministically.
     pub not_attempted: Vec<u32>,
 }
 
@@ -270,9 +270,9 @@ impl ClusterEngine {
                 ))
             })?;
 
-            // Include the committed endpoint even when it differs from the live primary. Two
-            // retries of the same uncommitted move then still share a ledger key, and GC/reassign
-            // operations cannot reason about the stale durable owner concurrently.
+            // Include the committed endpoint even when it differs from the live primary. Raw
+            // handoff reconciliation and retries then share a ledger key, and GC/reassign
+            // operations cannot reason about two recorded authorities concurrently.
             let footprint = [from_ep.as_str(), live_ep.as_str(), tgt_ep.as_str()];
             let ticket = match deadline {
                 Some(deadline) => self.move_ledger.reserve_until(&footprint, deadline),
@@ -654,9 +654,8 @@ impl ClusterEngine {
                     // Resolved equal under us (a concurrent move already placed it): not a failure.
                     Ok(ReassignOutcome::NoChange { .. }) => {}
                     Ok(ReassignOutcome::MovedButNotCommitted { .. }) => {
-                        // The data moved but its commit failed (event already emitted). Stop after
-                        // this wave so the durable map stays reconcilable rather than piling more
-                        // moves on top.
+                        // Legacy compatibility arm. Stop after this wave rather than piling more
+                        // movement onto a result whose caller says its commit is incomplete.
                         wave_failed = true;
                         if report.failed.is_none() {
                             report.failed = Some((
@@ -671,9 +670,9 @@ impl ClusterEngine {
                         }
                     }
                     Err(e) => {
-                        // A clean move failure rolled this position fully back (routing + map
-                        // unchanged); already-moved positions stay consistent. Stop after this
-                        // wave and report for a resume.
+                        // A proven clean failure rolled this position back; an ambiguous failure
+                        // preserved its durable intent. Already-committed positions stay consistent.
+                        // Stop after this wave and report for deterministic resume/startup recovery.
                         wave_failed = true;
                         if report.failed.is_none() {
                             report.failed = Some((pos, e.to_string()));

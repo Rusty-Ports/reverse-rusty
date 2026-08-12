@@ -1,6 +1,6 @@
 //! `impl ClusterEngine` — the unattended re-point reconciler (ADR-092, `distributed` feature): an
 //! idempotent, data-moving controller that converges the committed shard→node map to the desired HRW
-//! placement WITHOUT operator action, preserving the move-then-commit zero-FN ordering.
+//! placement WITHOUT operator action, using ADR-175's durable conditional cutover.
 //!
 //! Design: docs/design/clustering-and-scaling.md §9. Builds on ADR-090 (the data-moving
 //! [`reassign_and_move`](ClusterEngine::reassign_and_move) /
@@ -37,26 +37,24 @@ use crate::cluster::shard::ShardError;
 use super::reassign::{plan_waves, rebalance_group_targets, ReassignOutcome};
 use super::ClusterEngine;
 
-/// One [`ClusterEngine::reconcile`] pass's outcome (ADR-092). Every position is independent and
-/// individually consistent (each move is move-then-commit + CAS + auto-unfence), so a PARTIAL pass is
-/// always a valid, resumable state — never a false negative. The driver loop logs/meters these and
-/// retries the `uncommitted` + `failed` positions on its next pass.
+/// One [`ClusterEngine::reconcile`] pass's outcome (ADR-092/175). Every position is independent and
+/// individually consistent (each move has replicated intent, conditional commit, and deterministic
+/// recovery), so a PARTIAL pass is always resumable and never a false negative. The driver loop
+/// logs/meters these and retries failed positions on its next pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
     /// Positions whose desired placement committed this pass. This includes a
-    /// physical move and a commit-only recovery when the desired target was
+    /// physical move and durable authority reconciliation when the desired target was
     /// already the attested live authority.
     pub reconciled: Vec<u32>,
     /// Positions already in place (resolved equal under us — the idempotent no-op).
     pub skipped: Vec<u32>,
-    /// Positions whose live routing reaches the desired target but whose
-    /// durable assignment did not commit. Exact reads remain on the live
-    /// authority, but a restart can resolve the stale durable owner; retry
-    /// promptly. The RF=1 retry attests and commits the live target without a
-    /// stale recopy. `(position, from, to)`.
+    /// Legacy outcome retained for source/API compatibility. The built-in durable mover no longer
+    /// populates it: ambiguous work returns `Err` with a preserved intent that startup resolves
+    /// before serving. `(position, from, to)`.
     pub uncommitted: Vec<(u32, NodeId, NodeId)>,
-    /// Positions whose move failed and rolled back cleanly (routing + committed map unchanged);
-    /// retried next pass. `(position, error-message)`.
+    /// Positions whose move did not reach a terminal outcome. A proven clean failure rolled back;
+    /// an ambiguous failure preserved its durable intent for retry/startup. `(position, error-message)`.
     pub failed: Vec<(u32, String)>,
 }
 
@@ -103,7 +101,7 @@ pub struct ReconcileConfig {
     /// what the mesh and the nodes' disks can absorb.
     pub max_parallel_moves: usize,
     /// Run an orphan-slot GC sweep ([`ClusterEngine::gc_orphan_slots`], ADR-096) after a pass
-    /// that left the map fully CONVERGED (never while positions are uncommitted/failed — belt on
+    /// that left the map fully CONVERGED (never while positions are pending/failed — belt on
     /// top of the sweep's own keep-set). **Default `false` — no sweep ever runs, byte-identical.**
     pub gc_orphans: bool,
 }
@@ -137,18 +135,17 @@ impl ClusterEngine {
     ///   committed epoch is INVARIANT. Back-to-back passes on an unchanged map commit nothing — the
     ///   controller-level hysteresis the driver loop relies on.
     /// - **Continue past per-position failures:** unlike `rebalance_and_move` (which stops on the first
-    ///   failure for a human to resume), `reconcile` records a failed/uncommitted position and
-    ///   CONTINUES — an unattended loop should make maximum safe progress each pass and retry the rest
-    ///   next pass. Each position is independent (the committed map is per-position), and every
-    ///   individual move is still move-then-commit + CAS + auto-unfence, so continuing only runs more
-    ///   safe moves.
+    ///   failure for a human to resume), `reconcile` records a failed position and CONTINUES — an
+    ///   unattended loop should make maximum safe progress each pass and retry the rest next pass.
+    ///   Each position is independent, and every individual move is a replicated conditional
+    ///   transition, so continuing only runs more safe moves.
     ///
     /// ## Zero-FN
     /// `reconcile` adds only sequencing + continue-past-failure over `reassign_and_move`; it holds NO
     /// lock across moves (each move reserves its own ledger footprint) and never touches the hot path. A
-    /// failed move leaves that position's routing + committed map untouched (a clean rollback); an
-    /// uncommitted result leaves exact live routing on the target while the durable map is stale.
-    /// Re-running absorbs both; the RF=1 path commits an already-live target without copying again.
+    /// proven clean failure leaves that position's routing + committed map untouched; an ambiguous
+    /// failure preserves its durable intent and returns an error. Re-running or cold startup resolves
+    /// the recorded phase; the RF=1 path preserves an already-live target without stale recopy.
     ///
     /// Returns an empty report (a clean no-op) for an in-process / genesis cluster — no addr'd data
     /// nodes to place on, so [`rebalance_group_targets`] is empty. Fails closed only on a
@@ -191,13 +188,13 @@ impl ClusterEngine {
                     // Resolved equal under us (a concurrent move already placed it) — not a
                     // failure.
                     Ok(ReassignOutcome::NoChange { .. }) => report.skipped.push(pos),
-                    // Live routing reached the desired target, but durable
-                    // commit is pending; retry next pass.
+                    // Legacy compatibility arm. ADR-175's built-in mover no longer produces this
+                    // outcome; ambiguous transitions return Err with their intent preserved.
                     Ok(ReassignOutcome::MovedButNotCommitted { from, to, .. }) => {
                         report.uncommitted.push((pos, from, to));
                     }
-                    // A clean move failure rolled this position fully back (routing + map
-                    // unchanged). CONTINUE (do not abort the pass) — the next pass retries it.
+                    // A clean failure rolled back; an ambiguous failure preserved its intent.
+                    // CONTINUE (do not abort the pass) — retry/startup resolves it deterministically.
                     Err(e) => report.failed.push((pos, e.to_string())),
                 }
             }

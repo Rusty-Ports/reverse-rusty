@@ -88,7 +88,7 @@ pub struct RemoteShard {
     /// The endpoint string this client was connected with (ADR-096): the coordinator's GC sweep
     /// reads it back through [`Shard::live_endpoints`] so live routing's physical targets are a
     /// KEEP-set no drop can violate, however routing got there (a committed reassign, a raw
-    /// handoff flip, an uncommitted move).
+    /// handoff flip, or a legacy retained route).
     endpoint: String,
     /// The coordinator's frozen-dict fingerprint (verified equal to the server's at connect).
     /// Carried so dict-guarded RPCs (e.g. `FetchTranslog`) can present it.

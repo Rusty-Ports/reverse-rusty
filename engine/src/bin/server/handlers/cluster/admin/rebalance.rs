@@ -188,7 +188,7 @@ struct ClusterRebalanceResponse {
 
 /// Recompute the desired HRW shard placement. In-process clusters commit the
 /// advisory map. Resolve-only remote clusters use the data-moving
-/// move-then-commit workflow; restart-unsafe or non-authoritative remote
+/// durable-intent/conditional-cutover workflow; restart-unsafe or non-authoritative remote
 /// topologies are rejected before admission.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_rebalance(

@@ -15,9 +15,9 @@ The empty-body default is safe for the assembled topology:
 
 - An in-process cluster commits only the advisory shard→node map. Every physical shard is already
   co-resident, so no data copy is necessary.
-- A resolve-only remote cluster peer-recovers each desired target, fences and drains the
-  source, flips live routing, then commits the new assignment. It moves data before changing
-  durable routing authority.
+- A resolve-only remote cluster persists a move intent, peer-recovers each desired target, fences
+  and drains the source, records exact target evidence, conditionally commits the assignment, and
+  only then exposes the target through live routing.
 - A CLI-seeded assignment-routed coordinator returns `409 rebalance_resolve_only_required`. Its
   current live sources are authoritative, but changing the map would make the endpoint-list guard
   reject its next restart. Restart with the committed `--shards` count and no
@@ -43,7 +43,7 @@ curl -X POST localhost:9200/_cluster/rebalance \
 `max_parallel` does not make conflicting moves overlap. ADR-095 partitions changed positions into
 waves and the move ledger serializes any operations sharing a source or target node. A failure
 finishes the current wave, stops later waves, and leaves every completed position in a valid
-move-then-commit state.
+durable-intent state. Ambiguous work remains recorded for retry or cold-start recovery.
 
 Complete in-process response:
 
@@ -61,8 +61,8 @@ Complete in-process response:
 
 Complete resolve-only remote response uses `moved_data:true`; `reassigned` is the number of
 positions newly converged and `moved` lists their numeric positions. A listed RF=1 position may be a
-commit-only reconciliation when an earlier uncommitted flip already placed its target live; no stale
-source recopy occurs. `version` is a final linearizable observation of the committed `ClusterState`
+durable authority reconciliation when a raw handoff already placed its target live; no stale source
+recopy occurs. `version` is a final linearizable observation of the committed `ClusterState`
 application version after the complete or resumable workflow. It is not a Raft term/log index,
 checkpoint epoch, feature-model version, or placement generation.
 
@@ -88,6 +88,8 @@ is deterministic, completed positions are already converged, and the next pass r
 remaining diff. A planning, control-plane, hard movement, or final-version-attestation error fails
 loud with a structured non-200 response and directs the operator to inspect
 `GET /_cluster/state`; it never returns a successful partial result without the report above.
+An unresolved move intent is startup-recoverable; resolve-only startup completes or safely aborts it
+before serving and fails loud if authority cannot be proved.
 
 Supported query controls:
 
@@ -131,6 +133,9 @@ Rusty's whole-cluster HRW trigger
 Reverse Rusty therefore keeps its native path and does not accept `commands`, `dry_run`, `explain`,
 `retry_failed`, or `metric`. Only the manager-timeout spellings are shared because their waiting
 semantics align.
+
+The durable transition and conditional cutover are specified by
+[ADR-175](../../../decisions/adr-175-durable-reassignment-intent-and-conditional-cutover.md).
 
 ---
 
