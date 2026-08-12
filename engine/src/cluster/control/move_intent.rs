@@ -121,6 +121,8 @@ pub struct MoveIntent {
     pub operation_id: u64,
     pub position: u32,
     pub expected_assignment_generation: u64,
+    /// Logical row-placement identity under which recovery and fingerprints are valid.
+    pub placement_generation: u64,
     pub expected: ShardAssignment,
     pub desired: ShardAssignment,
     pub members: Vec<MoveMemberIdentity>,
@@ -227,6 +229,12 @@ fn identities_match(state: &ClusterState, intent: &MoveIntent) -> bool {
     intent.members.iter().all(|member| {
         !member.endpoint.is_empty()
             && member.endpoint == normalized_move_endpoint(&member.endpoint)
+            && intent
+                .members
+                .iter()
+                .filter(|candidate| candidate.endpoint == member.endpoint)
+                .count()
+                == 1
             && state
                 .nodes
                 .iter()
@@ -244,6 +252,7 @@ fn valid_begin(state: &ClusterState, intent: &MoveIntent) -> bool {
         && intent.desired.position == intent.position
         && intent.expected != intent.desired
         && intent.live_generation != 0
+        && intent.placement_generation == state.placement_generation
         && matches!(intent.phase, MoveIntentPhase::Preparing)
         && identities_match(state, intent)
 }
@@ -268,7 +277,17 @@ fn assignment_matches_expected(state: &ClusterState, intent: &MoveIntent) -> boo
         == Some(&intent.expected)
         && state.moves.assignment_generation(intent.position)
             == intent.expected_assignment_generation
+        && state.placement_generation == intent.placement_generation
         && identities_match(state, intent)
+}
+
+fn member_endpoints_overlap(left: &MoveIntent, right: &MoveIntent) -> bool {
+    left.members.iter().any(|left_member| {
+        right
+            .members
+            .iter()
+            .any(|right_member| left_member.endpoint == right_member.endpoint)
+    })
 }
 
 fn replace_assignment(state: &mut ClusterState, assignment: ShardAssignment) {
@@ -305,6 +324,14 @@ pub(super) fn apply_move(state: &mut ClusterState, command: MoveCommand) -> Move
                 } else {
                     MoveCommandOutcome::Conflict
                 };
+            }
+            if state
+                .moves
+                .intents
+                .iter()
+                .any(|current| member_endpoints_overlap(current, &intent))
+            {
+                return MoveCommandOutcome::Conflict;
             }
             if let Some(current) = state
                 .moves
@@ -404,10 +431,10 @@ pub(super) fn apply_move(state: &mut ClusterState, command: MoveCommand) -> Move
             else {
                 return MoveCommandOutcome::AlreadyApplied;
             };
-            if matches!(
-                state.moves.intents[index].phase,
-                MoveIntentPhase::Committed(_)
-            ) {
+            let intent = &state.moves.intents[index];
+            if intent.initial_authority != MoveInitialAuthority::Expected
+                || !matches!(intent.phase, MoveIntentPhase::Preparing)
+            {
                 return MoveCommandOutcome::Conflict;
             }
             state.moves.intents.remove(index);

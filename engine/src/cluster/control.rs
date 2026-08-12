@@ -547,6 +547,11 @@ impl ControlPlane for InMemoryControlPlane {
                 "proposals broken (test fault injection)".into(),
             ));
         }
+        if matches!(&change, ClusterStateChange::Move(_)) {
+            return Err(ControlError::Backend(
+                "move commands require ControlPlane::propose_move".into(),
+            ));
+        }
         let mut current = self.lock();
         let mut next = (**current).clone();
         let _ = apply(&mut next, change);

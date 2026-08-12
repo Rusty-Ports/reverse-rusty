@@ -161,6 +161,11 @@ impl ControlPlane for RaftControlPlane {
     }
 
     fn propose(&self, change: ClusterStateChange) -> Result<StateVersion, ControlError> {
+        if matches!(&change, ClusterStateChange::Move(_)) {
+            return Err(ControlError::Backend(
+                "move commands require ControlPlane::propose_move".into(),
+            ));
+        }
         let resp = self
             .handle
             .block_on(self.raft.client_write(change))

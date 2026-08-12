@@ -468,6 +468,7 @@ fn durable_move_intent_resumes_after_control_restart() {
             operation_id,
             position: 0,
             expected_assignment_generation: state.moves.assignment_generation(0),
+            placement_generation: state.placement_generation,
             expected,
             desired: desired.clone(),
             members: vec![

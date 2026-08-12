@@ -192,6 +192,7 @@ fn move_control_with_target(target: u64, operation_id: u64) -> (InMemoryControlP
         operation_id,
         position: 0,
         expected_assignment_generation: state.moves.assignment_generation(0),
+        placement_generation: state.placement_generation,
         expected,
         desired,
         members,
@@ -345,4 +346,127 @@ fn move_state_uses_a_fail_loud_epoch_encoding_after_upgrade() {
     );
     let round_trip: ClusterState = serde_json::from_slice(&current).unwrap();
     assert_eq!(round_trip.moves.format_version, MOVE_CONTROL_FORMAT_CURRENT);
+}
+
+#[test]
+fn generic_propose_refuses_to_hide_a_move_outcome() {
+    let (cp, _) = move_control_with_target(2, 62);
+    let before = cp.cluster_state().unwrap();
+    assert!(matches!(
+        cp.propose(ClusterStateChange::Move(MoveCommand::Abort {
+            operation_id: 999,
+        })),
+        Err(ControlError::Backend(_))
+    ));
+    assert_eq!(*cp.cluster_state().unwrap(), *before);
+}
+
+#[test]
+fn desired_authority_and_ready_intents_cannot_be_aborted() {
+    let (cp, mut desired) = move_control_with_target(2, 63);
+    desired.initial_authority = MoveInitialAuthority::Desired;
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(desired))
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Applied
+    );
+    assert_eq!(
+        cp.propose_move(MoveCommand::Abort { operation_id: 63 })
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Conflict
+    );
+    assert_eq!(cp.cluster_state().unwrap().moves.intents.len(), 1);
+
+    let (cp, expected) = move_control_with_target(2, 64);
+    cp.propose_move(MoveCommand::Begin(expected)).unwrap();
+    cp.propose_move(MoveCommand::MarkReady {
+        operation_id: 64,
+        evidence: recovery_evidence(2),
+    })
+    .unwrap();
+    assert_eq!(
+        cp.propose_move(MoveCommand::Abort { operation_id: 64 })
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Conflict
+    );
+}
+
+#[test]
+fn active_intents_reserve_their_physical_endpoint_footprints() {
+    let cp = InMemoryControlPlane::single_node(2, 64, 0);
+    for id in [1, 2, 3] {
+        cp.propose(ClusterStateChange::AddNode(node(id, NodeRole::Data)))
+            .unwrap();
+    }
+    for position in 0..2 {
+        cp.propose(ClusterStateChange::AssignShard(ShardAssignment {
+            position,
+            primary: NodeId(1),
+            replicas: Vec::new(),
+        }))
+        .unwrap();
+    }
+    let state = cp.cluster_state().unwrap();
+    let make_intent = |position, target, operation_id| MoveIntent {
+        intent_version: MOVE_INTENT_VERSION,
+        operation_id,
+        position,
+        expected_assignment_generation: state.moves.assignment_generation(position),
+        placement_generation: state.placement_generation,
+        expected: ShardAssignment {
+            position,
+            primary: NodeId(1),
+            replicas: Vec::new(),
+        },
+        desired: ShardAssignment {
+            position,
+            primary: NodeId(target),
+            replicas: Vec::new(),
+        },
+        members: [1, target]
+            .into_iter()
+            .map(|id| MoveMemberIdentity {
+                node: NodeId(id),
+                endpoint: format!("http://127.0.0.1:{}", 50050 + id),
+            })
+            .collect(),
+        live_generation: 21,
+        initial_authority: MoveInitialAuthority::Expected,
+        phase: MoveIntentPhase::Preparing,
+    };
+    let first = make_intent(0, 2, 71);
+    let overlapping = make_intent(1, 3, 72);
+    drop(state);
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(first)).unwrap().outcome,
+        MoveCommandOutcome::Applied
+    );
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(overlapping))
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Conflict
+    );
+}
+
+#[test]
+fn placement_generation_change_invalidates_recovery_evidence() {
+    let (cp, intent) = move_control_with_target(2, 73);
+    cp.propose_move(MoveCommand::Begin(intent)).unwrap();
+    cp.propose(ClusterStateChange::BumpModelVersion {
+        dict_fingerprint: 99,
+    })
+    .unwrap();
+    assert_eq!(
+        cp.propose_move(MoveCommand::MarkReady {
+            operation_id: 73,
+            evidence: recovery_evidence(2),
+        })
+        .unwrap()
+        .outcome,
+        MoveCommandOutcome::Conflict
+    );
 }

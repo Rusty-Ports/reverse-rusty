@@ -213,6 +213,11 @@ impl ControlPlane for RemoteControlPlane {
     }
 
     fn propose(&self, change: ClusterStateChange) -> Result<StateVersion, ControlError> {
+        if matches!(&change, ClusterStateChange::Move(_)) {
+            return Err(ControlError::Backend(
+                "move commands require ControlPlane::propose_move".into(),
+            ));
+        }
         match self.call(&ClientControlRequest::Propose(change))? {
             ClientControlReply::Committed(v) => Ok(StateVersion(v)),
             ClientControlReply::Err(e) => Err(e.into()),

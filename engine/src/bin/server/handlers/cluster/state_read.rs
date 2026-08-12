@@ -216,13 +216,34 @@ impl FromRequest<Arc<ClusterAppState>> for ClusterStateTransport {
     }
 }
 
-#[derive(Serialize)]
 struct ClusterStateResponse {
     /// Elasticsearch/OpenSearch-familiar exact alias for the application-level
     /// committed state version.
     version: u64,
-    #[serde(flatten)]
     state: ClusterState,
+}
+
+impl Serialize for ClusterStateResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut response = serializer.serialize_struct("ClusterStateResponse", 12)?;
+        response.serialize_field("version", &self.version)?;
+        response.serialize_field("epoch", &self.state.epoch)?;
+        response.serialize_field("nodes", &self.state.nodes)?;
+        response.serialize_field("voters", &self.state.voters)?;
+        response.serialize_field("assignments", &self.state.assignments)?;
+        response.serialize_field("num_shards", &self.state.num_shards)?;
+        response.serialize_field("vnodes", &self.state.vnodes)?;
+        response.serialize_field("dict_fingerprint", &self.state.dict_fingerprint)?;
+        response.serialize_field("model_version", &self.state.model_version)?;
+        response.serialize_field("placement_generation", &self.state.placement_generation)?;
+        response.serialize_field("moves", &self.state.moves)?;
+        response.end()
+    }
 }
 
 enum ClusterStateWorkerError {
