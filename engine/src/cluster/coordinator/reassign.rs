@@ -24,7 +24,6 @@
 //! byte-identical.
 
 use std::cell::Cell;
-use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::runtime::Handle;
@@ -349,10 +348,87 @@ impl ClusterEngine {
             return Ok(None);
         }
 
-        // A committed target still needs a physical repair when raw handoff left live routing
-        // elsewhere, but it does not need an assignment transition. This pre-existing divergent
-        // state is outside the normal durable-move path; repair it in place and keep the already
-        // authoritative committed target.
+        let live_identity = normalized_endpoint(&live_ep);
+        let committed_identity = normalized_endpoint(&from_ep);
+        let target_identity = normalized_endpoint(&tgt_ep);
+        if live_identity != committed_identity && live_identity != target_identity {
+            // A raw handoff chain can leave physical authority on B while the durable assignment
+            // still names A and this request wants C. First conditionally reconcile A → B as an
+            // already-live authority, then re-plan B → C. This keeps every persisted intent's
+            // expected primary equal to the source whose fence startup can attest.
+            let mut live_nodes = state.nodes.iter().filter(|node| {
+                node.addr
+                    .as_deref()
+                    .is_some_and(|endpoint| normalized_endpoint(endpoint) == live_identity)
+            });
+            let live_node = live_nodes.next().map(|node| node.id).ok_or_else(|| {
+                ShardError::ControlPlane(format!(
+                    "reassign_and_move: live source {live_ep} is not a registered membership \
+                     endpoint; register its authoritative node before moving onward"
+                ))
+            })?;
+            if live_nodes.next().is_some() {
+                return Err(ShardError::ControlPlane(format!(
+                    "reassign_and_move: live source {live_ep} aliases multiple membership nodes; \
+                     reconcile that logical identity explicitly before moving onward"
+                )));
+            }
+            let live_generation = self
+                .handoffs
+                .get(position)
+                .ok_or_else(|| {
+                    ShardError::Config(format!(
+                        "reassign_and_move: shard position {position} is not handoff-capable"
+                    ))
+                })?
+                .generation();
+            let source_fence_generation = intent::plan_live_authority_fence(
+                &state,
+                &expected,
+                &live_ep,
+                live_generation,
+                "reassign_and_move: attest chained live source",
+            )?;
+            let live_assignment = ShardAssignment {
+                position: pos,
+                primary: live_node,
+                replicas: Vec::new(),
+            };
+            let reconcile_intent = intent::build_intent(
+                &state,
+                expected.clone(),
+                live_assignment,
+                live_generation,
+                source_fence_generation,
+                MoveInitialAuthority::Desired,
+            )?;
+            intent::propose(
+                self.control.as_ref(),
+                MoveCommand::Begin(reconcile_intent.clone()),
+                "reassign_and_move: persist chained-source reconciliation",
+            )?;
+            intent::commit_live_authority(
+                self,
+                &reconcile_intent,
+                &live_ep,
+                handle,
+                "reassign_and_move: commit chained live source",
+            )?;
+            intent::propose(
+                self.control.as_ref(),
+                MoveCommand::Finish {
+                    operation_id: reconcile_intent.operation_id,
+                },
+                "reassign_and_move: finish chained-source reconciliation",
+            )?;
+            drop(_ticket);
+            return self
+                .reassign_and_move(position, to, handle)
+                .map(|outcome| Some(outcome));
+        }
+
+        // When the requested assignment is already committed, live routing must agree here. A
+        // different physical source was reconciled durably by the branch above before re-planning.
         if from == to && normalized_endpoint(&from_ep) == normalized_endpoint(&tgt_ep) {
             if state
                 .moves
@@ -366,24 +442,32 @@ impl ClusterEngine {
                      cutover before repairing live routing"
                 )));
             }
-            let outcome = match route {
-                HandoffRoute::AlreadyAtTarget { generation } => ReassignOutcome::NoChange {
-                    position: pos,
-                    generation,
-                },
-                HandoffRoute::Move => ReassignOutcome::Moved {
-                    position: pos,
-                    from,
-                    to,
-                    generation: self.execute_handoff_inner(position, &live_ep, &tgt_ep, handle)?,
-                },
+            let HandoffRoute::AlreadyAtTarget { generation } = route else {
+                return Err(ShardError::ControlPlane(format!(
+                    "reassign_and_move: shard position {position} still routes to {live_ep} after \
+                     durable source reconciliation; refusing an unrecorded repair"
+                )));
             };
-            return Ok(Some(outcome));
+            return Ok(Some(ReassignOutcome::NoChange {
+                position: pos,
+                generation,
+            }));
         }
 
-        let (generation, initial_authority) = match route {
+        let (generation, source_fence_generation, initial_authority) = match route {
             HandoffRoute::AlreadyAtTarget { generation } => {
-                (generation, MoveInitialAuthority::Desired)
+                let source_fence_generation = intent::plan_live_authority_fence(
+                    &state,
+                    &expected,
+                    &tgt_ep,
+                    generation,
+                    "reassign_and_move: attest already-live target",
+                )?;
+                (
+                    generation,
+                    source_fence_generation,
+                    MoveInitialAuthority::Desired,
+                )
             }
             HandoffRoute::Move => {
                 let handoff = self.handoffs.get(position).ok_or_else(|| {
@@ -391,7 +475,8 @@ impl ClusterEngine {
                         "reassign_and_move: shard position {position} is not handoff-capable"
                     ))
                 })?;
-                (handoff.generation() + 1, MoveInitialAuthority::Expected)
+                let generation = handoff.generation() + 1;
+                (generation, generation, MoveInitialAuthority::Expected)
             }
         };
         let desired = ShardAssignment {
@@ -399,8 +484,14 @@ impl ClusterEngine {
             primary: to,
             replicas: Vec::new(),
         };
-        let move_intent =
-            intent::build_intent(&state, expected, desired, generation, initial_authority)?;
+        let move_intent = intent::build_intent(
+            &state,
+            expected,
+            desired,
+            generation,
+            source_fence_generation,
+            initial_authority,
+        )?;
         intent::propose(
             self.control.as_ref(),
             MoveCommand::Begin(move_intent.clone()),
@@ -411,35 +502,13 @@ impl ClusterEngine {
         let cutover = Cell::new(false);
         let result = match route {
             HandoffRoute::AlreadyAtTarget { .. } => {
-                let target = RemoteShard::connect_for_coordinator_with_security(
-                    &tgt_ep,
-                    handle.clone(),
-                    self.dict.fingerprint(),
-                    self.tag_dict.fingerprint(),
-                    pos,
-                    self.coordinator_id,
-                    &self.client_security,
-                )?
-                .with_metrics(Arc::clone(&self.transport_metrics));
                 cutover.set(true);
-                let evidence = intent::recovery_evidence(
-                    generation,
-                    vec![intent::member_evidence(to, &target)?],
-                );
-                intent::propose(
-                    self.control.as_ref(),
-                    MoveCommand::MarkReady {
-                        operation_id: move_intent.operation_id,
-                        evidence,
-                    },
-                    "reassign_and_move: persist target evidence",
-                )?;
-                intent::propose(
-                    self.control.as_ref(),
-                    MoveCommand::Commit {
-                        operation_id: move_intent.operation_id,
-                    },
-                    "reassign_and_move: conditional assignment commit",
+                intent::commit_live_authority(
+                    self,
+                    &move_intent,
+                    &tgt_ep,
+                    handle,
+                    "reassign_and_move: commit already-live target",
                 )?;
                 Ok(generation)
             }

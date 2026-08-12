@@ -51,6 +51,32 @@ fn member_identity<'a>(
         })
 }
 
+fn assignment_identity_is_unique(intent: &MoveIntent, assignment: &ShardAssignment) -> bool {
+    let mut nodes = BTreeSet::new();
+    let mut endpoints = BTreeSet::new();
+    for node in assignment_nodes(assignment) {
+        let Ok(member) = member_identity(intent, node) else {
+            return false;
+        };
+        if !nodes.insert(node) || !endpoints.insert(member.endpoint.as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn source_is_desired_physical(intent: &MoveIntent) -> Result<bool, ShardError> {
+    let source = member_identity(intent, intent.expected.primary)?
+        .endpoint
+        .as_str();
+    for node in assignment_nodes(&intent.desired) {
+        if member_identity(intent, node)?.endpoint == source {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn validate_identity(state: &ClusterState, intent: &MoveIntent) -> Result<(), ShardError> {
     if intent.intent_version != MOVE_INTENT_VERSION
         || intent.position >= state.num_shards
@@ -66,17 +92,13 @@ fn validate_identity(state: &ClusterState, intent: &MoveIntent) -> Result<(), Sh
     expected_nodes.sort_unstable();
     expected_nodes.dedup();
     let member_nodes: Vec<NodeId> = intent.members.iter().map(|member| member.node).collect();
-    let unique_endpoints: BTreeSet<&str> = intent
-        .members
-        .iter()
-        .map(|member| member.endpoint.as_str())
-        .collect();
     if member_nodes != expected_nodes
         || !intent
             .members
             .windows(2)
             .all(|pair| pair[0].node < pair[1].node)
-        || unique_endpoints.len() != intent.members.len()
+        || !assignment_identity_is_unique(intent, &intent.expected)
+        || !assignment_identity_is_unique(intent, &intent.desired)
     {
         return Err(ShardError::ControlPlane(format!(
             "durable move {} has an incomplete or non-canonical member identity set",
@@ -194,17 +216,34 @@ impl RecoveryContext<'_> {
     ) -> Result<(), ShardError> {
         let source = self.expected_source(intent)?;
         let actual = source.fence(0)?;
-        let retained = assignment_nodes(&intent.desired).contains(&intent.expected.primary);
-        if actual == intent.live_generation || (allow_retained_unfenced && retained && actual == 0)
+        let retained = source_is_desired_physical(intent)?;
+        if actual == intent.source_fence_generation
+            || (allow_retained_unfenced && retained && actual == 0)
         {
             Ok(())
         } else {
             Err(ShardError::ControlPlane(format!(
                 "durable move {} expected source fence {}, observed {}; refusing ambiguous \
                  authority",
-                intent.operation_id, intent.live_generation, actual
+                intent.operation_id, intent.source_fence_generation, actual
             )))
         }
+    }
+
+    fn ensure_desired_authority_fence(&self, intent: &MoveIntent) -> Result<(), ShardError> {
+        let source = self.expected_source(intent)?;
+        let actual = if intent.source_fence_generation == 0 {
+            source.fence(0)?
+        } else {
+            source.fence(intent.source_fence_generation)?
+        };
+        if actual != intent.source_fence_generation {
+            return Err(ShardError::ControlPlane(format!(
+                "durable move {} could not establish recorded source fence {}; observed {}",
+                intent.operation_id, intent.source_fence_generation, actual
+            )));
+        }
+        Ok(())
     }
 
     fn desired_evidence(&self, intent: &MoveIntent) -> Result<MoveRecoveryEvidence, ShardError> {
@@ -224,12 +263,12 @@ impl RecoveryContext<'_> {
     }
 
     fn clear_retained_source(&self, intent: &MoveIntent) -> Result<(), ShardError> {
-        if !assignment_nodes(&intent.desired).contains(&intent.expected.primary) {
+        if !source_is_desired_physical(intent)? {
             return Ok(());
         }
         let current = self
             .expected_source(intent)?
-            .unfence(intent.live_generation)?;
+            .unfence(intent.source_fence_generation)?;
         if current != 0 {
             return Err(ShardError::ControlPlane(format!(
                 "durable move {} retained source could not be unfenced; generation {} remains",
@@ -242,7 +281,7 @@ impl RecoveryContext<'_> {
     fn abort_expected_preparation(&self, intent: &MoveIntent) -> Result<(), ShardError> {
         let current = self
             .expected_source(intent)?
-            .unfence(intent.live_generation)?;
+            .unfence(intent.source_fence_generation)?;
         if current != 0 {
             return Err(ShardError::ControlPlane(format!(
                 "durable move {} expected source remains fenced at generation {}; refusing to \
@@ -300,7 +339,7 @@ impl RecoveryContext<'_> {
                 self.abort_expected_preparation(intent)
             }
             MoveIntentPhase::Preparing => {
-                self.require_source_fence(intent, false)?;
+                self.ensure_desired_authority_fence(intent)?;
                 let evidence = self.desired_evidence(intent)?;
                 self.commit_with_evidence(intent, evidence)?;
                 self.clear_retained_source(intent)?;

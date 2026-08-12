@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{ClusterState, NodeId, ShardAssignment};
 
-pub const MOVE_INTENT_VERSION: u32 = 2;
+pub const MOVE_INTENT_VERSION: u32 = 3;
 pub const MOVE_CONTROL_FORMAT_LEGACY: u32 = 1;
-// Format 2 was the pre-placement-generation prototype. It is deliberately unsupported: replaying
-// one of those intents under the stronger predicate would make mixed-version state machines apply
-// the same log differently.
-pub const MOVE_CONTROL_FORMAT_CURRENT: u32 = 3;
+// Formats 2 and 3 were pre-release prototypes without the complete placement/source-fence
+// predicate. They are deliberately unsupported: replaying either under the stronger predicate
+// would make mixed-version state machines apply the same log differently.
+pub const MOVE_CONTROL_FORMAT_CURRENT: u32 = 4;
 
 /// Per-position assignment generation used by the move compare-and-set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +130,9 @@ pub struct MoveIntent {
     pub desired: ShardAssignment,
     pub members: Vec<MoveMemberIdentity>,
     pub live_generation: u64,
+    /// Exact fence observed on the expected physical source. It can be zero only for a logical
+    /// NodeId alias whose desired member is the same physical endpoint.
+    pub source_fence_generation: u64,
     pub initial_authority: MoveInitialAuthority,
     pub phase: MoveIntentPhase,
 }
@@ -148,18 +151,18 @@ impl MoveIntent {
 /// Idempotent commands whose preconditions are evaluated atomically by the control state machine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MoveCommand {
-    #[serde(rename = "BeginV2")]
+    #[serde(rename = "BeginV3")]
     Begin(MoveIntent),
-    #[serde(rename = "MarkReadyV2")]
+    #[serde(rename = "MarkReadyV3")]
     MarkReady {
         operation_id: u64,
         evidence: MoveRecoveryEvidence,
     },
-    #[serde(rename = "CommitV2")]
+    #[serde(rename = "CommitV3")]
     Commit { operation_id: u64 },
-    #[serde(rename = "AbortV2")]
+    #[serde(rename = "AbortV3")]
     Abort { operation_id: u64 },
-    #[serde(rename = "FinishV2")]
+    #[serde(rename = "FinishV3")]
     Finish { operation_id: u64 },
 }
 
@@ -211,6 +214,40 @@ fn expected_member_nodes(intent: &MoveIntent) -> Option<Vec<NodeId>> {
     Some(nodes)
 }
 
+fn member_endpoint(intent: &MoveIntent, node: NodeId) -> Option<&str> {
+    intent
+        .members
+        .iter()
+        .find(|member| member.node == node)
+        .map(|member| member.endpoint.as_str())
+}
+
+fn assignment_endpoints_unique(intent: &MoveIntent, assignment: &ShardAssignment) -> bool {
+    let Some(nodes) = assignment_nodes(assignment) else {
+        return false;
+    };
+    let mut endpoints: Vec<&str> = nodes
+        .into_iter()
+        .filter_map(|node| member_endpoint(intent, node))
+        .collect();
+    if endpoints.len() != 1 + assignment.replicas.len() {
+        return false;
+    }
+    endpoints.sort_unstable();
+    endpoints.windows(2).all(|pair| pair[0] != pair[1])
+}
+
+fn source_aliases_desired(intent: &MoveIntent) -> bool {
+    let Some(source) = member_endpoint(intent, intent.expected.primary) else {
+        return false;
+    };
+    assignment_nodes(&intent.desired).is_some_and(|nodes| {
+        nodes.into_iter().any(|node| {
+            node != intent.expected.primary && member_endpoint(intent, node) == Some(source)
+        })
+    })
+}
+
 fn identities_match(state: &ClusterState, intent: &MoveIntent) -> bool {
     let Some(nodes) = expected_member_nodes(intent) else {
         return false;
@@ -231,19 +268,14 @@ fn identities_match(state: &ClusterState, intent: &MoveIntent) -> bool {
     intent.members.iter().all(|member| {
         !member.endpoint.is_empty()
             && member.endpoint == normalized_move_endpoint(&member.endpoint)
-            && intent
-                .members
-                .iter()
-                .filter(|candidate| candidate.endpoint == member.endpoint)
-                .count()
-                == 1
             && state
                 .nodes
                 .iter()
                 .find(|node| node.id == member.node)
                 .and_then(|node| node.addr.as_deref())
                 .is_some_and(|endpoint| normalized_move_endpoint(endpoint) == member.endpoint)
-    })
+    }) && assignment_endpoints_unique(intent, &intent.expected)
+        && assignment_endpoints_unique(intent, &intent.desired)
 }
 
 fn valid_begin(state: &ClusterState, intent: &MoveIntent) -> bool {
@@ -253,7 +285,18 @@ fn valid_begin(state: &ClusterState, intent: &MoveIntent) -> bool {
         && intent.expected.position == intent.position
         && intent.desired.position == intent.position
         && intent.expected != intent.desired
-        && intent.live_generation != 0
+        && (intent.live_generation != 0
+            || intent.initial_authority == MoveInitialAuthority::Desired)
+        && (if source_aliases_desired(intent) {
+            intent.initial_authority == MoveInitialAuthority::Desired
+                && intent.source_fence_generation == 0
+        } else {
+            intent.source_fence_generation != 0
+        })
+        && (intent.initial_authority != MoveInitialAuthority::Expected
+            || intent.source_fence_generation == intent.live_generation)
+        && (intent.initial_authority != MoveInitialAuthority::Desired
+            || (intent.expected.replicas.is_empty() && intent.desired.replicas.is_empty()))
         && intent.placement_generation == state.placement_generation
         && matches!(intent.phase, MoveIntentPhase::Preparing)
         && identities_match(state, intent)
@@ -302,6 +345,7 @@ fn same_move_identity(left: &MoveIntent, right: &MoveIntent) -> bool {
         && left.desired == right.desired
         && left.members == right.members
         && left.live_generation == right.live_generation
+        && left.source_fence_generation == right.source_fence_generation
         && left.initial_authority == right.initial_authority
 }
 
@@ -319,7 +363,7 @@ fn replace_assignment(state: &mut ClusterState, assignment: ShardAssignment) {
 
 /// Apply one move command. The caller still owns the document epoch bump.
 pub(super) fn apply_move(state: &mut ClusterState, command: MoveCommand) -> MoveCommandOutcome {
-    // Once any new command is observed, every snapshot uses the v2 compatibility fence even when
+    // Once any new command is observed, every snapshot uses the v4 compatibility fence even when
     // the command is malformed or loses a race. Otherwise a compacted rejected command could be
     // hidden from an old binary joining from the resulting snapshot.
     state.moves.format_version = MOVE_CONTROL_FORMAT_CURRENT;

@@ -482,6 +482,7 @@ fn durable_move_intent_resumes_after_control_restart() {
                 },
             ],
             live_generation: evidence.live_generation,
+            source_fence_generation: evidence.live_generation,
             initial_authority: MoveInitialAuthority::Expected,
             phase: MoveIntentPhase::Preparing,
         };
@@ -506,7 +507,7 @@ fn durable_move_intent_resumes_after_control_restart() {
 
     assert_eq!(
         &std::fs::read(dir.join("raft-log.bin")).expect("read raft log")[..4],
-        b"RRL3",
+        b"RRL4",
         "the first durable move installs the old-binary rejection fence"
     );
 

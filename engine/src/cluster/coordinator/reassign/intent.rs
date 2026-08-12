@@ -1,5 +1,6 @@
 //! Shared durable-move protocol helpers.
 
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -41,6 +42,7 @@ fn operation_id(intent: &MoveIntent) -> u64 {
     mix_u64(&mut hash, intent.expected_assignment_generation);
     mix_u64(&mut hash, intent.placement_generation);
     mix_u64(&mut hash, intent.live_generation);
+    mix_u64(&mut hash, intent.source_fence_generation);
     mix_u64(
         &mut hash,
         match intent.initial_authority {
@@ -74,6 +76,7 @@ pub(super) fn build_intent(
     expected: ShardAssignment,
     desired: ShardAssignment,
     live_generation: u64,
+    source_fence_generation: u64,
     initial_authority: MoveInitialAuthority,
 ) -> Result<MoveIntent, ShardError> {
     let mut nodes = Vec::new();
@@ -109,11 +112,148 @@ pub(super) fn build_intent(
         desired,
         members,
         live_generation,
+        source_fence_generation,
         initial_authority,
         phase: MoveIntentPhase::Preparing,
     };
     intent.operation_id = operation_id(&intent);
     Ok(intent)
+}
+
+fn endpoint_for(state: &ClusterState, node: NodeId, context: &str) -> Result<String, ShardError> {
+    state
+        .nodes
+        .iter()
+        .find(|descriptor| descriptor.id == node)
+        .and_then(|descriptor| descriptor.addr.as_deref())
+        .map(normalized_endpoint)
+        .ok_or_else(|| {
+            ShardError::ControlPlane(format!(
+                "{context}: node {} has no registered endpoint",
+                node.0
+            ))
+        })
+}
+
+fn connect(
+    engine: &ClusterEngine,
+    endpoint: &str,
+    position: u32,
+    handle: &tokio::runtime::Handle,
+) -> Result<RemoteShard, ShardError> {
+    RemoteShard::connect_for_coordinator_with_security(
+        endpoint,
+        handle.clone(),
+        engine.dict.fingerprint(),
+        engine.tag_dict.fingerprint(),
+        position,
+        engine.coordinator_id,
+        &engine.client_security,
+    )
+    .map(|member| member.with_metrics(Arc::clone(&engine.transport_metrics)))
+}
+
+/// Choose the exact source fence that will make an already-live desired endpoint authoritative.
+/// The caller persists it before applying the fence, so a crash cannot strand an unrecorded
+/// physical side effect. Logical NodeId aliases share one physical endpoint and remain unfenced.
+pub(super) fn plan_live_authority_fence(
+    state: &ClusterState,
+    expected: &ShardAssignment,
+    desired_endpoint: &str,
+    live_generation: u64,
+    context: &str,
+) -> Result<u64, ShardError> {
+    let source_endpoint = endpoint_for(state, expected.primary, context)?;
+    let aliases_source = source_endpoint == normalized_endpoint(desired_endpoint);
+    if aliases_source {
+        return Ok(0);
+    }
+    live_generation.checked_add(1).ok_or_else(|| {
+        ShardError::ControlPlane(format!(
+            "{context}: no source-fence generation remains after live generation {live_generation}"
+        ))
+    })
+}
+
+fn connect_and_adopt_source(
+    engine: &ClusterEngine,
+    move_intent: &MoveIntent,
+    endpoint: &str,
+    handle: &tokio::runtime::Handle,
+) -> Result<RemoteShard, ShardError> {
+    RemoteShard::connect_and_adopt_for_coordinator_with_security(
+        endpoint,
+        handle.clone(),
+        crate::storage::serialize_dict(&engine.dict),
+        engine.dict.fingerprint(),
+        crate::storage::serialize_tagdict(&engine.tag_dict),
+        engine.tag_dict.fingerprint(),
+        move_intent.position,
+        crate::ownership::PlacementGeneration(move_intent.placement_generation),
+        engine.num_shards() as u32,
+        engine.coordinator_id,
+        &engine.client_security,
+    )
+    .map(|member| member.with_metrics(Arc::clone(&engine.transport_metrics)))
+}
+
+/// Persist evidence and conditionally commit an RF=1 target that is already the live authority.
+/// `Begin` must have succeeded first. Re-probing the recorded source fence closes the observation →
+/// evidence race; a changed fence preserves the intent for startup instead of guessing authority.
+pub(super) fn commit_live_authority(
+    engine: &ClusterEngine,
+    move_intent: &MoveIntent,
+    target_endpoint: &str,
+    handle: &tokio::runtime::Handle,
+    context: &str,
+) -> Result<(), ShardError> {
+    if !move_intent.desired.replicas.is_empty() {
+        return Err(ShardError::Config(format!(
+            "{context}: already-live authority reconciliation is RF=1 only"
+        )));
+    }
+    let source_endpoint = move_intent
+        .members
+        .iter()
+        .find(|member| member.node == move_intent.expected.primary)
+        .map(|member| member.endpoint.as_str())
+        .ok_or_else(|| {
+            ShardError::ControlPlane(format!(
+                "{context}: durable move lacks its expected source identity"
+            ))
+        })?;
+    let source = connect_and_adopt_source(engine, move_intent, source_endpoint, handle)?;
+    let actual = if move_intent.source_fence_generation == 0 {
+        source.fence(0)?
+    } else {
+        source.fence(move_intent.source_fence_generation)?
+    };
+    if actual != move_intent.source_fence_generation {
+        return Err(ShardError::ControlPlane(format!(
+            "{context}: recorded source fence {} changed to {actual}",
+            move_intent.source_fence_generation
+        )));
+    }
+    let target = connect(engine, target_endpoint, move_intent.position, handle)?;
+    let evidence = recovery_evidence(
+        move_intent.live_generation,
+        vec![member_evidence(move_intent.desired.primary, &target)?],
+    );
+    propose(
+        engine.control.as_ref(),
+        MoveCommand::MarkReady {
+            operation_id: move_intent.operation_id,
+            evidence,
+        },
+        context,
+    )?;
+    propose(
+        engine.control.as_ref(),
+        MoveCommand::Commit {
+            operation_id: move_intent.operation_id,
+        },
+        context,
+    )
 }
 
 pub(super) fn member_evidence(

@@ -197,6 +197,7 @@ fn move_control_with_target(target: u64, operation_id: u64) -> (InMemoryControlP
         desired,
         members,
         live_generation: 17,
+        source_fence_generation: 17,
         initial_authority: MoveInitialAuthority::Expected,
         phase: MoveIntentPhase::Preparing,
     };
@@ -287,6 +288,63 @@ fn durable_move_is_idempotent_and_commits_assignment_conditionally() {
 }
 
 #[test]
+fn logical_node_aliases_can_share_one_physical_move_endpoint() {
+    let (cp, mut intent) = move_control_with_target(2, 411);
+    let shared = intent.members[0].endpoint.clone();
+    cp.propose(ClusterStateChange::AddNode(NodeDescriptor {
+        id: NodeId(2),
+        addr: Some(shared.clone()),
+        role: NodeRole::Data,
+    }))
+    .unwrap();
+    intent.members[1].endpoint = shared;
+    intent.initial_authority = MoveInitialAuthority::Desired;
+    intent.source_fence_generation = 0;
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent.clone()))
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Applied
+    );
+    cp.propose_move(MoveCommand::MarkReady {
+        operation_id: intent.operation_id,
+        evidence: recovery_evidence(2),
+    })
+    .unwrap();
+    cp.propose_move(MoveCommand::Commit {
+        operation_id: intent.operation_id,
+    })
+    .unwrap();
+    cp.propose_move(MoveCommand::Finish {
+        operation_id: intent.operation_id,
+    })
+    .unwrap();
+    assert_eq!(cp.cluster_state().unwrap().assignments[0], intent.desired);
+}
+
+#[test]
+fn desired_authority_is_rejected_for_replica_groups() {
+    let (cp, mut intent) = move_control_with_target(2, 412);
+    intent.expected.replicas.push(NodeId(3));
+    intent.desired.replicas.push(NodeId(3));
+    intent.members.push(MoveMemberIdentity {
+        node: NodeId(3),
+        endpoint: "http://127.0.0.1:50053".into(),
+    });
+    intent.members.sort_unstable_by_key(|member| member.node);
+    intent.initial_authority = MoveInitialAuthority::Desired;
+    cp.propose(ClusterStateChange::AssignShard(intent.expected.clone()))
+        .unwrap();
+    intent.expected_assignment_generation =
+        cp.cluster_state().unwrap().moves.assignment_generation(0);
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent)).unwrap().outcome,
+        MoveCommandOutcome::Invalid,
+        "replica recovery needs a fenced, converged expected authority"
+    );
+}
+
+#[test]
 fn assignment_generation_invalidates_a_stale_move() {
     let (cp, intent) = move_control_with_target(2, 42);
     cp.propose(ClusterStateChange::AssignShard(intent.expected.clone()))
@@ -363,7 +421,7 @@ fn move_state_uses_a_fail_loud_epoch_encoding_after_upgrade() {
 }
 
 #[test]
-fn placement_bound_move_schema_rejects_the_predecessor_format() {
+fn source_fence_bound_move_schema_rejects_predecessor_formats() {
     let (cp, intent) = move_control_with_target(2, 610);
     assert_eq!(
         cp.propose_move(MoveCommand::Begin(intent.clone()))
@@ -373,7 +431,7 @@ fn placement_bound_move_schema_rejects_the_predecessor_format() {
     );
 
     let current_command = serde_json::to_value(MoveCommand::Begin(intent.clone())).unwrap();
-    assert!(current_command.get("BeginV2").is_some());
+    assert!(current_command.get("BeginV3").is_some());
     assert!(
         serde_json::from_value::<MoveCommand>(serde_json::json!({ "Begin": intent })).is_err(),
         "the predecessor wire variant must not enter a mixed-version state machine"
@@ -393,12 +451,25 @@ fn placement_bound_move_schema_rejects_the_predecessor_format() {
         "current move state must not default a missing placement predicate"
     );
 
-    predecessor["epoch"]["control_format_version"] = serde_json::json!(2);
-    predecessor["moves"]["format_version"] = serde_json::json!(2);
+    let mut missing_source_fence = predecessor.clone();
+    missing_source_fence["moves"]["intents"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_fence_generation");
+    assert!(
+        serde_json::from_value::<ClusterState>(missing_source_fence)
+            .unwrap_err()
+            .to_string()
+            .contains("source_fence_generation"),
+        "current move state must not default a missing source-fence predicate"
+    );
+
+    predecessor["epoch"]["control_format_version"] = serde_json::json!(3);
+    predecessor["moves"]["format_version"] = serde_json::json!(3);
     let error = serde_json::from_value::<ClusterState>(predecessor).unwrap_err();
     assert!(error
         .to_string()
-        .contains("unsupported move control format 2"));
+        .contains("unsupported move control format 3"));
 }
 
 #[test]
@@ -535,6 +606,7 @@ fn active_intents_reserve_their_physical_endpoint_footprints() {
             })
             .collect(),
         live_generation: 21,
+        source_fence_generation: 21,
         initial_authority: MoveInitialAuthority::Expected,
         phase: MoveIntentPhase::Preparing,
     };

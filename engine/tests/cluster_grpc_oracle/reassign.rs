@@ -32,6 +32,145 @@ use reverse_rusty::cluster::{
 use crate::harness::*;
 use crate::relocation::primary_endpoints;
 
+#[test]
+fn grpc_reassign_commits_a_logical_node_alias_on_the_same_endpoint() {
+    let queries = vec![(11, "+nike +shoe".to_string())];
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let tags = empty_tag_dict();
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let nodes = spin_two_servers(&rt, &norm, "reassign_node_alias");
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tags),
+        &cfg,
+        std::slice::from_ref(&nodes.src_ep),
+        rt.handle(),
+    )
+    .expect("connect source");
+    cluster.ingest(&queries).expect("ingest");
+    for id in [1, 2] {
+        cluster
+            .register_node(NodeDescriptor {
+                id: NodeId(id),
+                addr: Some(nodes.src_ep.clone()),
+                role: NodeRole::Data,
+            })
+            .expect("register logical alias");
+    }
+    cluster
+        .reassign_shard(reverse_rusty::cluster::ShardAssignment {
+            position: 0,
+            primary: NodeId(1),
+            replicas: Vec::new(),
+        })
+        .expect("seed logical source");
+
+    assert!(matches!(
+        cluster
+            .reassign_and_move(0, NodeId(2), rt.handle())
+            .expect("commit logical alias"),
+        ReassignOutcome::Reconciled {
+            from: NodeId(1),
+            to: NodeId(2),
+            ..
+        }
+    ));
+    let state = cluster.control_state().expect("committed state");
+    assert_eq!(state.assignments[0].primary, NodeId(2));
+    assert!(state.moves.intents.is_empty());
+    assert!(cluster
+        .percolate("nike running shoe")
+        .expect("alias read")
+        .contains(&11));
+
+    let _ = std::fs::remove_dir_all(&nodes.src_dir);
+    let _ = std::fs::remove_dir_all(&nodes.tgt_dir);
+}
+
+#[test]
+fn grpc_reassign_reconciles_a_chained_raw_source_before_moving_onward() {
+    let queries = vec![
+        (21, "+nike +shoe".to_string()),
+        (22, "+sony +tv".to_string()),
+    ];
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let tags = empty_tag_dict();
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let nodes = spin_three_servers(&rt, &norm, "reassign_chained_source");
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tags),
+        &cfg,
+        std::slice::from_ref(&nodes.first_ep),
+        rt.handle(),
+    )
+    .expect("connect first source");
+    cluster.ingest(&queries).expect("ingest");
+    for (id, endpoint) in [
+        (1, &nodes.first_ep),
+        (2, &nodes.second_ep),
+        (3, &nodes.third_ep),
+    ] {
+        cluster
+            .register_node(NodeDescriptor {
+                id: NodeId(id),
+                addr: Some(endpoint.clone()),
+                role: NodeRole::Data,
+            })
+            .expect("register node");
+    }
+    cluster
+        .reassign_shard(reverse_rusty::cluster::ShardAssignment {
+            position: 0,
+            primary: NodeId(1),
+            replicas: Vec::new(),
+        })
+        .expect("seed first source");
+    cluster
+        .execute_handoff(0, &nodes.first_ep, &nodes.second_ep, rt.handle())
+        .expect("raw handoff to second source");
+    cluster
+        .add_query(23, "+nike")
+        .expect("write acknowledged only by the chained live source");
+
+    assert!(matches!(
+        cluster
+            .reassign_and_move(0, NodeId(3), rt.handle())
+            .expect("reconcile second source then move to third"),
+        ReassignOutcome::Moved {
+            from: NodeId(2),
+            to: NodeId(3),
+            generation: 2,
+            ..
+        }
+    ));
+    let state = cluster.control_state().expect("final state");
+    assert_eq!(state.assignments[0].primary, NodeId(3));
+    assert!(state.moves.intents.is_empty());
+    assert!(cluster
+        .percolate("nike running shoe")
+        .expect("final target read")
+        .contains(&23));
+
+    for dir in [&nodes.first_dir, &nodes.second_dir, &nodes.third_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// Register source = node 1 (the src endpoint) and target = node 2 (the tgt endpoint), and commit a
 /// position-preserving map: position 0 → node 1 (where the data physically lives after ingest). This
 /// is the precondition `reassign_and_move` reads `from`/`to` endpoints from.
@@ -454,9 +593,9 @@ fn grpc_reassign_reconciles_an_existing_live_move_without_stale_recopy() {
     let _ = std::fs::remove_dir_all(&nodes.tgt_dir);
 }
 
-/// A pre-existing committed target does not make live divergence a no-op. Reassignment repairs the
-/// live backing, then recognizes that the durable owner already agrees instead of issuing a second
-/// assignment proposal or reporting the result uncommitted if that redundant proposal failed.
+/// A pre-existing committed target does not make live divergence a no-op. Reassignment first makes
+/// the attested live source durable, then moves back to the requested target under a second intent;
+/// every crash boundary therefore has one restartable authority instead of an unrecorded repair.
 #[test]
 fn grpc_reassign_repairs_live_routing_without_recommitting_existing_target() {
     let (queries, titles) = build_corpus();
@@ -498,17 +637,17 @@ fn grpc_reassign_repairs_live_routing_without_recommitting_existing_target() {
             outcome,
             ReassignOutcome::Moved {
                 position: 0,
-                from: NodeId(2),
+                from: NodeId(1),
                 to: NodeId(2),
                 generation: 1,
             }
         ),
-        "live routing must move without a redundant durable proposal: {outcome:?}"
+        "live routing must be reconciled durably before moving to the requested target: {outcome:?}"
     );
     assert_eq!(
         cluster.control_state().expect("state after repair").epoch,
-        before,
-        "an already-committed target must not receive a redundant proposal"
+        before + 8,
+        "source reconciliation and the physical move each persist Begin/Ready/Commit/Finish"
     );
     for (index, title) in titles.iter().enumerate() {
         let got: HashSet<u64> = cluster
@@ -579,12 +718,12 @@ fn grpc_reassign_repair_clears_a_demoted_targets_stale_fence() {
             outcome,
             ReassignOutcome::Moved {
                 position: 0,
-                from: NodeId(1),
+                from: NodeId(2),
                 to: NodeId(1),
                 generation: 2,
             }
         ),
-        "repair must recover and swap back without a redundant commit: {outcome:?}"
+        "repair must durably reconcile live B, then recover and swap back: {outcome:?}"
     );
     cluster
         .add_query(repaired_target_addition.0, &repaired_target_addition.1)

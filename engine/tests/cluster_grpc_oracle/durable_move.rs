@@ -101,6 +101,7 @@ fn intent(state: &reverse_rusty::cluster::ClusterState, nodes: &TwoNode) -> Move
             },
         ],
         live_generation: 1,
+        source_fence_generation: 1,
         initial_authority: MoveInitialAuthority::Desired,
         phase: MoveIntentPhase::Preparing,
     }
@@ -202,6 +203,56 @@ fn startup_commits_a_preparing_desired_authority_without_stale_recopy() {
             .contains(&13),
         "startup must preserve the post-handoff write that exists only on the desired authority"
     );
+    cleanup(&scenario);
+}
+
+#[test]
+fn startup_fences_an_unadopted_map_only_source_after_intent_replay() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let scenario = scenario("durable_map_only_source", &rt);
+    scenario
+        .cluster
+        .reassign_shard(ShardAssignment {
+            position: 0,
+            primary: NodeId(2),
+            replicas: Vec::new(),
+        })
+        .expect("craft map-only target while node one remains live");
+    let control = InMemoryControlPlane::new(scenario.cluster.control_state().expect("state"));
+    let state = control.cluster_state().expect("map-only state");
+    let mut move_intent = intent(&state, &scenario.nodes);
+    move_intent.desired.primary = NodeId(1);
+    move_intent.live_generation = 0;
+    move_intent.source_fence_generation = 1;
+    control
+        .propose_move(MoveCommand::Begin(move_intent))
+        .expect("persist reconciliation before touching the empty mapped source");
+
+    let coordinator_id = RemoteShard::new_coordinator_id();
+    assert_eq!(
+        recover(&control, &scenario, &rt, coordinator_id)
+            .expect("adopt and fence mapped source, then restore live authority"),
+        1
+    );
+    let recovered = control.cluster_state().expect("recovered state");
+    assert_eq!(recovered.assignments[0].primary, NodeId(1));
+    assert!(recovered.moves.intents.is_empty());
+    let restarted = ClusterEngine::connect_remote_exclusive(
+        Arc::clone(&scenario.norm),
+        Arc::clone(&scenario.dict),
+        Arc::clone(&scenario.tags),
+        &ClusterConfig {
+            num_shards: 1,
+            ..ClusterConfig::default()
+        },
+        std::slice::from_ref(&scenario.nodes.src_ep),
+        rt.handle(),
+        coordinator_id,
+    )
+    .expect("connect restored live source");
+    restarted
+        .upsert_query(17, "+nike", 1)
+        .expect("restored live source remains writable");
     cleanup(&scenario);
 }
 

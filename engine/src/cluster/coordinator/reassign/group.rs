@@ -293,6 +293,7 @@ impl ClusterEngine {
             committed.clone(),
             desired.clone(),
             new_gen,
+            new_gen,
             MoveInitialAuthority::Expected,
         )?;
         intent::propose(
