@@ -246,6 +246,22 @@ impl ControlService for ControlServer {
                 Ok(r) => ClientControlReply::Committed(r.data.version),
                 Err(e) => ClientControlReply::Err(WireControlError::from(&map_client_write(e))),
             },
+            ClientControlRequest::ProposeMove(command) => match self
+                .raft
+                .client_write(super::control::ClusterStateChange::Move(command))
+                .await
+            {
+                Ok(r) => match r.data.move_outcome {
+                    Some(outcome) => ClientControlReply::MoveCommitted {
+                        version: r.data.version,
+                        outcome,
+                    },
+                    None => ClientControlReply::Err(WireControlError::Backend(
+                        "move proposal committed without a move outcome".into(),
+                    )),
+                },
+                Err(e) => ClientControlReply::Err(WireControlError::from(&map_client_write(e))),
+            },
             ClientControlRequest::ChangeMembership(voters) => {
                 let set: BTreeSet<u64> = voters.iter().map(|n| n.0).collect();
                 match self.raft.change_membership(set, false).await {

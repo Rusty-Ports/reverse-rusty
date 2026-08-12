@@ -10,10 +10,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use openraft::storage::{LogFlushed, RaftLogStorage};
 use openraft::{
-    Entry, LogId, LogState, OptionalSend, RaftLogReader, StorageError, StorageIOError, Vote,
+    Entry, EntryPayload, LogId, LogState, OptionalSend, RaftLogReader, StorageError,
+    StorageIOError, Vote,
 };
 
-use crate::cluster::control::ControlError;
+use crate::cluster::control::{ClusterStateChange, ControlError};
 use crate::cluster::control_store;
 
 use super::TypeConfig;
@@ -29,6 +30,7 @@ struct LogStoreInner {
     /// dir, with `log_file` the CRC-framed append handle and `fsync` the durability policy.
     paths: Option<control_store::RaftPaths>,
     log_file: Option<std::fs::File>,
+    log_format: control_store::LogFormat,
     fsync: bool,
 }
 
@@ -51,6 +53,7 @@ impl LogStore {
                 committed: None,
                 paths: None,
                 log_file: None,
+                log_format: control_store::LogFormat::Legacy,
                 fsync: false,
             })),
         }
@@ -67,7 +70,7 @@ impl LogStore {
         let cf: fn(std::io::Error) -> ControlError =
             |e| ControlError::Backend(format!("raft store open: {e}"));
         let paths = control_store::RaftPaths::new(dir.to_path_buf());
-        let entries: Vec<Entry<TypeConfig>> =
+        let (entries, log_format): (Vec<Entry<TypeConfig>>, _) =
             control_store::read_records(&paths.log()).map_err(cf)?;
         let mut log = BTreeMap::new();
         for e in entries {
@@ -78,7 +81,7 @@ impl LogStore {
             .map_err(cf)?
             .flatten();
         let last_purged = control_store::read_value(&paths.purged()).map_err(cf)?;
-        let log_file = control_store::ensure_log(&paths.log()).map_err(cf)?;
+        let log_file = control_store::ensure_log(&paths.log(), log_format).map_err(cf)?;
         Ok(LogStore {
             inner: Arc::new(Mutex::new(LogStoreInner {
                 log,
@@ -87,6 +90,7 @@ impl LogStore {
                 committed,
                 paths: Some(paths),
                 log_file: Some(log_file),
+                log_format,
                 fsync,
             })),
         })
@@ -105,9 +109,35 @@ fn rewrite_and_reopen(inner: &mut LogStoreInner) -> std::io::Result<()> {
     };
     {
         let records: Vec<&Entry<TypeConfig>> = inner.log.values().collect();
-        control_store::rewrite_records(&path, &records, inner.fsync)?;
+        control_store::rewrite_records(&path, &records, inner.fsync, inner.log_format)?;
     }
-    inner.log_file = Some(control_store::ensure_log(&path)?);
+    inner.log_file = Some(control_store::ensure_log(&path, inner.log_format)?);
+    Ok(())
+}
+
+/// Atomically install the one-way V2 log header before the first move entry is appended. The
+/// rewrite preserves every prior entry; a crash after it but before the new append merely leaves a
+/// conservatively fenced log that old code rejects.
+fn fence_durable_moves(inner: &mut LogStoreInner) -> std::io::Result<()> {
+    if inner.log_format == control_store::LogFormat::DurableMoves {
+        return Ok(());
+    }
+    let Some(path) = inner.paths.as_ref().map(control_store::RaftPaths::log) else {
+        inner.log_format = control_store::LogFormat::DurableMoves;
+        return Ok(());
+    };
+    let records: Vec<&Entry<TypeConfig>> = inner.log.values().collect();
+    control_store::rewrite_records(
+        &path,
+        &records,
+        inner.fsync,
+        control_store::LogFormat::DurableMoves,
+    )?;
+    inner.log_file = Some(control_store::ensure_log(
+        &path,
+        control_store::LogFormat::DurableMoves,
+    )?);
+    inner.log_format = control_store::LogFormat::DurableMoves;
     Ok(())
 }
 
@@ -186,8 +216,17 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         I: IntoIterator<Item = Entry<TypeConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
+        let entries: Vec<Entry<TypeConfig>> = entries.into_iter().collect();
         {
             let mut inner = self.lock();
+            if entries.iter().any(|entry| {
+                matches!(
+                    &entry.payload,
+                    EntryPayload::Normal(ClusterStateChange::Move(_))
+                )
+            }) {
+                fence_durable_moves(&mut inner).map_err(|e| StorageIOError::write_logs(&e))?;
+            }
             let fsync = inner.fsync;
             for entry in entries {
                 // Durable-first: persist the framed record BEFORE acknowledging the flush, so a

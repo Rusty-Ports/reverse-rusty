@@ -24,8 +24,10 @@ use std::time::{Duration, Instant};
 
 use reverse_rusty::cluster::{
     durable_single_node, in_process_cluster, start_grpc_node, ClusterState, ClusterStateChange,
-    ControlError, ControlPlane, ControlServer, InMemoryControlPlane, NodeDescriptor, NodeId,
-    NodeRole, RaftControlPlane, ShardAssignment,
+    ControlError, ControlPlane, ControlServer, InMemoryControlPlane, MoveCommand,
+    MoveCommandOutcome, MoveInitialAuthority, MoveIntent, MoveIntentPhase, MoveMemberEvidence,
+    MoveMemberIdentity, MoveRecoveryEvidence, NodeDescriptor, NodeId, NodeRole, RaftControlPlane,
+    ShardAssignment, MOVE_INTENT_VERSION,
 };
 use tokio::runtime::Runtime;
 use tonic::transport::server::TcpIncoming;
@@ -411,6 +413,131 @@ fn durable_node_recovers_committed_document_after_restart() {
         after.nodes.iter().any(|n| n.id == NodeId(3)),
         "the post-restart write is present on the recovered node"
     );
+
+    reopened.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A move intent and its exact recovery evidence survive a manager restart before cutover. The
+/// restarted node can conditionally commit and finish the same operation without an operator
+/// replaying the original request. The first move command also installs the one-way durable-log
+/// header that makes an old manager binary fail loud.
+#[test]
+fn durable_move_intent_resumes_after_control_restart() {
+    let rt = Runtime::new().expect("tokio runtime");
+    let dir = std::env::temp_dir().join(format!("rr_raft_move_restart_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let operation_id = 0xCAFE;
+    let desired = ShardAssignment {
+        position: 0,
+        primary: NodeId(2),
+        replicas: vec![NodeId(1)],
+    };
+    let evidence = MoveRecoveryEvidence {
+        live_generation: 99,
+        members: vec![
+            MoveMemberEvidence {
+                node: NodeId(1),
+                fingerprint_lo: 11,
+                fingerprint_hi: 12,
+                live_count: 13,
+            },
+            MoveMemberEvidence {
+                node: NodeId(2),
+                fingerprint_lo: 21,
+                fingerprint_hi: 22,
+                live_count: 23,
+            },
+        ],
+    };
+
+    {
+        let node = durable_single_node(7, &dir, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle())
+            .expect("durable node");
+        run_doc_script(&node);
+        let state = node.cluster_state().expect("state before move");
+        let expected = state
+            .assignments
+            .iter()
+            .find(|assignment| assignment.position == 0)
+            .expect("position zero")
+            .clone();
+        let intent = MoveIntent {
+            intent_version: MOVE_INTENT_VERSION,
+            operation_id,
+            position: 0,
+            expected_assignment_generation: state.moves.assignment_generation(0),
+            expected,
+            desired: desired.clone(),
+            members: vec![
+                MoveMemberIdentity {
+                    node: NodeId(1),
+                    endpoint: "http://127.0.0.1:50051".into(),
+                },
+                MoveMemberIdentity {
+                    node: NodeId(2),
+                    endpoint: "http://127.0.0.1:50052".into(),
+                },
+            ],
+            live_generation: evidence.live_generation,
+            initial_authority: MoveInitialAuthority::Expected,
+            phase: MoveIntentPhase::Preparing,
+        };
+        drop(state);
+        assert_eq!(
+            node.propose_move(MoveCommand::Begin(intent))
+                .expect("persist intent")
+                .outcome,
+            MoveCommandOutcome::Applied
+        );
+        assert_eq!(
+            node.propose_move(MoveCommand::MarkReady {
+                operation_id,
+                evidence: evidence.clone(),
+            })
+            .expect("persist evidence")
+            .outcome,
+            MoveCommandOutcome::Applied
+        );
+        node.shutdown();
+    }
+
+    assert_eq!(
+        &std::fs::read(dir.join("raft-log.bin")).expect("read raft log")[..4],
+        b"RRL2",
+        "the first durable move installs the old-binary rejection fence"
+    );
+
+    let reopened = durable_single_node(7, &dir, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle())
+        .expect("restart durable node");
+    let recovered = reopened.cluster_state().expect("recovered state");
+    assert!(matches!(
+        recovered.moves.intents.as_slice(),
+        [MoveIntent {
+            operation_id: id,
+            phase: MoveIntentPhase::Ready(stored),
+            ..
+        }] if *id == operation_id && stored == &evidence
+    ));
+    drop(recovered);
+    assert_eq!(
+        reopened
+            .propose_move(MoveCommand::Commit { operation_id })
+            .expect("commit recovered move")
+            .outcome,
+        MoveCommandOutcome::Applied
+    );
+    assert_eq!(
+        reopened
+            .propose_move(MoveCommand::Finish { operation_id })
+            .expect("finish recovered move")
+            .outcome,
+        MoveCommandOutcome::Applied
+    );
+    let committed = reopened.cluster_state().expect("committed state");
+    assert_eq!(committed.assignments[0], desired);
+    assert!(committed.moves.intents.is_empty());
 
     reopened.shutdown();
     let _ = std::fs::remove_dir_all(&dir);

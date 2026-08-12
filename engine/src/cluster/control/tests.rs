@@ -160,3 +160,189 @@ fn control_error_folds_into_shard_error() {
     let e: ShardError = ControlError::NoQuorum.into();
     assert!(matches!(e, ShardError::ControlPlane(_)));
 }
+
+fn move_control_with_target(target: u64, operation_id: u64) -> (InMemoryControlPlane, MoveIntent) {
+    let cp = InMemoryControlPlane::single_node(1, 64, 0);
+    for id in [1, 2, 3] {
+        cp.propose(ClusterStateChange::AddNode(node(id, NodeRole::Data)))
+            .unwrap();
+    }
+    let expected = ShardAssignment {
+        position: 0,
+        primary: NodeId(1),
+        replicas: Vec::new(),
+    };
+    cp.propose(ClusterStateChange::AssignShard(expected.clone()))
+        .unwrap();
+    let state = cp.cluster_state().unwrap();
+    let desired = ShardAssignment {
+        position: 0,
+        primary: NodeId(target),
+        replicas: Vec::new(),
+    };
+    let members = [1, target]
+        .into_iter()
+        .map(|id| MoveMemberIdentity {
+            node: NodeId(id),
+            endpoint: format!("http://127.0.0.1:{}", 50050 + id),
+        })
+        .collect();
+    let intent = MoveIntent {
+        intent_version: MOVE_INTENT_VERSION,
+        operation_id,
+        position: 0,
+        expected_assignment_generation: state.moves.assignment_generation(0),
+        expected,
+        desired,
+        members,
+        live_generation: 17,
+        initial_authority: MoveInitialAuthority::Expected,
+        phase: MoveIntentPhase::Preparing,
+    };
+    drop(state);
+    (cp, intent)
+}
+
+fn recovery_evidence(target: u64) -> MoveRecoveryEvidence {
+    MoveRecoveryEvidence {
+        live_generation: 17,
+        members: vec![MoveMemberEvidence {
+            node: NodeId(target),
+            fingerprint_lo: 11,
+            fingerprint_hi: 22,
+            live_count: 3,
+        }],
+    }
+}
+
+#[test]
+fn durable_move_is_idempotent_and_commits_assignment_conditionally() {
+    let (cp, intent) = move_control_with_target(2, 41);
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent.clone()))
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Applied
+    );
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent.clone()))
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::AlreadyApplied
+    );
+
+    let evidence = recovery_evidence(2);
+    assert_eq!(
+        cp.propose_move(MoveCommand::MarkReady {
+            operation_id: 41,
+            evidence: evidence.clone(),
+        })
+        .unwrap()
+        .outcome,
+        MoveCommandOutcome::Applied
+    );
+    assert_eq!(
+        cp.propose_move(MoveCommand::Commit { operation_id: 41 })
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Applied
+    );
+    assert_eq!(
+        cp.propose_move(MoveCommand::Commit { operation_id: 41 })
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::AlreadyApplied
+    );
+    let state = cp.cluster_state().unwrap();
+    assert_eq!(state.assignments, vec![intent.desired]);
+    assert_eq!(state.moves.assignment_generation(0), 2);
+    assert!(matches!(
+        state.moves.intents[0].phase,
+        MoveIntentPhase::Committed(ref stored) if stored == &evidence
+    ));
+    drop(state);
+
+    assert_eq!(
+        cp.propose_move(MoveCommand::Finish { operation_id: 41 })
+            .unwrap()
+            .outcome,
+        MoveCommandOutcome::Applied
+    );
+    assert!(cp.cluster_state().unwrap().moves.intents.is_empty());
+}
+
+#[test]
+fn assignment_generation_invalidates_a_stale_move() {
+    let (cp, intent) = move_control_with_target(2, 42);
+    cp.propose(ClusterStateChange::AssignShard(intent.expected.clone()))
+        .unwrap();
+    assert_eq!(
+        cp.propose_move(MoveCommand::Begin(intent)).unwrap().outcome,
+        MoveCommandOutcome::Conflict
+    );
+    assert!(cp.cluster_state().unwrap().moves.intents.is_empty());
+}
+
+#[test]
+fn racing_move_begins_have_exactly_one_winner() {
+    use std::sync::Barrier;
+
+    let (cp, first) = move_control_with_target(2, 51);
+    let cp = Arc::new(cp);
+    let mut second = first.clone();
+    second.operation_id = 52;
+    second.desired.primary = NodeId(3);
+    second.members[1] = MoveMemberIdentity {
+        node: NodeId(3),
+        endpoint: "http://127.0.0.1:50053".into(),
+    };
+    let barrier = Arc::new(Barrier::new(3));
+    let run = |intent: MoveIntent| {
+        let cp = Arc::clone(&cp);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            cp.propose_move(MoveCommand::Begin(intent)).unwrap().outcome
+        })
+    };
+    let a = run(first);
+    let b = run(second);
+    barrier.wait();
+    let mut outcomes = [a.join().unwrap(), b.join().unwrap()];
+    outcomes.sort_unstable_by_key(|outcome| match outcome {
+        MoveCommandOutcome::Applied => 0,
+        MoveCommandOutcome::Conflict => 1,
+        MoveCommandOutcome::AlreadyApplied => 2,
+        MoveCommandOutcome::Invalid => 3,
+    });
+    assert_eq!(
+        outcomes,
+        [MoveCommandOutcome::Applied, MoveCommandOutcome::Conflict]
+    );
+    assert_eq!(cp.cluster_state().unwrap().moves.intents.len(), 1);
+}
+
+#[test]
+fn move_state_uses_a_fail_loud_epoch_encoding_after_upgrade() {
+    #[derive(Deserialize)]
+    struct LegacyReader {
+        #[allow(dead_code)]
+        epoch: u64,
+    }
+
+    let (cp, _) = move_control_with_target(2, 61);
+    let legacy = serde_json::to_vec(cp.cluster_state().unwrap().as_ref()).unwrap();
+    assert!(serde_json::from_slice::<LegacyReader>(&legacy).is_ok());
+
+    let result = cp
+        .propose_move(MoveCommand::Abort { operation_id: 999 })
+        .unwrap();
+    assert_eq!(result.outcome, MoveCommandOutcome::AlreadyApplied);
+    let current = serde_json::to_vec(cp.cluster_state().unwrap().as_ref()).unwrap();
+    assert!(
+        serde_json::from_slice::<LegacyReader>(&current).is_err(),
+        "an old binary must reject a state that has observed the move protocol"
+    );
+    let round_trip: ClusterState = serde_json::from_slice(&current).unwrap();
+    assert_eq!(round_trip.moves.format_version, MOVE_CONTROL_FORMAT_CURRENT);
+}

@@ -176,12 +176,13 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         let mut responses = Vec::new();
         for entry in entries {
             inner.last_applied = Some(entry.log_id);
+            let mut move_outcome = None;
             match entry.payload {
                 // A new leader's no-op marker — does NOT advance the semantic epoch.
                 EntryPayload::Blank => {}
                 // The ONE apply funnel shared with InMemoryControlPlane (live ≡ replay).
                 EntryPayload::Normal(change) => {
-                    crate::cluster::control::apply(&mut inner.state, change);
+                    move_outcome = crate::cluster::control::apply(&mut inner.state, change);
                     inner.state.epoch += 1;
                 }
                 // Raft membership ⇒ the app voter set (the faithful change_membership mapping).
@@ -195,7 +196,10 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                 }
             }
             let version = inner.state.epoch;
-            responses.push(ClusterStateResponse { version });
+            responses.push(ClusterStateResponse {
+                version,
+                move_outcome,
+            });
         }
         Ok(responses)
     }

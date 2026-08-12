@@ -18,7 +18,8 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 
 use super::control::{
-    ClusterState, ClusterStateChange, ControlError, ControlPlane, NodeId, StateVersion,
+    ClusterState, ClusterStateChange, ControlError, ControlPlane, MoveCommand, MoveProposalResult,
+    NodeId, StateVersion,
 };
 use super::control_raft::{decode, encode};
 use super::control_wire::{ClientControlReply, ClientControlRequest, WireControlError};
@@ -152,11 +153,13 @@ impl RemoteControlPlane {
     /// redialed fresh (ADR-086) — failover finds a *reachable* node, ForwardToLeader finds the
     /// *leader* among reachable nodes; bounded to one try per endpoint per call.
     ///
-    /// **Writes (`Propose`/`ChangeMembership`) never fail over.** A write that reached the leader may
+    /// **Non-idempotent writes (`Propose`/`ChangeMembership`) never fail over.** A write that reached the leader may
     /// have COMMITTED before a transport error swallowed the response; resubmitting it to another
     /// endpoint could double-apply a non-idempotent op (e.g. `BumpModelVersion` increments the model
     /// version on every commit). So a failed write surfaces loud and converges via an
     /// operator/restart retry — the same "writes never retry" stance as ADR-085's shard transport.
+    /// `ProposeMove` is the exception: its operation id and replicated-state-machine outcome make
+    /// resubmission idempotent, so it uses the same bounded endpoint failover as reads.
     /// The single `ForwardToLeader` follow inside `call_via` stays safe: a follower redirects WITHOUT
     /// applying, so the leader sees the first application.
     fn call(&self, req: &ClientControlRequest) -> Result<ClientControlReply, ControlError> {
@@ -214,6 +217,17 @@ impl ControlPlane for RemoteControlPlane {
             ClientControlReply::Committed(v) => Ok(StateVersion(v)),
             ClientControlReply::Err(e) => Err(e.into()),
             _ => Err(unexpected("Propose")),
+        }
+    }
+
+    fn propose_move(&self, command: MoveCommand) -> Result<MoveProposalResult, ControlError> {
+        match self.call(&ClientControlRequest::ProposeMove(command))? {
+            ClientControlReply::MoveCommitted { version, outcome } => Ok(MoveProposalResult {
+                version: StateVersion(version),
+                outcome,
+            }),
+            ClientControlReply::Err(e) => Err(e.into()),
+            _ => Err(unexpected("ProposeMove")),
         }
     }
 
