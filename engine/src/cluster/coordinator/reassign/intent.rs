@@ -241,7 +241,7 @@ pub(super) fn commit_live_authority(
     );
     propose(
         engine.control.as_ref(),
-        MoveCommand::MarkReady {
+        &MoveCommand::MarkReady {
             operation_id: move_intent.operation_id,
             evidence,
         },
@@ -249,7 +249,7 @@ pub(super) fn commit_live_authority(
     )?;
     propose(
         engine.control.as_ref(),
-        MoveCommand::Commit {
+        &MoveCommand::Commit {
             operation_id: move_intent.operation_id,
         },
         context,
@@ -282,7 +282,7 @@ pub(super) fn recovery_evidence(
 
 pub(super) fn propose(
     control: &dyn ControlPlane,
-    command: MoveCommand,
+    command: &MoveCommand,
     context: &str,
 ) -> Result<(), ShardError> {
     let operation_id = command.operation_id();
@@ -308,15 +308,16 @@ pub(super) fn propose(
             }
         }
     }
-    Err(last_error
-        .map(ShardError::from)
-        .unwrap_or_else(|| ShardError::ControlPlane(format!("{context}: proposal failed"))))
+    Err(last_error.map_or_else(
+        || ShardError::ControlPlane(format!("{context}: proposal failed")),
+        ShardError::from,
+    ))
 }
 
 pub(super) fn abort(engine: &ClusterEngine, intent: &MoveIntent, context: &str) {
     if let Err(error) = propose(
         engine.control.as_ref(),
-        MoveCommand::Abort {
+        &MoveCommand::Abort {
             operation_id: intent.operation_id,
         },
         context,

@@ -257,11 +257,7 @@ fn identities_match(state: &ClusterState, intent: &MoveIntent) -> bool {
             .members
             .windows(2)
             .all(|pair| pair[0].node < pair[1].node)
-        || intent
-            .members
-            .iter()
-            .map(|member| member.node)
-            .ne(nodes.into_iter())
+        || intent.members.iter().map(|member| member.node).ne(nodes)
     {
         return false;
     }

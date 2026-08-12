@@ -120,13 +120,7 @@ pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<std::fs::
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if !path.exists() {
-        let mut f = std::fs::File::create(path)?;
-        let (magic, version) = format.header();
-        f.write_all(&magic)?;
-        f.write_all(&version.to_le_bytes())?;
-        f.sync_all()?;
-    } else {
+    if path.exists() {
         let data = std::fs::read(path)?;
         let found = parse_log_format(&data)?;
         if found != format {
@@ -135,6 +129,12 @@ pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<std::fs::
                 format!("raft log: expected {format:?}, found {found:?}"),
             ));
         }
+    } else {
+        let mut f = std::fs::File::create(path)?;
+        let (magic, version) = format.header();
+        f.write_all(&magic)?;
+        f.write_all(&version.to_le_bytes())?;
+        f.sync_all()?;
     }
     std::fs::OpenOptions::new().append(true).open(path)
 }

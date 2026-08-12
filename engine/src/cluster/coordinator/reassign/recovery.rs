@@ -35,10 +35,7 @@ fn assignment_nodes(assignment: &ShardAssignment) -> Vec<NodeId> {
     nodes
 }
 
-fn member_identity<'a>(
-    intent: &'a MoveIntent,
-    node: NodeId,
-) -> Result<&'a MoveMemberIdentity, ShardError> {
+fn member_identity(intent: &MoveIntent, node: NodeId) -> Result<&MoveMemberIdentity, ShardError> {
     intent
         .members
         .iter()
@@ -291,7 +288,7 @@ impl RecoveryContext<'_> {
         }
         intent::propose(
             self.control,
-            MoveCommand::Abort {
+            &MoveCommand::Abort {
                 operation_id: intent.operation_id,
             },
             "startup: abort preparing move",
@@ -305,7 +302,7 @@ impl RecoveryContext<'_> {
     ) -> Result<(), ShardError> {
         intent::propose(
             self.control,
-            MoveCommand::MarkReady {
+            &MoveCommand::MarkReady {
                 operation_id: intent.operation_id,
                 evidence,
             },
@@ -313,7 +310,7 @@ impl RecoveryContext<'_> {
         )?;
         intent::propose(
             self.control,
-            MoveCommand::Commit {
+            &MoveCommand::Commit {
                 operation_id: intent.operation_id,
             },
             "startup: conditionally commit recovered move",
@@ -323,7 +320,7 @@ impl RecoveryContext<'_> {
     fn finish(&self, intent: &MoveIntent) -> Result<(), ShardError> {
         intent::propose(
             self.control,
-            MoveCommand::Finish {
+            &MoveCommand::Finish {
                 operation_id: intent.operation_id,
             },
             "startup: finish recovered move",

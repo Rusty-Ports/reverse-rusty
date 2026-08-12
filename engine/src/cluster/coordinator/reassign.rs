@@ -133,7 +133,7 @@ struct PlannedReassign<'a> {
     live_from_endpoint: String,
     target_endpoint: String,
     route: HandoffRoute,
-    _ticket: ledger::MoveTicket<'a>,
+    ticket: ledger::MoveTicket<'a>,
 }
 
 impl ClusterEngine {
@@ -151,6 +151,7 @@ impl ClusterEngine {
     ///   startup resumes or fails closed from its recorded phase before serving;
     /// - the target cannot receive live writes until consensus has named it, so no successful call
     ///   can leave a stale bare assignment.
+    ///
     /// **A position with committed replicas is rejected** (a single-target move would de-replicate
     /// it) — the group-aware [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094)
     /// moves a replicated position. Requires a
@@ -320,7 +321,7 @@ impl ClusterEngine {
                     live_from_endpoint: live_ep,
                     target_endpoint: tgt_ep,
                     route,
-                    _ticket: ticket,
+                    ticket,
                 });
                 break;
             }
@@ -335,7 +336,7 @@ impl ClusterEngine {
             live_from_endpoint: live_ep,
             target_endpoint: tgt_ep,
             route,
-            _ticket,
+            ticket,
         }) = planned
         else {
             return Err(ShardError::ControlPlane(format!(
@@ -404,7 +405,7 @@ impl ClusterEngine {
             )?;
             intent::propose(
                 self.control.as_ref(),
-                MoveCommand::Begin(reconcile_intent.clone()),
+                &MoveCommand::Begin(reconcile_intent.clone()),
                 "reassign_and_move: persist chained-source reconciliation",
             )?;
             intent::commit_live_authority(
@@ -416,15 +417,13 @@ impl ClusterEngine {
             )?;
             intent::propose(
                 self.control.as_ref(),
-                MoveCommand::Finish {
+                &MoveCommand::Finish {
                     operation_id: reconcile_intent.operation_id,
                 },
                 "reassign_and_move: finish chained-source reconciliation",
             )?;
-            drop(_ticket);
-            return self
-                .reassign_and_move(position, to, handle)
-                .map(|outcome| Some(outcome));
+            drop(ticket);
+            return self.reassign_and_move(position, to, handle).map(Some);
         }
 
         // When the requested assignment is already committed, live routing must agree here. A
@@ -494,7 +493,7 @@ impl ClusterEngine {
         )?;
         intent::propose(
             self.control.as_ref(),
-            MoveCommand::Begin(move_intent.clone()),
+            &MoveCommand::Begin(move_intent.clone()),
             "reassign_and_move: persist intent",
         )?;
 
@@ -525,7 +524,7 @@ impl ClusterEngine {
                     );
                     intent::propose(
                         self.control.as_ref(),
-                        MoveCommand::MarkReady {
+                        &MoveCommand::MarkReady {
                             operation_id: move_intent.operation_id,
                             evidence,
                         },
@@ -533,7 +532,7 @@ impl ClusterEngine {
                     )?;
                     intent::propose(
                         self.control.as_ref(),
-                        MoveCommand::Commit {
+                        &MoveCommand::Commit {
                             operation_id: move_intent.operation_id,
                         },
                         "reassign_and_move: conditional assignment commit",
@@ -572,7 +571,7 @@ impl ClusterEngine {
 
         intent::propose(
             self.control.as_ref(),
-            MoveCommand::Finish {
+            &MoveCommand::Finish {
                 operation_id: move_intent.operation_id,
             },
             "reassign_and_move: finish durable move",

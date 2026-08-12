@@ -528,6 +528,8 @@ impl InMemoryControlPlane {
         if self.broken.load(std::sync::atomic::Ordering::Relaxed) {
             return true;
         }
+        #[cfg(not(test))]
+        let _ = self;
         false
     }
 }

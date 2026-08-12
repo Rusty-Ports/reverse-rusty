@@ -298,7 +298,7 @@ impl ClusterEngine {
         )?;
         intent::propose(
             self.control.as_ref(),
-            MoveCommand::Begin(move_intent.clone()),
+            &MoveCommand::Begin(move_intent.clone()),
             "reassign_group_and_move: persist intent",
         )?;
         let cutover_started = Cell::new(false);
@@ -566,7 +566,7 @@ impl ClusterEngine {
                 }
                 intent::propose(
                     self.control.as_ref(),
-                    MoveCommand::MarkReady {
+                    &MoveCommand::MarkReady {
                         operation_id: move_intent.operation_id,
                         evidence: intent::recovery_evidence(new_gen, evidence),
                     },
@@ -574,7 +574,7 @@ impl ClusterEngine {
                 )?;
                 intent::propose(
                     self.control.as_ref(),
-                    MoveCommand::Commit {
+                    &MoveCommand::Commit {
                         operation_id: move_intent.operation_id,
                     },
                     "reassign_group_and_move: conditional assignment commit",
@@ -705,7 +705,7 @@ impl ClusterEngine {
         };
         intent::propose(
             self.control.as_ref(),
-            MoveCommand::Finish {
+            &MoveCommand::Finish {
                 operation_id: move_intent.operation_id,
             },
             "reassign_group_and_move: finish durable move",
