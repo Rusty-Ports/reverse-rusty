@@ -125,7 +125,6 @@ pub struct MoveIntent {
     pub position: u32,
     pub expected_assignment_generation: u64,
     /// Logical row-placement identity under which recovery and fingerprints are valid.
-    #[serde(default)]
     pub placement_generation: u64,
     pub expected: ShardAssignment,
     pub desired: ShardAssignment,

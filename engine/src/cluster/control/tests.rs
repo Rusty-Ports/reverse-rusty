@@ -366,12 +366,21 @@ fn placement_bound_move_schema_rejects_the_predecessor_format() {
     );
 
     let mut predecessor = serde_json::to_value(cp.cluster_state().unwrap().as_ref()).unwrap();
-    predecessor["epoch"]["control_format_version"] = serde_json::json!(2);
-    predecessor["moves"]["format_version"] = serde_json::json!(2);
-    predecessor["moves"]["intents"][0]
+    let mut malformed_current = predecessor.clone();
+    malformed_current["moves"]["intents"][0]
         .as_object_mut()
         .unwrap()
         .remove("placement_generation");
+    assert!(
+        serde_json::from_value::<ClusterState>(malformed_current)
+            .unwrap_err()
+            .to_string()
+            .contains("placement_generation"),
+        "current move state must not default a missing placement predicate"
+    );
+
+    predecessor["epoch"]["control_format_version"] = serde_json::json!(2);
+    predecessor["moves"]["format_version"] = serde_json::json!(2);
     let error = serde_json::from_value::<ClusterState>(predecessor).unwrap_err();
     assert!(error
         .to_string()
