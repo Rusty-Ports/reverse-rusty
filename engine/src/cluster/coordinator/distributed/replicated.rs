@@ -295,6 +295,7 @@ impl ClusterEngine {
         .with_handle(handle.clone())
         .with_client_security(security)
         .with_coordinator_id(coordinator_id)
-        .with_transport_metrics(metrics))
+        .with_transport_metrics(metrics)
+        .with_remote_logical_ids())
     }
 }

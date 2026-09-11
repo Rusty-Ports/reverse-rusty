@@ -259,7 +259,7 @@ fn owned_read_paths_fail_loud_on_unrouted_position() {
 }
 
 /// A coordinator attached to an already-populated cluster it could not enumerate
-/// (the gRPC connect shape — `RemoteShard` has no live-id enumeration RPC) must
+/// (for example, a failed or unsupported remote live-ID enumeration) must
 /// not run insert-only admission against an empty directory: `add_query` fails
 /// closed with a `Config` error directing to `upsert_query`, which stays fully
 /// usable because it re-drives replace-by-id on every shard (review finding).
