@@ -25,15 +25,13 @@ pub(super) struct LogicalIdDirectory {
     base: Vec<u64>,
     added: FastSet<u64>,
     removed: FastSet<u64>,
-    /// True only when this directory was installed from an authoritative source
-    /// (build/successful bulk-ingest/durable-open enumeration, or a provably-empty
-    /// fresh assembly) and the coordinator can attest that source was applied
-    /// coherently. A coordinator attached to an already-populated cluster it
-    /// cannot enumerate (the gRPC connect shape — `RemoteShard` has no live-id
-    /// enumeration RPC yet), or one whose initial bulk ingest failed after an
-    /// ambiguous subset of shard writes, stays unauthoritative. Insert-only and
-    /// exact-exhaustive admission then fail closed.
+    /// The directory covers every live logical id, allowing create-only admission.
+    /// This alone does not prove that all physical copies agree: enumeration can
+    /// reconstruct membership after a coordinator lost its partial-write journal.
     authoritative: bool,
+    /// The initial corpus was applied coherently. Exact exhaustive admission
+    /// additionally checks the current coordinator's incremental repair journal.
+    converged: bool,
 }
 
 impl LogicalIdDirectory {
@@ -44,6 +42,7 @@ impl LogicalIdDirectory {
             added: FastSet::default(),
             removed: FastSet::default(),
             authoritative: true,
+            converged: true,
         })
     }
 
@@ -89,6 +88,7 @@ impl LogicalIdDirectory {
             added,
             removed,
             authoritative: _,
+            converged: _,
         } = self;
         base.retain(|logical| !removed.contains(logical));
         base.extend(added.drain());
@@ -159,6 +159,12 @@ impl ClusterEngine {
         read_directory(&self.logical_ids).authoritative
     }
 
+    /// Membership enumeration is not evidence of complete cross-shard writes.
+    pub(super) fn logical_ids_converged(&self) -> bool {
+        let directory = read_directory(&self.logical_ids);
+        directory.authoritative && directory.converged
+    }
+
     /// Test hook: simulate the connect-to-populated-cluster shape, where the
     /// coordinator cannot enumerate the corpus and the directory is unseeded.
     #[cfg(test)]
@@ -176,7 +182,19 @@ impl ClusterEngine {
     }
 
     pub(super) fn replace_logical_ids(&self, ids: Vec<u64>) -> Result<(), ShardError> {
-        *write_directory(&self.logical_ids) = LogicalIdDirectory::from_ids(ids)?;
+        self.install_logical_ids(ids, true)
+    }
+
+    /// Install a complete membership snapshot atomically. Remote enumeration
+    /// must not attest convergence of a nonempty corpus from ids alone.
+    pub(super) fn install_logical_ids(
+        &self,
+        ids: Vec<u64>,
+        converged: bool,
+    ) -> Result<(), ShardError> {
+        let mut directory = LogicalIdDirectory::from_ids(ids)?;
+        directory.converged = converged;
+        *write_directory(&self.logical_ids) = directory;
         Ok(())
     }
 
@@ -186,7 +204,9 @@ impl ClusterEngine {
     /// its transport failed. Without a bulk repair journal, only rebuilding fresh
     /// shard slots can restore authority.
     pub(super) fn mark_logical_ids_unconverged(&self) {
-        write_directory(&self.logical_ids).authoritative = false;
+        let mut directory = write_directory(&self.logical_ids);
+        directory.authoritative = false;
+        directory.converged = false;
     }
 
     pub(super) fn compact_logical_ids(&self) {

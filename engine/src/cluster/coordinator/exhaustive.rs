@@ -225,7 +225,7 @@ impl ClusterEngine {
         // exact cross-shard disjointness/completeness is unattested even when the
         // incremental repair map is empty. Only a fresh corpus rebuild restores
         // that authority.
-        if !self.logical_ids_authoritative() {
+        if !self.logical_ids_converged() {
             return Err(ShardError::Protocol(
                 "exhaustive delivery requires authoritative coordinator convergence state; \
                  the coordinator either attached to populated shards without a live-id \
