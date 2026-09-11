@@ -142,6 +142,12 @@ pre-upgrade backup:
   pending transition when no same-coordinator retry remains. An existing exclusive client
   reconnecting to a restarted durable shard uses the read-only fingerprint claim and does not
   create a replacement slot.
+- **ADR-176 remote ID enumeration:** no durable format changes. Upgrade shard servers before the
+  coordinator to restore create-only admission on populated reattach. `LiveLogicalIds` is additive;
+  an old peer's `UNIMPLEMENTED`, a failed transfer, or an enumeration limit leaves creates disabled
+  while explicit upserts retain their existing behavior. Check `live_logical_ids` transport errors
+  and `logical_id_directory` startup diagnostics before admitting create-only traffic. ID membership
+  does not restore a previous coordinator's unknown repair history or enable exhaustive completion.
 
 An ADR-109 upgrade is therefore **not a normal rolling mixed-version upgrade**. Back up, stop the
 cluster, rebuild clustered data under the new binary (or wipe/reseed remote shard volumes from the

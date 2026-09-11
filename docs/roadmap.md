@@ -203,19 +203,6 @@ until the shadow proves complete.
 tail catch-up; crash injection at every phase leaves either the old complete slot or the new complete
 slot routable, never a partial install.
 
-### Seed the remote logical-ID directory
-
-**Problem.** A fresh coordinator attached to populated remote shards cannot enumerate existing
-logical IDs. Its admission directory is therefore unauthoritative and must conservatively treat an
-add as an upsert.
-
-**Direction.** Add a bounded `LiveLogicalIds` shard RPC, delegate it through handoff and replica
-composites, collect/sort/deduplicate the IDs at connect time, and install the directory atomically.
-Enumeration failure must leave the current fail-closed behavior in place.
-
-**Completion.** A reattached coordinator rejects create-only writes for existing IDs, accepts new
-IDs, and reconstructs the same directory across primary failover and restart.
-
 ### Replace striped cluster write locks with per-ID locks
 
 **Problem.** The fixed stripe table serializes unrelated logical IDs that hash to the same stripe.

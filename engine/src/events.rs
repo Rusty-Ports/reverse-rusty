@@ -87,6 +87,9 @@ pub enum DurabilityOp {
     /// risk (a missed match is this system's worst outcome). Distributed layer only; the
     /// in-process / RF=1 path never produces it (its `LocalShard` writes are infallible).
     ClusterPartialApply,
+    /// Reconstructing remote create-only admission failed. No mutation or match
+    /// data was lost; explicit upserts remain available while creates fail closed.
+    LogicalIdDirectory,
 }
 
 impl DurabilityOp {
@@ -111,6 +114,7 @@ impl DurabilityOp {
             DurabilityOp::Compaction => "compaction",
             DurabilityOp::ReplicaDesync => "replica_desync",
             DurabilityOp::ClusterPartialApply => "cluster_partial_apply",
+            DurabilityOp::LogicalIdDirectory => "logical_id_directory",
         }
     }
 
@@ -136,7 +140,8 @@ impl DurabilityOp {
             | DurabilityOp::SourceStoreLoad
             | DurabilityOp::WalTornTail
             | DurabilityOp::Compaction
-            | DurabilityOp::ReplicaDesync => false,
+            | DurabilityOp::ReplicaDesync
+            | DurabilityOp::LogicalIdDirectory => false,
         }
     }
 }

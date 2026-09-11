@@ -218,18 +218,18 @@ impl ClusterEngine {
             ));
         }
         // `pending_repair` covers incremental divergence witnessed by THIS
-        // coordinator. The directory authority bit covers two states that have
+        // coordinator. The convergence bit covers two states that have
         // no reconstructable repair journal: a fresh coordinator attached to
-        // populated remote shards it cannot enumerate, and an initial bulk load
+        // populated remote shards, and an initial bulk load
         // that failed after an ambiguous subset of shard writes. In either case,
         // exact cross-shard disjointness/completeness is unattested even when the
         // incremental repair map is empty. Only a fresh corpus rebuild restores
-        // that authority.
-        if !self.logical_ids_authoritative() {
+        // that authority. Enumerating remote IDs restores membership only.
+        if !self.logical_ids_converged() {
             return Err(ShardError::Protocol(
                 "exhaustive delivery requires authoritative coordinator convergence state; \
-                 the coordinator either attached to populated shards without a live-id \
-                 enumeration or an initial bulk ingest failed after ambiguous shard writes; \
+                 the coordinator either attached to populated shards without historical \
+                 convergence evidence or an initial bulk ingest failed after ambiguous shard writes; \
                  rebuild fresh shard slots from the authoritative corpus before retrying"
                     .into(),
             ));

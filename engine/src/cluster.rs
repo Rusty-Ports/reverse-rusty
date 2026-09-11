@@ -45,6 +45,8 @@ mod handoff;
 #[cfg(feature = "distributed")]
 mod health;
 #[cfg(feature = "distributed")]
+mod logical_id_wire;
+#[cfg(feature = "distributed")]
 mod node_metrics;
 #[cfg(feature = "distributed")]
 mod proto;

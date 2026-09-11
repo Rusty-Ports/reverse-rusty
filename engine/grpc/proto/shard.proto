@@ -35,6 +35,9 @@ service ShardService {
   rpc PercolateTopKBatch (PercolateTopKBatchRequest) returns (stream PercolateTopKBatchFrame);
   rpc NumQueries  (ShardRef)         returns (CountReply);
   rpc ClassCounts (ShardRef)         returns (ClassCountsReply);
+  // One bounded, consistent live-ID snapshot. Only the final empty complete
+  // frame certifies the count; EOF without it is a failed enumeration (ADR-176).
+  rpc LiveLogicalIds (LiveLogicalIdsRequest) returns (stream LiveLogicalIdsFrame);
   // ---- writes ----
   rpc IngestExtracted (IngestRequest) returns (IngestReply);
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
@@ -137,6 +140,25 @@ message Empty {}
 // other request fields targets. Used by `NumQueries`/`ClassCounts`; requests that already carry a body
 // embed the `shard_id` field directly instead.
 message ShardRef { uint32 shard_id = 1; }
+
+message LiveLogicalIdsRequest {
+  uint32 shard_id = 1;
+  fixed64 dict_fingerprint = 2;
+  fixed64 tag_dict_fingerprint = 3;
+  uint64 placement_generation = 4;
+  uint32 num_shards = 5;
+  uint64 max_ids = 6;
+  uint64 remaining_micros = 7;
+}
+
+message LiveLogicalIdsFrame {
+  repeated fixed64 logical_ids = 1;
+  uint64 total_ids = 2;
+  bool complete = 3;
+  uint32 shard_id = 4;
+  uint64 placement_generation = 5;
+  uint32 num_shards = 6;
+}
 
 // One per-query metadata tag (ADR-049/055): a raw `(key, value)` pair carried on the wire
 // alongside the DSL, re-resolved to a `TagId` read-only against the server's adopted frozen

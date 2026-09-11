@@ -141,3 +141,4 @@ mod adopt;
 mod fence;
 mod gc;
 mod limits;
+mod logical_ids;

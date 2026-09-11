@@ -9,6 +9,22 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-09-11 — Remote create-only admission after restart
+
+- Reconstruct the coordinator's logical-ID membership from complete, bounded shard snapshots on
+  populated remote attach. Existing IDs still conflict and new IDs can be created after coordinator
+  restart, durable shard reopen, or reattachment to surviving replicas. IDs retained only on stale
+  writable replicas remain reserved until explicitly replaced or removed.
+- Add the streaming `LiveLogicalIds` RPC with fixed snapshot identity, explicit completion,
+  frame/count/deadline limits, and one snapshot admission slot per node. Enumeration uses live
+  integer index rows; incomplete, malformed, or unsupported transfers leave admission unavailable
+  while explicit upserts remain usable.
+- Separate admission membership from historical convergence evidence. Reconstructing IDs does not
+  authorize exhaustive reads after loss of coordinator repair state
+  ([ADR-176](decisions/adr-176-remote-logical-id-directory.md)).
+- Refresh locked transport and build dependencies to clear current security advisories and a
+  yanked transitive release, preserving existing dependency ranges and policy gates.
+
 ## 2026-08-12 — Durable reassignment intent and conditional cutover
 
 - Added versioned per-position move intents with assignment and placement generations, normalized

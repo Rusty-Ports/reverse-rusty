@@ -751,6 +751,10 @@ impl Shard for RemoteShard {
         Ok(reply.count as usize)
     }
 
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        self.enumerate_logical_ids()
+    }
+
     fn live_endpoints(&self) -> Vec<String> {
         // The GC keep-set contribution (ADR-096): the endpoint this client was connected with —
         // wherever live routing reaches through this shard is a node the sweep must not drop from.

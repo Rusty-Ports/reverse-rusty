@@ -159,11 +159,9 @@ impl ClusterEngine {
             move_ledger: crate::cluster::coordinator::reassign::MoveLedger::new(),
         };
         // A fresh assembly holding ZERO stored queries has an authoritative EMPTY
-        // id directory — nothing to enumerate. A populated assembly (the gRPC
-        // attach-to-existing-data shape) keeps it unauthoritative: `RemoteShard`
-        // has no live-id enumeration RPC yet, so insert-only admission cannot be
-        // verified there and `add_query` fails closed (directing to `upsert_query`).
-        // The durable `open` path replaces this with the real enumeration below.
+        // id directory — nothing to enumerate. A populated assembly stays
+        // unauthoritative until the remote builders or durable open explicitly
+        // install a complete enumeration. Until then `add_query` fails closed.
         // A count FAILURE also stays unauthoritative rather than failing the
         // assembly: construction semantics predate this check, and unauthoritative
         // is already the fail-closed disposition.

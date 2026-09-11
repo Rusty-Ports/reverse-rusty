@@ -48,6 +48,10 @@ fn read_fails_over_to_in_sync_replica() {
     );
 
     // Primary errors on read (transport); the composite fails over to the in-sync replica.
+    assert_eq!(
+        rs.live_logical_ids().expect("enumeration failover"),
+        vec![1, 2]
+    );
     let (ids, _) = rs
         .percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty())
         .expect("failover read");
@@ -61,6 +65,7 @@ fn read_fails_over_to_in_sync_replica() {
     rs.replica_handles()[0]
         .in_sync
         .store(false, Ordering::Release);
+    assert!(matches!(rs.live_logical_ids(), Err(ShardError::Remote(_))));
     assert!(
         matches!(
             rs.percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty()),
@@ -93,6 +98,10 @@ fn read_does_not_fail_over_on_dict_mismatch() {
         ),
         "DictMismatch must propagate without failover"
     );
+    assert!(matches!(
+        rs.live_logical_ids(),
+        Err(ShardError::DictMismatch { .. })
+    ));
 }
 
 #[test]

@@ -312,6 +312,10 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().num_queries()
     }
 
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        self.current.load().live_logical_ids()
+    }
+
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         self.current.load().class_counts()
     }

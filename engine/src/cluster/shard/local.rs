@@ -68,6 +68,8 @@ pub(crate) struct LocalShard {
 }
 
 mod events;
+#[cfg(feature = "distributed")]
+mod logical_ids;
 mod mutations;
 mod open;
 mod ranked;

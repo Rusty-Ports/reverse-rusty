@@ -1,5 +1,59 @@
 use super::*;
 
+#[test]
+fn membership_only_directory_allows_create_without_attesting_exhaustive_delivery() {
+    let cluster = ClusterEngine::build(
+        vocab(),
+        &ClusterConfig::default(),
+        &[(7, "directoryproof".into())],
+    )
+    .expect("cluster");
+    cluster
+        .install_logical_ids(vec![7], false)
+        .expect("membership");
+    assert!(cluster.logical_ids_authoritative());
+    assert!(!cluster.logical_ids_converged());
+    assert!(matches!(
+        cluster.add_query(7, "replacement"),
+        Err(ShardError::DuplicateLogicalId(7))
+    ));
+    cluster
+        .add_query(8, "directoryproof")
+        .expect("fresh create");
+    cluster.remove_query(7).expect("remove");
+    cluster.compact_logical_ids();
+    assert!(!cluster.logical_ids_converged());
+
+    let mut sink = RecordingExhaustiveSink::default();
+    let error = cluster
+        .try_percolate_filtered_all(
+            "directoryproof",
+            &[],
+            crate::result::QueryScope::Standard,
+            None,
+            1,
+            None,
+            &mut sink,
+        )
+        .expect_err("membership alone cannot certify completeness");
+    assert!(matches!(error, ShardError::Protocol(_)));
+    assert!(sink.chunks.is_empty());
+}
+
+#[test]
+fn failed_directory_install_preserves_the_previous_membership_and_convergence() {
+    let cluster = ClusterEngine::build(
+        vocab(),
+        &ClusterConfig::default(),
+        &[(7, "directoryproof".into())],
+    )
+    .expect("cluster");
+    assert!(cluster.install_logical_ids(vec![8, 8], false).is_err());
+    assert!(cluster.contains_logical_id(7));
+    assert!(!cluster.contains_logical_id(8));
+    assert!(cluster.logical_ids_converged());
+}
+
 /// Initial bulk ingest predates the per-logical ADR-047 repair journal. If one
 /// shard succeeds and a later shard fails, retaining the coordinator leaves a
 /// physically partial corpus with an empty repair map. The logical directory's

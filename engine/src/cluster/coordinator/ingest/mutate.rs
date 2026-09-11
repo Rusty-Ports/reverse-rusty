@@ -117,7 +117,7 @@ impl ClusterEngine {
         // unrelated writes.
         let _logical_guard = self.logical_write_guard(id);
         // A coordinator attached to an already-populated cluster it could not
-        // enumerate (the gRPC connect shape) has an unauthoritative directory, so
+        // enumerate successfully has an unauthoritative directory, so
         // the duplicate check below would be vacuous — fail closed instead of
         // silently admitting a second physical row for a live id (review finding).
         // `upsert_query` stays available: it re-drives replace-by-id on every

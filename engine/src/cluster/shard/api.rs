@@ -326,10 +326,12 @@ pub(crate) trait Shard: Send + Sync {
     }
 
     /// This shard's live logical-id set without materializing query source text.
-    /// Used during durable coordinator open to rebuild unique-id admission state.
+    /// Used during coordinator open/attach to rebuild unique-id admission state.
+    /// Remote implementations must validate a complete bounded snapshot before
+    /// returning any IDs; failure must never return a partial set.
     fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
         Err(ShardError::Config(
-            "live_logical_ids is only supported for in-process shards".into(),
+            "live_logical_ids is not supported by this shard".into(),
         ))
     }
 

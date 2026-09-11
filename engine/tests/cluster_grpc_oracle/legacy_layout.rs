@@ -36,6 +36,18 @@ struct LegacyOwnershipServer {
 
 #[tonic::async_trait]
 impl ShardService for LegacyOwnershipServer {
+    type LiveLogicalIdsStream =
+        Pin<Box<dyn Stream<Item = Result<raw::LiveLogicalIdsFrame, Status>> + Send>>;
+
+    async fn live_logical_ids(
+        &self,
+        _: Request<raw::LiveLogicalIdsRequest>,
+    ) -> Result<Response<Self::LiveLogicalIdsStream>, Status> {
+        Err(Status::unimplemented(
+            "legacy peer has no logical-ID enumeration",
+        ))
+    }
+
     async fn dict_fingerprint(
         &self,
         _req: Request<raw::Empty>,
@@ -231,6 +243,55 @@ impl ShardService for LegacyOwnershipServer {
     ) -> Result<Response<raw::ContentFingerprintReply>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
+}
+
+#[test]
+fn grpc_logical_ids_unsupported_peer_keeps_create_only_admission_closed() {
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_with(&[], &norm);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let endpoint = {
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().expect("address")).expect("bind");
+        let address = incoming.local_addr().expect("address");
+        let peer = LegacyOwnershipServer {
+            dict_fp: dict.fingerprint(),
+            tag_fp: empty_tag_dict().fingerprint(),
+            placement_generation: 1,
+            num_shards: 1,
+            top_k_delay: None,
+        };
+        rt.spawn(
+            tonic::transport::Server::builder()
+                .add_service(ShardServiceServer::new(peer))
+                .serve_with_incoming(incoming),
+        );
+        format!("http://{address}")
+    };
+    let cluster = ClusterEngine::connect_remote(
+        norm,
+        dict,
+        empty_tag_dict(),
+        &ClusterConfig {
+            num_shards: 1,
+            ..Default::default()
+        },
+        &[endpoint],
+        rt.handle(),
+    )
+    .expect("old peer can still attach");
+    assert!(matches!(
+        cluster.add_query(1, "freshneedle"),
+        Err(ShardError::Config(_))
+    ));
+    let metrics = cluster.transport_metrics();
+    let enumeration = metrics
+        .methods
+        .iter()
+        .find(|row| row.method == "live_logical_ids")
+        .expect("metric");
+    assert_eq!(enumeration.calls, 1);
+    assert_eq!(enumeration.errors, 1);
 }
 
 /// Both connect paths refuse an old peer with no ownership attestation; adoption also refuses a
