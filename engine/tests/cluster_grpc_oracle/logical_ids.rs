@@ -388,3 +388,108 @@ fn grpc_logical_ids_one_failed_position_keeps_the_whole_directory_unavailable() 
         .upsert_query(1000, "freshneedle", 1)
         .expect("explicit upsert remains usable");
 }
+
+#[test]
+fn grpc_logical_ids_reserve_stale_replica_ids_even_with_an_empty_primary() {
+    // A replica can retain an ID after missing a delete. Reattachment reconstructs
+    // replica bookkeeping, so admission must inspect every copy that will receive writes.
+    // Include a failed replica enumeration behind an empty primary: primary counts
+    // must not bypass that failure and authorize an empty directory.
+    for (populated_primary, broken_replica) in [(false, false), (true, false), (false, true)] {
+        let rows = vec![
+            (7, "stalereservedneedle".to_string()),
+            (8, "keptneedle".into()),
+        ];
+        let norm = Arc::new(vocab());
+        let dict = frozen_dict_over(&rows, &norm);
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let primary_rt = tokio::runtime::Runtime::new().expect("primary runtime");
+        let (primary, _) = spawn(
+            &primary_rt,
+            ShardServer::pending(Arc::clone(&norm), EngineConfig::default()),
+        );
+        let (replica, _) = spawn(
+            &rt,
+            ShardServer::pending(Arc::clone(&norm), EngineConfig::default())
+                .with_max_grpc_result_bytes(if broken_replica { 1 } else { 4096 })
+                .expect("replica cap"),
+        );
+        let config = ClusterConfig {
+            num_shards: 1,
+            include_broad: true,
+            ..Default::default()
+        };
+        let seed = |endpoint: &str, rows: &[(u64, String)]| {
+            let cluster = ClusterEngine::connect_remote(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                empty_tag_dict(),
+                &config,
+                &[endpoint.to_string()],
+                rt.handle(),
+            )
+            .expect("seed endpoint");
+            cluster.ingest(rows).expect("seed rows");
+        };
+        seed(&replica, &rows[..1]);
+        if populated_primary {
+            seed(&primary, &rows[1..]);
+        }
+        let reattached = ClusterEngine::connect_replicated_exclusive(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            empty_tag_dict(),
+            &config,
+            &[ShardGroup {
+                primary,
+                replicas: vec![replica],
+            }],
+            rt.handle(),
+            843,
+        )
+        .expect("reattach with stale replica");
+        if broken_replica {
+            assert!(matches!(
+                reattached.add_query(9, "freshneedle"),
+                Err(ShardError::Config(_))
+            ));
+        } else {
+            assert!(matches!(
+                reattached.add_query(7, "replacementneedle"),
+                Err(ShardError::DuplicateLogicalId(7))
+            ));
+            reattached.add_query(9, "freshneedle").expect("fresh ID");
+        }
+        let mut sink = Sink::default();
+        assert!(matches!(
+            reattached.try_percolate_filtered_all(
+                "freshneedle",
+                &[],
+                reverse_rusty::QueryScope::WithBroad,
+                None,
+                8,
+                None,
+                &mut sink,
+            ),
+            Err(ShardError::Protocol(ref message)) if message.contains("convergence")
+        ));
+        assert_eq!(sink.0, 0);
+        reattached
+            .upsert_query(7, "replacementneedle", 2)
+            .expect("explicit replacement remains available");
+        if !broken_replica {
+            drop(primary_rt);
+            assert!(reattached
+                .percolate("stalereservedneedle")
+                .expect("deleted predicate on failover")
+                .is_empty());
+            assert_eq!(
+                reattached
+                    .percolate("replacementneedle")
+                    .expect("replacement on failover"),
+                vec![7]
+            );
+            assert!(reattached.transport_metrics().total_errors() > 0);
+        }
+    }
+}

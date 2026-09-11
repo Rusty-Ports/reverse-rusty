@@ -13,7 +13,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
 
 - Reconstruct the coordinator's logical-ID membership from complete, bounded shard snapshots on
   populated remote attach. Existing IDs still conflict and new IDs can be created after coordinator
-  restart, durable shard reopen, or reattachment to surviving replicas.
+  restart, durable shard reopen, or reattachment to surviving replicas. IDs retained only on stale
+  writable replicas remain reserved until explicitly replaced or removed.
 - Add the streaming `LiveLogicalIds` RPC with fixed snapshot identity, explicit completion,
   frame/count/deadline limits, and one snapshot admission slot per node. Enumeration uses live
   integer index rows; incomplete, malformed, or unsupported transfers leave admission unavailable

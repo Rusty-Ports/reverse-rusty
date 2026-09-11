@@ -1,3 +1,4 @@
+use super::logical_ids::RemoteLogicalIds;
 use super::{
     wrap_handoff, Arc, ClientSecurity, ClusterConfig, ClusterDurable, ClusterEngine, Dict,
     HandoffShard, HashRing, Normalizer, Shard, ShardError, ShardGroup, TagDict, TransportMetrics,
@@ -131,6 +132,7 @@ impl ClusterEngine {
         let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(groups.len());
         // ONE shared transport-metrics collector (ADR-085); see `connect_remote_with_security`.
         let metrics = Arc::new(TransportMetrics::new());
+        let mut logical_ids = RemoteLogicalIds::default();
         // CO-LOCATION (ADR-093 Stage 3): a primary and/or replicas of different positions may share
         // one endpoint (fewer pods than shards × RF). The FIRST connection to each distinct endpoint
         // ships+adopts the node dict; every LATER slot on that node reuses it via a lightweight
@@ -201,8 +203,9 @@ impl ClusterEngine {
                 }?
             }
             .with_metrics(Arc::clone(&metrics));
+            logical_ids.include(&primary, position, 0);
             let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
-            for ep in &g.replicas {
+            for (copy, ep) in g.replicas.iter().enumerate() {
                 let r = if adopted.insert(ep.as_str()) {
                     match coordinator_id {
                         Some(id) => {
@@ -263,6 +266,7 @@ impl ClusterEngine {
                     }?
                 }
                 .with_metrics(Arc::clone(&metrics));
+                logical_ids.include(&r, position, copy + 1);
                 replicas.push(Box::new(r) as Box<dyn Shard>);
             }
             let shard: Box<dyn Shard> = if replicas.is_empty() {
@@ -296,6 +300,6 @@ impl ClusterEngine {
         .with_client_security(security)
         .with_coordinator_id(coordinator_id)
         .with_transport_metrics(metrics)
-        .with_remote_logical_ids())
+        .with_collected_remote_logical_ids(logical_ids))
     }
 }

@@ -449,10 +449,13 @@ position, ordering, total count, and one terminal completion frame. A missing or
 cannot seed a partial directory. Handoff pins its current backing for the call, and replica composites
 use primary/in-sync read failover.
 
-Remote constructors sort and deduplicate the physical placement copies before atomically installing
-membership. The existing single-writer contract applies, with mesh leases enforcing exclusive
-builders. Empty assemblies retain their existing convergence proof; enumeration of a populated
-assembly establishes membership only. Unknown repair history still blocks exhaustive completion.
+Remote constructors enumerate every writable primary and replica, then sort and deduplicate before
+atomically installing a compact membership allocation. An empty primary cannot hide IDs on a stale
+replica or bypass its failed enumeration. IDs found only on stale copies remain reserved; explicit
+replacement or removal remains available. The existing single-writer contract applies, with mesh
+leases enforcing exclusive builders. Empty assemblies retain their convergence proof only when
+every copy is proven empty; a populated assembly establishes membership only. Unknown repair
+history still blocks exhaustive completion.
 
 Each transfer has a fixed ID ceiling, bounded frames, one node-local snapshot permit, and a deadline
 that covers capture and consumption. Abandoned streams release the snapshot at the server deadline.

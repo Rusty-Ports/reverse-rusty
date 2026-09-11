@@ -148,7 +148,8 @@ cycle (ADR-047) is proven deterministically in the lean core by `cluster/coordin
 (`partial_apply_is_detected_then_resync_converges` + `resync_requeues_when_shard_still_failing`).
 
 `cluster_grpc_oracle::logical_ids` covers create-only admission after remote reattach, co-located
-mmap/translog restart, replica failover, and atomic fallback when one position cannot enumerate.
+mmap/translog restart, replica failover, stale-replica IDs behind populated or empty primaries, and
+atomic fallback when any required physical copy cannot enumerate.
 Protocol and server unit tests cover snapshot isolation from concurrent writes, missing/malformed
 completion, ID/count/frame bounds, duplicate rows, cancellation, and abandoned-stream admission.
 Membership reconstruction deliberately leaves unproven exhaustive convergence refused (ADR-176).

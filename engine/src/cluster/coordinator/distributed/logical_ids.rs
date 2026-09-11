@@ -2,7 +2,59 @@
 
 use crate::cluster::logical_id_wire::MAX_LIVE_LOGICAL_IDS;
 
-use super::{ClusterEngine, DurabilityOp, EngineEvent, ShardError};
+use super::{ClusterEngine, DurabilityOp, EngineEvent, Shard, ShardError};
+
+/// Accumulate every physical copy that will receive writes before constructing
+/// a replicated coordinator. Primary-only read failover cannot prove absence on
+/// a replica whose old in-sync state was lost during coordinator restart.
+#[derive(Default)]
+pub(super) struct RemoteLogicalIds {
+    ids: Vec<u64>,
+    failure: Option<ShardError>,
+}
+
+impl RemoteLogicalIds {
+    pub(super) fn include(&mut self, shard: &dyn Shard, position: usize, copy: usize) {
+        if self.failure.is_some() {
+            return;
+        }
+        if let Err(error) = self.include_copy(shard) {
+            self.ids = Vec::new();
+            self.failure = Some(ShardError::Protocol(format!(
+                "enumerating logical IDs at position {position} copy {copy}: {error}"
+            )));
+        }
+    }
+
+    fn include_copy(&mut self, shard: &dyn Shard) -> Result<(), ShardError> {
+        // A proven-empty physical copy needs no enumeration, preserving attach
+        // compatibility with old empty peers. This proof must cover EACH copy.
+        if matches!(shard.num_queries(), Ok(0)) {
+            return Ok(());
+        }
+        let mut ids = shard.live_logical_ids()?;
+        self.ids.try_reserve(ids.len()).map_err(|error| {
+            ShardError::Config(format!("allocating logical-ID directory: {error}"))
+        })?;
+        self.ids.append(&mut ids);
+        // Bound temporary storage independently of the number of copies.
+        self.ids.sort_unstable();
+        self.ids.dedup();
+        if self.ids.len() > MAX_LIVE_LOGICAL_IDS {
+            return Err(ShardError::Config(format!(
+                "logical-ID directory exceeds {MAX_LIVE_LOGICAL_IDS} IDs"
+            )));
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Vec<u64>, ShardError> {
+        match self.failure {
+            Some(error) => Err(error),
+            None => compact_ids(self.ids),
+        }
+    }
+}
 
 impl ClusterEngine {
     pub(super) fn with_remote_logical_ids(self) -> Self {
@@ -11,7 +63,23 @@ impl ClusterEngine {
         if self.logical_ids_authoritative() {
             return self;
         }
-        if let Err(error) = self.seed_remote_logical_ids() {
+        let mut collected = RemoteLogicalIds::default();
+        for (position, shard) in self.shards.iter().enumerate() {
+            collected.include(shard.as_ref(), position, 0);
+        }
+        self.with_collected_remote_logical_ids(collected)
+    }
+
+    pub(super) fn with_collected_remote_logical_ids(self, collected: RemoteLogicalIds) -> Self {
+        let installed = collected.finish().and_then(|ids| {
+            // Membership alone cannot attest lost cross-shard repair history.
+            let converged = ids.is_empty();
+            self.install_logical_ids(ids, converged)
+        });
+        if let Err(error) = installed {
+            // from_parts counts only primary views for replicated positions.
+            // An empty primary cannot hide a failed/stale replica enumeration.
+            self.mark_logical_ids_unconverged();
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::LogicalIdDirectory,
                 detail: "remote logical-ID directory unavailable; create-only writes are \
@@ -21,34 +89,6 @@ impl ClusterEngine {
             });
         }
         self
-    }
-
-    fn seed_remote_logical_ids(&self) -> Result<(), ShardError> {
-        let mut collected = Vec::new();
-        for (position, shard) in self.shards.iter().enumerate() {
-            let mut ids = shard.live_logical_ids().map_err(|error| {
-                ShardError::Protocol(format!(
-                    "enumerating logical IDs at position {position}: {error}"
-                ))
-            })?;
-            collected.try_reserve(ids.len()).map_err(|error| {
-                ShardError::Config(format!("allocating logical-ID directory: {error}"))
-            })?;
-            collected.append(&mut ids);
-            // Deduplicate each position before reading another, so replicated
-            // placement cannot amplify temporary storage by the shard count.
-            collected.sort_unstable();
-            collected.dedup();
-            if collected.len() > MAX_LIVE_LOGICAL_IDS {
-                return Err(ShardError::Config(format!(
-                    "logical-ID directory exceeds {MAX_LIVE_LOGICAL_IDS} IDs"
-                )));
-            }
-        }
-        // No partial directory has been published. Membership of a populated
-        // remote corpus does NOT attest lost cross-shard repair history.
-        let converged = collected.is_empty();
-        self.install_logical_ids(compact_ids(collected)?, converged)
     }
 }
 

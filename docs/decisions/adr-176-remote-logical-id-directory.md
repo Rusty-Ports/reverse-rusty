@@ -55,11 +55,17 @@ resident directory does not retain capacity for physical placement copies. Compa
 failure leaves admission unavailable. This is maintenance work, outside the allocation-free
 matching path.
 
-Delegate through `HandoffShard` to the pinned current backing and through `ReplicatedShard` using
-its existing primary/in-sync-read-failover rule. Remote constructors collect each position's IDs,
-sort and deduplicate physical placement copies, then atomically install admission membership before
-returning the coordinator. The existing single-writer deployment contract remains necessary;
-exclusive coordinator builders additionally enforce it through the existing mesh lease.
+Delegate ordinary enumeration through `HandoffShard` to the pinned current backing and through
+`ReplicatedShard` using its existing primary/in-sync-read-failover rule. Admission reconstruction
+reads every writable primary and replica separately: a replica's newly initialized in-sync flag
+cannot prove it applied an earlier delete. Reserve any ID found on any copy, sort and deduplicate,
+then atomically install membership before returning the coordinator. An individually proven-empty
+copy can skip enumeration; an empty primary alone cannot certify its replicas or bypass their
+enumeration failures. This avoids forcing bulk replica recovery merely to establish conservative
+membership. IDs retained only on a stale copy can be replaced or removed explicitly.
+
+The existing single-writer deployment contract remains necessary; exclusive coordinator builders
+additionally enforce it through the existing mesh lease.
 
 Keep membership authority separate from convergence. A populated remote attach installs membership
 without certifying initial convergence, so create-only writes work while exhaustive reads retain
@@ -72,8 +78,8 @@ unavailable and records the reason; matching and explicit upserts keep their exi
 There is no segment, manifest, mutation-log, or control-plane format change, and no new dependency.
 Old servers return `UNIMPLEMENTED` for the new RPC; that cannot be mistaken for an empty shard.
 The rollout can therefore preserve the existing fail-closed attach behavior until every required
-position supports enumeration. No query visibility, feature normalization, routing, ranking, or
-per-row verification rule changes.
+physical copy supports enumeration or proves empty. No query visibility, feature normalization,
+routing, ranking, or per-row verification rule changes.
 
 The RPC proves membership at attach time, not an ongoing subscription or historical convergence.
 Remote exhaustive recovery after loss of coordinator repair state still needs separate evidence.
@@ -86,6 +92,9 @@ Unit and real gRPC coverage includes multi-frame and empty transfers; integer ID
 deletion, upsert, mmap/translog reopen, and co-location; primary/in-sync replica failover; missing and
 malformed completion; frame/count/deadline/admission limits; and atomic fallback when any required
 enumeration fails. Reattach tests reject existing-ID creates, accept fresh IDs, preserve matches,
-and keep unattested exhaustive reads refused. Sorting is compared against the standard sort across
-random, ordered, duplicate-heavy, and boundary ID sets, with deterministic mid-operation cancellation
-checks for sorting and validation. The standard default/distributed and crash gates remain required.
+and keep unattested exhaustive reads refused. Stale-replica coverage includes an empty primary,
+a populated primary, failed replica enumeration, and explicit replacement followed by real read
+failover. The installed allocation is checked for excess capacity after placement deduplication.
+Sorting is compared against the standard sort across random, ordered, duplicate-heavy, and boundary
+ID sets, with deterministic mid-operation cancellation checks for sorting and validation. The
+standard default/distributed and crash gates remain required.
