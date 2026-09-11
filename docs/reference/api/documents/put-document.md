@@ -46,9 +46,11 @@ modes:
 Any other query parameter—or any other value for these parameters—returns a structured **400**
 `illegal_argument_exception` before mutation. This is deliberate: silently ignoring `routing`,
 `pipeline`, `if_seq_no`, `if_primary_term`, `version`, or `version_type` could make an ES/OpenSearch
-client believe a write constraint was honored when it was not. A remote coordinator whose
-pre-existing shards cannot be enumerated also fails `op_type=create` closed rather than guessing
-that an id is absent; ordinary `op_type=index` remains available.
+client believe a write constraint was honored when it was not. A remote coordinator reconstructs
+create-only admission at startup by enumerating its pre-existing shards. After a successful attach,
+existing IDs return 409 and fresh IDs can be created. If any required enumeration is unsupported,
+incomplete, or exceeds its limits, `op_type=create` fails closed; ordinary `op_type=index` remains
+available. See [remote admission reconstruction](../../../design/clustering-and-scaling.md#94-remote-admission-reconstruction).
 
 The JSON-body `version` field is Reverse Rusty application metadata (an unsigned 32-bit value,
 default `1`) and is preserved verbatim in the successful response, `GET /_doc/{id}`, persistence,

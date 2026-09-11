@@ -436,8 +436,30 @@ drops, and deferred trash deletion all make its terminal report incomplete (ADR-
   follows the consensus decision, clears that target fence, and finishes cleanup. Missing quorum,
   endpoint replacement, generation drift, changed evidence, or uncertain fencing refuses startup
   rather than selecting whichever endpoint happens to answer.
-- A fresh remote coordinator attached to populated slots lacks an authoritative logical-ID directory
-  for some mutation/exhaustive operations; that authority gap remains explicit and fail-closed.
+- Remote attach reconstructs create-only admission from complete, bounded live-ID snapshots of
+  every position. An enumeration failure leaves admission unavailable. ID membership does not
+  prove historical write convergence; a populated reattach still refuses exact exhaustive delivery.
+
+### 9.4 Remote admission reconstruction
+
+`LiveLogicalIds` captures the integer live-row IDs of one slot under its mutation lock, then releases
+that lock before streaming. It includes mutable and mmap-backed rows without loading source text.
+The request checks feature/tag fingerprints and placement configuration; the client validates
+position, ordering, total count, and one terminal completion frame. A missing or malformed completion
+cannot seed a partial directory. Handoff pins its current backing for the call, and replica composites
+use primary/in-sync read failover.
+
+Remote constructors sort and deduplicate the physical placement copies before atomically installing
+membership. The existing single-writer contract applies, with mesh leases enforcing exclusive
+builders. Empty assemblies retain their existing convergence proof; enumeration of a populated
+assembly establishes membership only. Unknown repair history still blocks exhaustive completion.
+
+Each transfer has a fixed ID ceiling, bounded frames, one node-local snapshot permit, and a deadline
+that covers capture and consumption. Abandoned streams release the snapshot at the server deadline.
+The existing mesh read timeout bounds client retries as one operation. Unsupported peers, limits,
+or transfer failures retain matching and explicit upserts but disable create-only admission and emit
+`logical_id_directory` diagnostics. Protocol bounds and rationale are recorded in
+[ADR-176](../decisions/adr-176-remote-logical-id-directory.md).
 
 Runbooks and RPO/RTO expectations belong to
 [`../operations/disaster-recovery.md`](../operations/disaster-recovery.md), not this design page.

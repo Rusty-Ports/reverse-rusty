@@ -65,8 +65,9 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   (remote clusters only) answers 200 with `"result": "partial"`: the write **is** durably logged and
   queued for repair — do **not** re-PUT (it would double-log); `POST /_cluster/resync` converges it.
   `op_type=create` uses the coordinator's atomic logical-id reservation and returns 409 without a
-  log frame when the id exists; a remote assembly that cannot authoritatively enumerate its
-  pre-existing ids refuses create-only writes rather than guessing absence. `refresh=false|true|wait_for`
+  log frame when the id exists. Remote startup reconstructs this membership through bounded shard
+  enumeration; an unsupported, failed, or over-limit enumeration keeps create-only writes disabled
+  ([details](../../../design/clustering-and-scaling.md#94-remote-admission-reconstruction)). `refresh=false|true|wait_for`
   are accepted under the stronger publish-before-response model; unsupported write parameters fail
   with 400 instead of being ignored.
 - **`DELETE /_doc/{id}` is a log-first all-position remove** — successful and missing responses

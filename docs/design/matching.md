@@ -310,16 +310,19 @@ old body can remain live under its old placement while the replacement is alread
 placement; both positions can then be valid emitters for the same logical id. The bounded
 coordinator cannot deduplicate that state without result-sized memory, so it refuses exact
 completion until `resync` or a durable log replay restores one converged version. It also requires
-an authoritative coordinator logical-id directory: a fresh coordinator reattached to populated
-remote shards cannot prove that a prior process left no unrecorded partial apply, even though its
-new `pending_repairs` map is empty. The same authority is revoked when an initial multi-shard bulk
-ingest fails after an ambiguous subset of shard writes; that path predates the per-logical repair
+authoritative initial-corpus convergence independently of logical-ID membership: a coordinator
+reattached to populated remote shards cannot prove that a prior process left no unrecorded partial
+apply, even though its new `pending_repairs` map is empty. The same authority is revoked when an
+initial multi-shard bulk ingest fails after an ambiguous subset of shard writes; that path predates the per-logical repair
 journal, so its empty repair map is not a convergence attestation either. Both shapes refuse before
 emitting and require fresh shard slots rebuilt from the authoritative corpus. The coordinator
 rechecks convergence at every shard boundary so a newly queued repair fails an in-flight stream
 closed. The full exhaustive fan-out also holds the exclusive mutation/PIT-open barrier (live writes
 and `resync` hold the shared side), preventing a healthy successful re-placement from interleaving
 between shard reads.
+
+Remote ID enumeration restores create-only admission without restoring this convergence proof;
+see [remote admission reconstruction](clustering-and-scaling.md#94-remote-admission-reconstruction).
 
 ---
 

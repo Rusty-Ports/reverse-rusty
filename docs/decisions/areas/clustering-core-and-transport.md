@@ -13,6 +13,7 @@ The multi-shard correctness core, remote shard seam, shared feature space, and d
 | [032](../adr-032-per-shard-durable-segments.md) | Per-shard durable compiled segments | Stores compiled segments per shard and reopens them by attach-and-mmap under one coordinator commit. | Accepted |
 | [033](../adr-033-shared-nothing-storage.md) | Shared-nothing cluster storage | Chooses local segments, peer recovery, and Raft instead of a shared object store. | Accepted |
 | [034](../adr-034-cross-process-dict-shipping.md) | Cross-process dict shipping over gRPC | Ships the frozen dictionary during adoption so a data node need not rebuild the corpus. | Accepted |
+| [176](../adr-176-remote-logical-id-directory.md) | Remote logical-ID directory | Reconstructs create-only admission from bounded shard snapshots while keeping convergence evidence separate. | Accepted |
 
 ---
 

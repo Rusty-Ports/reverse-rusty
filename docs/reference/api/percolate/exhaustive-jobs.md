@@ -267,3 +267,5 @@ coordinator attached to already-populated remote shards is also refused even whe
 counter is zero: it cannot attest that an earlier coordinator left no partial apply. `resync`
 cannot reconstruct unknown history in that shape; rebuild fresh shard slots from the authoritative
 corpus before requesting exact exhaustive completion.
+Successful startup ID enumeration restores create-only admission, but supplies no evidence of
+historical cross-shard convergence and therefore does not relax this exhaustive-read boundary.
