@@ -142,6 +142,9 @@ impl Shard for FailingShard {
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.read_err().map_or(Ok(0), Err)
     }
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        self.read_err().map_or(Ok(Vec::new()), Err)
+    }
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         self.read_err().map_or(Ok([0; 5]), Err)
     }

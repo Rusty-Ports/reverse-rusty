@@ -210,6 +210,8 @@ pub struct ShardServer {
     /// Exact protobuf encoded-result cap for unary result messages and each
     /// `FetchMatches` stream item (ADR-110).
     max_grpc_result_bytes: usize,
+    /// One bounded logical-ID snapshot at a time per node, including stream lifetime.
+    logical_id_permits: Arc<tokio::sync::Semaphore>,
     /// Node-scope non-queuing admission for `PercolateAll` blocking workers.
     /// An owned permit lives for the complete stream worker, including any
     /// bounded-channel backpressure wait.

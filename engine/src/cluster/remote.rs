@@ -186,6 +186,7 @@ mod add_shard;
 mod adopt;
 mod call;
 mod connect;
+mod logical_ids;
 mod shard_impl;
 
 #[cfg(test)]

@@ -1,6 +1,38 @@
 use super::Engine;
 
 impl Engine {
+    /// Visit the live integer index for remote admission reconstruction without
+    /// loading source text. Poll physical rows too: tombstone-heavy segments must
+    /// remain cancellable even when few live IDs are produced.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn visit_live_logical_ids<E>(
+        &self,
+        mut visit: impl FnMut(u64) -> Result<(), E>,
+        mut poll: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        for local in 0..self.memtable.len() {
+            if local % 256 == 0 {
+                poll()?;
+            }
+            let local = local as u32;
+            if self.memtable.is_alive(local) {
+                visit(self.memtable.exact_store().logical(local))?;
+            }
+        }
+        for segment in &self.segments {
+            for local in 0..segment.len() {
+                if local % 256 == 0 {
+                    poll()?;
+                }
+                let local = local as u32;
+                if segment.is_alive(local) {
+                    visit(segment.logical(local))?;
+                }
+            }
+        }
+        poll()
+    }
+
     /// The current live `(logical_id, query_text)` set — the source corpus the
     /// index is a materialized view of, sorted by logical id for deterministic
     /// rebuilds. Backed by the query store (kept in sync with the index by the

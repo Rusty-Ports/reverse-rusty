@@ -30,18 +30,30 @@ type BatchTopKStream =
     Pin<Box<dyn Stream<Item = Result<proto::PercolateTopKBatchFrame, Status>> + Send>>;
 type ExhaustiveStream =
     Pin<Box<dyn Stream<Item = Result<proto::PercolateAllFrame, Status>> + Send>>;
+type LogicalIdsStream =
+    Pin<Box<dyn Stream<Item = Result<proto::LiveLogicalIdsFrame, Status>> + Send>>;
 
 mod add_shard;
 mod dict_adopt;
 mod exhaustive;
 mod gc;
 mod leases;
+mod logical_ids;
 mod ranked;
 mod ranked_batch;
 mod recovery;
 
 #[tonic::async_trait]
 impl ShardService for ShardServer {
+    type LiveLogicalIdsStream = LogicalIdsStream;
+
+    async fn live_logical_ids(
+        &self,
+        request: Request<proto::LiveLogicalIdsRequest>,
+    ) -> Result<Response<Self::LiveLogicalIdsStream>, Status> {
+        logical_ids::live_logical_ids(self, request).await
+    }
+
     async fn percolate(
         &self,
         request: Request<proto::PercolateRequest>,

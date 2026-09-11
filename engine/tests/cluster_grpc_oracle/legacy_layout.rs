@@ -36,6 +36,18 @@ struct LegacyOwnershipServer {
 
 #[tonic::async_trait]
 impl ShardService for LegacyOwnershipServer {
+    type LiveLogicalIdsStream =
+        Pin<Box<dyn Stream<Item = Result<raw::LiveLogicalIdsFrame, Status>> + Send>>;
+
+    async fn live_logical_ids(
+        &self,
+        _: Request<raw::LiveLogicalIdsRequest>,
+    ) -> Result<Response<Self::LiveLogicalIdsStream>, Status> {
+        Err(Status::unimplemented(
+            "legacy peer has no logical-ID enumeration",
+        ))
+    }
+
     async fn dict_fingerprint(
         &self,
         _req: Request<raw::Empty>,
