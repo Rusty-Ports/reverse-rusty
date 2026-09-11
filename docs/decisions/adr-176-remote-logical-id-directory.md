@@ -50,7 +50,10 @@ network backpressure. Sorting uses in-place bytewise radix partitioning, polling
 or partitioning steps; standard sorting is limited to leaves of at most 4,096 IDs. This avoids a
 second corpus-sized sort buffer and bounds cancellation work even for hostile ID orderings.
 The coordinator temporarily holds the union plus one position's ID vector; each serving node holds
-at most one bounded snapshot. This is maintenance work, outside the allocation-free matching path.
+at most one bounded snapshot. Compact the deduplicated allocation before installation so the
+resident directory does not retain capacity for physical placement copies. Compaction allocation
+failure leaves admission unavailable. This is maintenance work, outside the allocation-free
+matching path.
 
 Delegate through `HandoffShard` to the pinned current backing and through `ReplicatedShard` using
 its existing primary/in-sync-read-failover rule. Remote constructors collect each position's IDs,

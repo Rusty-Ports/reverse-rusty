@@ -48,6 +48,43 @@ impl ClusterEngine {
         // No partial directory has been published. Membership of a populated
         // remote corpus does NOT attest lost cross-shard repair history.
         let converged = collected.is_empty();
-        self.install_logical_ids(collected, converged)
+        self.install_logical_ids(compact_ids(collected)?, converged)
+    }
+}
+
+// Deduplication changes length, not capacity. Do not retain physical placement
+// copies in the compact directory's allocation for the coordinator's lifetime.
+fn compact_ids(ids: Vec<u64>) -> Result<Vec<u64>, ShardError> {
+    if ids.len() == ids.capacity() {
+        return Ok(ids);
+    }
+    let mut compact = Vec::new();
+    compact
+        .try_reserve_exact(ids.len())
+        .map_err(|error| ShardError::Config(format!("compacting logical-ID directory: {error}")))?;
+    compact.extend(ids);
+    Ok(compact)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logical_ids_compact_duplicate_placement_capacity_before_install() {
+        let mut ids = Vec::with_capacity(2_000);
+        ids.extend(0..1_000);
+        ids.extend(0..1_000);
+        ids.sort_unstable();
+        ids.dedup();
+        let compact = compact_ids(ids).expect("compact");
+        assert_eq!(compact, (0..1_000).collect::<Vec<_>>());
+        assert_eq!(compact.capacity(), compact.len());
+        assert_eq!(
+            compact_ids(Vec::with_capacity(100))
+                .expect("empty")
+                .capacity(),
+            0
+        );
     }
 }
