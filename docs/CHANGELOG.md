@@ -22,6 +22,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Separate admission membership from historical convergence evidence. Reconstructing IDs does not
   authorize exhaustive reads after loss of coordinator repair state
   ([ADR-176](decisions/adr-176-remote-logical-id-directory.md)).
+- Refresh locked transport and build dependencies to clear current security advisories and a
+  yanked transitive release, preserving existing dependency ranges and policy gates.
 
 ## 2026-08-12 — Durable reassignment intent and conditional cutover
 
