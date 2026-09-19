@@ -81,7 +81,7 @@ impl ClusterEngine {
         let mut still_pending = 0usize;
         for (logical, pr) in pending {
             // Serialize the whole per-id re-drive against same-id writers (the
-            // same stripe scope the live paths hold), and skip our drained copy
+            // same ID lock scope the live paths hold), and skip our drained copy
             // when a concurrent writer queued fresher work for this id during
             // the drain — `note_partial` overwrites, so a live map entry is
             // strictly fresher than what we hold.

@@ -54,6 +54,7 @@ mod ranked_batch;
 mod resize;
 mod topology;
 mod vocab;
+mod write_locks;
 
 pub use exhaustive::ClusterExhaustiveMatch;
 pub use matching::ClusterReadView;
@@ -355,7 +356,7 @@ pub struct ClusterEngine {
     logical_ids: RwLock<logical_ids::LogicalIdDirectory>,
     /// Same-id mutation serialization without globally serializing independent
     /// writes. See `logical_ids` for the compact base + overlay directory.
-    logical_write_stripes: Box<[Mutex<()>]>,
+    logical_write_locks: write_locks::LogicalWriteLocks,
     include_broad: bool,
     /// The durable mutation log (the tail); a `NullClusterLog` when in-memory.
     log: Box<dyn ClusterLog>,
@@ -413,7 +414,7 @@ pub struct ClusterEngine {
     /// `open_pit` / exhaustive delivery hold the WRITE side across their read
     /// fan-out — so they can never freeze/certify a torn cross-shard view (half
     /// of an upsert's tombstone/insert two-pass, a re-placed row present on two
-    /// shards, or on none). When a logical stripe is also needed, this barrier
+    /// shards, or on none). When a logical ID lock is also needed, this barrier
     /// is ALWAYS acquired first; `resync` has the same order, avoiding a
     /// writer-preferring RwLock cycle. Ordinary reads never touch it.
     pit_open_barrier: RwLock<()>,

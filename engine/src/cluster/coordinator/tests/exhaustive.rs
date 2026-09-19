@@ -538,14 +538,14 @@ fn exhaustive_refuses_pending_repair_overlap_until_resync() {
     assert_eq!(result.summary.exact_total, 1);
 }
 
-/// The mutation barrier and logical-id stripes have one global order:
-/// barrier first, stripe second. `resync` necessarily holds the barrier while
-/// taking a stripe; if a live mutation took the stripe first, a queued
+/// The mutation barrier and logical-ID locks have one global order:
+/// barrier first, ID lock second. `resync` necessarily holds the barrier while
+/// taking an ID lock; if a live mutation took the ID lock first, a queued
 /// exhaustive writer on a writer-preferring `RwLock` could complete a
-/// three-way deadlock. Holding the target stripe here lets the test observe
+/// three-way deadlock. Holding the target ID lock here lets the test observe
 /// which lock the live add reaches first without ever forming that cycle.
 #[test]
-fn live_mutation_takes_view_barrier_before_logical_stripe() {
+fn live_mutation_takes_view_barrier_before_logical_id_lock() {
     let cluster = ClusterEngine::build(
         vocab(),
         &ClusterConfig {
@@ -592,7 +592,7 @@ fn live_mutation_takes_view_barrier_before_logical_stripe() {
             .expect("mutation succeeds");
         assert!(
             barrier_held,
-            "live mutation blocked on the logical stripe before acquiring the view barrier"
+            "live mutation blocked on the logical-ID lock before acquiring the view barrier"
         );
     });
 }

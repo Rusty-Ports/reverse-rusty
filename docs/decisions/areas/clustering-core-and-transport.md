@@ -14,6 +14,7 @@ The multi-shard correctness core, remote shard seam, shared feature space, and d
 | [033](../adr-033-shared-nothing-storage.md) | Shared-nothing cluster storage | Chooses local segments, peer recovery, and Raft instead of a shared object store. | Accepted |
 | [034](../adr-034-cross-process-dict-shipping.md) | Cross-process dict shipping over gRPC | Ships the frozen dictionary during adoption so a data node need not rebuild the corpus. | Accepted |
 | [176](../adr-176-remote-logical-id-directory.md) | Remote logical-ID directory | Reconstructs create-only admission from bounded shard snapshots while keeping convergence evidence separate. | Accepted |
+| [177](../adr-177-per-id-cluster-write-locks.md) | Per-ID cluster write locks | Removes stripe collisions while bounding lock storage to active callers and preserving log/apply and bulk exclusion. | Accepted |
 
 ---
 

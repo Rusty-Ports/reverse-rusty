@@ -8,17 +8,15 @@
 //!
 //! The committed corpus is kept as a sorted `u64` column (eight bytes per id).
 //! Live inserts/removes use small overlays, avoiding a full hash-table copy of a
-//! multi-million-query base. Same-id mutations are serialized through striped
-//! locks while different ids remain independent.
+//! multi-million-query base. Same-id mutations use lifecycle-managed per-ID
+//! locks while different IDs remain independent.
 
-use std::sync::{MutexGuard, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 use crate::cluster::shard::ShardError;
 use crate::util::FastSet;
 
-use super::ClusterEngine;
-
-pub(super) const LOGICAL_WRITE_STRIPES: usize = 256;
+use super::{write_locks::LogicalWriteGuard, ClusterEngine};
 
 #[derive(Default)]
 pub(super) struct LogicalIdDirectory {
@@ -126,27 +124,15 @@ fn write_directory(
 }
 
 impl ClusterEngine {
-    pub(super) fn logical_write_guard(&self, logical: u64) -> MutexGuard<'_, ()> {
-        // Sequential ids spread evenly; the xor also mixes structured high bits.
-        let mixed = logical ^ (logical >> 32);
-        let stripe = mixed as usize % self.logical_write_stripes.len();
-        self.logical_write_stripes[stripe]
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    pub(super) fn logical_write_guard(&self, logical: u64) -> LogicalWriteGuard<'_> {
+        self.logical_write_locks.lock(logical)
     }
 
     /// Exclusively fence the empty-cluster bulk-load boundary against every
-    /// incremental logical-id mutation. Locks are always taken in stripe order;
-    /// single-id writers take only one, so there is no lock-order cycle.
-    pub(super) fn logical_bulk_write_guards(&self) -> Vec<MutexGuard<'_, ()>> {
-        self.logical_write_stripes
-            .iter()
-            .map(|stripe| {
-                stripe
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-            })
-            .collect()
+    /// incremental logical-id mutation. Every single-ID writer takes the shared
+    /// side before registering its ID; bulk never takes an individual ID lock.
+    pub(super) fn logical_bulk_write_guard(&self) -> RwLockWriteGuard<'_, ()> {
+        self.logical_write_locks.lock_bulk()
     }
 
     pub(super) fn contains_logical_id(&self, logical: u64) -> bool {
