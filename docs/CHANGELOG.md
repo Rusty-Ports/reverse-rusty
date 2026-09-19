@@ -18,6 +18,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Select repair payloads under the ID lock so a delayed repair pass cannot resurrect a mutation
   superseded by a newer successful write. Add stalled-log/fan-out, bulk exclusion, bounded-churn,
   and durable-replay regressions plus a reproducible write-concurrency capture.
+- Refresh the locked TLS dependency chain to address
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285), retaining the existing
+  dependency ranges and security policy.
 
 ## 2026-09-11 — Remote create-only admission after restart
 
