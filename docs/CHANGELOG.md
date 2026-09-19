@@ -9,6 +9,19 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-09-19 — Independent cluster writes by logical ID
+
+- Replace fixed write stripes with per-ID locks that preserve complete same-ID log/apply ordering
+  while allowing formerly colliding IDs to proceed independently. Reclaim idle entries and retain
+  exclusive bulk-load admission without keeping a lock for every stored or historical ID
+  ([ADR-177](decisions/adr-177-per-id-cluster-write-locks.md)).
+- Select repair payloads under the ID lock so a delayed repair pass cannot resurrect a mutation
+  superseded by a newer successful write. Add stalled-log/fan-out, bulk exclusion, bounded-churn,
+  and durable-replay regressions plus a reproducible write-concurrency capture.
+- Refresh the locked TLS dependency chain to address
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285), retaining the existing
+  dependency ranges and security policy.
+
 ## 2026-09-11 — Remote create-only admission after restart
 
 - Reconstruct the coordinator's logical-ID membership from complete, bounded shard snapshots on

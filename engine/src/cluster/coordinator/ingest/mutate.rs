@@ -37,8 +37,8 @@ impl ClusterEngine {
     }
 
     /// Atomically create one query only when `id` is absent. This is the
-    /// cluster-core operation behind REST `op_type=create`: the logical-id
-    /// stripe makes the absence check + reservation indivisible from every
+    /// cluster-core operation behind REST `op_type=create`: the logical-ID
+    /// lock makes the absence check + reservation indivisible from every
     /// add/upsert/remove of the same id, and a conflict writes no log frame.
     ///
     /// Unlike [`add_query_with_tags`](Self::add_query_with_tags), the caller's
@@ -53,16 +53,16 @@ impl ClusterEngine {
     ) -> Result<AddOutcome, ShardError> {
         // Check conflicts before compilation, matching the single-node REST
         // boundary: an already-live id is the decisive create-only error even
-        // when the replacement body would fail DSL compilation. The stripe is
+        // when the replacement body would fail DSL compilation. The ID lock is
         // load-bearing here. The directory also contains provisional reservations
         // while their coordinator-log append is in flight; an unlocked read could
         // report a false conflict if that append subsequently failed and rolled the
-        // reservation back. Waiting on the stripe observes the committed/rolled-back
+        // reservation back. Waiting on the ID lock observes the committed/rolled-back
         // result. This is still only an early conflict return, never an absence
         // proof — the second check below closes a create arriving during compilation.
         if self.logical_ids_authoritative() {
             // Preserve the global mutation lock order: PIT barrier, then logical
-            // stripe. Resync/exhaustive mutation code relies on this order.
+            // ID lock. Resync/exhaustive mutation code relies on this order.
             let _pit_barrier = self
                 .pit_open_barrier
                 .read()
@@ -102,8 +102,8 @@ impl ClusterEngine {
             return Ok(AddOutcome::RejectedClassD);
         }
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
-        // Global lock order is PIT/mutation barrier -> logical stripe. Resync
-        // uses the same order; taking the stripe first can deadlock behind a
+        // Global lock order is PIT/mutation barrier -> logical-ID lock. Resync
+        // uses the same order; taking the ID lock first can deadlock behind a
         // queued exhaustive writer on writer-preferring RwLock implementations.
         // Hold the barrier through the durable append and complete shard fan-out.
         let _pit_barrier = self
@@ -113,7 +113,7 @@ impl ClusterEngine {
         // ADR-110's bounded merge requires one live distributed row per logical id.
         // Content-derived placement cannot guarantee a common owner for two different
         // rows sharing an id, so cluster adds are insert-only; replacements use upsert.
-        // The stripe closes the same-id check/reservation race without serializing
+        // The ID lock closes the same-id check/reservation race without serializing
         // unrelated writes.
         let _logical_guard = self.logical_write_guard(id);
         // A coordinator attached to an already-populated cluster it could not
@@ -215,7 +215,7 @@ impl ClusterEngine {
             return Ok((0, AddOutcome::RejectedClassD));
         }
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
-        // Keep the same barrier -> logical-stripe order as add/remove/resync.
+        // Keep the same barrier -> logical-ID order as add/remove/resync.
         // The barrier spans the log append and both delete/insert fan-out passes.
         let _pit_barrier = self
             .pit_open_barrier
@@ -367,7 +367,7 @@ impl ClusterEngine {
     /// or any-of query may live on several shards; a re-add may have moved it).
     /// WAL-first, like [`Self::add_query`].
     pub fn remove_query(&self, id: u64) -> Result<usize, ShardError> {
-        // Canonical barrier -> logical-stripe order; see add/upsert. Keeping
+        // Canonical barrier -> logical-ID order; see add/upsert. Keeping
         // this guard through append + fan-out excludes torn exhaustive/PIT views.
         let _pit_barrier = self
             .pit_open_barrier

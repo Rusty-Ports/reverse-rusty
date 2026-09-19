@@ -103,10 +103,7 @@ impl ClusterEngine {
             logical_ids: std::sync::RwLock::new(
                 super::super::logical_ids::LogicalIdDirectory::default(),
             ),
-            logical_write_stripes: (0..super::super::logical_ids::LOGICAL_WRITE_STRIPES)
-                .map(|_| Mutex::new(()))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            logical_write_locks: super::super::write_locks::LogicalWriteLocks::default(),
             include_broad,
             replication_factor: replication_factor.max(1),
             per_shard,

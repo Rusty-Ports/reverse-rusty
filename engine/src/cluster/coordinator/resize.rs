@@ -556,7 +556,7 @@ impl ClusterEngine {
         // vocab flips to `Target::Reject` is dropped from every new shard, so
         // keeping its reservation would 409 a re-add on the LIVE coordinator
         // while a REOPENED one accepts it (review finding). `&mut self` makes
-        // this race-free with every striped writer.
+        // this race-free with every per-ID writer.
         self.replace_logical_ids(accepted_ids)?;
         // Atomic swap (under `&mut self`, so no read observes a half-state). The normalizer is
         // `new_norm` (the SAME instance on a resize); `self.vocab` is replaced only when a new

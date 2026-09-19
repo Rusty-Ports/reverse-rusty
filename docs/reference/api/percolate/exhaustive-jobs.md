@@ -226,8 +226,8 @@ In cluster mode, ownership makes shard streams disjoint and every shard summary 
 the terminal job completion. The coordinator mutation barrier serializes successful shard mutations
 and repair re-drives across that exact execution view (including direct library callers), so a long
 or backpressured exhaustive job can delay cluster writes; size the dedicated quota and timeout
-accordingly. Mutations and repair re-drives acquire that barrier before any logical-id stripe, so
-an exhaustive writer cannot form a lock-order cycle with `resync`. Full HTTP/gRPC channel waits are
+accordingly. Mutations and repair re-drives acquire that barrier before bulk exclusion and per-ID
+locks, so an exhaustive writer cannot form a lock-order cycle with `resync`. Full HTTP/gRPC channel waits are
 bounded by that job/request deadline. Shard nodes independently admit a bounded number of
 `PercolateAll` workers before spawning them; direct excess receives gRPC `RESOURCE_EXHAUSTED`
 rather than consuming the global blocking pool. While a blocking closure is still queued, its

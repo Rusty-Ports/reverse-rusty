@@ -36,7 +36,7 @@ impl ClusterEngine {
         // Initial bulk load is one exclusive logical-id admission boundary. A
         // concurrent incremental mutation cannot slip between the empty check,
         // directory install, and shard writes.
-        let _logical_guards = self.logical_bulk_write_guards();
+        let _logical_guard = self.logical_bulk_write_guard();
         // ingest re-indexes from scratch; on a populated cluster it would create duplicate
         // entries. Refuse loudly instead (the doc contract: a freshly assembled cluster).
         if self.num_queries()? > 0 {

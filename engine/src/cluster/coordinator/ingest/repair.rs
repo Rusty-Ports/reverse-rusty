@@ -68,34 +68,30 @@ impl ClusterEngine {
             .pit_open_barrier
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Drain the queue, then re-drive OUTSIDE the lock (re-driving issues shard RPCs; holding
-        // the lock across them would stall concurrent writes' note_partial/clear_pending).
-        let pending: Vec<(u64, PendingRepair)> = {
-            let mut guard = self
+        // Snapshot IDs only. The mutation must stay in the queue until we hold
+        // its ID lock: a successful newer write can clear it while this pass
+        // is busy with another ID. Draining payloads here would lose that
+        // supersession evidence and later resurrect the older mutation.
+        let pending: Vec<u64> = {
+            let guard = self
                 .pending_repair
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::take(&mut *guard).into_iter().collect()
+            guard.keys().copied().collect()
         };
         let mut repaired = 0usize;
         let mut still_pending = 0usize;
-        for (logical, pr) in pending {
-            // Serialize the whole per-id re-drive against same-id writers (the
-            // same stripe scope the live paths hold), and skip our drained copy
-            // when a concurrent writer queued fresher work for this id during
-            // the drain — `note_partial` overwrites, so a live map entry is
-            // strictly fresher than what we hold.
+        for logical in pending {
+            // Select the CURRENT repair under the same full-operation ID lock
+            // as live writers. A cleared entry needs no repair; a replacement
+            // entry carries the newer failed mutation and its current targets.
             let _logical_guard = self.logical_write_guard(logical);
-            {
-                let guard = self
-                    .pending_repair
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if guard.contains_key(&logical) {
-                    still_pending += 1;
-                    continue;
-                }
-            }
+            let repair = self
+                .pending_repair
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&logical);
+            let Some(pr) = repair else { continue };
             let mut still_failed = Vec::new();
             let mut first_err: Option<ShardError> = None;
             for &s in &pr.failed_shards {
@@ -132,16 +128,18 @@ impl ClusterEngine {
                 detail: format!("resync: logical {logical} still failing on {still_failed:?}"),
                 error: detail,
             });
-            // Re-queue only the still-failed shards — but `or_insert`, so a fresher mutation a
-            // concurrent write queued for this id during the drain is not clobbered.
+            // Re-queue only the still-failed shards before releasing the ID
+            // lock. No same-ID writer or repair can supersede this work yet.
             self.pending_repair
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entry(logical)
-                .or_insert(PendingRepair {
-                    mutation: pr.mutation,
-                    failed_shards: still_failed,
-                });
+                .insert(
+                    logical,
+                    PendingRepair {
+                        mutation: pr.mutation,
+                        failed_shards: still_failed,
+                    },
+                );
         }
         ResyncReport {
             repaired,
