@@ -37,8 +37,8 @@ impl ClusterEngine {
     }
 
     /// Atomically create one query only when `id` is absent. This is the
-    /// cluster-core operation behind REST `op_type=create`: the logical-id
-    /// ID lock makes the absence check + reservation indivisible from every
+    /// cluster-core operation behind REST `op_type=create`: the logical-ID
+    /// lock makes the absence check + reservation indivisible from every
     /// add/upsert/remove of the same id, and a conflict writes no log frame.
     ///
     /// Unlike [`add_query_with_tags`](Self::add_query_with_tags), the caller's
