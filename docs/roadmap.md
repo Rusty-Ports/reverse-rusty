@@ -203,19 +203,6 @@ until the shadow proves complete.
 tail catch-up; crash injection at every phase leaves either the old complete slot or the new complete
 slot routable, never a partial install.
 
-### Replace striped cluster write locks with per-ID locks
-
-**Problem.** The fixed stripe table serializes unrelated logical IDs that hash to the same stripe.
-The lock must still cover WAL append and the complete shard fan-out because same-ID operations may
-not interleave.
-
-**Direction.** Use a bounded lifecycle-managed lock table keyed by logical ID. Preserve the full
-same-ID critical section and the whole-directory exclusion used by bulk load; reclaim idle entries
-without allowing two locks for the same active ID.
-
-**Completion.** Same-ID live ordering remains replay-equivalent under failure, unrelated IDs no
-longer serialize on hash collision, and the table stays bounded under high-cardinality churn.
-
 ### Ranked-path allocation and merge cleanup
 
 **Problem.** The bounded ranked path still allocates during ownership validation, repeatedly scans

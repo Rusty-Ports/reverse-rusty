@@ -51,6 +51,8 @@ HOW TO RUN
   cargo run --release --bin learn -- 500000 50 0.30         # NPMI corpus learner (see appendix)
   cargo test --release --test stress cancellation::large_segment_overshoot_benchmark \
       -- --ignored --nocapture                               # ADR-123 bounded cancellation evidence
+  cargo test --release --lib write_concurrency_capture \
+      -- --ignored --nocapture --test-threads=1               # ADR-177 coordinator write contention
   RAYON_NUM_THREADS=4 cargo run --release --bin perfgate -- \
       capture /tmp/perf-current.json                         # diagnostic off-runner capture
 
@@ -195,6 +197,44 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-09-19] Apple M4 Max, 48 GiB, Darwin 25.5.0 arm64; pinned project toolchain.
+              ADR-177 PER-ID CLUSTER WRITES. Release+LTO; RAYON_NUM_THREADS=4.
+              Baseline main 0630821 versus the per-ID implementation, using the same
+              write_concurrency_capture test and shard instrumentation on both revisions.
+              Full coordinator upserts: compilation, log-position allocation, three-shard
+              delete fan-out, selective insertion, and snapshot publication. In-memory
+              corpus/log; this is not a durable-fsync or real-network throughput claim.
+              Eight OS writer threads; five rounds per case, each on a fresh cluster.
+              1,000 writes/thread without delay; 64/thread with a 1,000-us sleep before
+              the final shard's delete call. Scheduling may extend that injected delay.
+              Bodies alternate zzoldbody/zznewbody, ending on zznewbody. The three ID
+              shapes are spread (7..14), old-stripe collision (7 + 256*worker), and
+              shared same-ID (7). Build both revisions before timing; run sequentially.
+
+  INVARIANTS (every round, both revisions):
+    exact final new-body ID set equals the deduplicated writer IDs;
+    old-body result is empty; pending repair count is zero.
+
+  TIMING (five-round medians):
+    delay us  ID shape     stripes ms   per-ID ms   stripes ops/s   per-ID ops/s
+           0  spread          256.818     262.016          31,150         30,533
+           0  collision       395.382     262.616          20,234         30,463
+           0  same ID         395.914     387.366          20,206         20,652
+       1,000  spread           84.437      84.493           6,064          6,060
+       1,000  collision       725.760      92.739             705          5,521
+       1,000  same ID         720.115     722.050             711            709
+
+  Interpretation: removing collisions improves this collision-shaped workload by 1.51x
+    without delay and 7.83x with simulated downstream latency. Noncolliding zero-delay
+    writes cost about 2% more in this capture; delayed noncolliding and same-ID rates
+    remain comparable. Same-ID operations intentionally remain serialized. These are
+    diagnostic workstation timings, not a representative-production performance gate.
+
+  To reproduce the comparison, copy tests/write_concurrency.rs and its child modules
+    from engine/src/cluster/coordinator/ into the baseline revision, add the module to
+    coordinator/tests.rs, and run the command above in each checkout with the same
+    toolchain and RAYON_NUM_THREADS. Production source changes only on the feature side.
+
 [2026-08-10] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64, rustc 1.95.0.
               ADR-174 FAIL-OPEN TAG SEGMENT SUMMARIES. Release+LTO; tagbench
               160000 2000 8 0.05 372; eight category-local immutable segments;

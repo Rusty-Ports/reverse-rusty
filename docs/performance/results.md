@@ -196,6 +196,14 @@ reclaims dead rows, rebuilds postings/filters, and can optionally re-anchor unde
 visibility guards; it does not run a learned cover optimizer. Treat the historical update rate as a
 dated microbenchmark, not a durability or multi-node write-SLO guarantee.
 
+The [2026-09-19 coordinator capture](benchmark-results.txt) compares fixed stripes with ADR-177's
+per-ID locks using complete in-memory upserts across three shards. Eight writers with IDs that
+previously collided improved by **1.51×** without added delay and **7.83×** with a simulated 1 ms
+downstream write delay. Every round retained exact final query results. Noncolliding writes without
+delay were about 2% slower in this capture, reflecting the registration/allocation tradeoff; delayed
+noncolliding writes and intentional same-ID serialization remained comparable. This isolates lock
+collision cost; it does not measure real-network, fsync, or production-corpus throughput.
+
 ---
 
 ## 7. LSM multi-segment read amplification (segbench)

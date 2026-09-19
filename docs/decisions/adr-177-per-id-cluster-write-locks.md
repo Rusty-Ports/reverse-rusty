@@ -1,6 +1,7 @@
 # ADR-177 — Lifecycle-managed per-ID cluster write locks
 
-**Status:** Accepted  
+**Status:** Accepted
+
 **Date:** 2026-09-19
 
 ## Problem and prior art
@@ -58,3 +59,11 @@ churn, bulk exclusion, and unwind cleanup. Coordinator regressions must also pre
 ordering, failure recovery, and bulk admission. Timing evidence belongs in the
 [performance capture log](../performance/benchmark-results.txt); production throughput claims still
 require the representative-corpus acceptance work in the [roadmap](../roadmap.md).
+
+## Implementation outcome
+
+The coordinator regression reproduced a pre-existing repair-selection race: draining payloads
+before taking the ID lock could replay an old upsert after a newer successful write had cleared
+its repair entry, making the live result differ from durable reopen. `resync` now snapshots IDs
+and takes the current payload only while holding that ID's lock. The regression failed before
+this correction and passes afterward; the pass remains bounded to its initial ID snapshot.

@@ -65,6 +65,13 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 | **Distributed gRPC** | `tests/cluster_grpc_oracle/` | Localhost wire oracle for co-location, RF>1 failover, peer recovery under writes, retained-member fingerprints, raw handoff, and ADR-175 durable movement: RF=1 intent-phase restart recovery, injected commit-quorum loss, exact source/fence/evidence checks, aliases, and third-source chaining; plus RF>1 group cutover, reconcile, failover, concurrent writes, and post-move coordinator restart. Both shapes prove zero-FN acknowledged-write identity. It also covers protocol ownership attestation, missing/stale peer refusal, and ADR-174 additive tag-skip stats transport. ADR-110 adds real-wire top-K/source streaming, exact response caps, mixed-version refusal, one absolute deadline, post-freeze signed priority, and bounded failover/recovery/handoff reads. Requires localhost TCP permission. |
 | **Cluster scale soak** | `tests/cluster_soak/` | The **≥20M multi-shard scale proof** (ADR-104, the scale half of Distributed-v1 criterion 12): a durable K=8 in-process cluster at 20M queries ≡ the single-node engine over 50k titles, planted absolute-FN sentinels, mirrored live mutations (incl. a synthetic-ID retrievability check), and a checkpoint → reopen re-verify. `#[ignore]`d, **run explicitly by name only — in no gate and no CI workflow** (a one-off acceptance run; numbers pinned in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)) — see [Pressure & soak](#pressure--soak-tests). |
 
+Coordinator mutation regressions also cover per-ID lock retirement under high-cardinality churn,
+formerly colliding IDs progressing through stalled log/shard calls, full same-ID log/apply ordering,
+bulk-load exclusion, and repair supersession with live/reopened result equality (ADR-177). The manual
+`write_concurrency_capture` unit test measures complete coordinator upserts with and without injected
+downstream latency; commands and same-machine comparisons live in the
+[performance capture log](performance/benchmark-results.txt).
+
 ### What the oracle does and does not verify
 
 The main differential oracle independently checks the **retrieval and lowering back half**: it scans

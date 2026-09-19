@@ -245,6 +245,26 @@ Raft quorum is required for control-state transitions such as membership or assi
 consulted for ordinary query mutations. Read-your-writes through one healthy coordinator follows from
 log-first apply plus snapshot publication, not from a replica quorum.
 
+### 5.3 Per-ID mutation concurrency
+
+Create, upsert, remove, and repair serialize by the complete logical ID, from admission/log append
+through the complete shard fan-out. Unrelated IDs share only short registry bookkeeping; a slow
+write cannot hold another ID's lock through a hash collision. The lifecycle-managed lock table
+counts both holders and waiters, retiring an entry only after its final caller leaves. Storage grows
+with active mutation concurrency, not corpus size or historical churn
+([ADR-177](../decisions/adr-177-per-id-cluster-write-locks.md)).
+
+The lock order is PIT/exhaustive mutation barrier, then bulk-load barrier, then ID lock. Individual
+mutations hold the bulk barrier's shared side; initial bulk ingest holds its exclusive side across
+the empty check, directory installation, and all shard writes. Bulk never acquires individual ID
+locks. Ordinary matching does not enter this table.
+
+`resync` snapshots queued IDs, then selects each current repair under its ID lock. A newer successful
+write can clear an entry while the pass handles another ID; a newer partial write can replace it.
+Repair therefore skips cleared entries and uses the latest remaining mutation and failed targets.
+New IDs queued after the snapshot wait for the next pass. The ID lock stays held through re-drive
+and any requeue, preserving the same per-ID order as live log-and-apply operations.
+
 ---
 
 ## 6. Control plane and physical assignments
