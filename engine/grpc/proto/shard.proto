@@ -517,6 +517,9 @@ message FlushRequest {
 }
 message FlushReply {
   bool checkpointed = 1;
+  // ADR-180: the slot persists to disk (a `--data-dir` node). A checkpoint of a volatile slot
+  // proves nothing across a restart. Additive: an older server reports false.
+  bool durable = 2;
 }
 
 message CountReply       { uint64 count = 1; }            // usize num_queries

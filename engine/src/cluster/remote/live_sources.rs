@@ -12,8 +12,9 @@ use super::{
 };
 
 impl RemoteShard {
-    /// Export this slot's live corpus in one attempt. It is deliberately not retried: the
-    /// visitor consumes documents as they arrive, so a retry would replay what it already saw.
+    /// Export this slot's live corpus. Only opening the stream may be retried, once, after
+    /// reclaiming a restarted node's coordinator lease; consumption is never retried, because the
+    /// visitor consumes documents as they arrive and a retry would replay what it already saw.
     /// A transport failure, protocol violation, or visitor refusal fails the whole export.
     pub(super) fn export_live_sources(
         &self,
@@ -31,33 +32,53 @@ impl RemoteShard {
             remaining_micros: remaining_micros(deadline.saturating_duration_since(started)),
         };
         let mut collector = LiveSourceCollector::new(&body);
-        let mut request = tonic::Request::new(body);
-        request.set_timeout(deadline.saturating_duration_since(started));
-        let mut client = self.client.clone();
-        let result = self.block_on(async {
-            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-                let mut stream = client
-                    .live_sources(request)
-                    .await
-                    .map_err(|status| ranked_rpc_err(&status))?
-                    .into_inner();
-                while let Some(frame) = stream
-                    .message()
-                    .await
-                    .map_err(|status| ranked_rpc_err(&status))?
-                {
-                    collector
-                        .push(frame, &mut *visit)
-                        .map_err(|error| match error {
-                            CollectError::Wire(status) => ranked_rpc_err(&status),
-                            CollectError::Visit(error) => error,
-                        })?;
-                }
-                collector.finish().map_err(|status| ranked_rpc_err(&status))
+        let open = |body: proto::LiveSourcesRequest| {
+            let mut client = self.client.clone();
+            let mut request = tonic::Request::new(body);
+            request.set_timeout(deadline.saturating_duration_since(Instant::now()));
+            self.block_on(async move {
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    client.live_sources(request),
+                )
+                .await
             })
-            .await
-            .unwrap_or(Err(ShardError::DeadlineExceeded))
-        });
+        };
+        // A restarted source forgets its coordinator lease. Reclaiming it and reopening is safe
+        // here because no document has reached the visitor yet; once frames flow, never retry.
+        let mut opened = open(body);
+        if let Ok(Err(status)) = &opened {
+            if super::no_live_coordinator_lease_status(status) && self.coordinator_id.is_some() {
+                self.reclaim_coordinator_lease(Some(deadline))?;
+                opened = open(body);
+            }
+        }
+        let result = match opened {
+            Err(_) => Err(ShardError::DeadlineExceeded),
+            Ok(Err(status)) => Err(ranked_rpc_err(&status)),
+            Ok(Ok(response)) => {
+                let mut stream = response.into_inner();
+                self.block_on(async {
+                    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                        while let Some(frame) = stream
+                            .message()
+                            .await
+                            .map_err(|status| ranked_rpc_err(&status))?
+                        {
+                            collector
+                                .push(frame, &mut *visit)
+                                .map_err(|error| match error {
+                                    CollectError::Wire(status) => ranked_rpc_err(&status),
+                                    CollectError::Visit(error) => error,
+                                })?;
+                        }
+                        collector.finish().map_err(|status| ranked_rpc_err(&status))
+                    })
+                    .await
+                    .unwrap_or(Err(ShardError::DeadlineExceeded))
+                })
+            }
+        };
         let outcome = match &result {
             Ok(_) => RpcOutcome::Ok,
             Err(ShardError::DeadlineExceeded) => RpcOutcome::Timeout,

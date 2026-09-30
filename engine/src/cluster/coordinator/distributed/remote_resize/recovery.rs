@@ -2,7 +2,17 @@
 
 use crate::cluster::control::{MoveCommandOutcome, ResizeCommand, ResizeIntentPhase};
 
-use super::ShardError;
+use super::{ClusterEngine, ShardError};
+
+impl ClusterEngine {
+    /// Resolve a recorded remote-resize intent through this coordinator's control plane. Call it
+    /// only after the coordinator has claimed its shards exclusively: a live coordinator that is
+    /// still running the resize then holds those claims, so this coordinator fails to connect
+    /// instead of aborting the resize underneath it.
+    pub fn recover_resize_intent(&self) -> Result<Option<ResizeRecovery>, ShardError> {
+        recover_durable_resize(self.control.as_ref())
+    }
+}
 
 /// What coordinator startup did with a recorded remote-resize intent (ADR-180).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -211,9 +211,20 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/resize -H "authorization: Bearer
 
 Writes pause for the copy while reads keep serving; the control plane commits the new layout
 atomically, and restarts adopt the committed shard count, so `--shards` need not be edited. When
-the call returns, decommission the old shard nodes. If it fails, the old layout keeps serving and
-the targets must be wiped before another attempt. Details are in the
-[`/_cluster/resize` reference](../reference/api/cluster/resize.md).
+the call succeeds, decommission the old shard nodes.
+
+A failed response does not by itself prove the resize did not commit. Before wiping or
+decommissioning **either** set of nodes, read `GET /_cluster/state`:
+
+- If `num_shards`, `placement_generation`, and the assignments still name the old layout and no
+  resize intent is recorded, the resize did not commit: the old layout is authoritative, and the
+  targets may be wiped before another attempt.
+- If they name the targets, the new layout is authoritative. Restart the coordinator if it still
+  refuses writes, so startup finishes the intent and routes to the new layout, then decommission
+  the old nodes.
+- If an intent is recorded, restart the coordinator to resolve it, then read the state again.
+
+Details are in the [`/_cluster/resize` reference](../reference/api/cluster/resize.md).
 
 **A static or CLI-seeded remote coordinator** (like this Compose file's first boot) has **no
 online resize**: changing K re-keys the ring, and a coordinator restarted at the new K routes on the

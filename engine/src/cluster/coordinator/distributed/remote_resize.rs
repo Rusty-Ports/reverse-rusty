@@ -132,6 +132,10 @@ impl ClusterEngine {
             .map(|assignment| member_endpoint(&intent, assignment.primary))
             .collect::<Result<_, _>>()?;
 
+        // A durable layout may only move onto durable targets; a volatile one (tests, caches) may
+        // move onto either.
+        let source_durable = self.layout_is_durable(&handle, &expected_endpoints)?;
+
         // Exclude moves, GC, and other resizes on every participating endpoint for the copy.
         let mut footprint = expected_endpoints.clone();
         footprint.extend(target_endpoints.iter().cloned());
@@ -147,7 +151,7 @@ impl ClusterEngine {
             }
         }
         self.raise_resize_write_fence();
-        match self.build_and_commit(&handle, request, &intent, &target_endpoints) {
+        match self.build_and_commit(&handle, request, &intent, &target_endpoints, source_durable) {
             Ok((staged, exported, loaded)) => Ok(PreparedRemoteResize {
                 operation_id: request.operation_id,
                 staged,
@@ -426,6 +430,7 @@ impl ClusterEngine {
         request: &RemoteResizeRequest,
         intent: &ResizeIntent,
         target_endpoints: &[String],
+        source_durable: bool,
     ) -> Result<(ClusterEngine, u64, u64), ShardError> {
         if self.pending_repairs() != 0 {
             return Err(ShardError::ControlPlane(
@@ -491,7 +496,7 @@ impl ClusterEngine {
             )?;
             // Prove the loaded rows survive a target restart before they can become the layout
             // of record: an error-returning checkpoint of segments, sources, and the sidecar.
-            client.checkpoint_durably()?;
+            client.checkpoint_durably(source_durable)?;
             let (fingerprint_lo, fingerprint_hi, live_count) = client.content_fingerprint()?;
             if live_count != loaded[position] {
                 return Err(ShardError::Protocol(format!(
@@ -546,6 +551,29 @@ impl ClusterEngine {
             }
             Err(error) => error,
         })
+    }
+
+    /// Whether any slot of the current layout persists to disk.
+    fn layout_is_durable(
+        &self,
+        handle: &tokio::runtime::Handle,
+        endpoints: &[String],
+    ) -> Result<bool, ShardError> {
+        for (position, endpoint) in endpoints.iter().enumerate() {
+            let client = RemoteShard::connect_for_coordinator_with_security(
+                endpoint,
+                handle.clone(),
+                self.dict.fingerprint(),
+                self.tag_dict.fingerprint(),
+                position as u32,
+                self.coordinator_id,
+                &self.client_security,
+            )?;
+            if client.is_durable()? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn fence_retired_slot(

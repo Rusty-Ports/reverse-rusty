@@ -148,12 +148,18 @@ then runs these steps:
 6. Swap routing.
 7. Fence the old slots so a stale writer fails loud.
 
-Each target must attest a durable checkpoint before its evidence is recorded. A failure before the
-commit aborts and reopens writes, leaving the targets holding an unrouted layout that must be wiped
-before reuse. If the control plane cannot prove the commit did not happen, writes stay paused until
-a coordinator restart resolves the recorded intent. After a coordinator crash, startup aborts an
-uncommitted intent or finishes a committed one before serving. Replication factor above 1 is refused. Decommission the old
-nodes once the resize succeeds.
+Each target must attest a checkpoint before its evidence is recorded, and must persist to disk when
+the current layout does. Every copy of a query stored on several positions must agree; disagreeing
+copies (for example, an unrepaired partial upsert) fail the export, so repair or upsert them first.
+
+A failure before the commit aborts and reopens writes. If the control plane cannot prove the commit
+did not happen, writes stay paused until a coordinator restart resolves the recorded intent. A
+failed response is therefore not proof that nothing committed: before wiping the targets or
+decommissioning the old nodes, confirm in [`GET /_cluster/state`](../observability/cluster-state.md)
+which layout `num_shards`, `placement_generation`, and the assignments name. Startup resolves a
+recorded intent only after the coordinator has exclusively claimed its shards, so it cannot abort a
+resize that another live coordinator is still running. Replication factor above 1 is refused.
+Decommission the old nodes once the resize succeeds.
 
 A static or CLI-seeded remote coordinator returns `501 not_supported_in_cluster_mode` before
 admission: its routing follows the CLI endpoint list, so changing the ring there would make routing

@@ -18,7 +18,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   swaps routing, and fences the retired slots ([ADR-180](decisions/adr-180-remote-blue-green-resize.md)).
 - Record the transition as a replicated, idempotent resize intent behind a one-way control format 5
   and `RRL5` log header. Resolve-only startup adopts the committed shard count and placement
-  generation and aborts or finishes a recorded intent before routing.
+  generation, then aborts or finishes a recorded intent once it holds exclusive shard claims.
 
 ## 2026-09-30 — Governed resize operations
 

@@ -419,6 +419,7 @@ impl ShardService for ShardServer {
         }
         Ok(Response::new(proto::FlushReply {
             checkpointed: req.checkpoint,
+            durable: shard.is_durable(),
         }))
     }
 

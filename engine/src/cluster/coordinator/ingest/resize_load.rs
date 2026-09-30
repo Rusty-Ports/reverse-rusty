@@ -8,6 +8,17 @@ use super::{
 /// Approximate request-size budget per ingest call, well under the default gRPC decode limit.
 const LOAD_BATCH_BYTES: usize = 1024 * 1024;
 
+/// Conservative encoded size of one placed query in an ingest request.
+fn placed_bytes(query: &PlacedQuery) -> usize {
+    64 + query.dsl.len()
+        + query
+            .tags
+            .iter()
+            .map(|(key, value)| key.len() + value.len() + 8)
+            .sum::<usize>()
+        + 8 * query.placement.positions().len()
+}
+
 impl ClusterEngine {
     /// Place `entries` (logical id, stored version, source, raw tags) under this engine's ring
     /// and ingest them into its shards, adding each position's accepted row count to `loaded`.
@@ -64,18 +75,16 @@ impl ClusterEngine {
         for (position, bucket) in buckets.into_iter().enumerate() {
             let mut start = 0;
             while start < bucket.len() {
+                // Add documents while the batch stays within budget; a document that would
+                // overflow it starts the next batch, and one oversized document travels alone.
                 let mut end = start;
                 let mut bytes = 0usize;
-                while end < bucket.len() && (end == start || bytes < LOAD_BATCH_BYTES) {
-                    let query = &bucket[end];
-                    bytes = bytes.saturating_add(
-                        64 + query.dsl.len()
-                            + query
-                                .tags
-                                .iter()
-                                .map(|(k, v)| k.len() + v.len() + 8)
-                                .sum::<usize>(),
-                    );
+                while end < bucket.len() {
+                    let cost = placed_bytes(&bucket[end]);
+                    if end > start && bytes.saturating_add(cost) > LOAD_BATCH_BYTES {
+                        break;
+                    }
+                    bytes = bytes.saturating_add(cost);
                     end += 1;
                 }
                 let report = self.shards[position].ingest_extracted(&bucket[start..end])?;

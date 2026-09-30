@@ -115,8 +115,10 @@ A resolve-only coordinator treats the committed document as the layout of record
   `ClusterConfig::remote_placement_generation` threads it into the plain and replicated builders
   that previously hard-coded the initial generation.
 - It adopts the committed shard count, even when `--shards` differs.
-- Before routing, it aborts an uncommitted intent and finishes a committed one, then logs which
-  nodes to wipe or decommission.
+- Once it holds exclusive claims on the shards it routes to, it aborts an uncommitted intent and
+  finishes a committed one, then logs which nodes to wipe or decommission. Claiming first means a
+  live coordinator still running the resize makes this startup fail to connect instead of having
+  its resize aborted.
 
 CLI-seeded and static modes still require their CLI topology to match.
 
@@ -139,6 +141,21 @@ ambiguous-commit, and stalled-reader fixes were mutation-checked:
 - a failed `Finish` blocked every later resize and move;
 - a stalled export reader could pin the server producer and snapshot permit, and the client did not
   bound stream consumption by its deadline.
+
+The second review found six more, all fixed:
+
+- a volatile target could attest a checkpoint; targets must now persist to disk whenever the
+  source layout does, as reported by the additive `durable` flag on `Flush`;
+- the export silently kept the first of several disagreeing copies; copies must now match
+  exactly, or the export fails;
+- the operator docs implied a failed response meant nothing committed; they now require checking
+  the committed state before wiping either layout;
+- startup could abort another live coordinator's in-flight resize; resolution now runs only after
+  this coordinator holds exclusive shard claims;
+- the load batcher could overshoot its byte budget; a document that would overflow now starts the
+  next batch;
+- the export did not reclaim a restarted source's coordinator lease; opening the stream (never
+  consuming it) is now retried once after a reclaim.
 
 ## Alternatives
 

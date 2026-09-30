@@ -7,6 +7,11 @@ use super::{LocalShard, ShardError};
 use crate::cluster::shard::LiveTaggedQuery;
 
 impl LocalShard {
+    /// Whether this shard persists to a data directory (a checkpoint survives a restart).
+    pub(crate) fn is_durable(&self) -> bool {
+        self.data_dir.is_some()
+    }
+
     /// The sorted live logical ids to export, refusing a corpus above `max_documents`.
     pub(crate) fn live_source_ids(
         &self,

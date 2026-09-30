@@ -176,22 +176,6 @@ pub(crate) fn connect_remote_cluster(
         resolve_only,
     )?;
     let coordinator_id = process_coordinator_id();
-    // Resolve a recorded remote resize before anything routes (ADR-180): abort an uncommitted
-    // intent (the previous layout is still committed) or finish a committed one.
-    if let Some(rcp) = control.as_ref() {
-        match reverse_rusty::cluster::recover_durable_resize(rcp)? {
-            Some(reverse_rusty::cluster::ResizeRecovery::Aborted { operation_id }) => warn!(
-                operation_id,
-                "aborted an uncommitted remote resize; its target nodes hold an unrouted staged \
-                 layout and must be wiped before reuse"
-            ),
-            Some(reverse_rusty::cluster::ResizeRecovery::Finished { operation_id }) => warn!(
-                operation_id,
-                "finished a committed remote resize; decommission the previous layout's nodes"
-            ),
-            None => {}
-        }
-    }
     // Under assignment routing the committed document is the layout of record: connect every node
     // at its placement generation, and in resolve-only mode at its shard count.
     let mut effective = cfg.clone();
@@ -266,6 +250,22 @@ pub(crate) fn connect_remote_cluster(
         Some(rcp) => cluster.with_control_plane(Box::new(rcp)),
         None => cluster,
     };
+
+    // Resolve a recorded remote resize only now that this coordinator holds exclusive shard claims
+    // (ADR-180): a committed intent already routes to its layout and is finished; an uncommitted
+    // one is aborted, leaving the previous layout, which this coordinator now serves.
+    match cluster.recover_resize_intent()? {
+        Some(reverse_rusty::cluster::ResizeRecovery::Aborted { operation_id }) => warn!(
+            operation_id,
+            "aborted an uncommitted remote resize; its target nodes hold an unrouted staged \
+             layout and must be wiped before reuse"
+        ),
+        Some(reverse_rusty::cluster::ResizeRecovery::Finished { operation_id }) => warn!(
+            operation_id,
+            "finished a committed remote resize; decommission the previous layout's nodes"
+        ),
+        None => {}
+    }
 
     if !queries.is_empty() {
         match cluster.num_queries()? {
