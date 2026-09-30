@@ -35,6 +35,7 @@ mod handoff;
 mod health;
 mod hot;
 mod legacy_layout;
+mod live_sources;
 mod logical_ids;
 mod parallel;
 mod partial_apply;

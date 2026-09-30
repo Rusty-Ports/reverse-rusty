@@ -755,6 +755,14 @@ impl Shard for RemoteShard {
         self.enumerate_logical_ids()
     }
 
+    fn visit_live_sources(
+        &self,
+        visit: &mut (dyn FnMut(crate::cluster::live_source_wire::LiveSourceRow) -> Result<(), ShardError>
+                  + Send),
+    ) -> Result<u64, ShardError> {
+        self.export_live_sources(visit)
+    }
+
     fn live_endpoints(&self) -> Vec<String> {
         // The GC keep-set contribution (ADR-096): the endpoint this client was connected with —
         // wherever live routing reaches through this shard is a node the sweep must not drop from.

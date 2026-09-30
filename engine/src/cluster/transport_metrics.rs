@@ -38,6 +38,7 @@ const METHOD_LABELS: [&str; TransportMetrics::SLOTS] = [
     "percolate_top_k_batch",
     "percolate_all",
     "live_logical_ids",
+    "live_sources",
 ];
 
 #[derive(Default)]
@@ -63,7 +64,7 @@ impl Default for TransportMetrics {
 
 impl TransportMetrics {
     /// Number of distinct RPC kinds tracked (the counter-array length).
-    pub(crate) const SLOTS: usize = 21;
+    pub(crate) const SLOTS: usize = 22;
 
     /// A fresh, all-zero collector.
     pub fn new() -> Self {
@@ -193,6 +194,7 @@ pub(crate) enum RpcMethod {
     PercolateTopKBatch,
     PercolateAll,
     LiveLogicalIds,
+    LiveSources,
 }
 
 #[cfg(feature = "distributed")]

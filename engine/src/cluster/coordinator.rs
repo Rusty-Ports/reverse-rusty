@@ -69,6 +69,8 @@ mod distributed;
 #[cfg(feature = "distributed")]
 pub use distributed::handoff::HandoffOutcome;
 #[cfg(feature = "distributed")]
+pub use distributed::ExportedQuery;
+#[cfg(feature = "distributed")]
 mod gc;
 #[cfg(feature = "distributed")]
 mod reassign;

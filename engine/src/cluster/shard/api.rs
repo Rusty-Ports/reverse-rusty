@@ -347,6 +347,25 @@ pub(crate) trait Shard: Send + Sync {
         ))
     }
 
+    /// Stream this position's complete live corpus (logical id, source, stored version, raw
+    /// tags) to `visit`, in ascending id order, returning the number of documents visited —
+    /// the export behind a remote resize (ADR-180). The default materializes
+    /// [`Self::live_sources_tagged`]; a remote shard streams bounded frames instead. The
+    /// caller must hold writes paused: a corpus that changes mid-export fails loud.
+    #[cfg(feature = "distributed")]
+    fn visit_live_sources(
+        &self,
+        visit: &mut (dyn FnMut(crate::cluster::live_source_wire::LiveSourceRow) -> Result<(), ShardError>
+                  + Send),
+    ) -> Result<u64, ShardError> {
+        let documents = self.live_sources_tagged()?;
+        let count = documents.len() as u64;
+        for (logical, dsl, version, _, raw_tags, _, _, _) in documents {
+            visit((logical, dsl, version, raw_tags))?;
+        }
+        Ok(count)
+    }
+
     /// Whether this shard is backed by an in-process [`Engine`](crate::segment::Engine), so its normalizer
     /// can be swapped in place by a vocabulary change. `false` for a
     /// `RemoteShard`/`HandoffShard`, whose normalizer lives in another process and

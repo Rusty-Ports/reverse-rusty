@@ -54,12 +54,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::shard::ShardError;
 
 mod move_intent;
+mod resize_intent;
 
 pub use move_intent::{
     MoveCommand, MoveCommandOutcome, MoveControlState, MoveInitialAuthority, MoveIntent,
     MoveIntentPhase, MoveMemberEvidence, MoveMemberIdentity, MoveProposalResult,
     MoveRecoveryEvidence, MOVE_CONTROL_FORMAT_CURRENT, MOVE_CONTROL_FORMAT_LEGACY,
     MOVE_INTENT_VERSION,
+};
+pub use resize_intent::{
+    ResizeCommand, ResizeIntent, ResizeIntentPhase, ResizeLayout, ResizePositionEvidence,
+    RESIZE_CONTROL_FORMAT, RESIZE_INTENT_VERSION,
 };
 
 /// Logical node identity — the concept the in-process clustering core never had (placement
@@ -225,8 +230,12 @@ impl<'de> Deserialize<'de> for ClusterState {
                 value,
                 control_format_version,
             } => {
-                if control_format_version != MOVE_CONTROL_FORMAT_CURRENT
-                    || wire.moves.format_version != MOVE_CONTROL_FORMAT_CURRENT
+                let supported = control_format_version == MOVE_CONTROL_FORMAT_CURRENT
+                    || control_format_version == RESIZE_CONTROL_FORMAT;
+                if !supported
+                    || wire.moves.format_version != control_format_version
+                    || (control_format_version < RESIZE_CONTROL_FORMAT
+                        && wire.moves.resize.is_some())
                 {
                     return Err(D::Error::custom(format!(
                         "unsupported move control format {control_format_version}"
@@ -280,6 +289,9 @@ pub enum ClusterStateChange {
     /// Versioned, idempotent physical-move transition. Callers use
     /// [`ControlPlane::propose_move`] to retain the application outcome.
     Move(MoveCommand),
+    /// Versioned, idempotent remote-resize transition (ADR-180). Callers use
+    /// [`ControlPlane::propose_resize`] to retain the application outcome.
+    Resize(ResizeCommand),
 }
 
 /// Why a control-plane operation could not commit. Typed (not stringly) so callers can act
@@ -366,6 +378,14 @@ pub trait ControlPlane: Send + Sync {
         ))
     }
 
+    /// Commit one idempotent remote-resize transition and return its compare-and-set outcome
+    /// (ADR-180). Backends without durable resize support refuse.
+    fn propose_resize(&self, _command: ResizeCommand) -> Result<MoveProposalResult, ControlError> {
+        Err(ControlError::Backend(
+            "durable resize proposals are not supported by this control-plane backend".into(),
+        ))
+    }
+
     /// Change the Raft VOTER set — DISTINCT from [`propose`](Self::propose) because joint
     /// consensus is special in Raft (maps to `Raft::change_membership`, not `client_write`).
     fn change_membership(&self, voters: Vec<NodeId>) -> Result<StateVersion, ControlError>;
@@ -432,6 +452,9 @@ pub(super) fn apply(
             state.moves.retain_positions_below(num_shards);
         }
         ClusterStateChange::Move(command) => return Some(move_intent::apply_move(state, command)),
+        ClusterStateChange::Resize(command) => {
+            return Some(resize_intent::apply_resize(state, command));
+        }
     }
     None
 }
@@ -572,6 +595,21 @@ impl ControlPlane for InMemoryControlPlane {
         let mut current = self.lock();
         let mut next = (**current).clone();
         let outcome = move_intent::apply_move(&mut next, command);
+        next.epoch += 1;
+        let version = StateVersion(next.epoch);
+        *current = Arc::new(next);
+        Ok(MoveProposalResult { version, outcome })
+    }
+
+    fn propose_resize(&self, command: ResizeCommand) -> Result<MoveProposalResult, ControlError> {
+        if self.proposals_broken() {
+            return Err(ControlError::Backend(
+                "proposals broken (test fault injection)".into(),
+            ));
+        }
+        let mut current = self.lock();
+        let mut next = (**current).clone();
+        let outcome = resize_intent::apply_resize(&mut next, command);
         next.epoch += 1;
         let version = StateVersion(next.epoch);
         *current = Arc::new(next);

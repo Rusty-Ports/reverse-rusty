@@ -38,6 +38,10 @@ service ShardService {
   // One bounded, consistent live-ID snapshot. Only the final empty complete
   // frame certifies the count; EOF without it is a failed enumeration (ADR-176).
   rpc LiveLogicalIds (LiveLogicalIdsRequest) returns (stream LiveLogicalIdsFrame);
+  // Remote resize export (ADR-180): one slot's complete live corpus — source, version, and raw
+  // tags per logical id — streamed as bounded frames from a fixed live-id snapshot with explicit
+  // completion. A document that disappears mid-export fails the stream rather than shortening it.
+  rpc LiveSources (LiveSourcesRequest) returns (stream LiveSourcesFrame);
   // ---- writes ----
   rpc IngestExtracted (IngestRequest) returns (IngestReply);
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
@@ -154,6 +158,32 @@ message LiveLogicalIdsRequest {
 message LiveLogicalIdsFrame {
   repeated fixed64 logical_ids = 1;
   uint64 total_ids = 2;
+  bool complete = 3;
+  uint32 shard_id = 4;
+  uint64 placement_generation = 5;
+  uint32 num_shards = 6;
+}
+
+message LiveSourcesRequest {
+  uint32 shard_id = 1;
+  fixed64 dict_fingerprint = 2;
+  fixed64 tag_dict_fingerprint = 3;
+  uint64 placement_generation = 4;
+  uint32 num_shards = 5;
+  uint64 max_documents = 6;
+  uint64 remaining_micros = 7;
+}
+
+message LiveSource {
+  uint64 logical_id = 1;
+  string dsl = 2;
+  uint32 version = 3;
+  repeated TagKv tags = 4;
+}
+
+message LiveSourcesFrame {
+  repeated LiveSource documents = 1;
+  uint64 total_documents = 2;
   bool complete = 3;
   uint32 shard_id = 4;
   uint64 placement_generation = 5;

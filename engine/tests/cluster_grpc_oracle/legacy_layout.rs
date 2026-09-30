@@ -48,6 +48,18 @@ impl ShardService for LegacyOwnershipServer {
         ))
     }
 
+    type LiveSourcesStream =
+        Pin<Box<dyn Stream<Item = Result<raw::LiveSourcesFrame, Status>> + Send>>;
+
+    async fn live_sources(
+        &self,
+        _: Request<raw::LiveSourcesRequest>,
+    ) -> Result<Response<Self::LiveSourcesStream>, Status> {
+        Err(Status::unimplemented(
+            "legacy peer has no live-source export",
+        ))
+    }
+
     async fn dict_fingerprint(
         &self,
         _req: Request<raw::Empty>,

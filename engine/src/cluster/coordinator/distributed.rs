@@ -18,6 +18,8 @@ use crate::cluster::transport_metrics::TransportMetrics;
 use super::{ClusterConfig, ClusterDurable, ClusterEngine, ShardGroup};
 
 pub(super) mod handoff;
+mod live_corpus;
+pub use live_corpus::ExportedQuery;
 mod logical_ids;
 mod recovery;
 mod remote;

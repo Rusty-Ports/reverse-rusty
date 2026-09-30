@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::control::{
     ClusterState, ClusterStateChange, ControlError, MoveCommand, MoveCommandOutcome, NodeId,
+    ResizeCommand,
 };
 
 /// One client-facing control-plane operation — the [`ControlPlane`](super::control::ControlPlane)
@@ -26,6 +27,9 @@ pub(crate) enum ClientControlRequest {
     Propose(ClusterStateChange),
     /// Commit an idempotent durable-move transition and retain its compare-and-set outcome.
     ProposeMove(MoveCommand),
+    /// Commit an idempotent remote-resize transition and retain its compare-and-set outcome
+    /// (ADR-180). An older server fails to decode it and replies with an error.
+    ProposeResize(ResizeCommand),
     /// Change the Raft voter set (joint consensus).
     ChangeMembership(Vec<NodeId>),
     /// The current leader as the serving node sees it.

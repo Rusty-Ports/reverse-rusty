@@ -316,6 +316,14 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().live_logical_ids()
     }
 
+    fn visit_live_sources(
+        &self,
+        visit: &mut (dyn FnMut(crate::cluster::live_source_wire::LiveSourceRow) -> Result<(), ShardError>
+                  + Send),
+    ) -> Result<u64, ShardError> {
+        self.current.load().visit_live_sources(visit)
+    }
+
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         self.current.load().class_counts()
     }

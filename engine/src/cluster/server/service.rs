@@ -32,12 +32,15 @@ type ExhaustiveStream =
     Pin<Box<dyn Stream<Item = Result<proto::PercolateAllFrame, Status>> + Send>>;
 type LogicalIdsStream =
     Pin<Box<dyn Stream<Item = Result<proto::LiveLogicalIdsFrame, Status>> + Send>>;
+type LiveSourcesStream =
+    Pin<Box<dyn Stream<Item = Result<proto::LiveSourcesFrame, Status>> + Send>>;
 
 mod add_shard;
 mod dict_adopt;
 mod exhaustive;
 mod gc;
 mod leases;
+mod live_sources;
 mod logical_ids;
 mod ranked;
 mod ranked_batch;
@@ -46,6 +49,14 @@ mod recovery;
 #[tonic::async_trait]
 impl ShardService for ShardServer {
     type LiveLogicalIdsStream = LogicalIdsStream;
+    type LiveSourcesStream = LiveSourcesStream;
+
+    async fn live_sources(
+        &self,
+        request: Request<proto::LiveSourcesRequest>,
+    ) -> Result<Response<Self::LiveSourcesStream>, Status> {
+        live_sources::live_sources(self, request)
+    }
 
     async fn live_logical_ids(
         &self,

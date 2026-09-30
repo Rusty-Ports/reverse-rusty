@@ -247,6 +247,10 @@ impl ControlService for ControlServer {
                     ClientControlReply::Err(WireControlError::Backend(
                         "move commands require ProposeMove".into(),
                     ))
+                } else if matches!(&change, super::control::ClusterStateChange::Resize(_)) {
+                    ClientControlReply::Err(WireControlError::Backend(
+                        "resize commands require ProposeResize".into(),
+                    ))
                 } else {
                     match self.raft.client_write(change).await {
                         Ok(r) => ClientControlReply::Committed(r.data.version),
@@ -268,6 +272,22 @@ impl ControlService for ControlServer {
                     },
                     None => ClientControlReply::Err(WireControlError::Backend(
                         "move proposal committed without a move outcome".into(),
+                    )),
+                },
+                Err(e) => ClientControlReply::Err(WireControlError::from(&map_client_write(e))),
+            },
+            ClientControlRequest::ProposeResize(command) => match self
+                .raft
+                .client_write(super::control::ClusterStateChange::Resize(command))
+                .await
+            {
+                Ok(r) => match r.data.move_outcome {
+                    Some(outcome) => ClientControlReply::MoveCommitted {
+                        version: r.data.version,
+                        outcome,
+                    },
+                    None => ClientControlReply::Err(WireControlError::Backend(
+                        "resize proposal committed without a resize outcome".into(),
                     )),
                 },
                 Err(e) => ClientControlReply::Err(WireControlError::from(&map_client_write(e))),

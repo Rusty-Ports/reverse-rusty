@@ -45,12 +45,16 @@ use crate::storage::crc32;
 /// once it may contain source-fence-bound durable move commands.
 const LOG_MAGIC_V1: [u8; 4] = *b"RRRL"; // Reverse-Rusty Raft Log
 const LOG_MAGIC_V4: [u8; 4] = *b"RRL4";
+/// V5 adds remote-resize commands (ADR-180); an RRL4-only binary rejects it.
+const LOG_MAGIC_V5: [u8; 4] = *b"RRL5";
 const LOG_HEADER: usize = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Ordered oldest to newest: a log only ever upgrades to a later format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum LogFormat {
     Legacy,
     DurableMoves,
+    DurableResize,
 }
 
 impl LogFormat {
@@ -58,6 +62,7 @@ impl LogFormat {
         match self {
             Self::Legacy => (LOG_MAGIC_V1, 1),
             Self::DurableMoves => (LOG_MAGIC_V4, 4),
+            Self::DurableResize => (LOG_MAGIC_V5, 5),
         }
     }
 }
@@ -76,6 +81,7 @@ fn parse_log_format(data: &[u8]) -> io::Result<LogFormat> {
     match (data[0..4].try_into().ok(), version) {
         (Some(LOG_MAGIC_V1), 1) => Ok(LogFormat::Legacy),
         (Some(LOG_MAGIC_V4), 4) => Ok(LogFormat::DurableMoves),
+        (Some(LOG_MAGIC_V5), 5) => Ok(LogFormat::DurableResize),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("raft log: unsupported magic/version {version}"),
