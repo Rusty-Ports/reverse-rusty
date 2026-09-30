@@ -18,9 +18,14 @@ fn reopen_repairs_every_partial_frame_before_acknowledging_new_writes() {
     drop(wal);
     let bytes = std::fs::read(&path).unwrap();
     let frame = &bytes[prefix.len()..];
-    for len in [1, 4, 7, 8, 12, frame.len() - 1] {
+    let tails = [1, 4, 7, 8, 12, frame.len() - 1]
+        .into_iter()
+        .map(|len| frame[..len].to_vec())
+        .chain(std::iter::once(vec![0; 64]));
+    for tail in tails {
+        let len = tail.len();
         let mut damaged = prefix.clone();
-        damaged.extend_from_slice(&frame[..len]);
+        damaged.extend_from_slice(&tail);
         std::fs::write(&path, damaged).unwrap();
         assert_eq!(Wal::recover(&path).unwrap().skipped_bytes, len);
         let mut wal = Wal::open(&path, true).unwrap();
@@ -189,5 +194,26 @@ fn oversized_tag_fields_return_errors_before_writing_any_frame() {
     wal.append_insert(2, 1, "beta", &[]).unwrap();
     drop(wal);
     assert_eq!(Wal::recover(&path).unwrap().entries.len(), 1);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn damaged_length_of_an_acknowledged_last_frame_refuses_repair() {
+    let path = scratch_path("damaged_last_frame_length");
+    let mut wal = Wal::open(&path, true).unwrap();
+    wal.append_insert(1, 1, "alpha", &[]).unwrap();
+    drop(wal);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        Wal::recover(&path).err().unwrap().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert_eq!(
+        Wal::open(&path, true).err().unwrap().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
     let _ = std::fs::remove_file(path);
 }

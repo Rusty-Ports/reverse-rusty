@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 
-use super::crc32;
+use super::{crc32, Crc32};
 
 pub(crate) struct FrameScan<T> {
     pub records: Vec<T>,
@@ -34,6 +34,23 @@ fn u32_at(data: &[u8], offset: usize) -> io::Result<u32> {
 /// patterns linear in suffix size; an exhausted budget is ambiguous and also refused.
 fn validate_torn_suffix(tail: &[u8]) -> io::Result<()> {
     let mut budget = tail.len().saturating_mul(4).max(64);
+    // The declared length itself may be corrupt. A CRC-valid payload prefix is
+    // evidence of a whole record even if its header now claims more bytes and
+    // an incomplete write or zero padding follows it. One incremental pass
+    // checks every possible body end without quadratic checksum work.
+    if tail.len() > 8 {
+        budget -= tail.len() - 8;
+        let expected = u32_at(tail, 4)?;
+        let mut crc = Crc32::new();
+        for &byte in &tail[8..] {
+            crc.update(byte);
+            if crc.finish() == expected {
+                return Err(invalid(
+                    "complete log payload has a damaged length; refusing repair",
+                ));
+            }
+        }
+    }
     for offset in 1..tail.len().saturating_sub(7) {
         let len = u32_at(tail, offset)? as usize;
         if len == 0 {

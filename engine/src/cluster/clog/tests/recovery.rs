@@ -13,9 +13,14 @@ fn reopen_repairs_partial_frames_and_preserves_later_acknowledged_appends() {
     let prefix = framed(&FileClusterLog::encode_body(1, &add(1, "alpha")));
     let frame = framed(&FileClusterLog::encode_body(2, &add(99, "incomplete")));
     let frame = &frame[CLOG_HEADER_SIZE..];
-    for len in [1, 4, 7, 8, 12, frame.len() - 1] {
+    let tails = [1, 4, 7, 8, 12, frame.len() - 1]
+        .into_iter()
+        .map(|len| frame[..len].to_vec())
+        .chain(std::iter::once(vec![0; 64]));
+    for tail in tails {
+        let len = tail.len();
         let mut bytes = prefix.clone();
-        bytes.extend_from_slice(&frame[..len]);
+        bytes.extend_from_slice(&tail);
         std::fs::write(&path, bytes).unwrap();
         let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), prefix);
@@ -55,6 +60,9 @@ fn complete_unknown_or_malformed_payloads_refuse_open_replay_and_checkpoint() {
     unknown_op[8] = 99;
     cases.push(unknown_op);
     cases.push(body[..9].to_vec());
+    let mut short_remove = body[..9].to_vec();
+    short_remove[8] = OP_REMOVE;
+    cases.push(short_remove);
     let mut invalid_utf8 = body.clone();
     invalid_utf8[25] = 0xff;
     cases.push(invalid_utf8);

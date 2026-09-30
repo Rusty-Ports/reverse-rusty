@@ -29,10 +29,12 @@ The match core, signature cover, placement decisions, and on-disk record layouts
    append handle, truncate to the last fully decoded boundary and `sync_all` the cut, even when
    normal appends use the page-cache durability policy. A read-only replay reports the suffix but
    does not modify it.
-3. A damaged length prefix must not conceal later acknowledged frames. Before repairing an
-   incomplete body, look for a later complete CRC-valid frame. Finding one refuses repair. CRC work
-   has a linear budget in suffix size; budget exhaustion also refuses repair as ambiguous. This is
-   conservative detection, never a resynchronization or salvage path.
+3. A damaged length prefix must not discard an acknowledged payload or conceal later frames.
+   Before repairing an incomplete body, an incremental CRC pass checks whether any available
+   payload prefix matches the stored CRC, including a complete payload followed by padding or
+   another incomplete write. Also look for a later complete CRC-valid frame. Finding either refuses
+   repair. CRC work has a linear budget in suffix size; budget exhaustion also refuses repair as
+   ambiguous. This is conservative detection, never a resynchronization or salvage path.
 4. Encode a contiguous frame and submit it through one `write_all`. Any write, flush, or sync error
    disables further appends on that handle. Recovery can reopen a validated prefix; replacement
    paths disable the old handle before rename so a later error cannot acknowledge an append to an
@@ -40,6 +42,9 @@ The match core, signature cover, placement decisions, and on-disk record layouts
 5. Preserve the exact removed-byte count until startup replay or observer delivery. Standalone and
    coordinator recovery emit `WalTornTail`; shard-local restart queues the same event and delivers
    it when a sink attaches, outside the engine and sink mutexes.
+6. Fallible standalone open propagates initialization and append-handle failures on both the
+   manifest and pre-first-manifest paths. It cannot inherit an infallible constructor's degraded
+   in-memory fallback after failed log validation, repair, or sync.
 
 ## Compatibility
 
@@ -48,7 +53,9 @@ Raft headers. Known WAL v1–v7 shapes remain readable, including mixed files cr
 writers that did not update the header. A validated old WAL header is upgraded through a separate
 non-append write handle before current appends; unknown/newer headers fail without repair.
 WAL tag counts and field lengths are checked before encoding so a successful writer cannot create
-an undecodable record by narrowing a length. Source generations and optional-priority extensions
+an undecodable record by narrowing a length. The live engine validates these bounds before the WAL
+path and returns a client error, preserving storage health and the prior version on a rejected
+upsert. Source generations and optional-priority extensions
 must have their exact known shape.
 
 This supersedes the permissive corruption/unknown-frame behavior in ADR-013/066 and the unfenced
@@ -66,8 +73,8 @@ A refused log is preserved for diagnosis or restore, not automatically overwritt
 - **Repair only unexpected EOF:** the closest fit.
   [etcd's WAL repair implementation](https://raw.githubusercontent.com/etcd-io/etcd/main/server/storage/wal/repair.go)
   retains the last decoded offset, repairs an unexpected EOF with truncate and fsync, and rejects
-  other validation errors. We also tolerate final zero padding and conservatively check for later
-  CRC-valid records behind a damaged length.
+  other validation errors. We also tolerate final zero padding and conservatively check for complete
+  payloads or later CRC-valid records behind a damaged length.
 - **Automatically skip/resynchronize past corruption:** rejected. A skipped delete or upsert would
   reorder mutation semantics and can produce false negatives or resurrect data.
 - **Back up every repaired full log:** not required for an unequivocally incomplete suffix and
@@ -81,8 +88,10 @@ A refused log is preserved for diagnosis or restore, not automatically overwritt
 Regression tests cover incomplete frame lengths including the exact eight-byte header boundary,
 repair → acknowledged append → second reopen, complete CRC/unknown/malformed record refusal with
 byte preservation, header fences and legacy upgrades, malformed tag/placement/priority fields,
-zero padding, damaged lengths hiding later frames, deterministic partial-write and sync faults,
+zero padding, damaged lengths hiding complete payloads or later frames, pre-first-manifest I/O
+failure propagation, oversized-input rejection without health degradation, partial-write and sync faults,
 and one-time diagnostics across both standalone startup paths, coordinator reopen, and shard-local
 restart. A shard observer test acquires the engine mutex from its callback to prove delivery runs
-outside that lock. Existing independent persistence, distributed durability, and real-process
-SIGKILL suites remain the end-to-end contract checks.
+outside that lock. The WAL process test kills a writer twice in the same directory without an
+intervening checkpoint, then verifies the union of acknowledged writes against the independent
+oracle. Existing persistence and distributed durability suites remain the end-to-end contract checks.

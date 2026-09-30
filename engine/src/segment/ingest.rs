@@ -60,6 +60,32 @@ impl Engine {
         Ok(())
     }
 
+    /// Validate the live WAL's narrower field encoding before entering the
+    /// durability path. Caller input must not latch the storage-health flag.
+    /// Segment-only and in-memory writes do not use this encoding.
+    fn check_wal_fields(
+        &self,
+        text: &str,
+        tags: &[(String, String)],
+    ) -> Result<(), crate::error::ParseError> {
+        use crate::error::{ParseError, ParseErrorKind};
+        if self.wal.is_none() {
+            return Ok(());
+        }
+        if u32::try_from(text.len()).is_err() {
+            return Err(ParseError::new(ParseErrorKind::QueryTooLong, 0));
+        }
+        if u16::try_from(tags.len()).is_err() {
+            return Err(ParseError::new(ParseErrorKind::TooManyTags, 0));
+        }
+        if tags.iter().any(|(key, value)| {
+            u16::try_from(key.len()).is_err() || u16::try_from(value.len()).is_err()
+        }) {
+            return Err(ParseError::new(ParseErrorKind::TagFieldTooLong, 0));
+        }
+        Ok(())
+    }
+
     /// Reject a COMPILED query whose required / forbidden / any-of column would
     /// overflow the SoA exact store's `u16` count encoding, BEFORE any durable
     /// write — so the truncating `as u16` cast in [`ExactStore::push`] is never

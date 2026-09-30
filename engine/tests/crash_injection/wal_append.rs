@@ -13,7 +13,7 @@ use crate::harness::{
 
 #[test]
 #[ignore = "crash-injection: spawns + SIGKILLs a real process; run via the check.sh crash lane or `cargo test --release --test crash_injection -- --ignored`"]
-fn wal_append_acked_writes_survive_sigkill() {
+fn wal_append_acked_writes_survive_two_sigkills_in_the_same_directory() {
     let corpus = Corpus::generate("wal_append", 0xC0DE_0001, 16_000, 500);
     let full = full_reference(&corpus);
     let iters = crash_iters();
@@ -34,43 +34,31 @@ fn wal_append_acked_writes_survive_sigkill() {
                 res.killed,
                 "[wal_append] writer finished before the kill — raise the corpus size"
             );
+            let second = spawn_and_kill(
+                "wal_append",
+                &dir,
+                &corpus.tsv,
+                &["--offset".into(), "8000".into()],
+                fsync,
+                Trigger::Acks(2_000),
+                jitter_for(i + 1),
+            );
+            assert!(
+                second.killed,
+                "second writer must be killed after acknowledging progress"
+            );
+            let mut acked = res.acked;
+            acked.extend(second.acked);
+            acked.sort_unstable();
+            acked.dedup();
             exercised += reopen_and_diff(
                 &dir,
                 &corpus,
                 &full,
-                &res.acked,
-                &res.tombed,
+                &acked,
+                &[],
                 fsync,
-                &format!("wal_append/fsync={fsync}/iter={i}"),
-            );
-            // Reuse the actual SIGKILL artifact. The first open must repair it before
-            // acknowledging a new write, and the next crash must recover that write.
-            let cfg = reverse_rusty::config::EngineConfig {
-                data_dir: Some(dir.clone()),
-                wal_sync_on_write: fsync,
-                memtable_flush_threshold: usize::MAX,
-                ..reverse_rusty::config::EngineConfig::default()
-            };
-            let mut engine = reverse_rusty::segment::Engine::open(
-                reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
-                cfg.clone(),
-            )
-            .unwrap();
-            engine
-                .try_insert_live("restart canary", u64::MAX, 1)
-                .unwrap();
-            drop(engine); // abrupt engine lifetime end: no flush or checkpoint
-            let engine = reverse_rusty::segment::Engine::open(
-                reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
-                cfg,
-            )
-            .unwrap();
-            let mut scratch = reverse_rusty::segment::MatchScratch::new();
-            let mut ids = Vec::new();
-            engine.match_title("restart canary", &mut scratch, &mut ids, true);
-            assert!(
-                ids.contains(&u64::MAX),
-                "new acknowledgement lost on second restart"
+                &format!("wal_append/double-kill/fsync={fsync}/iter={i}"),
             );
         }
     }

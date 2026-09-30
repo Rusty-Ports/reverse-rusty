@@ -6,6 +6,140 @@ use reverse_rusty::config::EngineConfig;
 use reverse_rusty::segment::Engine;
 
 #[test]
+fn oversized_live_tag_fields_are_client_errors_and_leave_durability_healthy() {
+    use reverse_rusty::{ParseErrorKind, WriteError};
+
+    let dir = test_dir("wal_tag_input_health");
+    let path = dir.join("wal.log");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        memtable_flush_threshold: usize::MAX,
+        wal_sync_on_write: true,
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::open(make_norm(), config.clone()).unwrap();
+    engine.try_insert_live("wireless mouse", 1, 1).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    for tags in [
+        vec![("k".repeat(65_536), "v".into())],
+        vec![("k".into(), "é".repeat(32_768))],
+    ] {
+        for error in [
+            engine
+                .try_insert_live_with_tags("mechanical keyboard", 2, 1, &tags)
+                .unwrap_err(),
+            engine
+                .try_upsert_live_with_tags("mechanical keyboard", 1, 2, &tags)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                WriteError::Parse(reverse_rusty::ParseError {
+                    kind: ParseErrorKind::TagFieldTooLong,
+                    ..
+                })
+            ));
+        }
+        assert!(engine.snapshot().wal_healthy());
+        assert!(engine.snapshot().persistence_healthy());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(match_ids(&engine, "wireless mouse").contains(&1));
+        assert!(!match_ids(&engine, "mechanical keyboard").contains(&1));
+    }
+    // The exact byte ceiling remains valid and survives the next restart.
+    engine
+        .try_insert_live_with_tags(
+            "mechanical keyboard",
+            2,
+            1,
+            &[("k".repeat(65_535), "v".repeat(65_535))],
+        )
+        .unwrap();
+    drop(engine);
+    let engine = Engine::open(make_norm(), config).unwrap();
+    assert!(engine.snapshot().wal_healthy());
+    assert!(match_ids(&engine, "wireless mouse").contains(&1));
+    assert!(match_ids(&engine, "mechanical keyboard").contains(&2));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn manifestless_open_propagates_initialization_failure_with_a_readable_wal() {
+    let dir = test_dir("fresh_open_init_failure");
+    let path = dir.join("wal.log");
+    let mut wal = reverse_rusty::wal::Wal::open(&path, true).unwrap();
+    wal.append_insert(1, 1, "wireless mouse", &[]).unwrap();
+    drop(wal);
+    let before = std::fs::read(&path).unwrap();
+    // A deterministic filesystem failure, even for root: the required directory
+    // is a regular file. Read-only WAL recovery still succeeds here.
+    std::fs::write(dir.join("segments"), b"not a directory").unwrap();
+    assert_eq!(
+        reverse_rusty::wal::Wal::recover(&path)
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    assert!(Engine::open(make_norm(), config.clone()).is_err());
+    assert!(Engine::open_with_vocab(reverse_rusty::vocab::Vocab::default(), config).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn complete_unknown_op_or_mid_log_crc_failure_refuses_engine_open_without_repair() {
+    for manifest in [false, true] {
+        for unknown_op in [false, true] {
+            let dir = test_dir(&format!(
+                "wal_refusal_manifest_{manifest}_unknown_{unknown_op}"
+            ));
+            let config = EngineConfig {
+                data_dir: Some(dir.clone()),
+                memtable_flush_threshold: usize::MAX,
+                ..EngineConfig::default()
+            };
+            {
+                let mut engine = Engine::with_config(make_norm(), config.clone());
+                if manifest {
+                    engine.build_from_queries(&[(99, "placeholder seed".into())]);
+                }
+                for id in 1..=3 {
+                    engine.try_insert_live("wireless mouse", id, 1).unwrap();
+                }
+            }
+            let path = dir.join("wal.log");
+            let mut bytes = std::fs::read(&path).unwrap();
+            let first_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+            let second = 16 + first_len;
+            let len = u32::from_le_bytes(bytes[second..second + 4].try_into().unwrap()) as usize;
+            if unknown_op {
+                bytes[second + 16] = 7;
+                let crc = reverse_rusty::storage::crc32(&bytes[second + 8..second + 8 + len]);
+                bytes[second + 4..second + 8].copy_from_slice(&crc.to_le_bytes());
+            } else {
+                bytes[second + 17] ^= 1;
+            }
+            bytes.extend_from_slice(&[0xaa; 3]);
+            std::fs::write(&path, &bytes).unwrap();
+            let error = Engine::open(make_norm(), config).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            if unknown_op {
+                assert!(error.to_string().contains("unknown WAL opcode 7"));
+            } else {
+                assert!(error.to_string().contains("CRC mismatch"));
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[test]
 fn repaired_tail_is_reported_once_and_new_writes_survive_the_next_restart() {
     use reverse_rusty::events::{DurabilityOp, EngineEvent};
     use std::io::Write;

@@ -62,6 +62,22 @@ fn complete_crc_and_decode_errors_are_not_torn_tails() {
 }
 
 #[test]
+fn damaged_length_of_last_complete_frame_is_not_a_torn_write() {
+    for suffix in [vec![], vec![0; 64], vec![32, 0, 0]] {
+        let mut bytes = frame(b"last acknowledged record");
+        bytes[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&suffix);
+        assert_eq!(
+            scan_records(&bytes, 0, |body| Ok(body.to_vec()))
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+}
+
+#[test]
 fn repair_then_append_survives_another_reopen() {
     let path = std::env::temp_dir().join(format!("rr_framed_repair_{}", std::process::id()));
     let prefix = frame(b"first");

@@ -17,6 +17,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Refuse complete CRC failures, unknown or malformed payloads, and future WAL headers without
   changing the original log. Encode each frame before writing and disable later appends after any
   write/flush/sync failure ([ADR-182](decisions/adr-182-validated-log-recovery.md)).
+- Propagate pre-first-manifest initialization failures from fallible engine open. Reject oversized
+  live WAL tag fields as client errors without degrading storage health or replacing prior queries.
 
 ## 2026-09-30 — Durable peer-recovery targets
 

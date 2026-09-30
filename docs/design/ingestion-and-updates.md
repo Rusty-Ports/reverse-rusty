@@ -95,8 +95,9 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
 - **Log reopen validates before append** ([ADR-182](../decisions/adr-182-validated-log-recovery.md)).
   WAL, coordinator/translog, and Raft readers reject complete CRC failures and incompatible payloads.
   Only an incomplete final write or zero padding is removable; open truncates that suffix and syncs
-  the cut before allowing new writes. A damaged length that hides a later complete CRC-valid frame
-  refuses repair. A failed write, flush, or sync disables further appends on that handle until recovery.
+  the cut before allowing new writes. A damaged length that hides a complete CRC-valid payload or
+  later frame refuses repair. A failed write, flush, or sync disables further appends on that handle
+  until recovery. Fallible open propagates initialization failures even before the first manifest.
   Exact repaired-byte diagnostics survive startup and are delivered when an observer attaches.
 - **Segments are immutable** (Lucene/LSM): the write path is append-only; complexity is pushed to
   the merge, which is the right place for it.
