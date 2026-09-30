@@ -350,10 +350,7 @@ impl ClusterEngine {
                         ))
                     })?;
                 self.epoch.store(manifest.epoch, Ordering::Relaxed);
-                *self
-                    .committed_manifest
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manifest);
+                self.record_committed_manifest(manifest);
             }
             AliasImportManifestState::ImmediatePredecessor => self.checkpoint()?,
         }

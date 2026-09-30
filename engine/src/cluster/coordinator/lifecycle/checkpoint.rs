@@ -95,10 +95,7 @@ impl ClusterEngine {
         }
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
-        *self
-            .committed_manifest
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manifest.clone());
+        self.record_committed_manifest(manifest);
 
         // 4. Committed. Truncate the captured log prefix + GC orphaned segment files (both
         //    best-effort: a crash here just replays an already-captured tail / leaves
@@ -114,8 +111,51 @@ impl ClusterEngine {
             });
         }
         self.gc_orphan_segments(&dir, &segment_registry);
+        self.gc_superseded_source_sidecars(&dir, self.shards.len(), self.placement_generation().0);
         self.compact_logical_ids();
         Ok(())
+    }
+
+    /// Publish `manifest` as the durable commit point this process last wrote successfully.
+    pub(in crate::cluster::coordinator) fn record_committed_manifest(
+        &self,
+        manifest: crate::storage::ClusterManifest,
+    ) {
+        let generation = manifest.placement_generation.0;
+        *self
+            .committed_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manifest);
+        self.committed_placement_generation
+            .store(generation, Ordering::Release);
+    }
+
+    /// Refuse a placement-stamped mutation while the serving layout is ahead of the durable
+    /// commit point.
+    ///
+    /// A rebuild (resize or vocabulary change) swaps the serving shards before its control
+    /// update and checkpoint. If either step fails, the previous manifest stays authoritative
+    /// until a retry or later checkpoint commits the serving layout. An add or upsert logged in
+    /// that window carries the uncommitted placement generation, so replaying it over the
+    /// previous manifest after a crash would fail recovery and strand an acknowledged write.
+    /// Removes carry no placement and replay correctly against either layout, so they stay
+    /// available. In-memory clusters have no commit point to protect.
+    pub(in crate::cluster::coordinator) fn ensure_serving_layout_committed(
+        &self,
+    ) -> Result<(), ShardError> {
+        if self.data_dir.is_none() {
+            return Ok(());
+        }
+        let committed = self.committed_placement_generation.load(Ordering::Acquire);
+        let serving = self.placement_generation().0;
+        if committed == serving {
+            return Ok(());
+        }
+        Err(ShardError::Log(format!(
+            "writes are paused: serving placement generation {serving} is not yet durably \
+             committed (last committed generation {committed}); retry the resize or \
+             vocabulary change, or checkpoint, to commit it"
+        )))
     }
 
     /// Best-effort GC of segment files no longer in the committed registry (superseded by

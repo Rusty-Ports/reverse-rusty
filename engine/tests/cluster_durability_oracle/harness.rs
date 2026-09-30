@@ -311,3 +311,67 @@ pub(crate) fn final_live(
     }
     out
 }
+
+/// A control plane whose first proposal fails, so a rebuild swaps the serving layout and then
+/// fails its control transition before the durable commit (the post-swap retry window).
+pub(crate) struct FailFirstProposal {
+    inner: reverse_rusty::cluster::InMemoryControlPlane,
+    fail_next: std::sync::atomic::AtomicBool,
+}
+
+impl FailFirstProposal {
+    pub(crate) fn new(state: reverse_rusty::cluster::ClusterState) -> Self {
+        Self {
+            inner: reverse_rusty::cluster::InMemoryControlPlane::new(state),
+            fail_next: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    /// Replace `cluster`'s control plane with one whose next proposal fails.
+    pub(crate) fn install(cluster: ClusterEngine) -> ClusterEngine {
+        let initial = cluster.control_state().expect("initial control state");
+        cluster.with_control_plane(Box::new(Self::new(initial)))
+    }
+}
+
+impl reverse_rusty::cluster::ControlPlane for FailFirstProposal {
+    fn cluster_state(
+        &self,
+    ) -> Result<
+        std::sync::Arc<reverse_rusty::cluster::ClusterState>,
+        reverse_rusty::cluster::ControlError,
+    > {
+        self.inner.cluster_state()
+    }
+
+    fn version(
+        &self,
+    ) -> Result<reverse_rusty::cluster::StateVersion, reverse_rusty::cluster::ControlError> {
+        self.inner.version()
+    }
+
+    fn propose(
+        &self,
+        change: reverse_rusty::cluster::ClusterStateChange,
+    ) -> Result<reverse_rusty::cluster::StateVersion, reverse_rusty::cluster::ControlError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(reverse_rusty::cluster::ControlError::Backend(
+                "injected first proposal failure".into(),
+            ));
+        }
+        self.inner.propose(change)
+    }
+
+    fn change_membership(
+        &self,
+        voters: Vec<reverse_rusty::cluster::NodeId>,
+    ) -> Result<reverse_rusty::cluster::StateVersion, reverse_rusty::cluster::ControlError> {
+        self.inner.change_membership(voters)
+    }
+
+    fn leader(
+        &self,
+    ) -> Result<Option<reverse_rusty::cluster::NodeId>, reverse_rusty::cluster::ControlError> {
+        self.inner.leader()
+    }
+}

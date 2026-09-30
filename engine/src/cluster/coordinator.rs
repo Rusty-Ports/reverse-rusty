@@ -392,6 +392,10 @@ pub struct ClusterEngine {
     /// no-op retries compare the on-disk document to this identity rather than
     /// accepting matching epochs/model fields with different recovery state.
     committed_manifest: Mutex<Option<crate::storage::ClusterManifest>>,
+    /// Placement generation of [`Self::committed_manifest`], mirrored atomically so every
+    /// placement-stamped write can compare it with the serving generation without taking the
+    /// manifest lock. Meaningful only for a durable cluster.
+    committed_placement_generation: AtomicU64,
     /// Optional observer for durability events (recovery torn-tail, append failures).
     /// Buffered until set, mirroring the engine's `set_observer` pattern.
     observer: Mutex<Option<ClusterObserver>>,

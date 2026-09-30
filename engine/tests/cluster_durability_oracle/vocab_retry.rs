@@ -1,56 +1,6 @@
 //! Durable alias-import retry behavior after a live rebuild has been swapped.
 
 use crate::harness::*;
-use reverse_rusty::cluster::{
-    ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane, NodeId,
-    StateVersion,
-};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-
-struct FailFirstProposal {
-    inner: InMemoryControlPlane,
-    fail_next: AtomicBool,
-}
-
-impl FailFirstProposal {
-    fn new(state: ClusterState) -> Self {
-        Self {
-            inner: InMemoryControlPlane::new(state),
-            fail_next: AtomicBool::new(true),
-        }
-    }
-}
-
-impl ControlPlane for FailFirstProposal {
-    fn cluster_state(&self) -> Result<Arc<ClusterState>, ControlError> {
-        self.inner.cluster_state()
-    }
-
-    fn version(&self) -> Result<StateVersion, ControlError> {
-        self.inner.version()
-    }
-
-    fn propose(&self, change: ClusterStateChange) -> Result<StateVersion, ControlError> {
-        if self.fail_next.swap(false, Ordering::SeqCst) {
-            return Err(ControlError::Backend(
-                "injected first proposal failure".into(),
-            ));
-        }
-        self.inner.propose(change)
-    }
-
-    fn change_membership(&self, voters: Vec<NodeId>) -> Result<StateVersion, ControlError> {
-        self.inner.change_membership(voters)
-    }
-
-    fn leader(&self) -> Result<Option<NodeId>, ControlError> {
-        self.inner.leader()
-    }
-}
-
 #[test]
 fn identical_alias_retry_recommits_an_uncommitted_rebuild() {
     let dir = unique_dir("alias_retry_recommit");
@@ -58,8 +8,7 @@ fn identical_alias_retry_recommits_an_uncommitted_rebuild() {
     let manifest_path = dir.join("cluster_manifest.bin");
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
-    let initial = cluster.control_state().expect("initial control state");
-    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+    cluster = FailFirstProposal::install(cluster);
 
     let first = cluster.import_alias_synonyms("package, pkg");
     assert!(
@@ -102,8 +51,7 @@ fn identical_alias_retry_does_not_overwrite_a_different_valid_predecessor() {
     let manifest_path = dir.join("cluster_manifest.bin");
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
-    let initial = cluster.control_state().expect("initial control state");
-    cluster = cluster.with_control_plane(Box::new(FailFirstProposal::new(initial)));
+    cluster = FailFirstProposal::install(cluster);
 
     let first = cluster.import_alias_synonyms("package, pkg");
     assert!(

@@ -75,7 +75,10 @@ connection loss before retrying.
 A failed control proposal can occur after the serving swap. The next request first repairs only
 that exact one-generation resize predecessor; it cannot advance to a different shard count until
 the prior serving/control transition is committed and attested. Any other control/live divergence
-fails loud instead of being reinterpreted as a resize retry.
+fails loud instead of being reinterpreted as a resize retry. On a durable cluster, adds and upserts
+return `503 durability_unavailable` while the swapped layout is uncommitted, because the previous
+manifest remains the crash-recovery point; reads and removes continue, and the same-count retry or
+any successful checkpoint lifts the pause (ADR-178).
 
 The familiar overall `timeout`, `wait_for_active_shards`, asynchronous task controls, and target
 index settings are rejected because their ES/OpenSearch meanings do not match this synchronous

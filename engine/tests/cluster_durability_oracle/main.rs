@@ -27,6 +27,7 @@ mod hot;
 mod ranked;
 mod replication;
 mod resize;
+mod resize_commit_fence;
 mod torn_tail;
 mod upsert;
 mod vocab;

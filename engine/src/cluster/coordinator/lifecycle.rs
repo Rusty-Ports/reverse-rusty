@@ -9,8 +9,10 @@
 //!   - [`open`]       — `from_parts` (the shared assembly seam, also used by the distributed/gRPC builders) + `open` (reattach committed segments + replay the log tail)
 //!   - [`checkpoint`] — `checkpoint` (seal shards + commit the manifest + truncate the log) + `gc_orphan_segments` + the `epoch` accessor
 //!   - [`backup`]     — `backup_to` (checkpoint + snapshot the coordinator dir, ADR-079); restore is `open`
+//!   - [`sidecar_gc`] — post-commit reclamation of source sidecars superseded by a blue/green rebuild
 
 mod backup;
 mod build;
 mod checkpoint;
 mod open;
+mod sidecar_gc;
