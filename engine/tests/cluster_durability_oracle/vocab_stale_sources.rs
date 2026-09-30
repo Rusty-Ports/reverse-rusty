@@ -190,7 +190,7 @@ fn source_generations_coexist_across_the_rebuild_commit() {
     let q = 9_500_003u64;
     queries.push((q, "1994 vertex zzmovea".into()));
     let dir = unique_dir("superset_sources");
-    let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &queries)
+    let cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &queries)
         .expect("durable build");
     let blue_holders: Vec<usize> = (0..8)
         .filter(|s| {
@@ -206,9 +206,15 @@ fn source_generations_coexist_across_the_rebuild_commit() {
         !blue_holders.is_empty(),
         "the build generation must retain the query source"
     );
-    cluster
-        .set_vocab(equiv_vocab("zzmovea", "zzcanona"))
-        .expect("bind: the widened query moves onto the replicated lane");
+    // Fail the control transition after the green swap, so the blue manifest stays the
+    // authoritative commit point while the complete green generation already exists on disk.
+    let mut cluster = FailFirstProposal::install(cluster);
+    assert!(
+        cluster
+            .set_vocab(equiv_vocab("zzmovea", "zzcanona"))
+            .is_err(),
+        "the injected control failure must leave the green rebuild uncommitted"
+    );
     assert!(
         cluster
             .percolate("1994 vertex zzcanona pro")
@@ -216,15 +222,25 @@ fn source_generations_coexist_across_the_rebuild_commit() {
             .contains(&q),
         "precondition — the equivalence must widen the query onto zzcanona"
     );
-    drop(cluster); // committed by set_vocab's own checkpoint
-    for s in blue_holders {
+    for &s in &blue_holders {
         let path = dir.join(format!("shard_{s:03}")).join("sources.dat");
         assert!(
             reverse_rusty::storage::SourceStore::open(&path, true)
                 .expect("reopen untouched blue source store")
                 .get(q)
                 .is_some(),
-            "green construction must not overwrite the blue sidecar on shard {s}"
+            "green construction must not overwrite the authoritative blue sidecar on shard {s}"
+        );
+    }
+    cluster
+        .checkpoint()
+        .expect("a checkpoint commits the serving green generation");
+    drop(cluster);
+    for &s in &blue_holders {
+        let path = dir.join(format!("shard_{s:03}")).join("sources.dat");
+        assert!(
+            !path.exists(),
+            "the superseded blue sidecar on shard {s} must be reclaimed after the green commit"
         );
     }
 

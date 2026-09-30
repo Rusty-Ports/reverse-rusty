@@ -9,6 +9,16 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-09-29 — Safe retry window after a failed rebuild commit
+
+- Pause adds and upserts on a durable coordinator while a swapped resize or vocabulary rebuild is not
+  yet committed. Previously, a write accepted in that window could make the cluster fail to reopen
+  after a crash and strand the acknowledged mutation. Reads and removes continue, and the existing
+  retry or any checkpoint lifts the pause ([ADR-178](decisions/adr-178-uncommitted-rebuild-write-fence.md)).
+- Reclaim source sidecars superseded by a committed rebuild in every primary and in-process replica
+  directory, so repeated resizes or vocabulary changes no longer keep one full source corpus per
+  shard copy for every past generation.
+
 ## 2026-09-19 — Independent cluster writes by logical ID
 
 - Replace fixed write stripes with per-ID locks that preserve complete same-ID log/apply ordering

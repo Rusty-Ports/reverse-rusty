@@ -193,6 +193,11 @@ reclaimed. `ClusterEngine::open` attaches and mmaps the committed segments, rest
 source state, then replays only the log tail. Base-segment tombstones are baked into checkpoint output
 so trimming a remove cannot resurrect a query.
 
+A resize or vocabulary change swaps the serving layout before its control update and checkpoint. If
+either fails, the previous manifest stays authoritative and adds/upserts fail with a durability error
+until a retry or checkpoint commits the serving generation; reads and removes continue (ADR-178). Each
+successful commit reclaims source sidecars the manifest no longer selects.
+
 Standalone and in-process cluster backup APIs checkpoint before copying the manifest-selected files.
 Operational procedures and restore validation live in
 [`../operations/backup-restore.md`](../operations/backup-restore.md).

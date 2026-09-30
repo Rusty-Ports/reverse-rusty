@@ -102,6 +102,7 @@ impl ClusterEngine {
             return Ok(AddOutcome::RejectedClassD);
         }
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        self.ensure_serving_layout_committed()?;
         // Global lock order is PIT/mutation barrier -> logical-ID lock. Resync
         // uses the same order; taking the ID lock first can deadlock behind a
         // queued exhaustive writer on writer-preferring RwLock implementations.
@@ -215,6 +216,7 @@ impl ClusterEngine {
             return Ok((0, AddOutcome::RejectedClassD));
         }
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        self.ensure_serving_layout_committed()?;
         // Keep the same barrier -> logical-ID order as add/remove/resync.
         // The barrier spans the log append and both delete/insert fan-out passes.
         let _pit_barrier = self

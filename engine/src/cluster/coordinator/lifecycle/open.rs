@@ -115,6 +115,12 @@ impl ClusterEngine {
             source_files: durable.source_files,
             pending_alias_import_predecessor: None,
             pending_alias_import_manifest: Mutex::new(None),
+            committed_placement_generation: AtomicU64::new(
+                durable
+                    .manifest
+                    .as_ref()
+                    .map_or(durable.placement_generation.0, |m| m.placement_generation.0),
+            ),
             committed_manifest: Mutex::new(durable.manifest),
             control: durable.control,
             // A fresh transport-metrics collector (ADR-085); the gRPC builders REPLACE it with

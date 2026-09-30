@@ -34,7 +34,9 @@ Concurrent stats and vocabulary read/write operations serialize through the same
 > `503 persistence_unavailable` instead of `acknowledged: true`; the old manifest remains
 > authoritative for restart. A durable coordinator checkpoint failure is likewise not
 > acknowledged even though the blue/green state may already be live; inspect `GET /_vocab` before
-> deciding how to recover.
+> deciding how to recover. Until a retry or any successful checkpoint commits that live state, the
+> coordinator returns `503 durability_unavailable` for adds and upserts so a crash cannot strand
+> them behind the older manifest; reads and removes continue (ADR-178).
 
 ```bash
 curl -X PUT localhost:9200/_vocab \
