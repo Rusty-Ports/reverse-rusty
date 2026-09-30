@@ -113,29 +113,34 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
    field on `Flush`), every target position must commit an ADR-181 `Seal`, which a volatile
    target refuses. Only then are its content fingerprint and count checked against what was
    loaded and recorded as `MarkReady`, so evidence never names rows a target restart could lose.
-7. It commits. An ambiguous commit is resolved by reading the committed layout back.
+7. It stops serving the old layout, then commits. From the moment `Commit` may apply, the old
+   layout may no longer be the layout of record, and nothing keeps this coordinator's claim on the
+   targets alive until installation, so reads fail loud for that brief window rather than answer
+   from it. An ambiguous commit is resolved by reading the committed layout back.
 
-`install_remote_resize` then takes `&mut self` briefly. It installs the exported logical ids as an
-authoritative, converged directory (the new layout was loaded coherently from a fixed snapshot, so
-exhaustive delivery and create-only admission work even when this coordinator had attached to
-populated shards), swaps the ring, shards, handoff handles, metrics, and generation, clears PITs,
-and lowers the fence. `finish_remote_resize` fences every retired slot, so a stale writer fails
-loud, and records `Finish`. If installation fails, the resize has already committed, so the retired
-layout is no longer the layout of record: every position refuses reads and writes until a restart
-routes to the committed layout, exactly as after an unproven commit. A committed preparation dropped
-without installation (for example by a cancelled caller) stops serving the same way.
+`install_remote_resize` then takes `&mut self` briefly and makes no network call, since request
+threads may be waiting on that exclusive lock; preparation already confirmed the commit. It installs
+the exported logical ids as an authoritative, converged directory (the new layout was loaded
+coherently from a fixed snapshot, so exhaustive delivery and create-only admission work even when
+this coordinator had attached to populated shards), swaps the ring, shards, handoff handles,
+metrics, and generation, clears PITs, and lowers the fence. `finish_remote_resize` fences every
+retired slot, so a stale writer fails loud, and records `Finish`. If installation fails, the resize
+has already committed, so the retired layout is no longer the layout of record: every position
+refuses reads and writes until a restart routes to the committed layout, exactly as after an
+unproven commit. A committed preparation dropped without installation (for example by a cancelled
+caller) stops serving the same way.
 
 A failure aborts the intent. Only this coordinator's `Commit` can make the new layout the layout of
 record, since startup aborts every uncommitted intent, so a failure before `Commit` is proposed
 always reopens writes, even when the abort itself is lost; retrying the same operation clears the
-leftover intent. After `Commit` was proposed, writes reopen only when the control plane proves it
-did not apply: the abort was accepted and the served layout is still the committed one. The old
-layout then keeps serving and is writable, and the targets keep an unrouted staged layout that must
-be wiped before reuse. An unproven outcome keeps writes paused, because consensus may already name
-the new layout, and stops reads too: once this coordinator's target leases lapse, another
-coordinator can serve the new layout and accept writes the old one never sees. A coordinator restart
-resolves the recorded intent and routes to the committed layout. Until then every new resize is
-refused before it touches the fence: it did not raise that fence and cannot know the earlier
+leftover intent. After `Commit` was proposed, reads and writes reopen only when the control plane
+proves it did not apply: the abort was accepted and the served layout is still the committed one.
+The old layout then keeps serving and is writable, and the targets keep an unrouted staged layout
+that must be wiped before reuse. An unproven outcome keeps writes paused, because consensus may
+already name the new layout, and stops reads too: once this coordinator's target leases lapse,
+another coordinator can serve the new layout and accept writes the old one never sees. A coordinator
+restart resolves the recorded intent and routes to the committed layout. Until then every new resize
+is refused before it touches the fence: it did not raise that fence and cannot know the earlier
 outcome, so it must never lower it.
 
 ### Startup
@@ -259,6 +264,13 @@ abandonment guard now stops serving unless installation disarms it; and a staged
 compaction policy, which only runs on memtable flushes, so a large resize left far more segments
 than `max_segments`; the staged finish now compacts to the policy before the load is proven.
 
+The eleventh review found two more, both fixed with mutation-checked regression tests: installation
+read the control plane under the exclusive cluster lock, which request threads waiting on that lock
+could starve, so installation is now network-free; and between `Commit` and installation the old
+layout kept answering reads although another coordinator could already serve the committed one
+once this coordinator's target leases lapsed, so reads now stop just before `Commit` is proposed and
+resume only through installation or a proven non-commit.
+
 ## Alternatives
 
 - **Stage beside the old layout on the same nodes.** Deferred: it needs per-slot placement
@@ -318,8 +330,11 @@ governor stays in-process, because provisioning target nodes is an external deci
     before `Commit`;
   - a lost `Begin` reply with a failed abort reopens writes, refuses a different operation, and
     lets a retry of the same operation complete;
-  - after an ambiguous commit, a committed layout that cannot be installed, or an abandoned
-    committed preparation, reads fail loud and a retry cannot reopen writes;
+  - reads fail loud from just before `Commit` until installation, and resume after a refused
+    `Commit` that the control plane proves did not apply;
+  - installation needs no control-plane call;
+  - after an ambiguous commit or an abandoned committed preparation, reads fail loud and a retry
+    cannot reopen writes;
   - a coordinator attached to populated shards regains exhaustive delivery after the rebuild.
 - **Startup recovery tests.** An uncommitted intent is aborted and the committed one finished.
 - **Handler tests** cover `targets` validation by topology and origin, record the failed remote

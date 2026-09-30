@@ -212,9 +212,13 @@ fn grpc_remote_resize_pauses_writes_until_the_new_layout_is_installed() {
     // and so is the exclusive lock a vocabulary rebuild would queue for.
     assert_eq!(cluster.control_state().expect("state").num_shards, 2);
     assert!(cluster.ensure_resize_write_fence_open().is_err());
-    cluster
-        .percolate("1994 acme")
-        .expect("reads keep serving the old layout");
+    // Between `Commit` and installation the old layout may no longer be the layout of record, so
+    // reads fail loud rather than answer from it.
+    let read = cluster.percolate("1994 acme");
+    assert!(
+        matches!(read, Err(ShardError::ControlPlane(_))),
+        "reads must not answer from the retired layout after the commit: {read:?}"
+    );
     for write in [
         cluster.add_query(9_800_001, "zzfenced widget").map(|_| ()),
         cluster.remove_query(1).map(|_| ()),
@@ -231,6 +235,9 @@ fn grpc_remote_resize_pauses_writes_until_the_new_layout_is_installed() {
     cluster
         .ensure_resize_write_fence_open()
         .expect("install lowers the fence");
+    cluster
+        .percolate("1994 acme")
+        .expect("reads serve the installed layout");
     cluster
         .add_query(9_800_001, "zzfenced widget")
         .expect("writes reopen after install");

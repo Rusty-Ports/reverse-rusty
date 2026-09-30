@@ -78,9 +78,9 @@ pub(crate) struct HandoffShard {
     /// stamp. Read in step 6a only by `ClusterEngine::handoff_generations` (introspection);
     /// consumed for real by step 6b's `execute_handoff`.
     generation: AtomicU64,
-    /// Set when the coordinator can no longer prove this position's layout is the layout of
-    /// record (ADR-180: a remote resize whose `Commit` outcome is unresolved). Every fallible
-    /// call then fails loud instead of answering from a possibly retired layout.
+    /// Set while the coordinator cannot prove this position's layout is the layout of record
+    /// (ADR-180: a remote resize has proposed, or may have applied, `Commit`). Every fallible call
+    /// then fails loud instead of answering from a possibly retired layout.
     refused: AtomicBool,
 }
 
@@ -112,11 +112,18 @@ impl HandoffShard {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// Stop serving through this position until the coordinator restarts (ADR-180). Reads and
-    /// writes fail loud; the endpoint accessors keep reporting the backing so orphan GC never
-    /// treats its slot as unrouted.
+    /// Stop serving through this position (ADR-180): from just before a remote resize proposes
+    /// `Commit` until installation replaces it, or until a restart when the outcome is unresolved.
+    /// Reads and writes fail loud; the endpoint accessors keep reporting the backing so orphan GC
+    /// never treats its slot as unrouted.
     pub(crate) fn refuse_serving(&self) {
         self.refused.store(true, Ordering::Release);
+    }
+
+    /// Serve again after [`Self::refuse_serving`], once the control plane proves this position's
+    /// layout is still the layout of record.
+    pub(crate) fn resume_serving(&self) {
+        self.refused.store(false, Ordering::Release);
     }
 
     /// The current backing, unless serving has been refused.

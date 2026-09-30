@@ -99,6 +99,14 @@ impl ClusterEngine {
             operation_id: request.operation_id,
             evidence,
         })?;
+        // From the moment `Commit` may apply, the old layout may stop being the layout of record,
+        // and nothing keeps this coordinator's claim on the targets alive until installation. Stop
+        // serving it first, so no read can answer from it after another coordinator could serve
+        // the committed layout; installation serves the new one, and a failure that proves the
+        // commit did not apply serves the old one again.
+        for handoff in &self.handoffs {
+            handoff.refuse_serving();
+        }
         commit_proposed.set(true);
         self.commit_resize(request.operation_id, &intent.desired)?;
         Ok(StagedBuild {

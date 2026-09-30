@@ -147,7 +147,8 @@ operation then runs these steps:
    segments of the memtable flush size, and writes its source store once at the end. A stored query
    that no longer parses or places fails the resize instead of being left out.
 4. Prove each new position's content fingerprint and count.
-5. Commit the new shard count, placement generation, and assignments in one control-plane
+5. Stop answering reads from the old layout (they fail loud with `503` for this brief window),
+   then commit the new shard count, placement generation, and assignments in one control-plane
    transition.
 6. Swap routing.
 7. Fence the old slots so a stale writer fails loud.

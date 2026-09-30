@@ -15,6 +15,8 @@ struct Faults {
     /// Apply `Begin`, then lose only its reply.
     lose_begin_reply: AtomicBool,
     refuse_abort_once: AtomicBool,
+    /// Refuse `Commit` without applying it.
+    refuse_commit_once: AtomicBool,
     refuse_finish_once: AtomicBool,
     reads_broken: AtomicBool,
 }
@@ -85,6 +87,7 @@ impl reverse_rusty::cluster::ControlPlane for Faulty {
                 Err(Self::broken())
             }
             ResizeCommand::Abort { .. } if fire(&faults.refuse_abort_once) => Err(Self::broken()),
+            ResizeCommand::Commit { .. } if fire(&faults.refuse_commit_once) => Err(Self::broken()),
             ResizeCommand::Finish { .. } if fire(&faults.refuse_finish_once) => Err(Self::broken()),
             _ => {
                 if faults.reads_broken.load(Ordering::SeqCst) {
@@ -335,14 +338,16 @@ fn grpc_remote_resize_recovers_from_a_lost_begin_reply() {
 }
 
 #[test]
-fn grpc_remote_resize_stops_serving_when_a_committed_layout_cannot_be_installed() {
+fn grpc_remote_resize_installs_without_a_control_plane_call() {
     let Fixture {
         rt: _rt,
         cluster,
         targets,
+        titles,
         ..
     } = fixture(2);
     let (mut cluster, faults) = Faulty::install(cluster);
+    let before = matches(&cluster, &titles);
     let prepared = cluster
         .prepare_remote_resize(&RemoteResizeRequest {
             operation_id: 91,
@@ -350,21 +355,46 @@ fn grpc_remote_resize_stops_serving_when_a_committed_layout_cannot_be_installed(
             targets,
         })
         .expect("prepare commits the new layout");
-    // The commit applied, so the retired layout is no longer the layout of record. If the
-    // installation cannot confirm it, this coordinator must not keep answering from the old one.
+    // Installation runs under the exclusive cluster lock, so it must not need the control plane:
+    // a round trip there could stall the runtime that request threads waiting on the lock hold.
     faults.reads_broken.store(true, Ordering::SeqCst);
-    assert!(cluster.install_remote_resize(prepared).is_err());
+    let retired = cluster
+        .install_remote_resize(prepared)
+        .expect("installation makes no control-plane call");
+    assert_eq!(matches(&cluster, &titles), before);
     faults.reads_broken.store(false, Ordering::SeqCst);
-    let read = cluster.percolate("1994 acme");
     assert!(
-        matches!(read, Err(ShardError::ControlPlane(_))),
-        "reads must fail loud after a failed installation: {read:?}"
+        cluster
+            .finish_remote_resize(retired)
+            .expect("finish")
+            .finished
     );
-    let write = cluster.add_query(9_900_001, "zzuninstalled widget");
-    assert!(
-        matches!(write, Err(ShardError::ControlPlane(_))),
-        "{write:?}"
-    );
+}
+
+#[test]
+fn grpc_remote_resize_serves_the_old_layout_again_after_a_refused_commit() {
+    let Fixture {
+        rt: _rt,
+        cluster,
+        targets,
+        titles,
+        ..
+    } = fixture(2);
+    let (mut cluster, faults) = Faulty::install(cluster);
+    let before = matches(&cluster, &titles);
+    // `Commit` is refused without applying, and the read-back proves the old layout is still the
+    // layout of record, so the reads stopped before the proposal serve again, as do writes.
+    faults.refuse_commit_once.store(true, Ordering::SeqCst);
+    let failed = cluster.resize_remote(&RemoteResizeRequest {
+        operation_id: 111,
+        num_shards: 2,
+        targets,
+    });
+    assert!(failed.is_err(), "{failed:?}");
+    assert_eq!(matches(&cluster, &titles), before);
+    cluster
+        .add_query(9_900_101, "zzrefusedcommit widget")
+        .expect("writes reopen after a proven non-commit");
 }
 
 #[test]
@@ -382,9 +412,6 @@ fn grpc_remote_resize_stops_serving_when_a_prepared_resize_is_abandoned() {
             targets,
         })
         .expect("prepare commits the new layout");
-    cluster
-        .percolate("1994 acme")
-        .expect("reads serve the old layout until installation");
     // Dropping the committed preparation (for example, a cancelled caller) must not leave the
     // retired layout answering reads that could miss the committed layout's writes.
     drop(prepared);

@@ -230,9 +230,9 @@ impl ClusterEngine {
         })
     }
 
-    /// Swap the serving ring and shards to a committed staged layout and reopen writes. Any
-    /// failure leaves writes fenced and stops reads too, since the retired layout is no longer the
-    /// layout of record.
+    /// Swap the serving ring and shards to a committed staged layout and reopen reads and writes.
+    /// It makes no network call. Any failure leaves the retired layout refusing reads and writes,
+    /// since it is no longer the layout of record.
     pub fn install_remote_resize(
         &mut self,
         prepared: PreparedRemoteResize,
@@ -248,25 +248,16 @@ impl ClusterEngine {
         } = prepared;
         let exported = logical_ids.len() as u64;
         let generation = staged.placement_generation();
-        let checked = self.control_state().and_then(|state| {
-            if state.placement_generation != generation.0
-                || state.num_shards as usize != staged.ring.num_shards()
-            {
-                return Err(ShardError::ControlPlane(format!(
-                    "refusing to install a staged layout at generation {}/{} shards: the \
-                     committed layout is generation {}/{} shards",
-                    generation.0,
-                    staged.ring.num_shards(),
-                    state.placement_generation,
-                    state.num_shards
-                )));
-            }
-            // The directory mirrors the rebuilt corpus exactly, as after an in-process rebuild:
-            // the new layout was loaded coherently from a fixed snapshot while writes were
-            // fenced, so it restores create-only admission and exhaustive-delivery convergence
-            // even when this coordinator attached to populated shards without either.
-            self.replace_logical_ids(logical_ids)
-        });
+        // Installation is network-free: it runs under the exclusive cluster lock that request
+        // threads may be waiting on, so a control-plane round trip here could stall the runtime
+        // it needs. Preparation already confirmed the commit (an applied proposal or a matching
+        // read-back), and the recorded intent keeps every other layout change out until `Finish`.
+        //
+        // The directory mirrors the rebuilt corpus exactly, as after an in-process rebuild: the new
+        // layout was loaded coherently from a fixed snapshot while writes were fenced, so it
+        // restores create-only admission and exhaustive-delivery convergence even when this
+        // coordinator attached to populated shards without either.
+        let checked = self.replace_logical_ids(logical_ids);
         if let Err(error) = checked {
             // The resize committed, so the retired layout is no longer the layout of record, yet
             // this coordinator cannot install the new one. Once its target leases lapse another
@@ -550,6 +541,11 @@ impl ClusterEngine {
                         && state.moves.resize.is_none()
                 }));
         if reopen {
+            // Reads stopped just before `Commit` was proposed; the old layout is provably still the
+            // layout of record, so it serves again.
+            for handoff in &self.handoffs {
+                handoff.resume_serving();
+            }
             self.resize_write_fence.store(false, Ordering::Release);
         } else {
             // Consensus may already name the new layout, and once this coordinator's target
