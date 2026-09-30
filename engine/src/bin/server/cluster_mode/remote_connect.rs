@@ -53,6 +53,7 @@ fn connect_control_plane(
     dict_fp: u64,
     handle: &tokio::runtime::Handle,
     security: &ClientSecurity,
+    resolve_only: bool,
 ) -> Result<Option<RemoteControlPlane>, ShardError> {
     if control_endpoints.is_empty() {
         return Ok(None);
@@ -66,7 +67,10 @@ fn connect_control_plane(
             "read control-plane state (is a quorum leader up?): {e}"
         ))
     })?;
-    if doc.num_shards != cfg.num_shards as u32 || doc.vnodes != cfg.vnodes {
+    // A resolve-only coordinator takes its shard count from the committed document, which a
+    // remote resize changes (ADR-180); every other mode must agree with its CLI topology.
+    let shards_differ = doc.num_shards != cfg.num_shards as u32 && !resolve_only;
+    if shards_differ || doc.vnodes != cfg.vnodes {
         return Err(ShardError::ControlPlane(format!(
             "control-plane quorum ring (num_shards={}, vnodes={}) does not match this coordinator \
              (num_shards={}, vnodes={}); seed controlserver with --shards {} --vnodes {}",
@@ -162,8 +166,48 @@ pub(crate) fn connect_remote_cluster(
     // Attach the durable control-plane quorum BEFORE building shards (ADR-083/086): when routing by
     // assignments we must read/seed the committed document to know which endpoints to connect. The
     // control plane is off the matching hot path, so this never affects a percolate's result.
-    let control = connect_control_plane(control_endpoints, cfg, dict_fp, handle, &security)?;
+    let resolve_only = route_by_assignments && cli_groups.is_empty();
+    let control = connect_control_plane(
+        control_endpoints,
+        cfg,
+        dict_fp,
+        handle,
+        &security,
+        resolve_only,
+    )?;
     let coordinator_id = process_coordinator_id();
+    // Resolve a recorded remote resize before anything routes (ADR-180): abort an uncommitted
+    // intent (the previous layout is still committed) or finish a committed one.
+    if let Some(rcp) = control.as_ref() {
+        match reverse_rusty::cluster::recover_durable_resize(rcp)? {
+            Some(reverse_rusty::cluster::ResizeRecovery::Aborted { operation_id }) => warn!(
+                operation_id,
+                "aborted an uncommitted remote resize; its target nodes hold an unrouted staged \
+                 layout and must be wiped before reuse"
+            ),
+            Some(reverse_rusty::cluster::ResizeRecovery::Finished { operation_id }) => warn!(
+                operation_id,
+                "finished a committed remote resize; decommission the previous layout's nodes"
+            ),
+            None => {}
+        }
+    }
+    // Under assignment routing the committed document is the layout of record: connect every node
+    // at its placement generation, and in resolve-only mode at its shard count.
+    let mut effective = cfg.clone();
+    if let (Some(rcp), true) = (control.as_ref(), route_by_assignments) {
+        let state = rcp.cluster_state()?;
+        effective.remote_placement_generation = state.placement_generation;
+        if resolve_only && state.num_shards as usize != cfg.num_shards {
+            info!(
+                committed = state.num_shards,
+                flag = cfg.num_shards,
+                "using the committed shard count (resolve-only routing)"
+            );
+            effective.num_shards = state.num_shards as usize;
+        }
+    }
+    let cfg = &effective;
     if let Some(rcp) = control.as_ref() {
         let state = rcp.cluster_state()?;
         if !state.moves.intents.is_empty() && !route_by_assignments {

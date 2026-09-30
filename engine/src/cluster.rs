@@ -100,8 +100,10 @@ pub use control_raft::{
 pub use control_server::{ControlMetricsSource, ControlServer};
 #[cfg(feature = "distributed")]
 pub use coordinator::{
-    recover_durable_moves, ExportedQuery, GcReport, HandoffOutcome, OrphanSlot, ReassignOutcome,
-    RebalanceMoveReport, ReconcileConfig, ReconcileReport, ShardGroup,
+    recover_durable_moves, recover_durable_resize, ExportedQuery, GcReport, HandoffOutcome,
+    OrphanSlot, PreparedRemoteResize, ReassignOutcome, RebalanceMoveReport, ReconcileConfig,
+    ReconcileReport, RemoteResizeReport, RemoteResizeRequest, ResizeRecovery, RetiredRemoteLayout,
+    ShardGroup,
 };
 #[cfg(feature = "distributed")]
 pub use node_metrics::{serve_metrics, MetricsHandle};

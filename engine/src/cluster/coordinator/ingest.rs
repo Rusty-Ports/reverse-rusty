@@ -18,3 +18,5 @@ mod bulk;
 mod mutate;
 mod placement;
 mod repair;
+#[cfg(feature = "distributed")]
+mod resize_load;

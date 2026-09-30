@@ -68,6 +68,11 @@ impl ClusterEngine {
             .pit_open_barrier
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A remote resize starts only with no queued repairs and refuses new writes, so a
+        // re-drive during its copy could only diverge the layout it is exporting (ADR-180).
+        if self.ensure_resize_write_fence_open().is_err() {
+            return ResyncReport::default();
+        }
         // Snapshot IDs only. The mutation must stay in the queue until we hold
         // its ID lock: a successful newer write can clear it while this pass
         // is busy with another ID. Draining payloads here would lose that

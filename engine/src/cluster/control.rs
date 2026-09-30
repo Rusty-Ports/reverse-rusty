@@ -54,6 +54,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::shard::ShardError;
 
 mod move_intent;
+#[cfg(feature = "distributed")]
+pub(crate) use move_intent::normalized_move_endpoint;
 mod resize_intent;
 
 pub use move_intent::{

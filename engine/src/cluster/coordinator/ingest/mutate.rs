@@ -111,6 +111,7 @@ impl ClusterEngine {
             .pit_open_barrier
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_resize_write_fence_open()?;
         // ADR-110's bounded merge requires one live distributed row per logical id.
         // Content-derived placement cannot guarantee a common owner for two different
         // rows sharing an id, so cluster adds are insert-only; replacements use upsert.
@@ -223,6 +224,7 @@ impl ClusterEngine {
             .pit_open_barrier
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_resize_write_fence_open()?;
         // Serialize against an insert-only add/remove for the same id. An upsert
         // keeps the id present; a fresh upsert reserves it before the log append so
         // a concurrent add cannot create a second physical row.
@@ -375,6 +377,7 @@ impl ClusterEngine {
             .pit_open_barrier
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_resize_write_fence_open()?;
         let _logical_guard = self.logical_write_guard(id);
         let m = ClusterMutation::Remove { logical: id };
         if let Err(e) = self.log.append(&m) {

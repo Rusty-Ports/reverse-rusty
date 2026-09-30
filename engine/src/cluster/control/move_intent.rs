@@ -196,7 +196,7 @@ pub struct MoveProposalResult {
     pub outcome: MoveCommandOutcome,
 }
 
-pub(super) fn normalized_move_endpoint(endpoint: &str) -> String {
+pub(crate) fn normalized_move_endpoint(endpoint: &str) -> String {
     endpoint.trim_end_matches('/').to_ascii_lowercase()
 }
 

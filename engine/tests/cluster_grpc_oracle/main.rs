@@ -48,6 +48,7 @@ mod reconcile;
 mod reconcile_replicated;
 mod recovery;
 mod relocation;
+mod remote_resize;
 mod replication;
 mod replication_colocation;
 mod routing;

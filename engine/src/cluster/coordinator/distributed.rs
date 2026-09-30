@@ -23,4 +23,9 @@ pub use live_corpus::ExportedQuery;
 mod logical_ids;
 mod recovery;
 mod remote;
+mod remote_resize;
+pub use remote_resize::{
+    recover_durable_resize, PreparedRemoteResize, RemoteResizeReport, RemoteResizeRequest,
+    ResizeRecovery, RetiredRemoteLayout,
+};
 mod replicated;
