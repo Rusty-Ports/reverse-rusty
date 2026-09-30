@@ -1,8 +1,44 @@
 use super::{
-    translog, DurabilityOp, EngineEvent, Instant, LocalShard, LogPos, PoisonError, ShardError,
+    translog, DurabilityOp, Engine, EngineEvent, Instant, LocalShard, LogPos, PoisonError,
+    ShardError,
 };
 
 impl LocalShard {
+    /// Commit the already-durable base received by peer recovery before publishing the shard.
+    /// The source's watermark belongs to a different log: attachment starts this local log at
+    /// zero. This writes only the selector, without rewriting the source corpus just received.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn commit_recovered_checkpoint(&self) -> Result<(), ShardError> {
+        let eng = self.lock();
+        let p = self.translog.last_pos()?;
+        if p != LogPos(0) {
+            return Err(ShardError::Log(
+                "recovery checkpoint requires an unpublished shard with a fresh translog".into(),
+            ));
+        }
+        self.write_checkpoint(&eng, p)
+    }
+
+    fn write_checkpoint(&self, eng: &Engine, p: LogPos) -> Result<(), ShardError> {
+        if let Some(dir) = &self.data_dir {
+            let segment_files = eng.segment_filenames().map_err(|e| {
+                ShardError::Log(format!("collecting segment filenames for checkpoint: {e}"))
+            })?;
+            translog::write_sidecar(
+                dir,
+                &translog::ShardCheckpoint {
+                    next_seg_id: eng.next_seg_id(),
+                    local_checkpoint: p.0,
+                    dict_fingerprint: self.dict.fingerprint(),
+                    segment_files,
+                    compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+                    source_file_name: eng.source_file_name().to_string(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     /// Deliver a degraded-path event to the installed sink, if any (best-effort: dropped when no
     /// observer is attached — the default, byte-identical path). Library code never writes stderr
     /// (ADR-021); the observer turns this into logs + metrics.
@@ -58,22 +94,7 @@ impl LocalShard {
         // crash (ADR-039 §6): write it AFTER the segments are durable and BEFORE trimming the
         // translog, so a crash in between just replays an already-captured (position-filtered)
         // prefix — never a loss, never a double-apply.
-        if let Some(dir) = &self.data_dir {
-            let segment_files = eng.segment_filenames().map_err(|e| {
-                ShardError::Log(format!("collecting segment filenames for checkpoint: {e}"))
-            })?;
-            translog::write_sidecar(
-                dir,
-                &translog::ShardCheckpoint {
-                    next_seg_id: eng.next_seg_id(),
-                    local_checkpoint: p.0,
-                    dict_fingerprint: self.dict.fingerprint(),
-                    segment_files,
-                    compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
-                    source_file_name: eng.source_file_name().to_string(),
-                },
-            )?;
-        }
+        self.write_checkpoint(&eng, p)?;
         // Reap any stuck retention lease (ADR-048) before reading the floor: a lease that has not
         // heartbeated within the TTL belongs to a crashed/stalled recovery and must no longer pin
         // the tail (`renew` is the heartbeat, so a live recovery is never reaped). Disabled

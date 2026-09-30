@@ -74,50 +74,39 @@ async fn a_stalled_reader_cannot_pin_the_snapshot_permit_past_the_deadline() {
 }
 
 #[tokio::test]
-async fn a_checkpoint_flush_attests_a_durable_sidecar() {
-    let dir = std::env::temp_dir().join(format!("rr_live_sources_ckpt_{}", std::process::id()));
+async fn flush_reports_whether_the_slot_persists_to_disk() {
+    let dir = std::env::temp_dir().join(format!("rr_live_sources_durable_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let normalizer = norm();
     let dict = Arc::new(frozen_dict(&["exportneedle"], &normalizer));
-    let server = ShardServer::new_durable(
-        normalizer,
+    let flush = || proto::FlushRequest {
+        shard_id: 0,
+        placement_generation: 1,
+        num_shards: 1,
+    };
+    let durable = ShardServer::new_durable(
+        Arc::clone(&normalizer),
         Arc::clone(&dict),
         EngineConfig::default(),
         dir.clone(),
     )
     .expect("durable server");
-    server
-        .insert_extracted(insert_req_single(7, "exportneedle"))
-        .await
-        .expect("write");
-    let plain = server
-        .flush(Request::new(proto::FlushRequest {
-            shard_id: 0,
-            placement_generation: 1,
-            num_shards: 1,
-            checkpoint: false,
-        }))
-        .await
-        .expect("plain flush")
-        .into_inner();
     assert!(
-        !plain.checkpointed,
-        "a plain flush makes no checkpoint claim"
+        durable
+            .flush(Request::new(flush()))
+            .await
+            .expect("flush")
+            .into_inner()
+            .durable
     );
-    let durable = server
-        .flush(Request::new(proto::FlushRequest {
-            shard_id: 0,
-            placement_generation: 1,
-            num_shards: 1,
-            checkpoint: true,
-        }))
-        .await
-        .expect("checkpoint flush")
-        .into_inner();
-    assert!(durable.checkpointed);
+    let volatile = ShardServer::new(normalizer, dict, EngineConfig::default());
     assert!(
-        dir.join("shard_000").join("shard.ckpt").exists(),
-        "the checkpoint writes the slot sidecar"
+        !volatile
+            .flush(Request::new(flush()))
+            .await
+            .expect("flush")
+            .into_inner()
+            .durable
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

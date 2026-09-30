@@ -24,6 +24,7 @@ use crate::cluster::control::{
     NodeId, ResizeCommand, ResizeIntent, ResizeIntentPhase, ResizeLayout, ResizePositionEvidence,
 };
 use crate::cluster::remote::RemoteShard;
+use crate::cluster::shard::Shard;
 
 use super::{ClusterConfig, ClusterEngine, ShardError};
 
@@ -495,8 +496,11 @@ impl ClusterEngine {
                 &self.client_security,
             )?;
             // Prove the loaded rows survive a target restart before they can become the layout
-            // of record: an error-returning checkpoint of segments, sources, and the sidecar.
-            client.checkpoint_durably(source_durable)?;
+            // of record: a durable `Seal` (ADR-181) commits segments, sources, and the sidecar,
+            // and a volatile target refuses it. A volatile source layout has nothing to prove.
+            if source_durable {
+                client.seal_for_checkpoint()?;
+            }
             let (fingerprint_lo, fingerprint_hi, live_count) = client.content_fingerprint()?;
             if live_count != loaded[position] {
                 return Err(ShardError::Protocol(format!(

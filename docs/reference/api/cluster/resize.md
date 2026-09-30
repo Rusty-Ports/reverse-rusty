@@ -148,8 +148,9 @@ then runs these steps:
 6. Swap routing.
 7. Fence the old slots so a stale writer fails loud.
 
-Each target must attest a checkpoint before its evidence is recorded, and must persist to disk when
-the current layout does. Every copy of a query stored on several positions must agree; disagreeing
+When the current layout persists to disk, each target must too: every target position commits a
+durable `Seal` before its evidence is recorded, and a target started without `--data-dir` is
+refused. Every copy of a query stored on several positions must agree; disagreeing
 copies (for example, an unrepaired partial upsert) fail the export, so repair or upsert them first.
 
 A failure before the commit aborts and reopens writes. If the control plane cannot prove the commit

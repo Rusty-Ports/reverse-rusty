@@ -47,6 +47,9 @@ service ShardService {
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
   rpc Delete          (DeleteRequest) returns (DeleteReply);
   rpc Flush           (FlushRequest)  returns (FlushReply);
+  // Durable slot commit: seal segments and tombstones, publish shard.ckpt, then trim only the
+  // translog prefix allowed by active retention leases. A pre-Seal peer fails UNIMPLEMENTED.
+  rpc Seal (SealRequest) returns (SealReply);
   // ---- handshake ----
   // Connect-time dict-identity check: the coordinator compares the server's frozen-dict
   // fingerprint to its own and refuses a mismatch (ADR-029).
@@ -510,16 +513,22 @@ message FlushRequest {
   uint32 shard_id = 1; // ADR-093
   uint64 placement_generation = 2;
   uint32 num_shards = 3;
-  // ADR-180: seal a full, error-returning checkpoint (segments, sources, and the shard.ckpt
-  // sidecar) instead of a bare memtable flush. Additive: an older server ignores it and replies
-  // without `checkpointed`, which a caller that requires the checkpoint treats as a refusal.
-  bool checkpoint = 4;
 }
 message FlushReply {
-  bool checkpointed = 1;
-  // ADR-180: the slot persists to disk (a `--data-dir` node). A checkpoint of a volatile slot
-  // proves nothing across a restart. Additive: an older server reports false.
-  bool durable = 2;
+  // ADR-180: the slot persists to disk (a `--data-dir` node), so a remote resize knows whether
+  // its targets must prove durability with `Seal`. Additive: an older server reports false.
+  bool durable = 1;
+}
+
+message SealRequest {
+  uint32 shard_id = 1;
+  uint64 placement_generation = 2;
+  uint32 num_shards = 3;
+}
+message SealReply {
+  uint64 up_to_seqno = 1;
+  uint64 placement_generation = 2;
+  uint32 num_shards = 3;
 }
 
 message CountReply       { uint64 count = 1; }            // usize num_queries

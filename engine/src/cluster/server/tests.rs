@@ -143,3 +143,4 @@ mod gc;
 mod limits;
 mod live_sources;
 mod logical_ids;
+mod seal;

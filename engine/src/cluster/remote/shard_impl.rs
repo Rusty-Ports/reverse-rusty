@@ -956,7 +956,6 @@ impl Shard for RemoteShard {
                         shard_id,
                         placement_generation,
                         num_shards,
-                        checkpoint: false,
                     })
                     .await
                     .map(tonic::Response::into_inner)
@@ -966,12 +965,24 @@ impl Shard for RemoteShard {
     }
 
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
-        // The remote node owns its own segment durability + translog position (server-side); a
-        // recovering peer learns the snapshot's position from `FetchManifest.up_to_seqno`, not
-        // from this client-side call. Flush so the remote memtable seals; report `LogPos(0)` as
-        // a benign sentinel (the coordinator's gRPC recovery uses the server-reported position).
-        self.flush()?;
-        Ok(LogPos(0))
+        let req = proto::SealRequest {
+            shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
+        };
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Seal, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move { client.seal(req).await.map(tonic::Response::into_inner) }
+        })?;
+        if reply.placement_generation != self.placement_generation.get()
+            || reply.num_shards != self.num_shards
+        {
+            return Err(ShardError::Remote(
+                "Seal reply does not attest the requested placement configuration".into(),
+            ));
+        }
+        Ok(LogPos(reply.up_to_seqno))
     }
 
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {

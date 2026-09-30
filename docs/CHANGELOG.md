@@ -20,6 +20,16 @@ reverse chronological and describe outcomes, not the current architecture or fut
   and `RRL5` log header. Resolve-only startup adopts the committed shard count and placement
   generation, then aborts or finishes a recorded intent once it holds exclusive shard claims.
 
+## 2026-09-30 — Durable peer-recovery targets
+
+- Commit a recovered data node's restart checkpoint before acknowledging recovery, so its copied
+  corpus and later translog mutations survive restart even when replacing a previous checkpoint.
+  A checkpoint write failure fails recovery before publishing the new slot.
+- Add a durable remote `Seal` RPC and drive it for current primaries from `POST /_checkpoint`.
+  Remote responses report the primary count while retaining `durable: false`, since individual
+  node commits do not create a coordinator manifest or cross-shard snapshot
+  ([ADR-181](decisions/adr-181-durable-recovery-target-checkpoints.md)).
+
 ## 2026-09-30 — Governed resize operations
 
 - Name and observe in-process resizes: `POST /_cluster/resize` accepts an idempotent `operation_id`

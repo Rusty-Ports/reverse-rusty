@@ -20,9 +20,12 @@ starting the new binary on the same `--data-dir` — the durable formats do the 
 - [ ] **Take a backup / snapshot set first** ([`backup-restore.md`](backup-restore.md)): for the
       remote topologies that means the **quiesce-writes → snapshot every `shardN-data` +
       `controlN-data` volume → resume** procedure ([runbook §7](cluster-deployment.md) — a
-      stateless coordinator's `POST /_checkpoint` cannot seal remote nodes and `POST /_backup`
+      stateless coordinator's `POST /_checkpoint` seals primaries independently and `POST /_backup`
       returns 400 without a coordinator `data_dir`; there is no cross-shard barrier in v1).
       This is the rollback path if the new version writes a format the old one refuses.
+- [ ] **Remote checkpoint support:** data nodes must support the `Seal` RPC before deploying a
+      coordinator that uses it (ADR-181). A missing RPC fails the checkpoint; it cannot silently
+      fall back to memtable flush.
 - [ ] **Version sanity:** `deploy/check-versions.sh vX.Y.Z` asserts the tag matches the crate +
       chart `appVersion` you are deploying (the same tripwire the release pipeline runs).
 - [ ] Upgrade at **low write traffic** if you can — the windows below are smaller and the

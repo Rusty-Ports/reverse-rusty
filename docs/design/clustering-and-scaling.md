@@ -198,6 +198,19 @@ either fails, the previous manifest stays authoritative and adds/upserts fail wi
 until a retry or checkpoint commits the serving generation; reads and removes continue (ADR-178). Each
 successful commit reclaims generation-named source sidecars older than the committed generation.
 
+Remote recovery commits the received segment registry, source selector, and fresh **local** translog
+watermark in `shard.ckpt` before publishing the target or acknowledging `RecoverFrom`. The source's
+watermark remains a catch-up cursor, never the target's replay floor. A checkpoint write failure fails
+recovery. A later target restart attaches that base and replays its own post-recovery mutations.
+
+For a stateless remote coordinator, `checkpoint` sends the durable `Seal` RPC to each current primary.
+Each node seals its own segments/sources, commits its sidecar, then trims its translog subject to
+retention leases. These are independent node commits; no coordinator manifest, cluster epoch, or
+cross-shard snapshot is created. Replicas can be sealed individually with the same per-slot RPC.
+There is no automatic seal timer; operators drive checkpoints to bound primary replay history.
+The acknowledgement and compatibility details are recorded in
+[ADR-181](../decisions/adr-181-durable-recovery-target-checkpoints.md).
+
 Standalone and in-process cluster backup APIs checkpoint before copying the manifest-selected files.
 Operational procedures and restore validation live in
 [`../operations/backup-restore.md`](../operations/backup-restore.md).

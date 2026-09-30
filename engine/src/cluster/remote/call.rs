@@ -379,46 +379,20 @@ impl RemoteShard {
         })
     }
 
-    /// Seal a full, error-returning checkpoint on this slot (segments, sources, and the
-    /// `shard.ckpt` sidecar) and require the server to attest it (ADR-180). With
-    /// `require_durable`, a volatile slot is refused: its checkpoint cannot survive a restart. An
-    /// older server replies without the attestation, which fails closed.
-    pub(crate) fn checkpoint_durably(&self, require_durable: bool) -> Result<(), ShardError> {
-        let reply = self.flush_reply(true)?;
-        if !reply.checkpointed {
-            return Err(ShardError::Protocol(
-                "the shard server did not attest a durable checkpoint; upgrade it before using \
-                 it as a resize target"
-                    .into(),
-            ));
-        }
-        if require_durable && !reply.durable {
-            return Err(ShardError::Config(
-                "a resize target of a durable cluster must persist to disk; start it with \
-                 --data-dir"
-                    .into(),
-            ));
-        }
-        Ok(())
-    }
-
     /// Whether this slot persists to disk, from a plain flush (ADR-180).
     pub(crate) fn is_durable(&self) -> Result<bool, ShardError> {
-        Ok(self.flush_reply(false)?.durable)
-    }
-
-    fn flush_reply(&self, checkpoint: bool) -> Result<proto::FlushReply, ShardError> {
         let client = self.client.clone();
         let request = proto::FlushRequest {
             shard_id: self.shard_id,
             placement_generation: self.placement_generation.get(),
             num_shards: self.num_shards,
-            checkpoint,
         };
-        self.call(RpcMethod::Flush, CallKind::Write, move || {
-            let mut client = client.clone();
-            async move { client.flush(request).await.map(tonic::Response::into_inner) }
-        })
+        Ok(self
+            .call(RpcMethod::Flush, CallKind::Write, move || {
+                let mut client = client.clone();
+                async move { client.flush(request).await.map(tonic::Response::into_inner) }
+            })?
+            .durable)
     }
 
     /// This slot's order-independent 128-bit live-set fingerprint + live count (ADR-097): the

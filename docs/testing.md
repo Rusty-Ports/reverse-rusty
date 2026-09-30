@@ -161,6 +161,14 @@ Protocol and server unit tests cover snapshot isolation from concurrent writes, 
 completion, ID/count/frame bounds, duplicate rows, cancellation, and abandoned-stream admission.
 Membership reconstruction deliberately leaves unproven exhaustive convergence refused (ADR-176).
 
+`cluster_grpc_oracle::recovery_checkpoint` stops and reopens fresh and previously checkpointed
+recovery targets without a later seal, verifies base plus add/remove tail, and injects sidecar-write
+failure before recovery acknowledgement. The recovery and concurrent handoff corpora also restart
+their targets. Remote checkpoint coverage verifies translog trimming and post-seal restart replay
+(ADR-181); the container harness repeats recall after restarting the recovered handoff target.
+Server unit coverage queues and cancels a seal worker, then re-adopts the slot and checks that
+the subsequent ingest survives reopen and a waiting seal rejects the stale placement stamp.
+
 ## Pressure & soak tests
 
 [`tests/stress/`](../engine/tests/stress/) holds the pressure suite. Its normal tests run as

@@ -91,10 +91,10 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 5. It streams the corpus into the staged layout in byte-bounded, versioned batches placed under
    the new ring. Placement force-accepts, as log replay does, so a stored class-D query survives
    even when the current admission knob is off.
-6. Each target position attests an error-returning durable checkpoint (`Flush` with the additive
-   `checkpoint` flag, echoed as `checkpointed`). Only then are its content fingerprint and count
-   checked against what was loaded and recorded as `MarkReady`, so evidence never names rows a
-   target restart could lose.
+6. When the current layout is durable (each slot reports it through the additive `durable`
+   field on `Flush`), every target position must commit an ADR-181 `Seal`, which a volatile
+   target refuses. Only then are its content fingerprint and count checked against what was
+   loaded and recorded as `MarkReady`, so evidence never names rows a target restart could lose.
 7. It commits. An ambiguous commit is resolved by reading the committed layout back.
 
 `install_remote_resize` then takes `&mut self` briefly. It swaps the ring, shards, handoff handles,
@@ -145,7 +145,8 @@ ambiguous-commit, and stalled-reader fixes were mutation-checked:
 The second review found six more, all fixed:
 
 - a volatile target could attest a checkpoint; targets must now persist to disk whenever the
-  source layout does, as reported by the additive `durable` flag on `Flush`;
+  source layout does, proved by an ADR-181 `Seal` and detected through the additive `durable`
+  field on `Flush`;
 - the export silently kept the first of several disagreeing copies; copies must now match
   exactly, or the export fails;
 - the operator docs implied a failed response meant nothing committed; they now require checking
@@ -206,4 +207,4 @@ governor stays in-process, because provisioning target nodes is an external deci
 - **Handler tests** cover `targets` validation by topology and record the failed remote
   operation.
 
-**See also:** ADR-043, ADR-078, ADR-086, ADR-175, ADR-176, ADR-179.
+**See also:** ADR-043, ADR-078, ADR-086, ADR-175, ADR-176, ADR-179, ADR-181.
