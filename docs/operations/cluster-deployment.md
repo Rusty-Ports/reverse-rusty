@@ -212,7 +212,8 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/resize -H "authorization: Bearer
 Writes pause for the copy while reads keep serving; reads pause briefly around the commit, when
 the old nodes are retired. The control plane commits the new layout atomically, and restarts adopt
 the committed shard count, so `--shards` need not be edited. When the call succeeds, the old shard
-nodes stay retired (they refuse every request); wipe or decommission them.
+nodes stay retired (they refuse every request) and are no longer registered members; wipe or
+decommission them.
 
 A failed response does not by itself prove the resize did not commit. Before wiping or
 decommissioning **either** set of nodes, read `GET /_cluster/state`:

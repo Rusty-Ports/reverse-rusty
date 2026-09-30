@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::move_intent::{normalized_move_endpoint, MoveCommandOutcome, MoveMemberIdentity};
-use super::{ClusterState, NodeId, ShardAssignment};
+use super::{ClusterState, NodeId, NodeRole, ShardAssignment};
 
 pub const RESIZE_INTENT_VERSION: u32 = 1;
 /// The control format that may carry a resize intent. Older binaries accept at most format 4,
@@ -268,6 +268,16 @@ pub(super) fn apply_resize(state: &mut ClusterState, command: ResizeCommand) -> 
                     state.num_shards = intent.desired.num_shards;
                     state.placement_generation = intent.desired.placement_generation;
                     state.assignments.clone_from(&intent.desired.assignments);
+                    // The old layout's nodes are retired at the storage layer before this commit
+                    // and refuse every request, so they leave membership in the same transition:
+                    // no rebalance or reconcile may pick them as a destination again.
+                    let retired: Vec<NodeId> = layout_nodes(&intent.expected)
+                        .into_iter()
+                        .filter(|node| !layout_nodes(&intent.desired).contains(node))
+                        .collect();
+                    state
+                        .nodes
+                        .retain(|node| node.role != NodeRole::Data || !retired.contains(&node.id));
                     state.moves.retain_positions_below(state.num_shards);
                     for position in 0..state.num_shards {
                         state.moves.bump_assignment_generation(position);

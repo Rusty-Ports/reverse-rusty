@@ -95,8 +95,9 @@ preconditions run inside the state machine:
   the expected layout must still be committed.
 - **`MarkReady`** requires evidence for every desired position.
 - **`Commit`** re-checks the expected layout and member identities. It then replaces the shard
-  count, generation, and assignments in one transition and bumps every position's assignment
-  generation.
+  count, generation, and assignments in one transition, bumps every position's assignment
+  generation, and removes the old layout's (already retired) data nodes from membership, so no
+  rebalance or reconcile picks them as a destination.
 - **`Begin` on a move** is refused while a resize intent exists.
 
 A resize command raises the snapshot fence to control format 5, which never lowers. It also
@@ -158,7 +159,9 @@ guard, and holds a dedicated remote-resize permit that shutdown joins.
 A resolve-only coordinator treats the committed document as the layout of record: it connects
 every node at the committed placement generation (threaded through a new
 `ClusterConfig::remote_placement_generation`) and adopts the committed shard count, even when
-`--shards` differs. CLI-seeded and static modes still require their CLI topology to match.
+`--shards` differs. CLI-seeded and static modes still require their CLI topology to match; a
+static coordinator never resolves a resize (it does not route by the committed layout) and refuses
+to start while one is recorded.
 
 Before choosing any route, `recover_durable_resize` runs, like durable-move recovery:
 
@@ -206,6 +209,8 @@ the retirement sweep could lift a retirement that a concurrently committed resiz
 and a resize after an uncommitted route change would export from one node and retire another. The
 next review found that the pre-built durable startup path ignored a retirement record and that the
 routing check ran before the move reservation that excludes concurrent handoffs; both are fixed.
+The one after found two availability gaps, both fixed: retired nodes stayed registered as
+allocation candidates, and a static coordinator swept a committed layout it does not route by.
 
 ## Alternatives
 

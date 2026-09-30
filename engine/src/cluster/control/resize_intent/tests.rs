@@ -145,6 +145,16 @@ fn a_resize_commits_the_complete_layout_atomically_and_idempotently() {
         before.placement_generation + 1
     );
     assert_eq!(committed.assignments, begin.desired.assignments);
+    let registered: Vec<u64> = committed.nodes.iter().map(|node| node.id.0).collect();
+    for retired in [1, 2, 3] {
+        assert!(
+            !registered.contains(&retired),
+            "retired node {retired} leaves membership with the commit"
+        );
+    }
+    for target in [11, 12, 13, 14, 15] {
+        assert!(registered.contains(&target));
+    }
     for position in 0..5 {
         assert!(committed.moves.assignment_generation(position) > 0);
     }

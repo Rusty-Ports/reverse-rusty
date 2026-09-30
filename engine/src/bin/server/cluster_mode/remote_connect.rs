@@ -88,6 +88,23 @@ fn connect_control_plane(
     Ok(Some(rcp))
 }
 
+/// Tell the operator what startup did with a recorded remote resize (ADR-180).
+fn log_resize_recovery(recovered: Option<reverse_rusty::cluster::ResizeRecovery>) {
+    match recovered {
+        Some(reverse_rusty::cluster::ResizeRecovery::Aborted { operation_id }) => warn!(
+            operation_id,
+            "aborted an uncommitted remote resize and returned its old nodes to service; its \
+             target nodes hold an unrouted staged layout and must be wiped before reuse"
+        ),
+        Some(reverse_rusty::cluster::ResizeRecovery::Finished { operation_id }) => warn!(
+            operation_id,
+            "finished a committed remote resize; its old nodes are retired and must be wiped or \
+             decommissioned"
+        ),
+        None => {}
+    }
+}
+
 fn groups_to_endpoints(groups: &[ShardGroup]) -> Vec<ShardEndpoints> {
     groups
         .iter()
@@ -217,21 +234,25 @@ pub(crate) fn connect_remote_cluster(
                 "resolved durable shard-move intents before coordinator assembly"
             );
         }
-        // Remote resize decides which nodes may serve (ADR-180), so it too is resolved before any
-        // route is chosen. It claims the old layout's nodes first, so a coordinator still running
-        // that resize makes this startup fail instead of being aborted underneath.
-        match recover_durable_resize(rcp, handle, coordinator_id, &security)? {
-            Some(reverse_rusty::cluster::ResizeRecovery::Aborted { operation_id }) => warn!(
-                operation_id,
-                "aborted an uncommitted remote resize and returned its old nodes to service; its \
-                 target nodes hold an unrouted staged layout and must be wiped before reuse"
-            ),
-            Some(reverse_rusty::cluster::ResizeRecovery::Finished { operation_id }) => warn!(
-                operation_id,
-                "finished a committed remote resize; its old nodes are retired and must be \
-                 wiped or decommissioned"
-            ),
-            None => {}
+        // Remote resize decides which nodes may serve (ADR-180), so an assignment-routed
+        // coordinator resolves it before choosing any route. It claims the old layout's nodes
+        // first, so a coordinator still running that resize makes this startup fail instead of
+        // being aborted underneath. A static coordinator routes by its CLI endpoints and never
+        // resizes; it refuses to start over a recorded resize rather than resolving a layout it
+        // does not route by.
+        if route_by_assignments {
+            log_resize_recovery(recover_durable_resize(
+                rcp,
+                handle,
+                coordinator_id,
+                &security,
+            )?);
+        } else if rcp.cluster_state()?.moves.resize.is_some() {
+            return Err(ShardError::Config(
+                "the control plane records a remote resize; start this coordinator with \
+                 --route-by-assignments so it resolves the resize before serving"
+                    .into(),
+            ));
         }
     }
     let groups = build_groups(route_by_assignments, cli_groups, control.as_ref(), cfg)?;
