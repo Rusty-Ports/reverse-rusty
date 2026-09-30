@@ -1,40 +1,44 @@
-//! Strict native `POST /_cluster/resize` in-process blue/green rebuild.
+//! Strict native `/_cluster/resize`: the in-process blue/green rebuild (`POST`) and its
+//! operation records (`GET`).
 //!
 //! Elasticsearch and OpenSearch resize one named index into a distinct target
 //! index through `_split` or `_shrink`. Reverse Rusty instead replaces one
 //! in-process reverse-query ring in place after rebuilding the complete live
 //! corpus. Keep that semantic boundary explicit while adopting the manager
 //! timeout spellings that map exactly to waiting for administrative admission
-//! and exclusive topology access before the rebuild starts.
+//! and exclusive topology access before the rebuild starts. Operation IDs,
+//! placement-generation preconditions, and the status reads are ADR-179.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
     body::Bytes,
-    extract::{FromRequest, Query, Request, State},
+    extract::{FromRequest, Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use parking_lot::Mutex;
 use prometheus::HistogramTimer;
 use serde::{Deserialize, Serialize};
-use tokio::sync::TryAcquireError;
-use tracing::{error, instrument, warn};
+use tracing::instrument;
 
 use reverse_rusty::cluster::ShardError;
 
 use crate::dto::ApiError;
 use crate::handlers::search::parse_named_time_value;
 use crate::metrics::PrometheusMetrics;
+use crate::resize_ops::{valid_operation_id, ResizeAdmission, ResizeOperation, ResizeOrigin};
 use crate::state::{ClusterAppState, ClusterRebalanceTopology};
 
 use super::super::shard_error_status;
 
+mod execute;
+mod status;
 mod supervisor;
 
-use supervisor::{supervise_cluster_resize_worker, ClusterResizeWorkerFailure};
+pub(crate) use execute::{run_resize, ResizeRun, ResizeRunOutcome};
+use supervisor::ClusterResizeWorkerFailure;
 
 pub(crate) const CLUSTER_RESIZE_BODY_LIMIT: usize = 64 * 1024;
 pub(crate) const CLUSTER_RESIZE_BODY_TIMEOUT: Duration = Duration::from_millis(250);
@@ -87,10 +91,23 @@ fn parse_cluster_resize_manager_timeout(raw: &str) -> Result<Duration, String> {
 #[serde(deny_unknown_fields)]
 struct ClusterResizeBody {
     num_shards: usize,
+    #[serde(default, deserialize_with = "present")]
+    operation_id: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    if_placement_generation: Option<u64>,
+}
+
+/// Optional body fields may be omitted but, like every resize field, never `null`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 impl ClusterResizeBody {
-    fn validate(self) -> Result<usize, String> {
+    fn validate(self) -> Result<ClusterResizeRequest, String> {
         if self.num_shards == 0 {
             return Err("`num_shards` must be at least 1".to_string());
         }
@@ -99,20 +116,34 @@ impl ClusterResizeBody {
                 "`num_shards` must not exceed {MAX_CLUSTER_RESIZE_SHARDS}"
             ));
         }
-        Ok(self.num_shards)
+        if let Some(id) = self.operation_id.as_deref() {
+            if !valid_operation_id(id) {
+                return Err(format!(
+                    "`operation_id` must be 1..={} characters of ASCII letters, digits, `-`, \
+                     `_`, `.`, or `:`",
+                    crate::resize_ops::MAX_RESIZE_OPERATION_ID_LEN
+                ));
+            }
+        }
+        Ok(ClusterResizeRequest {
+            num_shards: self.num_shards,
+            operation_id: self.operation_id,
+            if_placement_generation: self.if_placement_generation,
+        })
     }
+}
+
+/// A validated resize body.
+struct ClusterResizeRequest {
+    num_shards: usize,
+    operation_id: Option<String>,
+    if_placement_generation: Option<u64>,
 }
 
 pub(crate) struct ClusterResizeTransport {
     duration: HistogramTimer,
     manager_timeout: Duration,
-    num_shards: usize,
-}
-
-impl ClusterResizeTransport {
-    fn into_parts(self) -> (HistogramTimer, Duration, usize) {
-        (self.duration, self.manager_timeout, self.num_shards)
-    }
+    request: ClusterResizeRequest,
 }
 
 impl FromRequest<Arc<ClusterAppState>> for ClusterResizeTransport {
@@ -127,19 +158,6 @@ impl FromRequest<Arc<ClusterAppState>> for ClusterResizeTransport {
             .http_request_duration
             .with_label_values(&[CLUSTER_RESIZE_ENDPOINT])
             .start_timer();
-        if request.method() != Method::POST {
-            let mut response = cluster_resize_rejection(
-                &state.prom,
-                StatusCode::METHOD_NOT_ALLOWED,
-                "method_not_allowed",
-                "POST is the only supported /_cluster/resize method",
-            );
-            response
-                .headers_mut()
-                .insert(header::ALLOW, HeaderValue::from_static("POST"));
-            return Err(response);
-        }
-
         let Query(params) =
             Query::<ClusterResizeParams>::try_from_uri(request.uri()).map_err(|source| {
                 cluster_resize_rejection(
@@ -219,7 +237,7 @@ impl FromRequest<Arc<ClusterAppState>> for ClusterResizeTransport {
                 "the resize JSON body must be an object",
             ));
         }
-        let num_shards = serde_json::from_slice::<ClusterResizeBody>(&bytes)
+        let resize = serde_json::from_slice::<ClusterResizeBody>(&bytes)
             .map_err(|source| {
                 cluster_resize_rejection(
                     &state.prom,
@@ -241,7 +259,7 @@ impl FromRequest<Arc<ClusterAppState>> for ClusterResizeTransport {
         Ok(Self {
             duration,
             manager_timeout,
-            num_shards,
+            request: resize,
         })
     }
 }
@@ -264,52 +282,18 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
             .is_some_and(|subtype| subtype.ends_with("+json"))
 }
 
-#[derive(Clone, Copy)]
-enum ResizeStart {
-    Queued,
-    Started,
-    Cancelled,
-}
-
-fn begin_cluster_resize(gate: &Mutex<ResizeStart>, deadline: Instant, no_wait: bool) -> bool {
-    let mut start = gate.lock();
-    if matches!(*start, ResizeStart::Cancelled) || (!no_wait && Instant::now() >= deadline) {
-        *start = ResizeStart::Cancelled;
-        return false;
-    }
-    *start = ResizeStart::Started;
-    true
-}
-
-fn cancel_queued_cluster_resize(gate: &Mutex<ResizeStart>) -> bool {
-    let mut start = gate.lock();
-    match *start {
-        ResizeStart::Queued | ResizeStart::Cancelled => {
-            *start = ResizeStart::Cancelled;
-            true
-        }
-        ResizeStart::Started => false,
-    }
-}
-
-struct CancelQueuedClusterResize(Arc<Mutex<ResizeStart>>);
-
-impl Drop for CancelQueuedClusterResize {
-    fn drop(&mut self) {
-        let _ = cancel_queued_cluster_resize(&self.0);
-    }
-}
-
 #[derive(Debug)]
-struct ClusterResizeSuccess {
-    old_num_shards: usize,
-    num_shards: usize,
-    rebuilt: usize,
-    version: u64,
+pub(crate) struct ClusterResizeSuccess {
+    pub(crate) old_num_shards: usize,
+    pub(crate) num_shards: usize,
+    pub(crate) rebuilt: usize,
+    pub(crate) version: u64,
+    pub(crate) placement_generation: u64,
 }
 
 enum ClusterResizeWorkerOutcome {
     NotStarted,
+    PreconditionFailed { current: u64 },
     Finished(Result<ClusterResizeSuccess, ShardError>),
 }
 
@@ -323,16 +307,65 @@ struct ClusterResizeResponse {
     old_num_shards: usize,
     num_shards: usize,
     rebuilt: usize,
+    placement_generation: u64,
+    operation_id: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    replayed: bool,
 }
 
-/// Rebuild every live query under a fresh in-process ring and atomically swap
-/// the serving cluster. Admission and all blocking locks remain off Tokio.
+/// `/_cluster/resize`: `GET` lists retained operations and autoscaler state; `POST`
+/// rebuilds every live query under a fresh in-process ring and atomically swaps the
+/// serving cluster. Admission and all blocking locks remain off Tokio.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_resize(
     State(state): State<Arc<ClusterAppState>>,
+    request: Request,
+) -> Response {
+    match *request.method() {
+        Method::GET => status::list_resize_operations(&state, &request),
+        Method::POST => match ClusterResizeTransport::from_request(request, &state).await {
+            Ok(transport) => post_cluster_resize(state, transport).await,
+            Err(rejection) => rejection,
+        },
+        _ => method_not_allowed(&state.prom, "GET, POST"),
+    }
+}
+
+/// `GET /_cluster/resize/{operation_id}`: one retained operation record.
+#[instrument(skip_all)]
+pub(crate) async fn cluster_resize_operation(
+    State(state): State<Arc<ClusterAppState>>,
+    Path(operation_id): Path<String>,
+    request: Request,
+) -> Response {
+    if request.method() != Method::GET {
+        return method_not_allowed(&state.prom, "GET");
+    }
+    status::get_resize_operation(&state, &request, &operation_id)
+}
+
+fn method_not_allowed(prom: &PrometheusMetrics, allow: &'static str) -> Response {
+    let mut response = cluster_resize_rejection(
+        prom,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        format!("supported methods: {allow}"),
+    );
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static(allow));
+    response
+}
+
+async fn post_cluster_resize(
+    state: Arc<ClusterAppState>,
     transport: ClusterResizeTransport,
 ) -> Response {
-    let (_duration, manager_timeout, num_shards) = transport.into_parts();
+    let ClusterResizeTransport {
+        duration: _duration,
+        manager_timeout,
+        request,
+    } = transport;
     if state.rebalance_topology != ClusterRebalanceTopology::InProcess {
         return cluster_resize_rejection(
             &state.prom,
@@ -342,202 +375,107 @@ pub(crate) async fn cluster_resize(
              shard count, re-ingest and validate the corpus, then cut traffic over",
         );
     }
-
-    let no_wait = manager_timeout.is_zero();
-    let Some(deadline) = Instant::now().checked_add(manager_timeout) else {
+    if Instant::now().checked_add(manager_timeout).is_none() {
         return cluster_resize_rejection(
             &state.prom,
             StatusCode::BAD_REQUEST,
             "validation_error",
             "resize manager timeout is too large for this platform",
         );
-    };
-    let permit = if no_wait {
-        match Arc::clone(&state.stats_permits).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(TryAcquireError::NoPermits) => {
-                return cluster_resize_not_started_timeout(&state.prom);
-            }
-            Err(TryAcquireError::Closed) => {
-                return cluster_resize_rejection(
-                    &state.prom,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "resize_unavailable",
-                    "resize admission is closed",
-                );
-            }
-        }
-    } else {
-        let Some(admission_budget) = deadline.checked_duration_since(Instant::now()) else {
-            return cluster_resize_not_started_timeout(&state.prom);
-        };
-        match tokio::time::timeout(
-            admission_budget,
-            Arc::clone(&state.stats_permits).acquire_owned(),
-        )
-        .await
-        {
-            Err(_) => return cluster_resize_not_started_timeout(&state.prom),
-            Ok(Err(_)) => {
-                return cluster_resize_rejection(
-                    &state.prom,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "resize_unavailable",
-                    "resize admission is closed",
-                );
-            }
-            Ok(Ok(permit)) => permit,
-        }
-    };
-    if !no_wait && Instant::now() >= deadline {
-        return cluster_resize_not_started_timeout(&state.prom);
     }
 
-    let worker_state = Arc::clone(&state);
-    let gate = Arc::new(Mutex::new(ResizeStart::Queued));
-    let _cancel_queued_on_drop = CancelQueuedClusterResize(Arc::clone(&gate));
-    let worker_gate = Arc::clone(&gate);
-    let (started_sender, mut started_receiver) = tokio::sync::oneshot::channel();
-    let completion = match supervise_cluster_resize_worker(move || {
-        let _permit = permit;
-        let topology = if no_wait {
-            worker_state.topology_guard.try_write()
-        } else {
-            deadline
-                .checked_duration_since(Instant::now())
-                .and_then(|budget| worker_state.topology_guard.try_write_for(budget))
-        };
-        let Some(_topology) = topology else {
-            return ClusterResizeWorkerOutcome::NotStarted;
-        };
-        let writes = if no_wait {
-            worker_state.write_serial.try_lock()
-        } else {
-            deadline
-                .checked_duration_since(Instant::now())
-                .and_then(|budget| worker_state.write_serial.try_lock_for(budget))
-        };
-        let Some(_writes) = writes else {
-            return ClusterResizeWorkerOutcome::NotStarted;
-        };
-        let cluster = if no_wait {
-            worker_state.cluster.try_write()
-        } else {
-            deadline
-                .checked_duration_since(Instant::now())
-                .and_then(|budget| worker_state.cluster.try_write_for(budget))
-        };
-        let Some(mut cluster) = cluster else {
-            return ClusterResizeWorkerOutcome::NotStarted;
-        };
-        if !begin_cluster_resize(&worker_gate, deadline, no_wait) {
-            return ClusterResizeWorkerOutcome::NotStarted;
-        }
-        let _ = started_sender.send(());
-        let old_num_shards = cluster.num_shards();
-        let result = cluster.resize(num_shards).and_then(|rebuilt| {
-            let control = cluster.control_state()?;
-            let placement_generation = cluster.placement_generation().0;
-            if control.num_shards as usize != num_shards
-                || control.placement_generation != placement_generation
-            {
-                return Err(ShardError::ControlPlane(format!(
-                    "resize terminal attestation failed: serving state is generation \
-                     {placement_generation}/{num_shards} shards but committed control state is \
-                     generation {}/{} shards",
-                    control.placement_generation, control.num_shards
-                )));
-            }
-            Ok(ClusterResizeSuccess {
-                old_num_shards,
-                num_shards,
-                rebuilt,
-                version: control.epoch,
-            })
-        });
-        ClusterResizeWorkerOutcome::Finished(result)
-    }) {
-        Ok(completion) => completion,
-        Err(source) => {
-            error!(error = %source, "failed to dispatch dedicated resize worker");
+    let operation_id = match state.resize_operations.admit(
+        request.operation_id,
+        ResizeOrigin::Api,
+        request.num_shards,
+        request.if_placement_generation,
+    ) {
+        ResizeAdmission::Execute(id) => id,
+        ResizeAdmission::Replay(record) => return replay_response(&state.prom, &record),
+        ResizeAdmission::InProgress(record) => {
             return cluster_resize_rejection(
                 &state.prom,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "resize_unavailable",
-                "resize worker could not be started",
+                StatusCode::CONFLICT,
+                "resize_in_progress",
+                format!(
+                    "resize operation {} is still {}; poll GET /_cluster/resize/{} for its \
+                     terminal state",
+                    record.operation_id,
+                    serde_json::to_string(&record.state).unwrap_or_default(),
+                    record.operation_id
+                ),
+            );
+        }
+        ResizeAdmission::Conflict(record) => {
+            return cluster_resize_rejection(
+                &state.prom,
+                StatusCode::CONFLICT,
+                "operation_id_conflict",
+                format!(
+                    "operation_id {} already names a different retained resize request",
+                    record.operation_id
+                ),
+            );
+        }
+        ResizeAdmission::Full => {
+            return cluster_resize_rejection(
+                &state.prom,
+                StatusCode::TOO_MANY_REQUESTS,
+                "resize_registry_full",
+                "every retained resize operation is still active",
             );
         }
     };
-    let mut completion = completion;
 
-    if no_wait {
-        return match completion.await {
-            Ok(outcome) => finish_cluster_resize_worker(&state.prom, outcome),
-            Err(source) => cluster_resize_supervisor_failed(&state.prom, &source),
-        };
-    }
-
-    let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
-    tokio::pin!(sleep);
-    tokio::select! {
-        outcome = &mut completion => match outcome {
-            Ok(outcome) => finish_cluster_resize_worker(&state.prom, outcome),
-            Err(source) => cluster_resize_supervisor_failed(&state.prom, &source),
+    let outcome = run_resize(
+        &state,
+        ResizeRun {
+            operation_id: operation_id.clone(),
+            num_shards: request.num_shards,
+            if_placement_generation: request.if_placement_generation,
+            manager_timeout,
         },
-        started = &mut started_receiver => {
-            if started.is_err() {
-                warn!("resize worker ended without sending its start signal");
-            }
-            match completion.await {
-                Ok(outcome) => finish_cluster_resize_worker(&state.prom, outcome),
-                Err(source) => cluster_resize_supervisor_failed(&state.prom, &source),
-            }
-        },
-        () = &mut sleep => {
-            if cancel_queued_cluster_resize(&gate) {
-                cluster_resize_not_started_timeout(&state.prom)
-            } else {
-                // The worker acquired every exclusive guard and started before
-                // the manager deadline. A blue/green swap cannot be cancelled
-                // safely at an arbitrary HTTP deadline, so await its outcome.
-                match completion.await {
-                    Ok(outcome) => finish_cluster_resize_worker(&state.prom, outcome),
-                    Err(source) => cluster_resize_supervisor_failed(&state.prom, &source),
-                }
-            }
-        }
-    }
+    )
+    .await;
+    finish_cluster_resize_run(&state.prom, operation_id, outcome)
 }
 
-fn finish_cluster_resize_worker(
-    prom: &PrometheusMetrics,
-    outcome: ClusterResizeWorkerResult,
-) -> Response {
-    match outcome {
-        Err(_) => cluster_resize_rejection(
+fn replay_response(prom: &PrometheusMetrics, record: &ResizeOperation) -> Response {
+    let Some(outcome) = record.outcome else {
+        return cluster_resize_rejection(
             prom,
             StatusCode::INTERNAL_SERVER_ERROR,
             "resize_unavailable",
-            "resize worker failed",
-        ),
-        Ok(ClusterResizeWorkerOutcome::NotStarted) => cluster_resize_not_started_timeout(prom),
-        Ok(ClusterResizeWorkerOutcome::Finished(Err(source))) => {
-            let status = shard_error_status(&source);
-            let status = if status.is_success() {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                status
-            };
-            let (_, error_type) = source.write_http_class();
-            cluster_resize_rejection(
-                prom,
-                status,
-                error_type,
-                "resize did not produce an attested terminal cluster state; inspect \
-                 /_health and /_cluster/state before retrying",
-            )
-        }
-        Ok(ClusterResizeWorkerOutcome::Finished(Ok(success))) => finish_cluster_resize_response(
+            "a succeeded resize record has no recorded outcome",
+        );
+    };
+    finish_cluster_resize_response(
+        prom,
+        Json(ClusterResizeResponse {
+            acknowledged: true,
+            shards_acknowledged: true,
+            version: outcome.version,
+            old_num_shards: outcome.old_num_shards,
+            num_shards: outcome.num_shards,
+            rebuilt: outcome.rebuilt,
+            placement_generation: outcome.placement_generation,
+            operation_id: record.operation_id.clone(),
+            replayed: true,
+        })
+        .into_response(),
+    )
+}
+
+fn finish_cluster_resize_run(
+    prom: &PrometheusMetrics,
+    operation_id: String,
+    outcome: ResizeRunOutcome,
+) -> Response {
+    let rejected = |status: StatusCode, error_type: &str, reason: String| {
+        cluster_resize_operation_rejection(prom, status, error_type, &reason, &operation_id)
+    };
+    match outcome {
+        ResizeRunOutcome::Succeeded(success) => finish_cluster_resize_response(
             prom,
             Json(ClusterResizeResponse {
                 acknowledged: true,
@@ -546,38 +484,78 @@ fn finish_cluster_resize_worker(
                 old_num_shards: success.old_num_shards,
                 num_shards: success.num_shards,
                 rebuilt: success.rebuilt,
+                placement_generation: success.placement_generation,
+                operation_id,
+                replayed: false,
             })
             .into_response(),
+        ),
+        ResizeRunOutcome::NotStarted => rejected(
+            StatusCode::REQUEST_TIMEOUT,
+            "resize_timeout",
+            NOT_STARTED_REASON.to_string(),
+        ),
+        ResizeRunOutcome::Unavailable(reason) => rejected(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "resize_unavailable",
+            reason.to_string(),
+        ),
+        ResizeRunOutcome::PreconditionFailed { current } => rejected(
+            StatusCode::CONFLICT,
+            "placement_generation_mismatch",
+            format!(
+                "the serving placement generation is {current}; the resize precondition was not \
+                 met and no resize was started"
+            ),
+        ),
+        ResizeRunOutcome::Failed(source) => {
+            let status = shard_error_status(&source);
+            let status = if status.is_success() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                status
+            };
+            let failure = execute::started_failure(&source);
+            rejected(status, &failure.error_type, failure.reason)
+        }
+        ResizeRunOutcome::WorkerFailed => rejected(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "resize_unavailable",
+            "resize worker failed".to_string(),
         ),
     }
 }
 
-fn cluster_resize_supervisor_failed(
+/// A structured error that also names the admitted operation, so a caller that omitted
+/// `operation_id` can still inspect and retry that exact operation (ADR-179).
+fn cluster_resize_operation_rejection(
     prom: &PrometheusMetrics,
-    source: &tokio::sync::oneshot::error::RecvError,
+    status: StatusCode,
+    error_type: &str,
+    reason: &str,
+    operation_id: &str,
 ) -> Response {
-    error!(error = %source, "resize completion supervisor failed");
-    cluster_resize_rejection(
+    finish_cluster_resize_response(
         prom,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "resize_unavailable",
-        "resize completion supervisor failed",
+        (
+            status,
+            Json(serde_json::json!({
+                "error": { "type": error_type, "reason": reason },
+                "status": status.as_u16(),
+                "operation_id": operation_id,
+            })),
+        )
+            .into_response(),
     )
 }
 
-fn cluster_resize_not_started_timeout(prom: &PrometheusMetrics) -> Response {
-    cluster_resize_rejection(
-        prom,
-        StatusCode::REQUEST_TIMEOUT,
-        "resize_timeout",
-        "timed out waiting for resize admission or exclusive cluster access; no resize was started",
-    )
-}
+const NOT_STARTED_REASON: &str =
+    "timed out waiting for resize admission or exclusive cluster access; no resize was started";
 
 fn cluster_resize_rejection(
     prom: &PrometheusMetrics,
     status: StatusCode,
-    error_type: &'static str,
+    error_type: &str,
     reason: impl Into<String>,
 ) -> Response {
     finish_cluster_resize_response(

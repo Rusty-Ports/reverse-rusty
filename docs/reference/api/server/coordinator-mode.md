@@ -58,6 +58,16 @@ CLI-seeded assignment-routed boot because it does not change the map. See the
 [reconcile](../cluster/reconcile.md) and [GC](../cluster/gc.md) API contracts for safety and shutdown
 semantics.
 
+An **in-process** coordinator may opt into governed automatic growth (ADR-179):
+`--autoscale-resize-interval-secs N` with `--autoscale-split-threshold Q` (selective queries per
+shard) observes load every `N` seconds and executes one bounded resize when the recommendation
+persists. `--autoscale-resize-observations` (default 3), `--autoscale-resize-cooldown-secs`
+(default 900), `--autoscale-resize-max-step` (default 8), `--autoscale-resize-max-shards`
+(default 64, at most 1024), and `--autoscale-resize-min-relief-percent` (default 10; 0 disables the
+futility hold) tune it. Automatic operations share the resize admission slot and appear in
+[`GET /_cluster/resize`](../cluster/resize-operations.md). Remote topologies refuse the flag at
+startup.
+
 Behavior deltas from single-node mode (all deliberate, none silent):
 
 - **`PUT /_doc/{id}` is a cluster-atomic upsert** — one coordinator log frame replaces every prior

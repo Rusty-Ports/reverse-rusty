@@ -36,6 +36,12 @@ pub(super) fn supervise_cluster_resize_worker(
                 Ok(ClusterResizeWorkerOutcome::NotStarted) => {
                     info!(detached, "resize was not started");
                 }
+                Ok(ClusterResizeWorkerOutcome::PreconditionFailed { current }) => {
+                    info!(
+                        detached,
+                        current, "resize precondition failed; no resize was started"
+                    );
+                }
                 Ok(ClusterResizeWorkerOutcome::Finished(Err(source))) => {
                     error!(detached, error = %source, "resize failed");
                 }
@@ -46,6 +52,7 @@ pub(super) fn supervise_cluster_resize_worker(
                         num_shards = success.num_shards,
                         rebuilt = success.rebuilt,
                         version = success.version,
+                        placement_generation = success.placement_generation,
                         "cluster resize completed"
                     );
                 }

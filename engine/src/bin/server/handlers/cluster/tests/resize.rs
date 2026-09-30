@@ -13,6 +13,8 @@ use reverse_rusty::cluster::{
 
 use super::*;
 
+mod autoscale;
+mod operations;
 mod retry;
 
 fn resize_request(uri: &str, body: impl Into<Body>) -> Request<Body> {
@@ -144,7 +146,7 @@ async fn resize_transport_is_strict_and_bounded() {
     let (status, headers, bytes) = send_raw(
         &state,
         Request::builder()
-            .method("GET")
+            .method("PUT")
             .uri("/_cluster/resize")
             .body(Body::empty())
             .expect("request"),
@@ -156,7 +158,7 @@ async fn resize_transport_is_strict_and_bounded() {
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
     );
-    assert_eq!(headers.get(header::ALLOW).expect("allow"), "POST");
+    assert_eq!(headers.get(header::ALLOW).expect("allow"), "GET, POST");
 
     for query in [
         "unknown=true",
@@ -184,6 +186,13 @@ async fn resize_transport_is_strict_and_bounded() {
         r#"{"num_shards":3,"num_shards":4}"#,
         r#"{"num_shards":null}"#,
         r#"{"num_shards":"3"}"#,
+        r#"{"num_shards":3,"operation_id":null}"#,
+        r#"{"num_shards":3,"operation_id":""}"#,
+        r#"{"num_shards":3,"operation_id":"has space"}"#,
+        r#"{"num_shards":3,"operation_id":7}"#,
+        r#"{"num_shards":3,"if_placement_generation":null}"#,
+        r#"{"num_shards":3,"if_placement_generation":-1}"#,
+        r#"{"num_shards":3,"if_placement_generation":"1"}"#,
     ];
     for raw in invalid_bodies {
         let (status, _, bytes) =

@@ -333,6 +333,40 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = false)]
     pub(crate) reconcile_gc_orphans: bool,
 
+    /// Run the governed resize loop every N seconds (ADR-179): observe per-shard selective
+    /// corpus, and when `recommended_shard_count` persists through the hysteresis, cooldown, and
+    /// futility checks, execute one bounded, grow-only resize through the same path as
+    /// `POST /_cluster/resize`. Requires an in-process cluster and
+    /// `--autoscale-split-threshold`. Unset (default) ⇒ no loop runs.
+    #[arg(long)]
+    pub(crate) autoscale_resize_interval_secs: Option<u64>,
+
+    /// Selective (non-replicated) queries per shard above which the governed resize loop
+    /// recommends growth. Required by `--autoscale-resize-interval-secs`.
+    #[arg(long)]
+    pub(crate) autoscale_split_threshold: Option<usize>,
+
+    /// Consecutive observations that must recommend growth before a resize is accepted.
+    #[arg(long, default_value_t = 3)]
+    pub(crate) autoscale_resize_observations: u32,
+
+    /// Minimum seconds between a layout change and the next accepted automatic resize.
+    #[arg(long, default_value_t = 900)]
+    pub(crate) autoscale_resize_cooldown_secs: u64,
+
+    /// Maximum shards one automatic resize may add.
+    #[arg(long, default_value_t = 8)]
+    pub(crate) autoscale_resize_max_step: usize,
+
+    /// Ceiling for automatically grown shard counts (at most 1024).
+    #[arg(long, default_value_t = 64)]
+    pub(crate) autoscale_resize_max_shards: usize,
+
+    /// Minimum percentage reduction of the hottest shard's selective corpus the previous
+    /// automatic resize must achieve before another is accepted (0 disables the futility hold).
+    #[arg(long, default_value_t = 10)]
+    pub(crate) autoscale_resize_min_relief_percent: u8,
+
     /// Coordinator gRPC client connect timeout in seconds (ADR-085) — bounds the TCP+TLS
     /// dial so an unreachable shard fails fast. Default: 5s.
     #[arg(long)]

@@ -241,6 +241,8 @@ pub(crate) struct ClusterAppState {
     pub(crate) pit_tokens: crate::pit::PitTokens,
     /// Admission bounds handed to `ClusterEngine::open_pit` per call.
     pub(crate) pit_config: reverse_rusty::PitConfig,
+    /// Retained resize operations and the latest autoscaler observation (ADR-179).
+    pub(crate) resize_operations: Arc<crate::resize_ops::ResizeOperations>,
 }
 
 /// What the request-scoped middleware needs from either backend's state — the seam

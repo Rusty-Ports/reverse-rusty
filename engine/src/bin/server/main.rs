@@ -51,6 +51,7 @@ mod handlers;
 mod jobs;
 mod metrics;
 mod pit;
+mod resize_ops;
 mod state;
 
 use std::net::SocketAddr;

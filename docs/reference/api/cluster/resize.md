@@ -11,11 +11,33 @@ tags, ranking values, and Boolean semantics are preserved.
 curl -X POST \
   'localhost:9200/_cluster/resize?cluster_manager_timeout=5s' \
   -H 'Content-Type: application/json' \
-  -d '{"num_shards":16}'
+  -d '{"num_shards":16,"operation_id":"grow-to-16","if_placement_generation":4}'
 ```
 
-The required `num_shards` is an integer from 1 through 1024. It may grow or shrink the ring by an
-arbitrary amount; it need not be a factor or multiple of the current count. Repeating an already
+The required `num_shards` is an integer from 1 through 1024. Two optional fields make the request
+safe to automate (ADR-179):
+
+- `operation_id` (1–64 ASCII letters, digits, `-`, `_`, `.`, or `:`) names the operation. Repeating
+  the same request under a retained ID replays the recorded success with `"replayed": true` and
+  does not rebuild; an operation that is still queued or running returns `409 resize_in_progress`;
+  different parameters under a retained ID return `409 operation_id_conflict`. A failed or
+  not-started operation re-executes under its ID, which keeps retry-to-heal available: if the
+  failed attempt had already swapped the serving layout, the retry passes its
+  `if_placement_generation` precondition at that operation's own uncommitted generation and
+  finishes the commit. When the
+  field is omitted, the server generates an ID and returns it, in error responses after admission
+  as well as on success.
+- `if_placement_generation` is a compare-and-set precondition checked under the exclusive guards
+  before the rebuild starts. A mismatch returns `409 placement_generation_mismatch` and changes
+  nothing. Read the current value from the last resize response or
+  [`GET /_cluster/state`](../observability/cluster-state.md).
+
+Operation records are process-local and bounded to the 64 most recent; active records, and failed
+records that still hold an uncommitted swap, are never evicted. A restart forgets them; use `if_placement_generation` when a retry must stay safe across a
+coordinator restart. Progress and outcomes are readable through
+[`GET /_cluster/resize`](resize-operations.md).
+
+The target shard count may grow or shrink the ring by an arbitrary amount; it need not be a factor or multiple of the current count. Repeating an already
 attested current count is an acknowledged no-op in memory. A same-count retry repairs a prior
 post-swap control-count failure before acknowledgement; on a durable cluster it also re-checkpoints
 and repairs the on-disk shard-directory set.
@@ -29,7 +51,9 @@ A successful response is terminal:
   "version": 47,
   "old_num_shards": 8,
   "num_shards": 16,
-  "rebuilt": 1200000
+  "rebuilt": 1200000,
+  "placement_generation": 5,
+  "operation_id": "resize-1790000000000-1"
 }
 ```
 
@@ -44,6 +68,9 @@ A successful response is terminal:
   also attests that the committed placement generation exactly matches the serving shards.
 - `old_num_shards` and `num_shards` report the serving ring transition. `rebuilt` is the number of
   unique live logical queries rebuilt; it is zero for a same-count retry.
+- `placement_generation` is the attested serving placement generation, suitable for the next
+  request's `if_placement_generation`. `operation_id` names this operation; `replayed: true`
+  appears only on a replay of a recorded success.
 
 ## Execution and timeout contract
 
@@ -86,10 +113,12 @@ in-place rebuild.
 
 ## Strictness, topology, and errors
 
-The route accepts only `POST`, requires `application/json` or `application/*+json`, caps the body at
-64 KiB, and gives body delivery 250 ms. It requires exactly one object with exactly one
-`num_shards` field; unknown/duplicate/null fields, non-object JSON, fractional/string counts, zero,
-and counts above 1024 are rejected before admission. Every route-reached response is structured
+`POST` requires `application/json` or `application/*+json`, caps the body at 64 KiB, and gives body
+delivery 250 ms. It requires one object with the required `num_shards` field and the optional
+fields above; unknown/duplicate/null fields, non-object JSON, fractional/string counts, zero, counts
+above 1024, malformed operation IDs, and negative or non-integer generations are rejected before
+admission. `GET` reads [operation records](resize-operations.md); any other method returns `405`
+with `Allow: GET, POST`. Every route-reached response is structured
 JSON, `Cache-Control: no-store`, and observed under the fixed `cluster_resize` metric label.
 
 Only an in-process cluster is supported. A static, CLI-seeded assignment-routed, or resolve-only
@@ -97,10 +126,12 @@ remote coordinator returns `501 not_supported_in_cluster_mode` before admission.
 ring without first rebuilding and attesting every remote position would make routing disagree with
 stored placement and create silent false negatives. Use the documented separate-cluster
 blue/green procedure instead; online remote resize remains a
-[roadmap item](../../../roadmap.md#automatic-and-remote-cluster-resize).
+[roadmap item](../../../roadmap.md#remote-cluster-resize).
 
-Invalid input is 400, a pre-start deadline is 408, an oversized body is 413, a missing/wrong media
-type is 415, closed/failed worker admission is 503, and the remote-topology boundary is 501.
+Invalid input is 400, a pre-start deadline is 408, an operation-ID conflict, in-progress duplicate,
+or failed precondition is 409, an oversized body is 413, a missing/wrong media type is 415, a
+registry whose every retained record is active is 429, closed/failed worker admission is 503, and
+the remote-topology boundary is 501.
 Underlying rebuild, control, or durability failures fail loud with a typed non-200 response and a
 sanitized reason; inspect server logs, health, and cluster state before retrying.
 

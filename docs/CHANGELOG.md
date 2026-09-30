@@ -9,6 +9,20 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-09-30 — Governed resize operations
+
+- Name and observe in-process resizes: `POST /_cluster/resize` accepts an idempotent `operation_id`
+  (a retained success replays without rebuilding; a failed attempt re-executes to heal) and an
+  `if_placement_generation` compare-and-set precondition checked before the rebuild starts.
+  Responses report the operation ID and attested placement generation, and the new
+  `GET /_cluster/resize` and `GET /_cluster/resize/{operation_id}` read progress without the
+  cluster lock ([ADR-179](decisions/adr-179-governed-resize-operations.md)).
+- Add an opt-in governed growth loop (`--autoscale-resize-interval-secs`) for in-process clusters.
+  A pure resize governor accepts a split recommendation only after it persists across observations
+  and a cooldown, bounds each step and the final shard count, and stops growing when a resize fails
+  to relieve the hottest shard. Accepted operations run through the ordinary resize path with the
+  observed placement generation as a precondition.
+
 ## 2026-09-29 — Safe retry window after a failed rebuild commit
 
 - Pause adds and upserts on a durable coordinator while a swapped resize or vocabulary rebuild is not
