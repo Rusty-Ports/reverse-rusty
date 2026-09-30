@@ -31,6 +31,9 @@ pub struct MoveControlState {
     pub assignment_generations: Vec<AssignmentGeneration>,
     #[serde(default)]
     pub intents: Vec<MoveIntent>,
+    /// The single active remote-resize intent (ADR-180). Present only at control format 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize: Option<super::resize_intent::ResizeIntent>,
 }
 
 impl Default for MoveControlState {
@@ -39,6 +42,7 @@ impl Default for MoveControlState {
             format_version: MOVE_CONTROL_FORMAT_LEGACY,
             assignment_generations: Vec::new(),
             intents: Vec::new(),
+            resize: None,
         }
     }
 }
@@ -192,7 +196,7 @@ pub struct MoveProposalResult {
     pub outcome: MoveCommandOutcome,
 }
 
-pub(super) fn normalized_move_endpoint(endpoint: &str) -> String {
+pub(crate) fn normalized_move_endpoint(endpoint: &str) -> String {
     endpoint.trim_end_matches('/').to_ascii_lowercase()
 }
 
@@ -362,11 +366,17 @@ pub(super) fn apply_move(state: &mut ClusterState, command: MoveCommand) -> Move
     // Once any new command is observed, every snapshot uses the v4 compatibility fence even when
     // the command is malformed or loses a race. Otherwise a compacted rejected command could be
     // hidden from an old binary joining from the resulting snapshot.
-    state.moves.format_version = MOVE_CONTROL_FORMAT_CURRENT;
+    // Never lower an already-installed newer fence (ADR-180's resize format).
+    state.moves.format_version = state.moves.format_version.max(MOVE_CONTROL_FORMAT_CURRENT);
     match command {
         MoveCommand::Begin(intent) => {
             if !valid_begin(state, &intent) {
                 return MoveCommandOutcome::Invalid;
+            }
+            // A remote resize replaces every assignment at once; no per-position move may start
+            // underneath it.
+            if state.moves.resize.is_some() {
+                return MoveCommandOutcome::Conflict;
             }
             if let Some(current) = state
                 .moves

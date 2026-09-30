@@ -49,6 +49,11 @@ from the same `--load-file`, so the fingerprint handshake holds. Its new boot ID
 until the 30-second renewable owner lease expires, then wait for any response bodies/streams
 admitted under the prior owner to drain before taking over a node.
 
+A resolve-only coordinator takes its shard count and placement generation from the committed
+control document, so it follows a remote resize (ADR-180) without editing `--shards`; every other
+mode must match its CLI topology. Once it holds exclusive shard claims, startup also aborts an
+uncommitted recorded resize or finishes a committed one.
+
 Topology-changing data movement requires a resolve-only coordinator after the initial seeded boot:
 `--route-by-assignments`, `--control-endpoint`, the committed `--shards` count, and no
 `--shard-endpoint`. `--reconcile-interval-secs` is accepted only in this mode; its optional

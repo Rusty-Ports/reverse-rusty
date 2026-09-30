@@ -140,6 +140,51 @@ impl Engine {
         duplicate
     }
 
+    /// One live source document by logical id, with the same integrity checks as
+    /// [`Self::live_source_documents_tagged`]. `Ok(None)` means `logical` has no live exact row
+    /// now; `Err(logical)` means its source is missing or disagrees with the exact row.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn live_source_document(
+        &self,
+        logical: u64,
+    ) -> Result<Option<crate::segment::LiveSourceDocument>, u64> {
+        let Some((version, exact_generation, tags, rank, placement)) =
+            self.live_metadata_for(logical)
+        else {
+            return Ok(None);
+        };
+        let source = self.query_store.get_document(logical).ok_or(logical)?;
+        let metadata_known = source.metadata_known();
+        if (metadata_known
+            && (source.version() != version || source.source_generation() != exact_generation))
+            || (!metadata_known && (source.source_generation() != 0 || exact_generation != 0))
+        {
+            return Err(logical);
+        }
+        let raw_tags = if source.tags_known() {
+            source.tags().to_vec()
+        } else {
+            tags.iter()
+                .map(|&id| {
+                    self.tag_dict
+                        .key_value(id)
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or(logical)?
+        };
+        Ok(Some((
+            logical,
+            source.query().to_string(),
+            version,
+            exact_generation,
+            raw_tags,
+            tags,
+            rank,
+            placement,
+        )))
+    }
+
     /// Internal document-complete variant of [`Self::live_sources_tagged`].
     /// Carries canonical raw tags for cluster source read-back across rebuilds
     /// and fails if either durable domain lacks a matching logical id.

@@ -69,8 +69,11 @@ pub(super) async fn add_shard(
     // A co-located slot must belong to the coordinator that adopted the
     // node. If two first handshakes raced while the lease was unowned, this
     // atomic claim admits exactly one before any new slot is installed.
+    server.ensure_not_retired()?;
     crate::cluster::security::claim_coordinator(&server.coordinator_lease, coordinator_id).await?;
     let _install = server.coordinator_lease.lock_install().await;
+    // Retirement serializes with installation (ADR-180): re-check under the barrier.
+    server.ensure_not_retired()?;
 
     // Re-read after ownership and install serialization. A same-id retry may
     // have installed/replaced the node space while this request was waiting;

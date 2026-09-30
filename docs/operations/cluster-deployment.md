@@ -198,19 +198,50 @@ cooldown, and growth stops when a resize fails to relieve the hottest shard. Aut
 only grows; shrink explicitly. Flag details are in
 [coordinator mode](../reference/api/server/coordinator-mode.md).
 
-**The remote topology** (this compose — shards on separate nodes) has **no online resize**: changing K
-re-keys the ring, and a coordinator restarted at the new K routes on the new ring while the existing data
-is still placed under the old one — searches in that window silently miss queries. So scale by
-**blue/green**, never in place:
+**A resolve-only remote coordinator** resizes online onto fresh nodes (ADR-180). Start the new
+shard servers empty (their own volumes and certificates whose SANs cover their names), then pass
+them as `targets`:
+
+```sh
+curl -fsS -XPOST http://127.0.0.1:9200/_cluster/resize -H "authorization: Bearer $RR_AUTH_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"num_shards": 6, "operation_id": "grow-6", "targets": [
+        {"id": 21, "endpoint": "https://shard-21:50051"}, {"id": 22, "endpoint": "https://shard-22:50051"}]}'
+```
+
+Writes pause for the copy while reads keep serving; reads pause briefly around the commit, when
+the old nodes are retired. The control plane commits the new layout atomically, and restarts adopt
+the committed shard count, so `--shards` need not be edited. When the call succeeds, the old shard
+nodes stay retired (they refuse every request) and are no longer registered members; wipe or
+decommission them.
+
+A failed response does not by itself prove the resize did not commit. Before wiping or
+decommissioning **either** set of nodes, read `GET /_cluster/state`:
+
+- If `num_shards`, `placement_generation`, and the assignments still name the old layout and no
+  resize intent is recorded, the resize did not commit: the old layout is authoritative, and the
+  targets may be wiped before another attempt.
+- If they name the targets, the new layout is authoritative. Restart the coordinator if it still
+  refuses writes, so startup finishes the intent and routes to the new layout, then decommission
+  the old nodes.
+- If an intent is recorded, restart the coordinator to resolve it, then read the state again.
+  Startup also returns to service any old node that a resize which never committed left retired.
+
+Details are in the [`/_cluster/resize` reference](../reference/api/cluster/resize.md).
+
+**A static or CLI-seeded remote coordinator** (like this Compose file's first boot) has **no
+online resize**: changing K re-keys the ring, and a coordinator restarted at the new K routes on the
+new ring while the existing data is still placed under the old one — searches in that window
+silently miss queries. Switch to resolve-only routing first, or scale by **blue/green**, never in
+place:
 
 1. Stand up a **separate** green cluster at the new K (new project name + volumes + a `--shard-endpoint`
    per new shard + SANs).
 2. Re-ingest the full corpus into the green coordinator and validate it.
 3. Cut traffic over (swap the published port / proxy upstream), then decommission blue.
 
-Do **not** add a shard to the live cluster and re-ingest in place. Cross-process / online resize is
-tracked in the [roadmap](../roadmap.md#remote-cluster-resize) under ADR-078's
-compatibility constraints.
+Do **not** add a shard to the live cluster and re-ingest in place. Remaining remote-resize work
+(same-node staging, RF>1) is tracked in the [roadmap](../roadmap.md#remote-cluster-resize).
 
 **Before any assignment-changing move**, switch the coordinator from its first-boot CLI-seeded
 posture to resolve-only routing. The checked-in Compose file exposes this without editing YAML:
@@ -402,8 +433,8 @@ The consolidated v1 constraints table — every non-goal with the deciding ADR �
 [`deployment-modes.md` §4](deployment-modes.md) (ADR-098). The ones this runbook's procedures
 touch:
 
-- **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales
-  by redeploy ([§5](#5-scaling), ADR-078).
+- **Online remote resize outside resolve-only routing** — static and CLI-seeded coordinators scale by
+  redeploy; resolve-only coordinators resize onto fresh nodes ([§5](#5-scaling), ADR-078/180).
 - **Custom vocabulary on the remote topology** — unsupported; remote shards run the default normalizer.
   Custom vocab is an in-process `--data-dir` cluster capability ([§8](#8-vocabulary), ADR-076).
 - **Cross-shard backup consistency barrier** — a remote cluster's backups are per-shard consistent;

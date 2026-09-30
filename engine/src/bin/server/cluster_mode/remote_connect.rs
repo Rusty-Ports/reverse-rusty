@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 use tracing::{info, warn};
 
 use reverse_rusty::cluster::{
-    recover_durable_moves, ClientSecurity, ClusterConfig, ClusterEngine, ControlPlane,
-    RemoteControlPlane, RemoteShard, ShardEndpoints, ShardError, ShardGroup,
+    recover_durable_moves, recover_durable_resize, ClientSecurity, ClusterConfig, ClusterEngine,
+    ControlPlane, RemoteControlPlane, RemoteShard, ShardEndpoints, ShardError, ShardGroup,
 };
 use reverse_rusty::normalize::Normalizer;
 
@@ -53,6 +53,7 @@ fn connect_control_plane(
     dict_fp: u64,
     handle: &tokio::runtime::Handle,
     security: &ClientSecurity,
+    resolve_only: bool,
 ) -> Result<Option<RemoteControlPlane>, ShardError> {
     if control_endpoints.is_empty() {
         return Ok(None);
@@ -66,7 +67,10 @@ fn connect_control_plane(
             "read control-plane state (is a quorum leader up?): {e}"
         ))
     })?;
-    if doc.num_shards != cfg.num_shards as u32 || doc.vnodes != cfg.vnodes {
+    // A resolve-only coordinator takes its shard count from the committed document, which a
+    // remote resize changes (ADR-180); every other mode must agree with its CLI topology.
+    let shards_differ = doc.num_shards != cfg.num_shards as u32 && !resolve_only;
+    if shards_differ || doc.vnodes != cfg.vnodes {
         return Err(ShardError::ControlPlane(format!(
             "control-plane quorum ring (num_shards={}, vnodes={}) does not match this coordinator \
              (num_shards={}, vnodes={}); seed controlserver with --shards {} --vnodes {}",
@@ -82,6 +86,23 @@ fn connect_control_plane(
         );
     }
     Ok(Some(rcp))
+}
+
+/// Tell the operator what startup did with a recorded remote resize (ADR-180).
+fn log_resize_recovery(recovered: Option<reverse_rusty::cluster::ResizeRecovery>) {
+    match recovered {
+        Some(reverse_rusty::cluster::ResizeRecovery::Aborted { operation_id }) => warn!(
+            operation_id,
+            "aborted an uncommitted remote resize and returned its old nodes to service; its \
+             target nodes hold an unrouted staged layout and must be wiped before reuse"
+        ),
+        Some(reverse_rusty::cluster::ResizeRecovery::Finished { operation_id }) => warn!(
+            operation_id,
+            "finished a committed remote resize; its old nodes are retired and must be wiped or \
+             decommissioned"
+        ),
+        None => {}
+    }
 }
 
 fn groups_to_endpoints(groups: &[ShardGroup]) -> Vec<ShardEndpoints> {
@@ -162,8 +183,32 @@ pub(crate) fn connect_remote_cluster(
     // Attach the durable control-plane quorum BEFORE building shards (ADR-083/086): when routing by
     // assignments we must read/seed the committed document to know which endpoints to connect. The
     // control plane is off the matching hot path, so this never affects a percolate's result.
-    let control = connect_control_plane(control_endpoints, cfg, dict_fp, handle, &security)?;
+    let resolve_only = route_by_assignments && cli_groups.is_empty();
+    let control = connect_control_plane(
+        control_endpoints,
+        cfg,
+        dict_fp,
+        handle,
+        &security,
+        resolve_only,
+    )?;
     let coordinator_id = process_coordinator_id();
+    // Under assignment routing the committed document is the layout of record: connect every node
+    // at its placement generation, and in resolve-only mode at its shard count.
+    let mut effective = cfg.clone();
+    if let (Some(rcp), true) = (control.as_ref(), route_by_assignments) {
+        let state = rcp.cluster_state()?;
+        effective.remote_placement_generation = state.placement_generation;
+        if resolve_only && state.num_shards as usize != cfg.num_shards {
+            info!(
+                committed = state.num_shards,
+                flag = cfg.num_shards,
+                "using the committed shard count (resolve-only routing)"
+            );
+            effective.num_shards = state.num_shards as usize;
+        }
+    }
+    let cfg = &effective;
     if let Some(rcp) = control.as_ref() {
         let state = rcp.cluster_state()?;
         if !state.moves.intents.is_empty() && !route_by_assignments {
@@ -188,6 +233,26 @@ pub(crate) fn connect_remote_cluster(
                 recovered,
                 "resolved durable shard-move intents before coordinator assembly"
             );
+        }
+        // Remote resize decides which nodes may serve (ADR-180), so an assignment-routed
+        // coordinator resolves it before choosing any route. It claims the old layout's nodes
+        // first, so a coordinator still running that resize makes this startup fail instead of
+        // being aborted underneath. A static coordinator routes by its CLI endpoints and never
+        // resizes; it refuses to start over a recorded resize rather than resolving a layout it
+        // does not route by.
+        if route_by_assignments {
+            log_resize_recovery(recover_durable_resize(
+                rcp,
+                handle,
+                coordinator_id,
+                &security,
+            )?);
+        } else if rcp.cluster_state()?.moves.resize.is_some() {
+            return Err(ShardError::Config(
+                "the control plane records a remote resize; start this coordinator with \
+                 --route-by-assignments so it resolves the resize before serving"
+                    .into(),
+            ));
         }
     }
     let groups = build_groups(route_by_assignments, cli_groups, control.as_ref(), cfg)?;
@@ -222,6 +287,12 @@ pub(crate) fn connect_remote_cluster(
         Some(rcp) => cluster.with_control_plane(Box::new(rcp)),
         None => cluster,
     };
+
+    // The topology was read before connecting; another coordinator could have committed a new
+    // layout since. An assignment-routed coordinator serves only the committed layout.
+    if route_by_assignments {
+        cluster.attest_committed_layout()?;
+    }
 
     if !queries.is_empty() {
         match cluster.num_queries()? {

@@ -13,6 +13,38 @@ impl Engine {
     /// cluster lane, so a knob here is fail-closed defense). In-memory only (the
     /// cluster step keeps shards non-durable); no WAL/manifest involvement.
     pub fn ingest_extracted(&mut self, items: &[PlacedQuery]) -> IngestReport {
+        let report = self.ingest_extracted_segment(items);
+        // Bulk ingest has no WAL/translog backstop (mirroring `commit_base_segment`):
+        // this is the sole point at which the bulk's source text becomes durable. A
+        // segments-only cluster shard that skipped this would reopen with durable
+        // segments but an EMPTY source store — and the vocabulary rebuild, which
+        // gathers `live_sources`, would silently erase the bulk-loaded corpus
+        // (ADR-074). In-memory engines no-op (no data_dir); a write failure degrades
+        // `persistence_healthy` via the DurabilityFailure event path.
+        if report.ingested != 0 {
+            self.save_query_sources();
+        }
+        report
+    }
+
+    /// [`Self::ingest_extracted`] without persisting the source store: the rows' sources are
+    /// held in memory until [`Self::persist_staged_sources`]. A remote-resize staged load
+    /// (ADR-180) seals many segments into a fresh slot and writes the store once at the end,
+    /// rather than rewriting the whole store for every segment.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn ingest_extracted_staged(&mut self, items: &[PlacedQuery]) -> IngestReport {
+        self.ingest_extracted_segment(items)
+    }
+
+    /// Persist the source store after a staged load, reporting whether every write so far
+    /// (each staged segment and this store) is durable.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn persist_staged_sources(&mut self) -> bool {
+        self.save_query_sources();
+        self.persistence_healthy
+    }
+
+    fn ingest_extracted_segment(&mut self, items: &[PlacedQuery]) -> IngestReport {
         let mut report = IngestReport::default();
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
@@ -106,7 +138,6 @@ impl Engine {
         }
         seg.build_filter();
         self.seal_and_push(seg);
-        let accepted_any = !accepted.is_empty();
         for source in accepted {
             self.query_store.insert_document_with_generation_and_status(
                 source.logical,
@@ -116,16 +147,6 @@ impl Engine {
                 &source.tags,
                 source.tags_known,
             );
-        }
-        // Bulk ingest has no WAL/translog backstop (mirroring `commit_base_segment`):
-        // this is the sole point at which the bulk's source text becomes durable. A
-        // segments-only cluster shard that skipped this would reopen with durable
-        // segments but an EMPTY source store — and the vocabulary rebuild, which
-        // gathers `live_sources`, would silently erase the bulk-loaded corpus
-        // (ADR-074). In-memory engines no-op (no data_dir); a write failure degrades
-        // `persistence_healthy` via the DurabilityFailure event path.
-        if accepted_any {
-            self.save_query_sources();
         }
         report
     }

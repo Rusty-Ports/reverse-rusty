@@ -219,9 +219,14 @@ pub struct ShardServer {
     /// Hard node-local wall-clock ceiling for `PercolateAll`, independent of
     /// the caller-supplied remaining budget.
     max_exhaustive_stream_duration: Duration,
+    /// Set when a remote resize retired this node (ADR-180): every slot RPC, adoption, and new
+    /// slot is refused until the same operation lifts it. Persisted under `data_dir` first, so a
+    /// restarted retired node stays retired.
+    retired: Arc<ArcSwapOption<retirement::Retirement>>,
 }
 
 mod construct;
+mod retirement;
 mod serve;
 mod slots;
 

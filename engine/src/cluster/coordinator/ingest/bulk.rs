@@ -33,6 +33,7 @@ impl ClusterEngine {
             .pit_open_barrier
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_resize_write_fence_open()?;
         // Initial bulk load is one exclusive logical-id admission boundary. A
         // concurrent incremental mutation cannot slip between the empty check,
         // directory install, and shard writes.

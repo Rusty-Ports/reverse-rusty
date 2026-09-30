@@ -69,6 +69,11 @@ mod distributed;
 #[cfg(feature = "distributed")]
 pub use distributed::handoff::HandoffOutcome;
 #[cfg(feature = "distributed")]
+pub use distributed::{
+    recover_durable_resize, ExportedQuery, PreparedRemoteResize, RemoteResizeReport,
+    RemoteResizeRequest, ResizeRecovery, RetiredRemoteLayout,
+};
+#[cfg(feature = "distributed")]
 mod gc;
 #[cfg(feature = "distributed")]
 mod reassign;
@@ -173,6 +178,11 @@ pub struct ClusterConfig {
     /// (ADR-048) so it is not left permanently write-quiesced. Only consulted by `execute_handoff`
     /// (the `distributed` feature). A test sets it to `0` to force the abort deterministically.
     pub handoff_final_drain_cap: usize,
+    /// Placement generation a remote (gRPC) builder adopts on, and validates against, every data
+    /// node. Defaults to the initial generation. A coordinator connecting after a remote resize
+    /// passes the committed control-state generation (ADR-180). In-process and durable builds
+    /// ignore it: their generation comes from the build or the manifest.
+    pub remote_placement_generation: u64,
 }
 
 impl ClusterConfig {
@@ -194,6 +204,7 @@ impl Default for ClusterConfig {
             wal_sync_on_write: false,
             handoff_drain_passes: Self::DEFAULT_HANDOFF_DRAIN_PASSES,
             handoff_final_drain_cap: Self::DEFAULT_HANDOFF_FINAL_DRAIN_CAP,
+            remote_placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
         }
     }
 }
@@ -304,11 +315,27 @@ impl ClusterDurable {
     /// The non-durable bundle: a `NullClusterLog`, no `data_dir`, and a single-node
     /// [`InMemoryControlPlane`] over the build's ring params + dict fingerprint.
     fn in_memory(num_shards: u32, vnodes: u32, dict_fingerprint: u64) -> Self {
+        Self::in_memory_at(
+            num_shards,
+            vnodes,
+            dict_fingerprint,
+            crate::ownership::PlacementGeneration::INITIAL,
+        )
+    }
+
+    /// An in-memory durability shell serving an explicit placement generation — the stateless
+    /// remote coordinator after a remote resize (ADR-180).
+    fn in_memory_at(
+        num_shards: u32,
+        vnodes: u32,
+        dict_fingerprint: u64,
+        placement_generation: crate::ownership::PlacementGeneration,
+    ) -> Self {
         ClusterDurable {
             log: Box::new(NullClusterLog::new()),
             data_dir: None,
             epoch: 0,
-            placement_generation: crate::ownership::PlacementGeneration::INITIAL,
+            placement_generation,
             source_files: vec!["sources.dat".to_string(); num_shards as usize],
             manifest: None,
             vnodes,
@@ -396,6 +423,10 @@ pub struct ClusterEngine {
     /// placement-stamped write can compare it with the serving generation without taking the
     /// manifest lock. Meaningful only for a durable cluster.
     committed_placement_generation: AtomicU64,
+    /// Set while a remote resize copies the corpus onto its new layout (ADR-180). Every mutation
+    /// checks it under the PIT/mutation barrier and is refused, so the exported corpus cannot
+    /// miss a write the new layout never received.
+    resize_write_fence: AtomicBool,
     /// Optional observer for durability events (recovery torn-tail, append failures).
     /// Buffered until set, mirroring the engine's `set_observer` pattern.
     observer: Mutex<Option<ClusterObserver>>,

@@ -58,7 +58,7 @@ use tokio::runtime::Handle;
 
 use super::control::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, MoveCommand, MoveCommandOutcome,
-    MoveProposalResult, NodeId, StateVersion,
+    MoveProposalResult, NodeId, ResizeCommand, StateVersion,
 };
 
 mod builders;
@@ -180,6 +180,20 @@ impl ControlPlane for RaftControlPlane {
             .map_err(map_client_write)?;
         let outcome = resp.data.move_outcome.ok_or_else(|| {
             ControlError::Backend("move proposal committed without a move outcome".into())
+        })?;
+        Ok(MoveProposalResult {
+            version: StateVersion(resp.data.version),
+            outcome,
+        })
+    }
+
+    fn propose_resize(&self, command: ResizeCommand) -> Result<MoveProposalResult, ControlError> {
+        let resp = self
+            .handle
+            .block_on(self.raft.client_write(ClusterStateChange::Resize(command)))
+            .map_err(map_client_write)?;
+        let outcome = resp.data.move_outcome.ok_or_else(|| {
+            ControlError::Backend("resize proposal committed without a resize outcome".into())
         })?;
         Ok(MoveProposalResult {
             version: StateVersion(resp.data.version),

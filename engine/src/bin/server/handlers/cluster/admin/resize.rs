@@ -28,15 +28,19 @@ use reverse_rusty::cluster::ShardError;
 use crate::dto::ApiError;
 use crate::handlers::search::parse_named_time_value;
 use crate::metrics::PrometheusMetrics;
-use crate::resize_ops::{valid_operation_id, ResizeAdmission, ResizeOperation, ResizeOrigin};
+use crate::resize_ops::{ResizeAdmission, ResizeOperation, ResizeOrigin};
 use crate::state::{ClusterAppState, ClusterRebalanceTopology};
 
 use super::super::shard_error_status;
 
+mod body;
 mod execute;
+#[cfg(feature = "distributed")]
+mod remote;
 mod status;
 mod supervisor;
 
+use body::{ClusterResizeBody, ClusterResizeRequest};
 pub(crate) use execute::{run_resize, ResizeRun, ResizeRunOutcome};
 use supervisor::ClusterResizeWorkerFailure;
 
@@ -85,59 +89,6 @@ fn parse_cluster_resize_manager_timeout(raw: &str) -> Result<Duration, String> {
         return Ok(Duration::ZERO);
     }
     parse_named_time_value("cluster_manager_timeout/master_timeout", raw)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClusterResizeBody {
-    num_shards: usize,
-    #[serde(default, deserialize_with = "present")]
-    operation_id: Option<String>,
-    #[serde(default, deserialize_with = "present")]
-    if_placement_generation: Option<u64>,
-}
-
-/// Optional body fields may be omitted but, like every resize field, never `null`.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
-}
-
-impl ClusterResizeBody {
-    fn validate(self) -> Result<ClusterResizeRequest, String> {
-        if self.num_shards == 0 {
-            return Err("`num_shards` must be at least 1".to_string());
-        }
-        if self.num_shards > MAX_CLUSTER_RESIZE_SHARDS {
-            return Err(format!(
-                "`num_shards` must not exceed {MAX_CLUSTER_RESIZE_SHARDS}"
-            ));
-        }
-        if let Some(id) = self.operation_id.as_deref() {
-            if !valid_operation_id(id) {
-                return Err(format!(
-                    "`operation_id` must be 1..={} characters of ASCII letters, digits, `-`, \
-                     `_`, `.`, or `:`",
-                    crate::resize_ops::MAX_RESIZE_OPERATION_ID_LEN
-                ));
-            }
-        }
-        Ok(ClusterResizeRequest {
-            num_shards: self.num_shards,
-            operation_id: self.operation_id,
-            if_placement_generation: self.if_placement_generation,
-        })
-    }
-}
-
-/// A validated resize body.
-struct ClusterResizeRequest {
-    num_shards: usize,
-    operation_id: Option<String>,
-    if_placement_generation: Option<u64>,
 }
 
 pub(crate) struct ClusterResizeTransport {
@@ -366,14 +317,38 @@ async fn post_cluster_resize(
         manager_timeout,
         request,
     } = transport;
-    if state.rebalance_topology != ClusterRebalanceTopology::InProcess {
-        return cluster_resize_rejection(
-            &state.prom,
-            StatusCode::NOT_IMPLEMENTED,
-            "not_supported_in_cluster_mode",
-            "remote cluster resize is not implemented; build a separate cluster at the target \
-             shard count, re-ingest and validate the corpus, then cut traffic over",
-        );
+    match (state.rebalance_topology, request.targets.is_empty()) {
+        (ClusterRebalanceTopology::InProcess, true) => {}
+        (ClusterRebalanceTopology::InProcess, false) => {
+            return cluster_resize_rejection(
+                &state.prom,
+                StatusCode::BAD_REQUEST,
+                "validation_error",
+                "`targets` applies only to a remote cluster; an in-process resize rebuilds in place",
+            );
+        }
+        #[cfg(feature = "distributed")]
+        (ClusterRebalanceTopology::ResolveOnlyRemote, false) => {}
+        #[cfg(feature = "distributed")]
+        (ClusterRebalanceTopology::ResolveOnlyRemote, true) => {
+            return cluster_resize_rejection(
+                &state.prom,
+                StatusCode::BAD_REQUEST,
+                "validation_error",
+                "a remote resize needs `targets`: fresh, empty shard servers for the new layout",
+            );
+        }
+        _ => {
+            return cluster_resize_rejection(
+                &state.prom,
+                StatusCode::NOT_IMPLEMENTED,
+                "not_supported_in_cluster_mode",
+                "remote resize requires resolve-only assignment routing (--route-by-assignments, \
+                 --control-endpoint, and no --shard-endpoint) and a distributed build; otherwise \
+                 build a separate cluster at the target shard count, re-ingest and validate the \
+                 corpus, then cut traffic over",
+            );
+        }
     }
     if Instant::now().checked_add(manager_timeout).is_none() {
         return cluster_resize_rejection(
@@ -384,11 +359,20 @@ async fn post_cluster_resize(
         );
     }
 
-    let operation_id = match state.resize_operations.admit(
+    let target_records = request
+        .targets
+        .iter()
+        .map(|target| crate::resize_ops::ResizeTargetRecord {
+            id: target.id.0,
+            endpoint: target.addr.clone().unwrap_or_default(),
+        })
+        .collect();
+    let operation_id = match state.resize_operations.admit_with_targets(
         request.operation_id,
         ResizeOrigin::Api,
         request.num_shards,
         request.if_placement_generation,
+        target_records,
     ) {
         ResizeAdmission::Execute(id) => id,
         ResizeAdmission::Replay(record) => return replay_response(&state.prom, &record),
@@ -434,6 +418,7 @@ async fn post_cluster_resize(
             num_shards: request.num_shards,
             if_placement_generation: request.if_placement_generation,
             manager_timeout,
+            targets: request.targets,
         },
     )
     .await;

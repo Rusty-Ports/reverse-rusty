@@ -21,7 +21,6 @@ use crate::cluster::node_metrics::ShardRpc;
 use crate::cluster::proto;
 use crate::cluster::proto::shard_service_server::ShardService;
 use crate::cluster::shard::Shard;
-use crate::segment::PlacedQuery;
 
 use super::{compile_item, ShardServer};
 
@@ -32,20 +31,36 @@ type ExhaustiveStream =
     Pin<Box<dyn Stream<Item = Result<proto::PercolateAllFrame, Status>> + Send>>;
 type LogicalIdsStream =
     Pin<Box<dyn Stream<Item = Result<proto::LiveLogicalIdsFrame, Status>> + Send>>;
+type LiveSourcesStream =
+    Pin<Box<dyn Stream<Item = Result<proto::LiveSourcesFrame, Status>> + Send>>;
 
 mod add_shard;
 mod dict_adopt;
 mod exhaustive;
 mod gc;
 mod leases;
+mod live_sources;
 mod logical_ids;
 mod ranked;
 mod ranked_batch;
 mod recovery;
+mod retire;
+mod stage_ingest;
+
+#[cfg(test)]
+pub(in crate::cluster::server) use stage_ingest::run_installed;
 
 #[tonic::async_trait]
 impl ShardService for ShardServer {
     type LiveLogicalIdsStream = LogicalIdsStream;
+    type LiveSourcesStream = LiveSourcesStream;
+
+    async fn live_sources(
+        &self,
+        request: Request<proto::LiveSourcesRequest>,
+    ) -> Result<Response<Self::LiveSourcesStream>, Status> {
+        live_sources::live_sources(self, request)
+    }
 
     async fn live_logical_ids(
         &self,
@@ -240,6 +255,9 @@ impl ShardService for ShardServer {
             num_shards: space.num_shards,
             coordinator_id: self.coordinator_lease.owner(),
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            // ADR-180: a retired node still answers this handshake, so startup resolution can
+            // claim it and lift a retirement whose resize never committed.
+            retired_operation: self.retired_operation(),
         }))
     }
 
@@ -282,40 +300,8 @@ impl ShardService for ShardServer {
         let req = request.into_inner();
         let (slot, st) = self.loaded_slot(req.shard_id)?;
         slot.check_not_fenced()?;
-        let items = req.items;
-        let mut lc = String::new();
-        let mut rejected_parse = 0u64;
-        let mut extracted: Vec<PlacedQuery> = Vec::with_capacity(items.len());
-        for it in items {
-            let placement = proto::placement_from_proto(it.placement.clone())
-                .map_err(|error| Status::failed_precondition(error.to_string()))?;
-            self.validate_placement_config(placement.generation(), placement.num_shards())?;
-            placement
-                .validate_for_shard(req.shard_id, placement.generation(), placement.num_shards())
-                .map_err(|error| Status::failed_precondition(error.to_string()))?;
-            match compile_item(&self.norm, &st.dict, &it.dsl, &mut lc) {
-                // Carry the raw tags forward; the shard's engine resolves them read-only against the
-                // adopted frozen tag space (ADR-055).
-                Some(ex) => extracted.push(PlacedQuery {
-                    logical: it.logical_id,
-                    ex,
-                    dsl: it.dsl,
-                    // Store the wire version verbatim — the coordinator's REST layer already
-                    // defaulted an absent version to 1 before placing, so an explicit value
-                    // (incl. 0) is caller-supplied and must round-trip identically to the
-                    // in-process / single-node path. Clamping here was a deployment-dependent
-                    // divergence: the coordinator logged N while the shard stored N.max(1).
-                    version: it.version,
-                    source_generation: None,
-                    tags: proto::tags_from_proto(it.tags),
-                    // The wire is dict-agnostic (raw tags only) — pre-resolved ids never arrive.
-                    tag_ids: Vec::new(),
-                    rank: crate::rank::RankValues::default(),
-                    placement,
-                }),
-                None => rejected_parse += 1,
-            }
-        }
+        let (extracted, rejected_parse) =
+            stage_ingest::compile_ingest_items(self, req.shard_id, &st, req.items)?;
         let report = st.shard.ingest_local(&extracted);
         slot.latency.observe(ShardRpc::Ingest, started.elapsed());
         Ok(Response::new(proto::IngestReply {
@@ -323,6 +309,27 @@ impl ShardService for ShardServer {
             rejected_parse: rejected_parse + report.rejected_parse as u64,
             rejected_class_d: report.rejected_class_d as u64,
         }))
+    }
+
+    async fn retire(
+        &self,
+        request: Request<proto::RetireRequest>,
+    ) -> Result<Response<proto::RetireReply>, Status> {
+        retire::retire(self, request).await
+    }
+
+    async fn unretire(
+        &self,
+        request: Request<proto::UnretireRequest>,
+    ) -> Result<Response<proto::UnretireReply>, Status> {
+        retire::unretire(self, request).await
+    }
+
+    async fn stage_ingest(
+        &self,
+        request: Request<tonic::Streaming<proto::IngestRequest>>,
+    ) -> Result<Response<proto::IngestReply>, Status> {
+        stage_ingest::stage_ingest(self, request).await
     }
 
     async fn insert_extracted(
@@ -398,12 +405,11 @@ impl ShardService for ShardServer {
             crate::ownership::PlacementGeneration(req.placement_generation),
             req.num_shards,
         )?;
-        self.loaded_slot(req.shard_id)?
-            .1
-            .shard
-            .flush()
-            .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(proto::FlushReply {}))
+        let shard = &self.loaded_slot(req.shard_id)?.1.shard;
+        shard.flush().map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(proto::FlushReply {
+            durable: shard.is_durable(),
+        }))
     }
 
     async fn seal(

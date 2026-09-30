@@ -32,7 +32,7 @@ use super::shard_error_status;
 mod endpoint;
 mod supervisor;
 
-use endpoint::validate_node_addr;
+pub(in crate::handlers::cluster) use endpoint::validate_node_addr;
 use supervisor::supervise_cluster_node_register_worker;
 
 pub(crate) const CLUSTER_NODE_REGISTER_BODY_LIMIT: usize = 64 * 1024;

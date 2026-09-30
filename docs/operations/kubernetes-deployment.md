@@ -140,8 +140,9 @@ cluster-level counters + a per-shard `reverse_rusty_cluster_shard_queries{shard=
   2. Re-ingest the full corpus into the green coordinator and validate it.
   3. Cut traffic over (swap the Service/Ingress upstream), then `helm uninstall` blue.
 
-  Cross-process / online resize remains a
-  [roadmap item](../roadmap.md#remote-cluster-resize) under ADR-078's constraints.
+  A resolve-only coordinator can instead resize onto a second, empty shard StatefulSet with
+  `POST /_cluster/resize` and `targets` (ADR-180); same-node resize remains a
+  [roadmap item](../roadmap.md#remote-cluster-resize).
 - **RF>1:** not modeled by this chart at v1 (`replicationFactor` is documentation-only). A replica per
   position needs a second StatefulSet per shard + the coordinator's `--replication-factor`; see
   [cluster-deployment.md §5](cluster-deployment.md) and the
@@ -210,8 +211,8 @@ local data volume; it does **not** make coordinators active-active. The shard-no
 a second coordinator from serving the same slots, and the chart does not provide leader election for
 the REST tier.
 
-Other v1 limits (remote custom vocabulary is unsupported, no online resize, no gRPC `SIGTERM`
-drain) are unchanged — see [cluster-deployment.md](cluster-deployment.md) and ADR-084.
+Other v1 limits (remote custom vocabulary is unsupported, no same-node online resize, no gRPC
+`SIGTERM` drain) are unchanged — see [cluster-deployment.md](cluster-deployment.md) and ADR-084.
 
 ## 7. Smoke test
 

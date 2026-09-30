@@ -45,6 +45,8 @@ mod handoff;
 #[cfg(feature = "distributed")]
 mod health;
 #[cfg(feature = "distributed")]
+mod live_source_wire;
+#[cfg(feature = "distributed")]
 mod logical_id_wire;
 #[cfg(feature = "distributed")]
 mod node_metrics;
@@ -74,8 +76,10 @@ pub use control::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane,
     MoveCommand, MoveCommandOutcome, MoveControlState, MoveInitialAuthority, MoveIntent,
     MoveIntentPhase, MoveMemberEvidence, MoveMemberIdentity, MoveProposalResult,
-    MoveRecoveryEvidence, NodeDescriptor, NodeId, NodeRole, ShardAssignment, StateVersion,
+    MoveRecoveryEvidence, NodeDescriptor, NodeId, NodeRole, ResizeCommand, ResizeIntent,
+    ResizeIntentPhase, ResizeLayout, ResizePositionEvidence, ShardAssignment, StateVersion,
     MOVE_CONTROL_FORMAT_CURRENT, MOVE_CONTROL_FORMAT_LEGACY, MOVE_INTENT_VERSION,
+    RESIZE_CONTROL_FORMAT, RESIZE_INTENT_VERSION,
 };
 pub use coordinator::{
     recommended_shard_count, resolve_topology, route_topology, seed_position_preserving,
@@ -96,8 +100,10 @@ pub use control_raft::{
 pub use control_server::{ControlMetricsSource, ControlServer};
 #[cfg(feature = "distributed")]
 pub use coordinator::{
-    recover_durable_moves, GcReport, HandoffOutcome, OrphanSlot, ReassignOutcome,
-    RebalanceMoveReport, ReconcileConfig, ReconcileReport, ShardGroup,
+    recover_durable_moves, recover_durable_resize, ExportedQuery, GcReport, HandoffOutcome,
+    OrphanSlot, PreparedRemoteResize, ReassignOutcome, RebalanceMoveReport, ReconcileConfig,
+    ReconcileReport, RemoteResizeReport, RemoteResizeRequest, ResizeRecovery, RetiredRemoteLayout,
+    ShardGroup,
 };
 #[cfg(feature = "distributed")]
 pub use node_metrics::{serve_metrics, MetricsHandle};

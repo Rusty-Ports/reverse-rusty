@@ -186,8 +186,13 @@ mod add_shard;
 mod adopt;
 mod call;
 mod connect;
+mod live_sources;
 mod logical_ids;
+mod retire;
 mod shard_impl;
+mod stage_ingest;
+
+pub(crate) use retire::{claim_retirement, unretire_node, RetiredSlot};
 
 #[cfg(test)]
 mod tests;

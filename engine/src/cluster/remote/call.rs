@@ -379,6 +379,22 @@ impl RemoteShard {
         })
     }
 
+    /// Whether this slot persists to disk, from a plain flush (ADR-180).
+    pub(crate) fn is_durable(&self) -> Result<bool, ShardError> {
+        let client = self.client.clone();
+        let request = proto::FlushRequest {
+            shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
+        };
+        Ok(self
+            .call(RpcMethod::Flush, CallKind::Write, move || {
+                let mut client = client.clone();
+                async move { client.flush(request).await.map(tonic::Response::into_inner) }
+            })?
+            .durable)
+    }
+
     /// This slot's order-independent 128-bit live-set fingerprint + live count (ADR-097): the
     /// group move compares the frozen source's against a retained member's — equal (while both
     /// sides are quiescent) proves the member already holds exactly the source's live set, so

@@ -27,7 +27,8 @@ use reverse_rusty::cluster::{
     ControlError, ControlPlane, ControlServer, InMemoryControlPlane, MoveCommand,
     MoveCommandOutcome, MoveInitialAuthority, MoveIntent, MoveIntentPhase, MoveMemberEvidence,
     MoveMemberIdentity, MoveRecoveryEvidence, NodeDescriptor, NodeId, NodeRole, RaftControlPlane,
-    ShardAssignment, MOVE_INTENT_VERSION,
+    ResizeCommand, ResizeIntent, ResizeIntentPhase, ResizeLayout, ResizePositionEvidence,
+    ShardAssignment, MOVE_INTENT_VERSION, RESIZE_INTENT_VERSION,
 };
 use tokio::runtime::Runtime;
 use tonic::transport::server::TcpIncoming;
@@ -749,4 +750,136 @@ fn grpc_control_server_health_liveness_and_readiness() {
     );
     // Keep the plane (the raft core owner) alive until the assertions complete.
     drop(plane);
+}
+
+#[test]
+fn durable_resize_intent_upgrades_the_log_and_resumes_after_control_restart() {
+    let rt = Runtime::new().expect("tokio runtime");
+    let dir = std::env::temp_dir().join(format!("rr_raft_resize_restart_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let operation_id = 0x5E12E;
+    let evidence: Vec<ResizePositionEvidence> = (0..2)
+        .map(|position| ResizePositionEvidence {
+            position,
+            fingerprint_lo: 100 + u64::from(position),
+            fingerprint_hi: 7,
+            live_count: 40,
+        })
+        .collect();
+    let desired = ResizeLayout {
+        num_shards: 2,
+        placement_generation: 0,
+        assignments: vec![
+            ShardAssignment {
+                position: 0,
+                primary: NodeId(21),
+                replicas: Vec::new(),
+            },
+            ShardAssignment {
+                position: 1,
+                primary: NodeId(22),
+                replicas: Vec::new(),
+            },
+        ],
+    };
+
+    let expected_generation = {
+        let plane = durable_single_node(8, &dir, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle())
+            .expect("durable node");
+        run_doc_script(&plane);
+        for position in 1..NUM_SHARDS {
+            plane
+                .propose(ClusterStateChange::AssignShard(ShardAssignment {
+                    position,
+                    primary: NodeId(1 + u64::from(position % 2)),
+                    replicas: Vec::new(),
+                }))
+                .expect("assign");
+        }
+        for id in [21, 22] {
+            plane
+                .propose(ClusterStateChange::AddNode(node(id, NodeRole::Data)))
+                .expect("register target");
+        }
+        let state = plane.cluster_state().expect("state");
+        let mut desired = desired.clone();
+        desired.placement_generation = state.placement_generation + 1;
+        let intent = ResizeIntent {
+            intent_version: RESIZE_INTENT_VERSION,
+            operation_id,
+            expected: ResizeLayout {
+                num_shards: state.num_shards,
+                placement_generation: state.placement_generation,
+                assignments: state.assignments.clone(),
+            },
+            desired,
+            members: [21u64, 22]
+                .iter()
+                .map(|&id| MoveMemberIdentity {
+                    node: NodeId(id),
+                    endpoint: node(id, NodeRole::Data).addr.expect("address"),
+                })
+                .collect(),
+            phase: ResizeIntentPhase::Preparing,
+        };
+        let generation = state.placement_generation;
+        drop(state);
+        assert_eq!(
+            plane
+                .propose_resize(ResizeCommand::Begin(intent))
+                .expect("persist intent")
+                .outcome,
+            MoveCommandOutcome::Applied
+        );
+        assert_eq!(
+            plane
+                .propose_resize(ResizeCommand::MarkReady {
+                    operation_id,
+                    evidence: evidence.clone(),
+                })
+                .expect("persist evidence")
+                .outcome,
+            MoveCommandOutcome::Applied
+        );
+        plane.shutdown();
+        generation
+    };
+
+    assert_eq!(
+        &std::fs::read(dir.join("raft-log.bin")).expect("read raft log")[..4],
+        b"RRL5",
+        "the first resize command installs the newer rejection fence"
+    );
+
+    let reopened = durable_single_node(8, &dir, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle())
+        .expect("restart durable node");
+    let recovered = reopened.cluster_state().expect("recovered state");
+    assert!(matches!(
+        recovered.moves.resize.as_ref(),
+        Some(ResizeIntent {
+            operation_id: id,
+            phase: ResizeIntentPhase::Ready(stored),
+            ..
+        }) if *id == operation_id && stored == &evidence
+    ));
+    drop(recovered);
+    for command in [
+        ResizeCommand::Commit { operation_id },
+        ResizeCommand::Finish { operation_id },
+    ] {
+        assert_eq!(
+            reopened
+                .propose_resize(command)
+                .expect("resume recovered resize")
+                .outcome,
+            MoveCommandOutcome::Applied
+        );
+    }
+    let committed = reopened.cluster_state().expect("committed state");
+    assert_eq!(committed.num_shards, 2);
+    assert_eq!(committed.placement_generation, expected_generation + 1);
+    assert!(committed.moves.resize.is_none());
+    drop(committed);
+    reopened.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
 }

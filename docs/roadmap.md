@@ -168,36 +168,30 @@ lossless through persistence and reopen.
 
 ### Remote cluster resize
 
-**Problem.** In-process resize is a governed blue/green rebuild with operation records and opt-in
-automatic growth (ADR-179), but a remote cluster still cannot change its shard count online:
-operators stand up a separate cluster, re-ingest, and cut over by hand.
+**Problem.** A resolve-only remote cluster can resize online onto fresh nodes (ADR-180), but it
+needs spare nodes for the whole new layout, pauses writes for the copy, and refuses replication
+factors above 1.
 
-**Constraint discovered.** A shard node adopts one node-wide placement space: its persisted
-feature space records a single placement generation and shard count, and every slot RPC validates
-against it. Blue and green layouts therefore cannot coexist on one node today. Remote blue/green
-needs per-slot placement configuration (or a node-level staged layout) addressed by generation,
-with a durable format fence.
+**Constraint.** A shard node adopts one node-wide placement space (a single placement generation
+and shard count validated by every slot RPC), and a slot's key and directory are its logical
+position. Staging a new layout on the existing nodes therefore needs per-slot placement
+configuration or a node-level staged layout, layout-aware slot addressing and GC, and a durable
+node-format fence.
 
 **Direction.**
 
-1. Let a node host slots for the committed layout and one staged layout, each validated against its
-   own generation and shard count.
-2. Stream the live corpus (source, version, tags, and rank values) from the committed layout,
-   re-place it under the target ring, and build the staged slots.
-3. Record the transition as a replicated resize intent in the control document, following
-   ADR-175's `Begin`/`Ready`/`Commit` discipline: validate per-position fingerprints and counts,
-   conditionally commit the new shard count, placement generation, and assignments together, then
-   switch coordinator routing and retire the old slots through the GC path.
-4. Keep writes consistent across the copy, either by holding the coordinator write barrier (as the
-   in-process path does) or by a measured catch-up drain.
-5. Reuse the ADR-179 governor and operation records as the controller.
-6. If measured rebuild cost justifies it, add a targeted online split that re-keys only the affected
+1. Extend the resize to replicated groups: build each desired position's replicas on target nodes
+   and record full-group evidence, as ADR-175 does for moves.
+2. Keep writes open during the copy with a measured catch-up drain (or dual-write) before the
+   final fenced cutover, if the copy window proves material.
+3. If spare-node capacity is the limiting factor, stage the new layout beside the old one on the
+   existing nodes behind a node-format fence.
+4. If measured rebuild cost justifies it, add a targeted online split that re-keys only the affected
    ring range. Do not introduce dual routing as an unmeasured prerequisite.
 
-**Completion.** Repeated remote grow/shrink operations converge under concurrent writes and injected
-failure, a coordinator restart resumes or safely aborts a recorded intent, stale coordinators fail
-loud against retired slots, and every acknowledged query remains matchable before and after the
-routing cutover.
+**Completion.** Each extension preserves ADR-180's guarantees: every acknowledged query remains
+matchable across the cutover, a coordinator restart resolves any recorded intent, and a failure
+before commit leaves the old layout serving.
 
 ### Staged replica recovery outside the fence window
 

@@ -9,6 +9,21 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-09-30 — Remote blue/green resize
+
+- Resize a resolve-only remote cluster online: `POST /_cluster/resize` with `targets` builds the new
+  layout on fresh shard servers, pauses writes while reads keep serving, streams the deduplicated
+  corpus through the new bounded `LiveSources` export RPC into one `StageIngest` load stream per
+  target (full-size segments, one source-store write), proves each new position's fingerprint,
+  durably retires the old nodes (they then refuse every request from any coordinator), commits the
+  shard count, placement generation, and assignments in one control-plane transition, and swaps
+  routing ([ADR-180](decisions/adr-180-remote-blue-green-resize.md)).
+- Record the transition as a replicated, idempotent resize intent behind a one-way control format 5
+  and `RRL5` log header. Resolve-only startup resolves a recorded resize before choosing routes
+  (aborting an uncommitted one only after claiming its nodes, and returning never-committed
+  retirements to service), adopts the committed shard count and placement generation, and attests
+  that it connected to exactly that layout.
+
 ## 2026-09-30 — Validated log recovery before append
 
 - Repair and sync incomplete final WAL, coordinator/translog, and Raft writes before reopening for

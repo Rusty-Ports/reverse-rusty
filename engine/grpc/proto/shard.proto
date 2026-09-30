@@ -38,8 +38,16 @@ service ShardService {
   // One bounded, consistent live-ID snapshot. Only the final empty complete
   // frame certifies the count; EOF without it is a failed enumeration (ADR-176).
   rpc LiveLogicalIds (LiveLogicalIdsRequest) returns (stream LiveLogicalIdsFrame);
+  // Remote resize export (ADR-180): one slot's complete live corpus — source, version, and raw
+  // tags per logical id — streamed as bounded frames from a fixed live-id snapshot with explicit
+  // completion. A document that disappears mid-export fails the stream rather than shortening it.
+  rpc LiveSources (LiveSourcesRequest) returns (stream LiveSourcesFrame);
   // ---- writes ----
   rpc IngestExtracted (IngestRequest) returns (IngestReply);
+  // Remote resize load (ADR-180): stream a fresh slot's corpus as bounded requests for one
+  // shard. The shard seals memtable-threshold-sized segments as rows arrive and writes its
+  // source store and checkpoint sidecar once, when the client closes the stream.
+  rpc StageIngest (stream IngestRequest) returns (IngestReply);
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
   rpc Delete          (DeleteRequest) returns (DeleteReply);
   rpc Flush           (FlushRequest)  returns (FlushReply);
@@ -135,6 +143,16 @@ service ShardService {
   // dict/tag-fingerprint mismatch like every guarded RPC; deliberately blind to sources.dat /
   // segment-layout divergence (never on the match path).
   rpc ContentFingerprint (ContentFingerprintRequest) returns (ContentFingerprintReply);
+  // ---- remote-resize retirement (ADR-180) ----
+  // Durably retire this whole node at its placement generation before a resize commits a
+  // successor layout. A retired node refuses every slot RPC (reads included), adoption, and new
+  // slots until the same operation unretires it or the node is wiped, so no coordinator can
+  // serve a superseded layout from it. The reply carries each hosted slot's content fingerprint,
+  // so the caller can prove nothing changed since its export. Idempotent per operation.
+  rpc Retire (RetireRequest) returns (RetireReply);
+  // Lift a retirement recorded by exactly this operation, once the control plane proves its
+  // resize did not commit. Idempotent: an unretired node reports `was_retired = false`.
+  rpc Unretire (UnretireRequest) returns (UnretireReply);
 }
 
 message Empty {}
@@ -157,6 +175,32 @@ message LiveLogicalIdsRequest {
 message LiveLogicalIdsFrame {
   repeated fixed64 logical_ids = 1;
   uint64 total_ids = 2;
+  bool complete = 3;
+  uint32 shard_id = 4;
+  uint64 placement_generation = 5;
+  uint32 num_shards = 6;
+}
+
+message LiveSourcesRequest {
+  uint32 shard_id = 1;
+  fixed64 dict_fingerprint = 2;
+  fixed64 tag_dict_fingerprint = 3;
+  uint64 placement_generation = 4;
+  uint32 num_shards = 5;
+  uint64 max_documents = 6;
+  uint64 remaining_micros = 7;
+}
+
+message LiveSource {
+  uint64 logical_id = 1;
+  string dsl = 2;
+  uint32 version = 3;
+  repeated TagKv tags = 4;
+}
+
+message LiveSourcesFrame {
+  repeated LiveSource documents = 1;
+  uint64 total_documents = 2;
   bool complete = 3;
   uint32 shard_id = 4;
   uint64 placement_generation = 5;
@@ -484,7 +528,11 @@ message FlushRequest {
   uint64 placement_generation = 2;
   uint32 num_shards = 3;
 }
-message FlushReply   {}
+message FlushReply {
+  // ADR-180: the slot persists to disk (a `--data-dir` node), so a remote resize knows whether
+  // its targets must prove durability with `Seal`. Additive: an older server reports false.
+  bool durable = 1;
+}
 
 message SealRequest {
   uint32 shard_id = 1;
@@ -525,6 +573,9 @@ message DictFingerprintReply {
   // echo its own non-zero id; zero is an unowned or pre-lease server.
   uint64 coordinator_id = 6;
   uint32 compiler_semantics_version = 7;
+  // ADR-180: non-zero when a remote resize retired this node. Connecting coordinators refuse it;
+  // only startup resize resolution reads it, to lift a retirement whose resize never committed.
+  uint64 retired_operation = 8;
 }
 
 // The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
@@ -772,6 +823,26 @@ message ContentFingerprintReply {
   uint64 placement_generation = 4;
   uint32 num_shards = 5;
 }
+
+message RetireRequest {
+  uint64 operation_id = 1;
+  // The node's current placement configuration and feature space; any mismatch is refused.
+  uint64 placement_generation = 2;
+  uint32 num_shards = 3;
+  uint64 dict_fingerprint = 4;
+  uint64 tag_dict_fingerprint = 5;
+  // The generation of the layout that supersedes this node; must exceed placement_generation.
+  uint64 successor_generation = 6;
+}
+message RetiredSlot {
+  uint32 shard_id = 1;
+  uint64 fp_lo = 2;
+  uint64 fp_hi = 3;
+  uint64 live_count = 4;
+}
+message RetireReply { repeated RetiredSlot slots = 1; }
+message UnretireRequest { uint64 operation_id = 1; }
+message UnretireReply { bool was_retired = 1; }
 
 // ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----
 // The three Raft RPCs between cluster-manager nodes, carried as an OPAQUE serialized envelope:

@@ -122,6 +122,7 @@ impl ClusterEngine {
                     .map_or(durable.placement_generation.0, |m| m.placement_generation.0),
             ),
             committed_manifest: Mutex::new(durable.manifest),
+            resize_write_fence: AtomicBool::new(false),
             control: durable.control,
             // A fresh transport-metrics collector (ADR-085); the gRPC builders REPLACE it with
             // the shared one they also hand to each `RemoteShard` (via `with_transport_metrics`),

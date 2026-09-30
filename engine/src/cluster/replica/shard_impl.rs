@@ -242,6 +242,17 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.live_sources_tagged())
     }
 
+    /// The primary is the write authority, so the export reads it directly: the visitor
+    /// consumes documents as they arrive and cannot be replayed against a failover copy.
+    #[cfg(feature = "distributed")]
+    fn visit_live_sources(
+        &self,
+        visit: &mut (dyn FnMut(crate::cluster::live_source_wire::LiveSourceRow) -> Result<(), ShardError>
+                  + Send),
+    ) -> Result<u64, ShardError> {
+        self.primary.visit_live_sources(visit)
+    }
+
     fn is_local(&self) -> bool {
         true
     }

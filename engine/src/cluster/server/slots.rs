@@ -26,7 +26,10 @@ impl ShardServer {
     /// The slot hosting `shard_id` on this node, or `not_found` (ADR-093). Clones the slot `Arc` out
     /// and DROPS the map read-guard before returning, so no caller (notably the async `recover_from`)
     /// holds the std `RwLock` across an RPC/`await`.
+    ///
+    /// A node retired by a remote resize (ADR-180) hosts no servable slot at all.
     pub(in crate::cluster::server) fn slot(&self, shard_id: u32) -> Result<Arc<ShardSlot>, Status> {
+        self.ensure_not_retired()?;
         let map = self
             .shards
             .read()
@@ -87,6 +90,8 @@ impl ShardServer {
         shard_id: u32,
         slot: Arc<ShardSlot>,
     ) -> Result<(), Status> {
+        // No path (adoption, recovery, co-location) may give a retired node a slot (ADR-180).
+        self.ensure_not_retired()?;
         self.shards
             .write()
             .map_err(|_| Status::internal("shard map lock poisoned"))?

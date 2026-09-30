@@ -165,6 +165,23 @@ impl ClusterEngine {
         )))
     }
 
+    /// Refuse any mutation while a remote resize is copying the corpus onto its new layout
+    /// (ADR-180). Callers check this while holding the PIT/mutation barrier, which the resize
+    /// takes exclusively after raising the fence, so every accepted write lands before the export
+    /// snapshot and every later write is refused rather than silently omitted. A server also
+    /// checks it before asking for exclusive access for a vocabulary rebuild: the resize holds
+    /// shared access for its whole copy, so waiting for exclusive access would stall reads.
+    pub fn ensure_resize_write_fence_open(&self) -> Result<(), ShardError> {
+        if self.resize_write_fence.load(Ordering::Acquire) {
+            return Err(ShardError::ControlPlane(
+                "writes are paused while a remote resize copies the corpus to its new layout; \
+                 retry after the resize completes"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Best-effort GC of segment files no longer in the committed registry (superseded by
     /// a re-seal/compaction during the just-committed checkpoint, or left by an earlier
     /// crashed checkpoint). An orphan left behind is benign — it is not in the manifest,

@@ -24,6 +24,7 @@ Allocation, handoff, autoscaling, resize, reconciliation, and repair after parti
 | [175](../adr-175-durable-reassignment-intent-and-conditional-cutover.md) | Durable reassignment cutover | Persists conditional RF1/RF>1 moves and resolves every recorded authority transition before startup serves. | Done |
 | [178](../adr-178-uncommitted-rebuild-write-fence.md) | Uncommitted-rebuild write fence | Pauses placement-stamped writes until a swapped resize/vocabulary rebuild commits, and reclaims superseded source sidecars. | Accepted |
 | [179](../adr-179-governed-resize-operations.md) | Governed resize operations | Adds idempotent resize records, a placement-generation precondition, status reads, and an opt-in hysteresis/cooldown/futility-governed growth loop. | Accepted |
+| [180](../adr-180-remote-blue-green-resize.md) | Remote blue/green resize | Resizes a resolve-only remote cluster onto fresh nodes through a durable intent, paused writes, corpus export, fingerprint evidence, durable retirement of the old nodes, and one atomic layout commit. | Accepted |
 
 ---
 

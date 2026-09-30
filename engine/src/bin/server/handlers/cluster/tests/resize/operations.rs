@@ -407,3 +407,173 @@ async fn a_failure_names_the_generated_operation_so_it_can_heal() {
         4
     );
 }
+
+#[tokio::test]
+async fn targets_are_validated_against_the_topology() {
+    let state = test_state(&seed());
+    let (status, _, bytes) = send_raw(
+        &state,
+        resize_request(
+            "/_cluster/resize",
+            r#"{"num_shards":4,"targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+        ),
+    )
+    .await;
+    assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+
+    for body in [
+        r#"{"num_shards":4,"targets":[]}"#,
+        r#"{"num_shards":4,"targets":null}"#,
+        r#"{"num_shards":4,"targets":[{"id":1,"endpoint":""}]}"#,
+        r#"{"num_shards":4,"targets":[{"id":1,"endpoint":"a"},{"id":1,"endpoint":"b"}]}"#,
+        r#"{"num_shards":4,"targets":[{"id":1,"endpoint":"a","extra":true}]}"#,
+    ] {
+        let (status, _, bytes) = send_raw(&state, resize_request("/_cluster/resize", body)).await;
+        assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+    }
+    assert_eq!(state.cluster.read().num_shards(), 3);
+}
+
+#[cfg(feature = "distributed")]
+fn resolve_only_state(config: &ClusterConfig) -> Arc<ClusterAppState> {
+    let cluster =
+        ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), config, &seed())
+            .expect("cluster");
+    state_from_cluster_with_rebalance_topology(
+        cluster,
+        crate::state::ClusterRebalanceTopology::ResolveOnlyRemote,
+    )
+}
+
+#[cfg(feature = "distributed")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remote_resize_frees_health_admission_but_stays_joinable_by_shutdown() {
+    let state = resolve_only_state(&ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    });
+    // Hold the exclusive cluster lock on a dedicated thread so the remote worker parks after it
+    // has taken the topology and write guards.
+    let holder_state = Arc::clone(&state);
+    let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
+    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel::<()>(1);
+    let holder = std::thread::spawn(move || {
+        let _cluster = holder_state.cluster.write();
+        locked_sender.send(()).expect("signal cluster lock");
+        release_receiver.recv().expect("release cluster lock");
+    });
+    locked_receiver.recv().expect("cluster locked");
+    let request_state = Arc::clone(&state);
+    let request = tokio::spawn(async move {
+        post_json(
+            &request_state,
+            r#"{"num_shards":4,"operation_id":"remote-health","targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+        )
+        .await
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !state.write_serial.is_locked() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never took the write guard"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // A remote copy keeps reads serving, so it must return the single administrative permit
+    // that `/_health` also waits for; otherwise probes time out for the whole copy.
+    while state.stats_permits.available_permits() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the remote resize kept the permit health probes need"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Shutdown joins detached administration by acquiring its permits, so the copy must still
+    // hold one of its own.
+    assert_eq!(
+        state.remote_resize_permits.available_permits(),
+        0,
+        "shutdown must be able to wait for the running copy"
+    );
+    release_sender.send(()).expect("release");
+    holder.join().expect("holder");
+    let (status, failed) = request.await.expect("request task");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{failed}");
+    assert_eq!(state.remote_resize_permits.available_permits(), 1);
+}
+
+#[cfg(feature = "distributed")]
+#[tokio::test]
+async fn a_resolve_only_remote_resize_requires_targets() {
+    let config = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let state = resolve_only_state(&config);
+    let (status, _, bytes) = send_raw(
+        &state,
+        resize_request("/_cluster/resize", r#"{"num_shards":4}"#),
+    )
+    .await;
+    assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+
+    // Unknown targets are registered as data nodes, so each endpoint must be a mesh origin; a
+    // malformed one is refused before any operation starts or any node is registered.
+    for endpoint in ["not-a-uri", "ftp://127.0.0.1:1", "http://127.0.0.1:1/path"] {
+        let body = format!(
+            r#"{{"num_shards":4,"operation_id":"bad-origin","targets":[{{"id":11,"endpoint":"{endpoint}"}}]}}"#
+        );
+        let (status, _, bytes) = send_raw(&state, resize_request("/_cluster/resize", body)).await;
+        assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+    }
+    let (status, _) = get_json(&state, "/_cluster/resize/bad-origin").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(state
+        .cluster
+        .read()
+        .control_state()
+        .expect("state")
+        .nodes
+        .iter()
+        .all(|node| node.id.0 != 11));
+
+    // With targets, the worker reaches the engine, which refuses a cluster that is not
+    // remote and assignment-routed; the refusal is recorded and nothing changes.
+    let (status, failed) = post_json(
+        &state,
+        r#"{"num_shards":4,"operation_id":"remote-1","targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{failed}");
+    assert_eq!(failed["operation_id"], "remote-1");
+    let (_, record) = get_json(&state, "/_cluster/resize/remote-1").await;
+    assert_eq!(record["state"], "failed", "{record}");
+    assert_eq!(record["targets"][0]["id"], 11);
+    assert_eq!(state.cluster.read().num_shards(), 3);
+
+    let static_state = state_from_cluster_with_rebalance_topology(
+        ClusterEngine::build(
+            Normalizer::default_vocab().expect("vocab"),
+            &config,
+            &seed(),
+        )
+        .expect("cluster"),
+        crate::state::ClusterRebalanceTopology::StaticRemote,
+    );
+    let (status, _, bytes) = send_raw(
+        &static_state,
+        resize_request(
+            "/_cluster/resize",
+            r#"{"num_shards":4,"targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+        ),
+    )
+    .await;
+    assert_error(
+        status,
+        &bytes,
+        StatusCode::NOT_IMPLEMENTED,
+        "not_supported_in_cluster_mode",
+    );
+}

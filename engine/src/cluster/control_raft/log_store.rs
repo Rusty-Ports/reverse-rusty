@@ -118,32 +118,28 @@ fn rewrite_and_reopen(inner: &mut LogStoreInner) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Atomically install the one-way V4 log header before the first move entry is appended. The
-/// rewrite preserves every prior entry; a crash after it but before the new append merely leaves a
-/// conservatively fenced log that old code rejects.
-fn fence_durable_moves(inner: &mut LogStoreInner) -> std::io::Result<()> {
-    if inner.log_format == control_store::LogFormat::DurableMoves {
+/// Atomically install a one-way newer log header (V4 before the first move entry, V5 before the
+/// first resize entry) ahead of the append. The rewrite preserves every prior entry; a crash after
+/// it but before the new append merely leaves a conservatively fenced log that old code rejects.
+/// A log never downgrades.
+fn fence_log_format(
+    inner: &mut LogStoreInner,
+    target: control_store::LogFormat,
+) -> std::io::Result<()> {
+    if inner.log_format >= target {
         return Ok(());
     }
     let Some(path) = inner.paths.as_ref().map(control_store::RaftPaths::log) else {
-        inner.log_format = control_store::LogFormat::DurableMoves;
+        inner.log_format = target;
         return Ok(());
     };
     if let Some(file) = &mut inner.log_file {
         file.disable();
     }
     let records: Vec<&Entry<TypeConfig>> = inner.log.values().collect();
-    control_store::rewrite_records(
-        &path,
-        &records,
-        inner.fsync,
-        control_store::LogFormat::DurableMoves,
-    )?;
-    inner.log_file = Some(control_store::ensure_log(
-        &path,
-        control_store::LogFormat::DurableMoves,
-    )?);
-    inner.log_format = control_store::LogFormat::DurableMoves;
+    control_store::rewrite_records(&path, &records, inner.fsync, target)?;
+    inner.log_file = Some(control_store::ensure_log(&path, target)?);
+    inner.log_format = target;
     Ok(())
 }
 
@@ -225,14 +221,20 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         let entries: Vec<Entry<TypeConfig>> = entries.into_iter().collect();
         {
             let mut inner = self.lock();
-            if entries.iter().any(|entry| {
-                matches!(
-                    &entry.payload,
-                    EntryPayload::Normal(ClusterStateChange::Move(_))
-                )
-            }) {
-                fence_durable_moves(&mut inner).map_err(|e| StorageIOError::write_logs(&e))?;
-            }
+            let required = entries
+                .iter()
+                .map(|entry| match &entry.payload {
+                    EntryPayload::Normal(ClusterStateChange::Resize(_)) => {
+                        control_store::LogFormat::DurableResize
+                    }
+                    EntryPayload::Normal(ClusterStateChange::Move(_)) => {
+                        control_store::LogFormat::DurableMoves
+                    }
+                    _ => control_store::LogFormat::Legacy,
+                })
+                .max()
+                .unwrap_or(control_store::LogFormat::Legacy);
+            fence_log_format(&mut inner, required).map_err(|e| StorageIOError::write_logs(&e))?;
             let fsync = inner.fsync;
             for entry in entries {
                 // Durable-first: persist the framed record BEFORE acknowledging the flush, so a

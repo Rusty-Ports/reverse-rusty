@@ -4,7 +4,7 @@ use axum::http::Uri;
 
 const MAX_NODE_ADDR_BYTES: usize = 2 * 1024;
 
-pub(super) fn validate_node_addr(addr: String) -> Result<String, String> {
+pub(in crate::handlers::cluster) fn validate_node_addr(addr: String) -> Result<String, String> {
     if addr.is_empty() {
         return Err("`addr` must not be empty".to_string());
     }

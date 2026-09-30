@@ -19,7 +19,7 @@ use tokio::runtime::Handle;
 
 use super::control::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, MoveCommand, MoveProposalResult,
-    NodeId, StateVersion,
+    NodeId, ResizeCommand, StateVersion,
 };
 use super::control_raft::{decode, encode};
 use super::control_wire::{ClientControlReply, ClientControlRequest, WireControlError};
@@ -233,6 +233,17 @@ impl ControlPlane for RemoteControlPlane {
             }),
             ClientControlReply::Err(e) => Err(e.into()),
             _ => Err(unexpected("ProposeMove")),
+        }
+    }
+
+    fn propose_resize(&self, command: ResizeCommand) -> Result<MoveProposalResult, ControlError> {
+        match self.call(&ClientControlRequest::ProposeResize(command))? {
+            ClientControlReply::MoveCommitted { version, outcome } => Ok(MoveProposalResult {
+                version: StateVersion(version),
+                outcome,
+            }),
+            ClientControlReply::Err(e) => Err(e.into()),
+            _ => Err(unexpected("ProposeResize")),
         }
     }
 

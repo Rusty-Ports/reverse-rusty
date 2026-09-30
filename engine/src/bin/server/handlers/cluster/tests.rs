@@ -65,6 +65,7 @@ fn state_from_cluster_with_rebalance_topology(
         reassign_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_REASSIGNS,
         )),
+        remote_resize_permits: Arc::new(tokio::sync::Semaphore::new(1)),
         rebalance_topology,
         health_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,

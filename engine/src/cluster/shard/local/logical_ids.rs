@@ -1,15 +1,54 @@
-//! Bounded integer-only snapshot for remote coordinator admission (ADR-176).
+//! Bounded integer-only snapshots of a shard's live logical ids: remote coordinator admission
+//! (ADR-176) and the live-corpus export of a remote resize (ADR-180).
 
-use std::sync::TryLockError;
+use std::sync::{MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use super::{LocalShard, ShardError};
+use crate::segment::Engine;
+
+/// How a snapshot treats a logical id held by more than one live row.
+#[derive(Clone, Copy)]
+pub(super) enum DuplicateRows {
+    /// Fail: bounded ranking needs exactly one live row per logical id.
+    Refuse,
+    /// Report the id once: the source store keeps one document per logical id.
+    Collapse,
+}
 
 impl LocalShard {
     pub(crate) fn bounded_live_logical_ids(
         &self,
         max_ids: usize,
         deadline: Instant,
+    ) -> Result<Vec<u64>, ShardError> {
+        self.snapshot_live_ids(max_ids, deadline, DuplicateRows::Refuse)
+    }
+
+    /// Lock the engine, polling `deadline` instead of waiting on a busy lock indefinitely.
+    pub(super) fn lock_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<MutexGuard<'_, Engine>, ShardError> {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(ShardError::DeadlineExceeded);
+            }
+            match self.engine.try_lock() {
+                Ok(engine) => return Ok(engine),
+                Err(TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+                Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    }
+
+    /// The sorted live logical ids, refusing more than `max_ids` live rows. Every step — the lock
+    /// wait, the row scan, the sort, and the duplicate pass — polls `deadline`.
+    pub(super) fn snapshot_live_ids(
+        &self,
+        max_ids: usize,
+        deadline: Instant,
+        duplicates: DuplicateRows,
     ) -> Result<Vec<u64>, ShardError> {
         let mut check = || {
             if Instant::now() >= deadline {
@@ -18,14 +57,7 @@ impl LocalShard {
                 Ok(())
             }
         };
-        let engine = loop {
-            check()?;
-            match self.engine.try_lock() {
-                Ok(engine) => break engine,
-                Err(TryLockError::Poisoned(error)) => break error.into_inner(),
-                Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(1)),
-            }
-        };
+        let engine = self.lock_until(deadline)?;
         let live = engine.num_live_queries();
         if live > max_ids {
             return Err(ShardError::Config(format!(
@@ -53,7 +85,10 @@ impl LocalShard {
                 "live logical-ID snapshot has missing index rows".into(),
             ));
         }
-        validate_unique(&ids, check)?;
+        match duplicates {
+            DuplicateRows::Refuse => validate_unique(&ids, check)?,
+            DuplicateRows::Collapse => collapse_duplicates(&mut ids, check)?,
+        }
         Ok(ids)
     }
 }
@@ -128,6 +163,25 @@ fn validate_unique(
             ));
         }
     }
+    check()
+}
+
+/// Remove adjacent duplicates from sorted `ids` in place, polling `check` as it goes.
+fn collapse_duplicates(
+    ids: &mut Vec<u64>,
+    mut check: impl FnMut() -> Result<(), ShardError>,
+) -> Result<(), ShardError> {
+    let mut kept = 0;
+    for read in 0..ids.len() {
+        if read.is_multiple_of(4096) {
+            check()?;
+        }
+        if kept == 0 || ids[kept - 1] != ids[read] {
+            ids[kept] = ids[read];
+            kept += 1;
+        }
+    }
+    ids.truncate(kept);
     check()
 }
 
@@ -237,5 +291,56 @@ mod tests {
             .bounded_live_logical_ids(1, deadline())
             .expect("empty")
             .is_empty());
+    }
+    #[test]
+    fn export_ids_collapse_duplicate_rows_and_bound_every_lock_wait() {
+        let norm = Arc::new(crate::normalize::Normalizer::default_vocab().expect("vocab"));
+        let mut dict = crate::dict::Dict::new();
+        let ast = crate::dsl::parse("exportneedle").expect("DSL");
+        let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut String::new());
+        dict.finalize_mask();
+        let shard = LocalShard::new(
+            norm,
+            Arc::new(dict),
+            Arc::new(crate::tagdict::TagDict::new()),
+            crate::config::EngineConfig::default(),
+        );
+        for version in [1, 2] {
+            shard
+                .insert_extracted_with_tags(&ex, 9, version, "exportneedle", &[])
+                .expect("insert");
+        }
+        shard
+            .insert_extracted_with_tags(&ex, 4, 1, "exportneedle", &[])
+            .expect("insert");
+        let deadline = || Instant::now() + Duration::from_secs(2);
+        assert_eq!(
+            shard.live_source_ids(3, deadline()).expect("export ids"),
+            vec![4, 9],
+            "a duplicated row is exported once"
+        );
+        assert!(
+            shard.live_source_ids(2, deadline()).is_err(),
+            "rows are bounded"
+        );
+
+        let locked = shard.lock();
+        let soon = || Instant::now() + Duration::from_millis(5);
+        assert!(matches!(
+            shard.live_source_ids(3, soon()),
+            Err(ShardError::DeadlineExceeded)
+        ));
+        assert!(matches!(
+            shard.live_source_page(&[4, 9], soon()),
+            Err(ShardError::DeadlineExceeded)
+        ));
+        drop(locked);
+        assert_eq!(
+            shard
+                .live_source_page(&[4, 9], deadline())
+                .expect("page")
+                .len(),
+            2
+        );
     }
 }
