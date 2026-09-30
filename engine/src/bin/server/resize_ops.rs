@@ -138,6 +138,10 @@ pub(crate) struct AutoscaleStatus {
 struct Inner {
     records: VecDeque<ResizeOperation>,
     autoscale: Option<AutoscaleStatus>,
+    /// Highest placement generation any retained success committed.
+    committed_watermark: u64,
+    /// Highest generation any failed attempt swapped in without committing.
+    newest_uncommitted: u64,
 }
 
 /// The bounded registry shared by the REST handlers and the autoscale loop.
@@ -151,6 +155,15 @@ pub(crate) fn unix_ms_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Whether `record` must be retained so it can heal its own uncommitted swap. Only the newest
+/// uncommitted generation that no later success has committed can still need healing: any newer
+/// resize first repairs or supersedes the older swap.
+fn pins(record: &ResizeOperation, committed_watermark: u64, newest_uncommitted: u64) -> bool {
+    record.uncommitted_generation.is_some_and(|generation| {
+        generation > committed_watermark && generation >= newest_uncommitted
+    })
 }
 
 /// Whether `id` is an acceptable caller-supplied operation ID.
@@ -224,16 +237,27 @@ impl ResizeOperations {
         if inner.records.len() >= MAX_RETAINED_RESIZE_OPERATIONS {
             // A failed record that still holds an uncommitted swap is pinned like an active
             // one: its ID is the only operation allowed to finish that commit (ADR-179).
+            let (committed, newest) = (inner.committed_watermark, inner.newest_uncommitted);
             let Some(oldest_terminal) = inner
                 .records
                 .iter()
-                .position(|r| r.state.is_terminal() && r.uncommitted_generation.is_none())
+                .position(|r| r.state.is_terminal() && !pins(r, committed, newest))
             else {
                 return ResizeAdmission::Full;
             };
             inner.records.remove(oldest_terminal);
         }
-        let id = operation_id.unwrap_or_else(|| self.generated_id(origin, now_ms));
+        let id = match operation_id {
+            Some(id) => id,
+            // A caller may choose an ID that matches the generated namespace; never let a
+            // generated ID alias a retained record.
+            None => loop {
+                let candidate = self.generated_id(origin, now_ms);
+                if !inner.records.iter().any(|r| r.operation_id == candidate) {
+                    break candidate;
+                }
+            },
+        };
         inner.records.push_back(ResizeOperation {
             operation_id: id.clone(),
             origin,
@@ -268,6 +292,10 @@ impl ResizeOperations {
 
     pub(crate) fn mark_succeeded(&self, id: &str, outcome: ResizeOutcome) {
         let now_ms = unix_ms_now();
+        {
+            let mut inner = self.inner.lock();
+            inner.committed_watermark = inner.committed_watermark.max(outcome.placement_generation);
+        }
         self.update(id, |r| {
             r.state = ResizeState::Succeeded;
             r.finished_at_ms = Some(now_ms);
@@ -286,6 +314,10 @@ impl ResizeOperations {
         generation: u64,
     ) {
         let now_ms = unix_ms_now();
+        {
+            let mut inner = self.inner.lock();
+            inner.newest_uncommitted = inner.newest_uncommitted.max(generation);
+        }
         self.update(id, |r| {
             r.state = ResizeState::Failed;
             r.finished_at_ms = Some(now_ms);

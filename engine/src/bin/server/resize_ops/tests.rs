@@ -205,3 +205,59 @@ fn an_uncommitted_failed_record_is_pinned_against_eviction() {
         "re-admission keeps the uncommitted generation for the worker's precondition"
     );
 }
+
+#[test]
+fn superseded_or_healed_pins_are_released() {
+    let ops = ResizeOperations::new(false);
+    let old = execute(ops.admit(Some("old".into()), ResizeOrigin::Api, 6, Some(3)));
+    ops.mark_failed_uncommitted(&old, failure(), 4);
+    let newer = execute(ops.admit(Some("newer".into()), ResizeOrigin::Api, 8, None));
+    ops.mark_failed_uncommitted(&newer, failure(), 5);
+    let healed = execute(ops.admit(Some("healer".into()), ResizeOrigin::Api, 8, None));
+    ops.mark_succeeded(
+        &healed,
+        ResizeOutcome {
+            placement_generation: 5,
+            ..outcome(8)
+        },
+    );
+    // Every retained record is now evictable: the gen-4 pin is superseded by gen 5, and the gen-5
+    // pin is healed by a success that committed generation 5.
+    let mut last = super::ResizeAdmission::Full;
+    for i in 0..MAX_RETAINED_RESIZE_OPERATIONS {
+        last = ops.admit(Some(format!("fill-{i}")), ResizeOrigin::Api, 2, None);
+        if let super::ResizeAdmission::Execute(id) = &last {
+            ops.mark_not_started(id, failure());
+        }
+    }
+    assert!(
+        matches!(last, super::ResizeAdmission::Execute(_)),
+        "{last:?}"
+    );
+    assert!(ops.get("old").is_none() && ops.get("newer").is_none());
+}
+
+#[test]
+fn a_generated_id_never_aliases_a_caller_supplied_one() {
+    let ops = ResizeOperations::new(false);
+    let now = super::unix_ms_now();
+    // Occupy a window of plausible generated names.
+    for ms in now..now + 50 {
+        for seq in 1..4 {
+            let id = format!("resize-{ms}-{seq}");
+            if let super::ResizeAdmission::Execute(id) =
+                ops.admit(Some(id), ResizeOrigin::Api, 2, None)
+            {
+                ops.mark_not_started(&id, failure());
+            }
+        }
+    }
+    let generated = execute(ops.admit(None, ResizeOrigin::Api, 9, None));
+    let matching: Vec<_> = ops
+        .list()
+        .into_iter()
+        .filter(|r| r.operation_id == generated)
+        .collect();
+    assert_eq!(matching.len(), 1, "exactly one record per id");
+    assert_eq!(matching[0].num_shards, 9);
+}

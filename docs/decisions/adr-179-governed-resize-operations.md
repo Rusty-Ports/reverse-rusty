@@ -53,8 +53,10 @@ records. It never takes the cluster lock. Each record carries an operation ID, o
 sanitized failure. The dedicated resize worker writes `running` and the terminal state itself, so
 a record completes after an HTTP disconnect or loop abort. Drop guards mark a record
 `not_started` when its caller disappears before dispatch, and `failed` if the worker unwinds. A
-failed record that still holds an uncommitted swap is pinned against eviction like an active one,
-because only its ID can finish that commit.
+failed record that still holds the newest uncommitted swap is pinned against eviction like an
+active one, because only its ID can finish that commit; the pin is released once any success
+commits that generation or a newer swap supersedes it. Generated IDs are checked against retained
+records so a caller-chosen ID can never alias one.
 
 `POST /_cluster/resize` adds two optional body fields and two response fields:
 
