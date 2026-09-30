@@ -238,6 +238,12 @@ impl CoordinatorLease {
     pub(crate) async fn lock_install_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.install).lock_owned().await
     }
+
+    /// Whether the installation barrier is currently held.
+    #[cfg(test)]
+    pub(crate) fn install_is_held(&self) -> bool {
+        self.install.try_lock().is_err()
+    }
 }
 
 enum ClaimRegistration<'a> {

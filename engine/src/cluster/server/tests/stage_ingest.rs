@@ -198,3 +198,45 @@ async fn staged_load_fails_when_its_checkpoint_sidecar_cannot_be_written() {
     assert!(status.message().contains("shard.ckpt"), "{status:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_jobs_hold_the_install_barrier_and_refuse_a_replaced_slot() {
+    use crate::cluster::server::service::run_installed;
+
+    let normalizer = norm();
+    let first = frozen_dict(&["stageneedle"], &normalizer);
+    let second = frozen_dict(&["stageneedle", "otherneedle"], &normalizer);
+    let server = ShardServer::pending(Arc::clone(&normalizer), EngineConfig::default());
+    server
+        .adopt_dict(adopt_req_shard(&first, 0))
+        .await
+        .expect("adopt");
+    let (_, replaced) = server.loaded_slot(0).expect("slot");
+
+    // Adopting a different dict onto the empty slot installs a new engine state. A job captured
+    // against the old state — for example a worker detached by a cancelled stream — is refused
+    // rather than writing the old engine's files over the replacement's.
+    server
+        .adopt_dict(adopt_req_shard(&second, 0))
+        .await
+        .expect("re-adopt onto the empty slot");
+    let (_, current) = server.loaded_slot(0).expect("slot");
+    assert!(!Arc::ptr_eq(&replaced, &current));
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&ran);
+    let refused = run_installed(&server, 0, &replaced, move |_| {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    })
+    .await;
+    assert_eq!(refused.expect_err("replaced").code(), Code::Aborted);
+    assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+
+    // A job against the installed state runs while holding the barrier that adoption, recovery,
+    // and removal take, so none of them can replace the slot until it finishes.
+    let lease = Arc::clone(&server.coordinator_lease);
+    let held = run_installed(&server, 0, &current, move |_| lease.install_is_held())
+        .await
+        .expect("job runs");
+    assert!(held);
+    assert!(!server.coordinator_lease.install_is_held());
+}

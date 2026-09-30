@@ -46,6 +46,9 @@ mod ranked_batch;
 mod recovery;
 mod stage_ingest;
 
+#[cfg(test)]
+pub(in crate::cluster::server) use stage_ingest::run_installed;
+
 #[tonic::async_trait]
 impl ShardService for ShardServer {
     type LiveLogicalIdsStream = LogicalIdsStream;

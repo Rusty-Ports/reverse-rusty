@@ -98,7 +98,9 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
    new ring. Each target position receives one client-streaming `StageIngest` call: the target seals
    segments of its memtable flush threshold as rows arrive and writes its source store and
    checkpoint sidecar once, when the stream closes. A dropped, unfinished load cancels the call
-   rather than closing it, so a target never persists a partial load as complete. Placement
+   rather than closing it, so a target never persists a partial load as complete. Each segment
+   and finish job holds the node's installation barrier, so a cancelled call's detached worker
+   can never write over a slot that adoption, recovery, or removal replaced. Placement
    force-accepts, as log replay does, so a stored class-D query survives even when the current
    admission knob is off; a stored query that no longer parses or places fails the resize.
 6. When the current layout is durable (each slot reports it through the additive `durable`
@@ -194,6 +196,12 @@ The fourth review found two more, both fixed with mutation-checked regression te
   membership that later rebalances would target; targets are now validated as mesh origins, like
   node registration.
 
+The fifth review found one more, fixed with a mutation-checked regression test: a cancelled
+`StageIngest` detached its blocking segment and finish workers without the node's installation
+barrier, so an adoption, recovery, or removal could replace the slot while the old engine still
+wrote the same files. Each worker now confirms the slot is unchanged and unfenced under the barrier
+and holds it until the job finishes, as `Seal` does.
+
 ## Alternatives
 
 - **Stage beside the old layout on the same nodes.** Deferred: it needs per-slot placement
@@ -223,7 +231,8 @@ governor stays in-process, because provisioning target nodes is an external deci
   its deadline while the engine lock is held, for both the id snapshot and page reads.
 - **Staged-load tests** show a stream seals threshold-sized segments (not one per request), loads
   nothing from an empty stream, refuses a second shard id, writes a durable slot's source store
-  only when the stream closes, and fails when its checkpoint sidecar cannot be written.
+  only when the stream closes, fails when its checkpoint sidecar cannot be written, and runs each
+  job under the installation barrier, refusing a slot replaced since the stream began.
 - **Resize-intent state-machine tests** cover:
   - atomic idempotent commit and generation bumps;
   - invalid, co-located, unregistered, and unnormalized intents;

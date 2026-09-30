@@ -46,34 +46,69 @@ pub(super) async fn stage_ingest(
         reply.rejected_parse += rejected_parse;
         pending.extend(items);
         if pending.len() >= segment_rows {
-            seal(&state, std::mem::take(&mut pending), &mut reply).await?;
+            seal(
+                server,
+                req.shard_id,
+                &state,
+                std::mem::take(&mut pending),
+                &mut reply,
+            )
+            .await?;
         }
     }
     // An empty stream loads nothing: the position received no rows.
     let Some((shard_id, state, _)) = loaded else {
         return Ok(Response::new(reply));
     };
-    server.slot(shard_id)?.check_not_fenced()?;
     if !pending.is_empty() {
-        seal(&state, pending, &mut reply).await?;
+        seal(server, shard_id, &state, pending, &mut reply).await?;
     }
-    tokio::task::spawn_blocking(move || state.shard.finish_staged_load())
-        .await
-        .map_err(|error| Status::internal(format!("staged load finish failed: {error}")))?
-        .map_err(|error| Status::internal(error.to_string()))?;
+    run_installed(server, shard_id, &state, |state| {
+        state.shard.finish_staged_load()
+    })
+    .await?
+    .map_err(|error| Status::internal(error.to_string()))?;
     Ok(Response::new(reply))
 }
 
-/// Seal one staged segment off the async runtime and add its counts to `reply`.
+/// Run one staged-load job on a blocking worker that owns the node's installation barrier, once
+/// `state` is confirmed to still be the slot's installed, unfenced state. Cancelling the RPC
+/// detaches the worker; holding the barrier until it finishes keeps adoption, recovery, and removal
+/// from replacing the slot while the old engine still writes the same files, as `Seal` does.
+pub(in crate::cluster::server) async fn run_installed<T: Send + 'static>(
+    server: &ShardServer,
+    shard_id: u32,
+    state: &Arc<ServerState>,
+    job: impl FnOnce(&ServerState) -> T + Send + 'static,
+) -> Result<T, Status> {
+    let install = server.coordinator_lease.lock_install_owned().await;
+    let (slot, current) = server.loaded_slot(shard_id)?;
+    if !Arc::ptr_eq(&current, state) {
+        return Err(Status::aborted(
+            "the slot was replaced during the staged load",
+        ));
+    }
+    slot.check_not_fenced()?;
+    tokio::task::spawn_blocking(move || {
+        let _install = install;
+        job(&current)
+    })
+    .await
+    .map_err(|error| Status::internal(format!("staged load worker failed: {error}")))
+}
+
+/// Seal one staged segment under the installation barrier and add its counts to `reply`.
 async fn seal(
+    server: &ShardServer,
+    shard_id: u32,
     state: &Arc<ServerState>,
     items: Vec<PlacedQuery>,
     reply: &mut proto::IngestReply,
 ) -> Result<(), Status> {
-    let state = Arc::clone(state);
-    let report = tokio::task::spawn_blocking(move || state.shard.ingest_staged(&items))
-        .await
-        .map_err(|error| Status::internal(format!("staged segment build failed: {error}")))?;
+    let report = run_installed(server, shard_id, state, move |state| {
+        state.shard.ingest_staged(&items)
+    })
+    .await?;
     reply.ingested += report.ingested as u64;
     reply.rejected_parse += report.rejected_parse as u64;
     reply.rejected_class_d += report.rejected_class_d as u64;
