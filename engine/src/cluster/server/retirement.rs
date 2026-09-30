@@ -101,6 +101,25 @@ pub(super) fn read_retirement(dir: &Path) -> Result<Option<Retirement>, ShardErr
     }))
 }
 
+/// The retirement to restore for a durable node rooted at `dir`. Every durable constructor loads
+/// it, so no restart path can put a retired node back into service.
+pub(super) fn restore_retirement(
+    dir: &Path,
+) -> Result<Option<std::sync::Arc<Retirement>>, ShardError> {
+    Ok(read_retirement(dir)?.map(std::sync::Arc::new))
+}
+
+/// [`restore_retirement`] for a constructor that cannot fail: an unreadable record fails closed,
+/// leaving the node retired (refusing everything) rather than guessing it was not.
+pub(super) fn restore_retirement_or_refuse(dir: &Path) -> Option<std::sync::Arc<Retirement>> {
+    restore_retirement(dir).unwrap_or_else(|_| {
+        Some(std::sync::Arc::new(Retirement {
+            operation_id: u64::MAX,
+            successor_generation: u64::MAX,
+        }))
+    })
+}
+
 impl ShardServer {
     /// The operation that retired this node, or 0.
     pub(super) fn retired_operation(&self) -> u64 {

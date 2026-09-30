@@ -92,12 +92,16 @@ impl ShardServer {
         // was interrupted. Best-effort — never fails boot (the ADR-078/079 posture) — and runs
         // BEFORE the adoption branch so a pending node's trash is swept too.
         sweep_dropped_trash(&data_dir);
+        // A node retired by a remote resize (ADR-180) stays retired across restarts.
+        let retired = super::retirement::restore_retirement(&data_dir)?;
         // The dict + tag space are ONE atomically-written blob (never desynced); absent
         // ⇒ a never-adopted durable node, which starts pending and adopts on connect.
         let Some((dict_bytes, tag_bytes, placement_generation, num_shards)) =
             read_adopted_space(&data_dir)?
         else {
-            return Ok(Self::pending_durable(norm, config, data_dir));
+            let server = Self::pending_durable(norm, config, data_dir);
+            server.retired.store(retired);
+            return Ok(server);
         };
         let dict = Arc::new(crate::storage::deserialize_dict(&dict_bytes).map_err(|e| {
             ShardError::Log(format!(
@@ -127,8 +131,6 @@ impl ShardServer {
             num_shards,
         })));
         let slots = restore_durable_slots(&data_dir, &norm, &dict, &tag_dict, &config)?;
-        // A node retired by a remote resize (ADR-180) stays retired across restarts.
-        let retired = super::retirement::read_retirement(&data_dir)?.map(Arc::new);
         for (&position, slot) in &slots {
             if let Some(state) = slot.state.load_full() {
                 state
@@ -162,6 +164,7 @@ impl ShardServer {
     /// recovering/replica node — after adoption it can serve `FetchSegments` and accept
     /// `RecoverFrom`. The durable analogue of [`Self::pending`].
     pub fn pending_durable(norm: Arc<Normalizer>, config: EngineConfig, data_dir: PathBuf) -> Self {
+        let retired = super::retirement::restore_retirement_or_refuse(&data_dir);
         ShardServer {
             norm,
             config,
@@ -179,7 +182,7 @@ impl ShardServer {
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
-            retired: Arc::new(ArcSwapOption::from(None)),
+            retired: Arc::new(ArcSwapOption::from(retired)),
         }
     }
 
@@ -194,6 +197,7 @@ impl ShardServer {
     ) -> Result<Self, ShardError> {
         // The sole pre-built slot (shard-id 0) roots its segments at `data_dir/shard_000/` (ADR-093:
         // the per-shard subdir the coordinator's durable layout already uses), not the data_dir root.
+        let retired = super::retirement::restore_retirement(&data_dir)?;
         let mut sc = config.clone();
         sc.data_dir = Some(shard_dir(&data_dir, 0));
         let tag_dict = Arc::new(finalized_empty_tag_dict());
@@ -226,7 +230,7 @@ impl ShardServer {
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
-            retired: Arc::new(ArcSwapOption::from(None)),
+            retired: Arc::new(ArcSwapOption::from(retired)),
         })
     }
 }

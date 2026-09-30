@@ -142,3 +142,43 @@ async fn retirement_must_name_the_nodes_current_layout() {
     );
     assert_eq!(count(&srv).await.expect("still serving"), 0);
 }
+
+#[tokio::test]
+async fn a_retired_prebuilt_durable_node_stays_retired_across_restarts() {
+    let n = norm();
+    let d = Arc::new(frozen_dict(&["retireneedle"], &n));
+    let dir = std::env::temp_dir().join(format!("rr_retire_prebuilt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let srv = ShardServer::new_durable(
+        Arc::clone(&n),
+        Arc::clone(&d),
+        EngineConfig::default(),
+        dir.clone(),
+    )
+    .expect("pre-built durable node");
+    let mut retire = retire_req(&d, 11);
+    retire.get_mut().num_shards = 1;
+    retire.get_mut().tag_dict_fingerprint = {
+        let mut tags = TagDict::new();
+        tags.mark_finalized();
+        tags.fingerprint()
+    };
+    srv.retire(retire).await.expect("retire");
+    drop(srv);
+    // The shard server's default durable startup path must restore the retirement too.
+    let restarted =
+        ShardServer::new_durable(Arc::clone(&n), d, EngineConfig::default(), dir.clone())
+            .expect("restart");
+    assert!(
+        count(&restarted).await.is_err(),
+        "a retired node serves nothing after restart"
+    );
+    assert_eq!(retired_operation(&restarted).await, 11);
+    let pending = ShardServer::pending_durable(n, EngineConfig::default(), dir.clone());
+    assert_eq!(retired_operation_of_pending(&pending), 11);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn retired_operation_of_pending(srv: &ShardServer) -> u64 {
+    srv.retired_operation()
+}

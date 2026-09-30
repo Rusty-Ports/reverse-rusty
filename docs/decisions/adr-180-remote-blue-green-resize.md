@@ -64,7 +64,8 @@ admission knob is off; a stored query that no longer parses or places fails the 
 
 Which layout may serve is enforced by the data nodes, not by any coordinator's memory. `Retire`
 durably marks a whole node as superseded by a successor placement generation, keyed by the resize
-operation id; the record is written before it takes effect and survives restarts. A retired node:
+operation id; the record is written before it takes effect, and every durable startup path restores
+it (an unreadable record fails closed). A retired node:
 
 - refuses every slot RPC, reads included, as a superseded placement;
 - refuses adoption and any new slot, so it can never be re-adopted empty and answer with silently
@@ -110,7 +111,8 @@ the copy:
 1. It validates the request and the cluster: remote, assignment-routed, exclusively owned by this
    coordinator, replication factor 1, no queued partial writes, and live routing naming exactly
    the committed layout's nodes (after a raw handoff or map-only reassignment they differ, and the
-   export would read nodes that retirement never reaches).
+   export would read nodes that retirement never reaches). The routing check runs under the move
+   reservation, which keeps handoffs over those nodes out for the rest of the resize.
 2. Before any network call, it raises a **resize write fence** and briefly takes the mutation
    barrier exclusively, so every accepted write lands before the export and every later add,
    upsert, remove, bulk load, or resync is refused. A resize that finds the fence already raised
@@ -201,7 +203,9 @@ which is tracked outside this ADR.
 The first review of the revised design found three more, each fixed with a mutation-checked test:
 startup resolution ran before a fresh quorum was seeded and refused its placeholder assignments;
 the retirement sweep could lift a retirement that a concurrently committed resize had just made;
-and a resize after an uncommitted route change would export from one node and retire another.
+and a resize after an uncommitted route change would export from one node and retire another. The
+next review found that the pre-built durable startup path ignored a retirement record and that the
+routing check ran before the move reservation that excludes concurrent handoffs; both are fixed.
 
 ## Alternatives
 

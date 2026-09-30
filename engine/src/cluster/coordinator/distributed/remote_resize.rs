@@ -151,14 +151,6 @@ impl ClusterEngine {
         progress: &ResizeProgress,
     ) -> Result<PreparedRemoteResize, ShardError> {
         self.register_resize_targets(&request.targets)?;
-        // The export reads live routing, while fingerprints and retirement target the committed
-        // layout, so both must name the same nodes. An uncommitted route change (a raw handoff
-        // or a map-only reassignment) is refused rather than leaving a live node unretired.
-        self.attest_committed_layout().map_err(|error| {
-            ShardError::ControlPlane(format!(
-                "remote resize requires serving routing to match the committed layout: {error}"
-            ))
-        })?;
         let state = self.control_state()?;
         let state = self.finish_prior_resize(state, request.operation_id)?;
         let intent = resize_intent(&state, request)?;
@@ -170,14 +162,24 @@ impl ClusterEngine {
             .map(|assignment| member_endpoint(&intent, assignment.primary))
             .collect::<Result<_, _>>()?;
 
-        // A durable layout may only move onto durable targets; a volatile one (tests, caches) may
-        // move onto either.
-        let source_durable = self.layout_is_durable(handle, &expected_endpoints)?;
-
         // Exclude moves, GC, and other resizes on every participating endpoint for the copy.
         let mut footprint = expected_endpoints.clone();
         footprint.extend(target_endpoints.iter().cloned());
         let _ticket = self.move_ledger.reserve(&footprint);
+        // The export reads live routing, while fingerprints and retirement target the committed
+        // layout, so both must name the same nodes. Checked under the reservation, which keeps
+        // every handoff and move over these endpoints out until the resize ends: an uncommitted
+        // route change (a raw handoff or a map-only reassignment) is refused rather than leaving
+        // a live node unretired.
+        self.attest_committed_layout().map_err(|error| {
+            ShardError::ControlPlane(format!(
+                "remote resize requires serving routing to match the committed layout: {error}"
+            ))
+        })?;
+
+        // A durable layout may only move onto durable targets; a volatile one (tests, caches) may
+        // move onto either.
+        let source_durable = self.layout_is_durable(handle, &expected_endpoints)?;
 
         match self.propose_resize(ResizeCommand::Begin(intent.clone()))? {
             MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => {}
