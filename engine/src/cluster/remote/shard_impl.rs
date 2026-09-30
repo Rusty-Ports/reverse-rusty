@@ -956,6 +956,7 @@ impl Shard for RemoteShard {
                         shard_id,
                         placement_generation,
                         num_shards,
+                        checkpoint: false,
                     })
                     .await
                     .map(tonic::Response::into_inner)

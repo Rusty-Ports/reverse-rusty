@@ -510,8 +510,14 @@ message FlushRequest {
   uint32 shard_id = 1; // ADR-093
   uint64 placement_generation = 2;
   uint32 num_shards = 3;
+  // ADR-180: seal a full, error-returning checkpoint (segments, sources, and the shard.ckpt
+  // sidecar) instead of a bare memtable flush. Additive: an older server ignores it and replies
+  // without `checkpointed`, which a caller that requires the checkpoint treats as a refusal.
+  bool checkpoint = 4;
 }
-message FlushReply   {}
+message FlushReply {
+  bool checkpointed = 1;
+}
 
 message CountReply       { uint64 count = 1; }            // usize num_queries
 // `counts` stays at EXACTLY 4 ([A, B, C, D]) — a pre-ADR-105 reader hard-errors on any

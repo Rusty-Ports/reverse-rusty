@@ -67,8 +67,9 @@ pub(super) fn live_sources(
             max_bytes,
             &sender,
         ) {
-            // The receiver may already be gone; nothing else can observe the failure.
-            let _undelivered = sender.blocking_send(Err(status));
+            // Never wait to report a failure: a stalled or departed receiver must not keep this
+            // producer (and the node's snapshot permit) alive past the deadline.
+            let _undelivered = sender.try_send(Err(status));
         }
     });
     Ok(Response::new(Box::pin(
@@ -98,10 +99,24 @@ impl FrameIdentity {
 
 type FrameSender = Sender<Result<proto::LiveSourcesFrame, Status>>;
 
-fn send(sender: &FrameSender, frame: proto::LiveSourcesFrame) -> Result<(), Status> {
-    sender
-        .blocking_send(Ok(frame))
-        .map_err(|_| Status::cancelled("live-source export receiver closed"))
+/// Send one frame, waiting for channel capacity no later than `deadline`, so a receiver that
+/// stops polling cannot pin the producer and the node's snapshot permit.
+fn send(
+    sender: &FrameSender,
+    frame: proto::LiveSourcesFrame,
+    deadline: Instant,
+) -> Result<(), Status> {
+    let handle = tokio::runtime::Handle::current();
+    match handle.block_on(tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        sender.send(Ok(frame)),
+    )) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(Status::cancelled("live-source export receiver closed")),
+        Err(_) => Err(Status::deadline_exceeded(
+            "live-source export deadline exhausted while the receiver was not reading",
+        )),
+    }
 }
 
 fn produce(
@@ -146,7 +161,11 @@ fn produce(
                 )));
             }
             if frame_bytes.saturating_add(item_bytes) > max_bytes {
-                send(sender, std::mem::replace(&mut frame, identity.frame(total)))?;
+                send(
+                    sender,
+                    std::mem::replace(&mut frame, identity.frame(total)),
+                    deadline,
+                )?;
                 frame_bytes = FRAME_HEADER_BYTES;
             }
             frame.documents.push(item);
@@ -154,9 +173,9 @@ fn produce(
         }
     }
     if !frame.documents.is_empty() {
-        send(sender, frame)?;
+        send(sender, frame, deadline)?;
     }
     let mut complete = identity.frame(total);
     complete.complete = true;
-    send(sender, complete)
+    send(sender, complete, deadline)
 }

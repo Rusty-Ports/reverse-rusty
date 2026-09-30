@@ -234,6 +234,7 @@ fn drop_shard_removes_slot_and_dir_and_is_idempotent() {
         shard_id: 0,
         placement_generation: 1,
         num_shards: 1,
+        checkpoint: false,
     })))
     .expect("flush to disk");
     assert!(

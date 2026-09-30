@@ -139,6 +139,9 @@ impl ClusterEngine {
         // `AddShard` (no dict re-ship / re-deserialize). This set spans BOTH primaries and replicas
         // across all groups, so a node hosting e.g. pos-0's primary and pos-1's replica adopts once
         // and gains its second slot via `AddShard` (which keys on the node dict, not the shard-id).
+        // Adopt and validate the configured placement generation (ADR-180): the committed
+        // control-state generation after a remote resize, otherwise the initial one.
+        let generation = crate::ownership::PlacementGeneration(config.remote_placement_generation);
         let mut adopted: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (position, g) in groups.iter().enumerate() {
             // A replica hosts the SAME global position (shard-id) as its primary (ADR-093).
@@ -154,7 +157,7 @@ impl ClusterEngine {
                             tag_dict_bytes.clone(),
                             expected_tag,
                             shard_id,
-                            crate::ownership::PlacementGeneration::INITIAL,
+                            generation,
                             config.num_shards as u32,
                             id,
                             &security,
@@ -169,7 +172,7 @@ impl ClusterEngine {
                             tag_dict_bytes.clone(),
                             expected_tag,
                             shard_id,
-                            crate::ownership::PlacementGeneration::INITIAL,
+                            generation,
                             config.num_shards as u32,
                             &security,
                         ),
@@ -183,7 +186,7 @@ impl ClusterEngine {
                             expected,
                             expected_tag,
                             shard_id,
-                            crate::ownership::PlacementGeneration::INITIAL,
+                            generation,
                             config.num_shards as u32,
                             id,
                             &security,
@@ -196,7 +199,7 @@ impl ClusterEngine {
                             expected,
                             expected_tag,
                             shard_id,
-                            crate::ownership::PlacementGeneration::INITIAL,
+                            generation,
                             config.num_shards as u32,
                             &security,
                         ),
@@ -217,7 +220,7 @@ impl ClusterEngine {
                                 tag_dict_bytes.clone(),
                                 expected_tag,
                                 shard_id,
-                                crate::ownership::PlacementGeneration::INITIAL,
+                                generation,
                                 config.num_shards as u32,
                                 id,
                                 &security,
@@ -232,7 +235,7 @@ impl ClusterEngine {
                                 tag_dict_bytes.clone(),
                                 expected_tag,
                                 shard_id,
-                                crate::ownership::PlacementGeneration::INITIAL,
+                                generation,
                                 config.num_shards as u32,
                                 &security,
                             ),
@@ -246,7 +249,7 @@ impl ClusterEngine {
                                 expected,
                                 expected_tag,
                                 shard_id,
-                                crate::ownership::PlacementGeneration::INITIAL,
+                                generation,
                                 config.num_shards as u32,
                                 id,
                                 &security,
@@ -259,7 +262,7 @@ impl ClusterEngine {
                                 expected,
                                 expected_tag,
                                 shard_id,
-                                crate::ownership::PlacementGeneration::INITIAL,
+                                generation,
                                 config.num_shards as u32,
                                 &security,
                             ),
@@ -281,8 +284,12 @@ impl ClusterEngine {
             shards.push(boxed);
             handoffs.push(h);
         }
-        let durable =
-            ClusterDurable::in_memory(config.num_shards as u32, config.vnodes, dict.fingerprint());
+        let durable = ClusterDurable::in_memory_at(
+            config.num_shards as u32,
+            config.vnodes,
+            dict.fingerprint(),
+            generation,
+        );
         Ok(Self::from_parts(
             norm,
             dict,

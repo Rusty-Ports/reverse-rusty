@@ -409,12 +409,17 @@ impl ShardService for ShardServer {
             crate::ownership::PlacementGeneration(req.placement_generation),
             req.num_shards,
         )?;
-        self.loaded_slot(req.shard_id)?
-            .1
-            .shard
-            .flush()
-            .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(proto::FlushReply {}))
+        let shard = &self.loaded_slot(req.shard_id)?.1.shard;
+        if req.checkpoint {
+            shard
+                .seal_for_checkpoint()
+                .map_err(|e| Status::internal(e.to_string()))?;
+        } else {
+            shard.flush().map_err(|e| Status::internal(e.to_string()))?;
+        }
+        Ok(Response::new(proto::FlushReply {
+            checkpointed: req.checkpoint,
+        }))
     }
 
     // ---- peer recovery (ADR-035/036, clustering build-path step 4b) ----

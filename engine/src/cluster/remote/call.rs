@@ -379,6 +379,32 @@ impl RemoteShard {
         })
     }
 
+    /// Seal a full, error-returning checkpoint on this slot (segments, sources, and the
+    /// `shard.ckpt` sidecar) and require the server to attest it (ADR-180). An older server
+    /// replies without the attestation, which fails closed.
+    pub(crate) fn checkpoint_durably(&self) -> Result<(), ShardError> {
+        let client = self.client.clone();
+        let request = proto::FlushRequest {
+            shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
+            checkpoint: true,
+        };
+        let reply = self.call(RpcMethod::Flush, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move { client.flush(request).await.map(tonic::Response::into_inner) }
+        })?;
+        if reply.checkpointed {
+            Ok(())
+        } else {
+            Err(ShardError::Protocol(
+                "the shard server did not attest a durable checkpoint; upgrade it before using \
+                 it as a resize target"
+                    .into(),
+            ))
+        }
+    }
+
     /// This slot's order-independent 128-bit live-set fingerprint + live count (ADR-097): the
     /// group move compares the frozen source's against a retained member's — equal (while both
     /// sides are quiescent) proves the member already holds exactly the source's live set, so

@@ -141,4 +141,5 @@ mod adopt;
 mod fence;
 mod gc;
 mod limits;
+mod live_sources;
 mod logical_ids;

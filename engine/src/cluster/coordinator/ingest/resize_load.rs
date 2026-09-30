@@ -1,7 +1,9 @@
 //! Loading a staged remote-resize layout (ADR-180): place exported queries under this engine's
 //! ring and send them to its shards in byte-bounded batches.
 
-use super::{extract_readonly, ClusterEngine, PlacedQuery, ShardError, TaggedEntry, Target};
+use super::{
+    extract_readonly, placement_of, ClusterEngine, PlacedQuery, ShardError, TaggedEntry, Target,
+};
 
 /// Approximate request-size budget per ingest call, well under the default gRPC decode limit.
 const LOAD_BATCH_BYTES: usize = 1024 * 1024;
@@ -11,8 +13,9 @@ impl ClusterEngine {
     /// and ingest them into its shards, adding each position's accepted row count to `loaded`.
     /// Used only on a freshly built staged layout: it neither checks emptiness nor installs the
     /// logical-id directory, because the staged engine contributes only its shards and ring to the
-    /// serving coordinator. Queries the front door would reject are skipped, as in the original
-    /// load. A shard write error propagates and fails the resize.
+    /// serving coordinator. Placement force-accepts, like log replay, so a stored class-D query is
+    /// never dropped by the current admission knob; only an effectively empty query (stored
+    /// nowhere) is skipped. A shard write error propagates and fails the resize.
     pub(in crate::cluster::coordinator) fn load_resize_batch(
         &self,
         entries: &[TaggedEntry],
@@ -26,7 +29,15 @@ impl ClusterEngine {
                 continue;
             };
             let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-            let target = self.placement(&ex);
+            // Re-place an already-admitted corpus the way apply/replay does: force-accept, so a
+            // stored class-D query survives even when the current front-door knob is off.
+            let target = placement_of(
+                &self.dict,
+                &self.ring,
+                &ex,
+                true,
+                self.per_shard.hot_anchor_threshold,
+            );
             let placement =
                 target.placement(self.placement_generation(), self.shards.len() as u32)?;
             let positions: Vec<usize> = match target {

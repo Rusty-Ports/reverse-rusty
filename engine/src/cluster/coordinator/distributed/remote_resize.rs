@@ -20,8 +20,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::cluster::control::{
-    normalized_move_endpoint, ClusterStateChange, MoveCommandOutcome, NodeDescriptor, NodeId,
-    ResizeCommand, ResizeIntent, ResizeIntentPhase, ResizeLayout, ResizePositionEvidence,
+    normalized_move_endpoint, ClusterState, ClusterStateChange, MoveCommandOutcome, NodeDescriptor,
+    NodeId, ResizeCommand, ResizeIntent, ResizeIntentPhase, ResizeLayout, ResizePositionEvidence,
 };
 use crate::cluster::remote::RemoteShard;
 
@@ -122,6 +122,7 @@ impl ClusterEngine {
                 state.num_shards
             )));
         }
+        let state = self.finish_prior_committed_resize(state)?;
         let intent = resize_intent(&state, request)?;
         let expected_endpoints = expected_endpoints(&state)?;
         let target_endpoints: Vec<String> = intent
@@ -257,6 +258,45 @@ impl ClusterEngine {
         })
     }
 
+    /// A previous resize may have committed and installed but failed to record `Finish`. Its
+    /// intent would block every later resize and move, so finish it first when the served layout is
+    /// exactly the one it committed, fencing that intent's retired slots again (idempotent).
+    fn finish_prior_committed_resize(
+        &self,
+        state: ClusterState,
+    ) -> Result<ClusterState, ShardError> {
+        let Some(prior) = state.moves.resize.clone() else {
+            return Ok(state);
+        };
+        let serving_committed = matches!(prior.phase, ResizeIntentPhase::Committed(_))
+            && state.num_shards == prior.desired.num_shards
+            && state.placement_generation == prior.desired.placement_generation
+            && state.assignments == prior.desired.assignments
+            && self.ring.num_shards() == prior.desired.num_shards as usize
+            && self.placement_generation().0 == prior.desired.placement_generation;
+        if !serving_committed {
+            return Err(ShardError::ControlPlane(format!(
+                "another remote resize ({}) is still in progress; wait for it or restart the \
+                 coordinator to resolve it",
+                prior.operation_id
+            )));
+        }
+        let old_layout = ClusterState {
+            num_shards: prior.expected.num_shards,
+            assignments: prior.expected.assignments.clone(),
+            ..state.clone()
+        };
+        let fence_generation = state.epoch.max(1);
+        for (position, endpoint) in expected_endpoints(&old_layout)?.iter().enumerate() {
+            // Best effort, as in `finish_remote_resize`: the committed layout is already serving.
+            let _fenced = self.fence_retired_slot(endpoint, position as u32, fence_generation);
+        }
+        self.expect_resize_outcome(ResizeCommand::Finish {
+            operation_id: prior.operation_id,
+        })?;
+        self.control_state()
+    }
+
     fn validate_remote_resize_request(
         &self,
         request: &RemoteResizeRequest,
@@ -350,21 +390,33 @@ impl ClusterEngine {
         );
     }
 
-    /// Lower the fence and abort the intent after a failure before a proven commit. If the abort
-    /// cannot be proposed, the intent stays for startup recovery, which aborts it.
+    /// Abort the intent after a failure, and lower the write fence only when the control plane
+    /// proves the resize did not commit: the abort was accepted and the committed layout is still
+    /// the one being served. An ambiguous outcome keeps writes fenced, because a write accepted on
+    /// the old layout would vanish if consensus had already named the new one; a coordinator
+    /// restart resolves the recorded intent and routes to the committed layout.
     fn fail_resize(&self, operation_id: u64, failure: ShardError) -> ShardError {
-        if let Ok(state) = self.control_state() {
-            let committed = state.moves.resize.as_ref().is_some_and(|intent| {
-                intent.operation_id == operation_id
-                    && matches!(intent.phase, ResizeIntentPhase::Committed(_))
+        let aborted = matches!(
+            self.propose_resize(ResizeCommand::Abort { operation_id }),
+            Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
+        );
+        let still_serving_committed = self.control_state().is_ok_and(|state| {
+            state.num_shards as usize == self.ring.num_shards()
+                && state.placement_generation == self.placement_generation().0
+                && state.moves.resize.is_none()
+        });
+        if aborted && still_serving_committed {
+            self.resize_write_fence.store(false, Ordering::Release);
+        } else {
+            self.emit(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::ReplicaDesync,
+                detail: format!(
+                    "remote resize {operation_id} failed with an unproven outcome; writes stay \
+                     paused until a coordinator restart resolves the recorded intent"
+                ),
+                error: failure.to_string(),
             });
-            if committed {
-                // The new layout is durable; keep writes fenced until it is installed.
-                return failure;
-            }
         }
-        let _aborted = self.propose_resize(ResizeCommand::Abort { operation_id });
-        self.resize_write_fence.store(false, Ordering::Release);
         failure
     }
 
@@ -437,6 +489,9 @@ impl ClusterEngine {
                 self.coordinator_id,
                 &self.client_security,
             )?;
+            // Prove the loaded rows survive a target restart before they can become the layout
+            // of record: an error-returning checkpoint of segments, sources, and the sidecar.
+            client.checkpoint_durably()?;
             let (fingerprint_lo, fingerprint_hi, live_count) = client.content_fingerprint()?;
             if live_count != loaded[position] {
                 return Err(ShardError::Protocol(format!(

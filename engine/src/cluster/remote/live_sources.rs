@@ -35,24 +35,28 @@ impl RemoteShard {
         request.set_timeout(deadline.saturating_duration_since(started));
         let mut client = self.client.clone();
         let result = self.block_on(async {
-            let mut stream = client
-                .live_sources(request)
-                .await
-                .map_err(|status| ranked_rpc_err(&status))?
-                .into_inner();
-            while let Some(frame) = stream
-                .message()
-                .await
-                .map_err(|status| ranked_rpc_err(&status))?
-            {
-                collector
-                    .push(frame, &mut *visit)
-                    .map_err(|error| match error {
-                        CollectError::Wire(status) => ranked_rpc_err(&status),
-                        CollectError::Visit(error) => error,
-                    })?;
-            }
-            collector.finish().map_err(|status| ranked_rpc_err(&status))
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                let mut stream = client
+                    .live_sources(request)
+                    .await
+                    .map_err(|status| ranked_rpc_err(&status))?
+                    .into_inner();
+                while let Some(frame) = stream
+                    .message()
+                    .await
+                    .map_err(|status| ranked_rpc_err(&status))?
+                {
+                    collector
+                        .push(frame, &mut *visit)
+                        .map_err(|error| match error {
+                            CollectError::Wire(status) => ranked_rpc_err(&status),
+                            CollectError::Visit(error) => error,
+                        })?;
+                }
+                collector.finish().map_err(|status| ranked_rpc_err(&status))
+            })
+            .await
+            .unwrap_or(Err(ShardError::DeadlineExceeded))
         });
         let outcome = match &result {
             Ok(_) => RpcOutcome::Ok,

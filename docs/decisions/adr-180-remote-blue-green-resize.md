@@ -42,7 +42,9 @@ followed by an explicit completion frame. The export fails loud when:
 
 The client checks frame identity, a stable total, strictly increasing ids, and a completion count
 equal to everything delivered. It never retries a partially consumed stream. It shares the node's
-single snapshot permit with `LiveLogicalIds`. `ClusterEngine::export_live_corpus` dedups replicated
+single snapshot permit with `LiveLogicalIds`. Every send waits for channel capacity no later than
+the deadline and failure delivery never waits, so a stalled reader cannot pin the producer or the
+permit; the client bounds consumption with the same absolute deadline. `ClusterEngine::export_live_corpus` dedups replicated
 rows across positions.
 
 ### Replicated resize intent
@@ -76,7 +78,8 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 `prepare_remote_resize` runs under a shared reference, so reads keep serving the old layout:
 
 1. It validates the cluster: remote, assignment-routed, replication factor 1, no queued partial
-   writes.
+   writes. A committed intent left behind by a failed `Finish` is finished first, after its
+   retired slots are fenced again, when the served layout is exactly the one it committed.
 2. It registers the targets, reserves every participating endpoint in the move ledger, and
    records `Begin`.
 3. It raises a **resize write fence** and briefly takes the mutation barrier exclusively. Every
@@ -86,25 +89,31 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 4. It builds the staged layout with the ordinary remote builder at generation `N + 1`, refusing
    targets that already hold data.
 5. It streams the corpus into the staged layout in byte-bounded, versioned batches placed under
-   the new ring.
-6. It checks each target position's content fingerprint and count against what was loaded, and
-   records `MarkReady`.
+   the new ring. Placement force-accepts, as log replay does, so a stored class-D query survives
+   even when the current admission knob is off.
+6. Each target position attests an error-returning durable checkpoint (`Flush` with the additive
+   `checkpoint` flag, echoed as `checkpointed`). Only then are its content fingerprint and count
+   checked against what was loaded and recorded as `MarkReady`, so evidence never names rows a
+   target restart could lose.
 7. It commits. An ambiguous commit is resolved by reading the committed layout back.
 
 `install_remote_resize` then takes `&mut self` briefly. It swaps the ring, shards, handoff handles,
 metrics, and generation, clears PITs, and lowers the fence. `finish_remote_resize` fences every
 retired slot, so a stale writer fails loud, and records `Finish`.
 
-A failure before the commit aborts the intent and lowers the fence, leaving the old layout serving
-and writable. The targets keep an unrouted staged layout that must be wiped before reuse.
+A failure aborts the intent, and lowers the fence only when the control plane proves the resize did
+not commit: the abort was accepted and the served layout is still the committed one. The old layout
+then keeps serving and is writable, and the targets keep an unrouted staged layout that must be
+wiped before reuse. An unproven outcome keeps writes paused, because consensus may already name the
+new layout; a coordinator restart resolves the recorded intent and routes to the committed layout.
 
 ### Startup
 
 A resolve-only coordinator treats the committed document as the layout of record:
 
 - It connects every node at the committed placement generation. A new
-  `ClusterConfig::remote_placement_generation` threads it into the builder that previously
-  hard-coded the initial generation.
+  `ClusterConfig::remote_placement_generation` threads it into the plain and replicated builders
+  that previously hard-coded the initial generation.
 - It adopts the committed shard count, even when `--shards` differs.
 - Before routing, it aborts an uncommitted intent and finishes a committed one, then logs which
   nodes to wipe or decommission.
@@ -117,6 +126,19 @@ CLI-seeded and static modes still require their CLI topology to match.
 and requires it there. An in-process coordinator rejects `targets`, and other remote topologies
 keep the `501`. The operation ID, precondition, records, and status reads are ADR-179's. `targets`
 is part of the request identity, and the ID's FNV-1a hash is the control-plane intent key.
+
+## Codex review
+
+The first review found seven real issues, all fixed with regression tests; the class-D,
+ambiguous-commit, and stalled-reader fixes were mutation-checked:
+
+- an ambiguous commit reopened writes on the old layout;
+- target durability was unproven before the commit;
+- the staged load re-applied the class-D admission knob;
+- the replicated builder ignored the committed generation;
+- a failed `Finish` blocked every later resize and move;
+- a stalled export reader could pin the server producer and snapshot permit, and the client did not
+  bound stream consumption by its deadline.
 
 ## Alternatives
 

@@ -148,9 +148,11 @@ then runs these steps:
 6. Swap routing.
 7. Fence the old slots so a stale writer fails loud.
 
-A failure before the commit aborts and reopens writes, leaving the targets holding an unrouted layout
-that must be wiped before reuse. After a coordinator crash, startup aborts an uncommitted intent or
-finishes a committed one before serving. Replication factor above 1 is refused. Decommission the old
+Each target must attest a durable checkpoint before its evidence is recorded. A failure before the
+commit aborts and reopens writes, leaving the targets holding an unrouted layout that must be wiped
+before reuse. If the control plane cannot prove the commit did not happen, writes stay paused until
+a coordinator restart resolves the recorded intent. After a coordinator crash, startup aborts an
+uncommitted intent or finishes a committed one before serving. Replication factor above 1 is refused. Decommission the old
 nodes once the resize succeeds.
 
 A static or CLI-seeded remote coordinator returns `501 not_supported_in_cluster_mode` before
