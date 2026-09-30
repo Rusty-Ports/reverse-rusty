@@ -473,8 +473,8 @@ fn grpc_durable_colocated_node_restart_reattaches_all_slots() {
             counts.iter().all(|&c| c > 0),
             "both slots populated: {counts:?}"
         );
-        // Persist both slots to disk so an open_durable restart restores from segments (each slot
-        // seals its memtable into a base segment under its `shard_<id>/`).
+        // Bulk ingestion already recorded each slot's base in its checkpoint sidecar. Flush
+        // exercises memtable materialization; it does not itself advance that restart selector.
         cluster
             .flush()
             .expect("flush both co-located slots to segments");

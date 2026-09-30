@@ -184,6 +184,13 @@ impl ShardService for LegacyOwnershipServer {
         Err(Status::unimplemented("legacy mock"))
     }
 
+    async fn seal(
+        &self,
+        _req: Request<raw::SealRequest>,
+    ) -> Result<Response<raw::SealReply>, Status> {
+        Err(Status::unimplemented("legacy peer has no durable Seal RPC"))
+    }
+
     type FetchSegmentsStream =
         Pin<Box<dyn Stream<Item = Result<raw::FetchSegmentsChunk, Status>> + Send>>;
     async fn fetch_segments(
@@ -429,6 +436,10 @@ fn distributed_top_k_refuses_pre_adr_110_peer() {
         rt.handle(),
     )
     .expect("ADR-109 handshake succeeds");
+    let error = cluster
+        .checkpoint()
+        .expect_err("an unsupported Seal RPC must fail checkpoint");
+    assert!(error.to_string().contains("durable Seal RPC"), "{error}");
     let program = cluster
         .compile_rank_program(&reverse_rusty::RankProgramSpec::default())
         .expect("rank program");

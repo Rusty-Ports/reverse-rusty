@@ -78,36 +78,12 @@ fn grpc_live_handoff_under_sustained_writes() {
     };
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let src_dir = server_dir("ho_src");
-    let tgt_dir = server_dir("ho_tgt");
-    let (src_addr, tgt_addr) = {
-        let _enter = rt.enter();
-        let si = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind src");
-        let sa = si.local_addr().expect("src addr");
-        rt.spawn(
-            ShardServer::pending_durable(
-                Arc::clone(&norm),
-                EngineConfig::default(),
-                src_dir.clone(),
-            )
-            .serve_with_incoming(si),
-        );
-        let ti = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind tgt");
-        let ta = ti.local_addr().expect("tgt addr");
-        rt.spawn(
-            ShardServer::pending_durable(
-                Arc::clone(&norm),
-                EngineConfig::default(),
-                tgt_dir.clone(),
-            )
-            .serve_with_incoming(ti),
-        );
-        (sa, ta)
-    };
-    wait_until_listening(src_addr);
-    wait_until_listening(tgt_addr);
-    let src_ep = format!("http://{src_addr}");
-    let tgt_ep = format!("http://{tgt_addr}");
+    let source = RestartableNode::start(&rt, &norm, "handoff_restart_source");
+    let target = RestartableNode::start(&rt, &norm, "handoff_restart_target");
+    let src_dir = source.dir.clone();
+    let tgt_dir = target.dir.clone();
+    let src_ep = source.endpoint.clone();
+    let tgt_ep = target.endpoint.clone();
 
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
@@ -227,6 +203,28 @@ fn grpc_live_handoff_under_sustained_writes() {
         assert_eq!(
             got, oracle_final[i],
             "post-handoff cluster vs brute(final) on {title:?}"
+        );
+    }
+
+    let target = target.restart(&rt, &norm);
+    let restarted = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        empty_tag_dict(),
+        &cfg,
+        std::slice::from_ref(&target.endpoint),
+        rt.handle(),
+    )
+    .expect("connect restarted recovery target");
+    for (title, expected) in titles.iter().zip(&oracle_final) {
+        let got: HashSet<u64> = restarted
+            .percolate(title)
+            .expect("percolate after target restart")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            &got, expected,
+            "restarted target vs final oracle on {title:?}"
         );
     }
 

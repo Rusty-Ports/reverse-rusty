@@ -46,6 +46,7 @@ mod rebalance;
 mod reconcile;
 mod reconcile_replicated;
 mod recovery;
+mod recovery_checkpoint;
 mod relocation;
 mod replication;
 mod replication_colocation;

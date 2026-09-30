@@ -75,3 +75,10 @@
   cluster-state doc, explicitly NOT the query mutations this log carries), ADR-033 (shared-nothing — local
   segments + per-node durable log, no object store), `src/cluster/{translog,shard,replica,server,remote,coordinator}.rs`,
   `engine/grpc/proto/shard.proto` (`FetchTranslog`/`TranslogEntry`), `tests/cluster_grpc_oracle/`.
+
+## Later outcome — recovery target durability (2026-09-30)
+
+[ADR-181](adr-181-durable-recovery-target-checkpoints.md) closes a gap in the original self-restart
+proof: successful `RecoverFrom` now commits the target checkpoint before publication or reply,
+including a fresh local replay floor when replacing an existing slot. Restart oracles cover the
+recovered base and subsequent tail. The original decision above remains historical.

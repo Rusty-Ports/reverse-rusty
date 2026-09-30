@@ -26,7 +26,7 @@ failure class. "Crash" = the process dies (OOM-kill, SIGKILL, node reboot with t
 | Single-node | volume loss | since the last backup | restore ([`backup-restore.md`](backup-restore.md)) + restart |
 | In-process cluster (`--cluster --data-dir`) | crash | **0** (coordinator log + manifest + per-shard segments; ADR-031/032) | restart + reopen |
 | In-process cluster | volume loss | since the last backup | restore + restart |
-| Remote (Compose/Helm), RF=1 | shard pod crash | **0** (per-shard translog + segments on the volume; ADR-039) | pod restart; reads routing to it `502` meanwhile (fail-loud, ADR-072) |
+| Remote (Compose/Helm), RF=1 | shard pod crash | **0** (per-shard translog + committed segments, including successfully recovered targets; ADR-039/181) | pod restart; reads routing to it `502` meanwhile (fail-loud, ADR-072) |
 | Remote, RF=1 | **shard volume loss** | since the last snapshot **of that shard** | §3.1 below |
 | Remote, RF≥2 | one node lost | **0 for reads** (failover to an in-sync replica, ADR-035); writes need the primary | automatic for reads; replica replacement per [runbook §6](cluster-deployment.md) |
 | Remote | control-plane **minority** loss | 0 (quorum holds; durable Raft, ADR-041) | restart the node; it rejoins |
@@ -124,7 +124,7 @@ shard A's snapshot and shard B's exists in one restored shard and not the other 
 per-query, so the effect is "that query is missing", not corruption). For a consistent **set**,
 quiesce writes (pause the ingest pipeline), snapshot every shard + control volume, then resume —
 the [runbook §7 procedure](cluster-deployment.md) (a stateless coordinator's
-`POST /_checkpoint` cannot seal remote shards and `POST /_backup` returns 400; each node's volume
+`POST /_checkpoint` seals primaries independently and `POST /_backup` returns 400; each node's volume
 is crash-consistent on its own). If you must restore from a non-quiesced set, treat the window
 between the oldest and newest snapshot as lost and replay it from upstream.
 

@@ -5,6 +5,72 @@ use super::*;
 use axum::http::header;
 use tower::ServiceExt;
 
+#[cfg(feature = "distributed")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_reports_remote_primary_seals_and_fails_without_acknowledgement() {
+    let root =
+        std::env::temp_dir().join(format!("rr-remote-checkpoint-api-{}", uuid::Uuid::new_v4()));
+    let norm = Arc::new(Normalizer::default_vocab().expect("vocab"));
+    let config = ClusterConfig {
+        num_shards: 1,
+        ..ClusterConfig::default()
+    };
+    let template = ClusterEngine::build(
+        Normalizer::default_vocab().expect("template vocab"),
+        &config,
+        &seed(),
+    )
+    .expect("frozen dict");
+    let dict = Arc::new(template.dict().clone());
+    let mut tags = reverse_rusty::tagdict::TagDict::new();
+    tags.mark_finalized();
+    let tags = Arc::new(tags);
+    let incoming =
+        tonic::transport::server::TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+    let endpoint = format!("http://{}", incoming.local_addr().expect("address"));
+    let server = reverse_rusty::cluster::ShardServer::pending_durable(
+        Arc::clone(&norm),
+        reverse_rusty::config::EngineConfig::default(),
+        root.clone(),
+    );
+    let task = tokio::spawn(server.serve_with_incoming(incoming));
+    let handle = tokio::runtime::Handle::current();
+    let cluster = tokio::task::spawn_blocking(move || {
+        let cluster =
+            ClusterEngine::connect_remote(norm, dict, tags, &config, &[endpoint], &handle)
+                .expect("remote coordinator");
+        cluster.ingest(&seed()).expect("remote corpus");
+        cluster
+            .add_query(900, "+nike +shoe")
+            .expect("translog mutation");
+        cluster
+    })
+    .await
+    .expect("connect worker");
+    let state = state_from_cluster(cluster);
+    let (status, _, bytes) = send_raw(&state, req_empty("POST", "/_checkpoint")).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+    assert_eq!(body["acknowledged"], true);
+    assert_eq!(body["durable"], false);
+    assert_eq!(body["epoch"], 0);
+    assert_eq!(body["shards_checkpointed"], 1);
+    assert!(body["message"]
+        .as_str()
+        .expect("scope explanation")
+        .contains("remote primary"));
+    let obstruction = root.join("shard_000/shard.ckpt.tmp");
+    std::fs::create_dir(&obstruction).expect("block node checkpoint");
+    let (status, _, bytes) = send_raw(&state, req_empty("POST", "/_checkpoint")).await;
+    assert!(status.is_server_error(), "{status}");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("error JSON");
+    assert_ne!(body["acknowledged"], true);
+    drop(state);
+    task.abort();
+    assert!(task.await.expect_err("cancelled server").is_cancelled());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn durable_state(tag: &str) -> (Arc<ClusterAppState>, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "rr-cluster-checkpoint-api-{tag}-{}",

@@ -120,6 +120,9 @@ pub(super) async fn recover_from(
     request: Request<proto::RecoverFromRequest>,
 ) -> Result<Response<proto::RecoverFromReply>, Status> {
     let req = request.into_inner();
+    // Recovery replaces files and the slot state. Wait for every admitted seal worker,
+    // including detached workers whose RPC caller has already cancelled.
+    let _install = server.coordinator_lease.lock_install().await;
     server.validate_placement_config(
         crate::ownership::PlacementGeneration(req.placement_generation),
         req.num_shards,
@@ -206,6 +209,11 @@ pub(super) async fn recover_from(
         next_seg_id,
     )
     .map_err(|e| Status::internal(format!("attaching recovered segments: {e}")))?;
+    // Attachment replaced both the base and the local translog. The old slot checkpoint no
+    // longer describes them; commit the new selector before publication or acknowledgement.
+    shard
+        .commit_recovered_checkpoint()
+        .map_err(|e| Status::internal(format!("committing recovered checkpoint: {e}")))?;
     let num_queries = shard
         .num_queries()
         .map_err(|e| Status::internal(e.to_string()))? as u64;
@@ -434,6 +442,11 @@ async fn drain_recovery_stream(
         )));
     }
     validate_received(&manifest, &received)?;
+    // File contents were synced before rename. Persist the segment directory entries before
+    // a checkpoint can select them; syncing the slot directory in write_sidecar covers sources.
+    std::fs::File::open(seg_dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| Status::internal(format!("sync recovered segment directory: {e}")))?;
     Ok((
         manifest.segment_files,
         manifest.next_seg_id,

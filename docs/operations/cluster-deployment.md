@@ -286,12 +286,12 @@ flows that need a backup (volume loss, quorum-majority loss, whole-cluster loss)
 
 | Event | What happens | Action |
 |---|---|---|
-| **A shard crashes/restarts** | Durable self-restore from its `--data-dir` (segments + translog, ADR-039); reads that route to it return `502` until it's back. | `rrc restart shardN` (or let `unless-stopped` do it). Matches resume automatically. |
+| **A shard crashes/restarts** | Durable self-restore from its `--data-dir` (segments + translog, ADR-039/181), including a successfully recovered target; reads that route to it return `502` until it's back. | `rrc restart shardN` (or let `unless-stopped` do it). Matches resume automatically. |
 | **Rolling shard restart** | One shard at a time; the others keep serving (reads to the down shard fail loud meanwhile). | `rrc restart shardN` sequentially; wait for `/_health` green between each. |
 | **Coordinator restart** | Reconnects to control first and resolves every durable move intent before route assembly. It then re-mints + re-ships the dict and re-derives placement. A missing quorum or ambiguous recorded endpoint, fence, placement, or evidence fails readiness instead of serving stale routing. A new boot ID can be rejected until the prior renewable owner lease expires (at most 30 seconds after its last admitted owner RPC), then waits for response bodies/streams already admitted under that owner to drain. | Restore control quorum and required shard endpoints, then `rrc restart coordinator`; allow the restart policy to retry and wait for green. No manual pre-restart reassignment is required. |
 | **Control-plane restart** | Each node resumes from its durable Raft log/vote (ADR-041). | Restart control nodes; quorum re-forms. With control wiring on (compose/Helm default), the coordinator's thin client fails **reads** over to a live endpoint meanwhile — but admin **writes** are not retried across endpoints (a committed-but-lost write must not double-apply), so if the coordinator's connected node is the one down, writes fail loud until the coordinator reconnects to a live endpoint (a restart) — even while quorum is otherwise available (ADR-085/086). |
 | **Replica failover** (RF>1) | Reads fail over to an in-sync replica; the primary stays authoritative for writes (ADR-035). | None — automatic. |
-| **Replica replacement** (RF>1) | A replacement reusing the **same durable volume** self-restores from its own segments + translog. A **fresh-volume** replica simply listed in the endpoint group is assembled as *in-sync without recovery* — reads could then serve it empty (silent FN). | Prefer same-volume restart. A fresh replica must complete an explicit peer recovery (`RecoverFrom`, ADR-036) **before** it serves reads — not a plain "start it"; treat fresh-volume replica replacement as a care-needed v1 operation. |
+| **Replica replacement** (RF>1) | A replacement reusing the **same durable volume** self-restores from its own segments + translog. A **fresh-volume** replica simply listed in the endpoint group is assembled as *in-sync without recovery* — reads could then serve it empty (silent FN). | Prefer same-volume restart. A fresh replica must complete explicit peer recovery and tail catch-up (`RecoverFrom`, ADR-036/181) **before** it serves reads. Successful recovery commits the target's restart checkpoint; there is no separate operator-facing peer-recovery REST route. |
 
 The lifecycle invariants above are exercised end-to-end by the multi-process, single-host
 container-network harness ([`deploy/harness.sh`](../../deploy/harness.sh), ADR-072):
@@ -306,9 +306,13 @@ Backup depends on topology, because the durable state lives in different places:
   engine-driven `POST /_backup` — a consistent, self-contained snapshot taken under the engine's write
   lock. This is the path with a real consistency barrier. Full procedure:
   [backup-restore.md](backup-restore.md).
-- **Remote topology** (this compose — the coordinator is **stateless**): `POST /_checkpoint` does
-  not seal the remote shards; its response therefore reports `durable: false` and
-  `shards_checkpointed: 0`. `POST /_backup` returns 400 because the coordinator has no `data_dir`.
+- **Remote topology** (this compose — the coordinator is **stateless**): `POST /_checkpoint` seals
+  each current primary's node-local checkpoint and trims its translog subject to retention leases.
+  Its response reports `durable: false` and the number of primary positions in
+  `shards_checkpointed`: there is no coordinator commit or cross-shard snapshot. Run checkpoints
+  periodically to bound primary translog replay; replicas can be sealed individually through the
+  same authenticated per-slot `Seal` RPC. Upgrade data nodes before the coordinator, since older
+  nodes fail that RPC loudly. `POST /_backup` returns 400 because the coordinator has no `data_dir`.
   The durable state is each node's own `--data-dir` volume (`shardN-data`,
   `controlN-data`), fsync'd by that node per its log policy. **There is no coordinator-driven
   cross-shard consistency barrier in v1**, so for a globally consistent backup you must

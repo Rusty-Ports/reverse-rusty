@@ -43,6 +43,9 @@ service ShardService {
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
   rpc Delete          (DeleteRequest) returns (DeleteReply);
   rpc Flush           (FlushRequest)  returns (FlushReply);
+  // Durable slot commit: seal segments and tombstones, publish shard.ckpt, then trim only the
+  // translog prefix allowed by active retention leases. A pre-Seal peer fails UNIMPLEMENTED.
+  rpc Seal (SealRequest) returns (SealReply);
   // ---- handshake ----
   // Connect-time dict-identity check: the coordinator compares the server's frozen-dict
   // fingerprint to its own and refuses a mismatch (ADR-029).
@@ -482,6 +485,17 @@ message FlushRequest {
   uint32 num_shards = 3;
 }
 message FlushReply   {}
+
+message SealRequest {
+  uint32 shard_id = 1;
+  uint64 placement_generation = 2;
+  uint32 num_shards = 3;
+}
+message SealReply {
+  uint64 up_to_seqno = 1;
+  uint64 placement_generation = 2;
+  uint32 num_shards = 3;
+}
 
 message CountReply       { uint64 count = 1; }            // usize num_queries
 // `counts` stays at EXACTLY 4 ([A, B, C, D]) — a pre-ADR-105 reader hard-errors on any
