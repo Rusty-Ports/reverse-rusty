@@ -2,14 +2,19 @@ use super::*;
 use crate::segment::MatchScratch;
 
 fn scratch_dir() -> std::path::PathBuf {
+    // The clock alone is not unique: parallel tests in one process can read the same (often
+    // microsecond-granular) timestamp and then share a data directory.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "reverse_rusty_clause_migration_ids_{}_{}",
+        "reverse_rusty_clause_migration_ids_{}_{}_{}",
         std::process::id(),
-        nonce
+        nonce,
+        sequence
     ))
 }
 
