@@ -78,8 +78,8 @@ fn grpc_live_handoff_under_sustained_writes() {
     };
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let source = RestartableNode::start(&rt, &norm, "recovery_restart_source");
-    let target = RestartableNode::start(&rt, &norm, "recovery_restart_target");
+    let source = RestartableNode::start(&rt, &norm, "handoff_restart_source");
+    let target = RestartableNode::start(&rt, &norm, "handoff_restart_target");
     let src_dir = source.dir.clone();
     let tgt_dir = target.dir.clone();
     let src_ep = source.endpoint.clone();

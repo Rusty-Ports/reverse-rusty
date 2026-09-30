@@ -34,6 +34,8 @@ sidecar, then trim to the active retention floor. Its reply contains the real lo
 attests the placement generation and shard count. `RemoteShard` rejects mismatched replies and has
 no flush/sentinel fallback. An old peer fails `UNIMPLEMENTED`; roll data nodes before coordinators.
 Mesh authentication and coordinator ownership apply through the existing RPC middleware.
+The seal runs on a blocking worker and completes its commit after RPC cancellation, leaving the
+gRPC runtime available for reads and health checks.
 
 A remote `ClusterEngine::checkpoint` seals each current primary. The REST response keeps
 `durable: false` and epoch zero because the coordinator has no manifest, but reports sealed primary

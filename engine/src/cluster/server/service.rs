@@ -418,11 +418,12 @@ impl ShardService for ShardServer {
         if self.data_dir.is_none() {
             return Err(Status::failed_precondition("Seal requires a durable shard"));
         }
-        let up_to_seqno = self
-            .loaded_slot(req.shard_id)?
-            .1
-            .shard
-            .seal_for_checkpoint()
+        let (_, state) = self.loaded_slot(req.shard_id)?;
+        // Sealing may rewrite the source corpus and wait for filesystem sync. The worker
+        // owns the slot snapshot and completes its commit even if the RPC is cancelled.
+        let up_to_seqno = tokio::task::spawn_blocking(move || state.shard.seal_for_checkpoint())
+            .await
+            .map_err(|e| Status::internal(format!("shard seal worker failed: {e}")))?
             .map_err(|e| Status::internal(format!("sealing shard checkpoint: {e}")))?
             .0;
         Ok(Response::new(proto::SealReply {

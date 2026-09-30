@@ -386,7 +386,9 @@ pub(crate) struct RestartableNode {
 
 impl RestartableNode {
     pub(crate) fn start(rt: &tokio::runtime::Runtime, norm: &Arc<Normalizer>, tag: &str) -> Self {
-        let dir = server_dir(tag);
+        static NEXT_NODE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_NODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = server_dir(&format!("{tag}_{id}"));
         let server =
             ShardServer::pending_durable(Arc::clone(norm), EngineConfig::default(), dir.clone());
         Self::serve(rt, server, dir)
