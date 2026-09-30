@@ -5,8 +5,8 @@
 //!   failures use `ParseError { kind, pos }`, `NormalizerError`, or `IngestReport`
 //! Hot path: no — match path is infallible by construction
 //!
-//! Query parsing is the only fallible step caused by caller input (a malformed
-//! stored-query DSL string), so it gets a real, inspectable error type rather
+//! Query parsing and ingest validation reject malformed or unencodable caller
+//! input, so they get a real, inspectable error type rather
 //! than a `String`. Normalizer construction can fail if the Aho-Corasick
 //! automaton builder rejects the phrase patterns. Both implement
 //! [`std::error::Error`], so they compose with `?`, `Box<dyn Error>`, and
@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-/// A syntax error in a stored-query DSL string.
+/// A syntax or ingest-validation error for a stored query.
 ///
 /// Returned by [`crate::dsl::parse`] and propagated by
 /// [`crate::compile::compile_one`]. Carries the character position where the
@@ -57,6 +57,9 @@ pub enum ParseErrorKind {
     /// `max_tags` ceiling (ADR-049). Rejected loudly rather than truncating the
     /// SoA tag column (which would silently drop a real tag).
     TooManyTags,
+    /// A live durable write carries a tag key or value exceeding the WAL's
+    /// `u16` byte-length encoding. Rejected before I/O without degrading storage.
+    TagFieldTooLong,
     /// A compiled query's required / forbidden / any-of column would overflow the
     /// SoA exact store's `u16` count encoding. The independent parser ceilings bound
     /// the AST, but several AST clauses can flatten into one over-`u16` column (e.g.
@@ -77,6 +80,9 @@ impl ParseErrorKind {
             ParseErrorKind::TooManyClauses => "query has too many clauses",
             ParseErrorKind::AnyOfGroupTooLarge => "any-of group has too many members",
             ParseErrorKind::TooManyTags => "query has too many metadata tags",
+            ParseErrorKind::TagFieldTooLong => {
+                "metadata tag key or value exceeds the WAL's 65535-byte limit"
+            }
             ParseErrorKind::CompiledColumnTooLarge => {
                 "compiled query exceeds the u16 exact-store column limit"
             }
@@ -126,7 +132,7 @@ impl std::error::Error for NormalizerError {}
 /// An error from the live-write path ([`Engine::try_insert_live`](crate::segment::Engine::try_insert_live)).
 ///
 /// A write can fail two ways with very different meanings: the caller's query
-/// DSL was malformed ([`WriteError::Parse`] — a client error), or the mutation
+/// DSL or metadata was invalid ([`WriteError::Parse`] — a client error), or the mutation
 /// could not be appended to the write-ahead log ([`WriteError::Wal`] — a
 /// durability failure). They are kept distinct so the server can map them to
 /// different HTTP statuses (400 vs 503). A `Wal` error means the write was
@@ -134,7 +140,7 @@ impl std::error::Error for NormalizerError {}
 /// acknowledged as success.
 #[derive(Debug)]
 pub enum WriteError {
-    /// The query DSL was malformed. The write never reached the WAL.
+    /// The query DSL or metadata was invalid. The write never reached the WAL.
     Parse(ParseError),
     /// The write-ahead log could not record the mutation, so the mutation was
     /// rejected (not applied to the in-memory state).

@@ -26,6 +26,7 @@ Write paths, segments, WAL and source persistence, compaction, recovery, and dur
 | [138](../adr-138-compaction-api-contract.md) | Compaction REST API contract | Makes native force-all truthful and adds a strict force-merge compatibility subset. | Accepted |
 | [139](../adr-139-backup-api-contract.md) | Backup REST API contract | Makes native backup strict, async-runtime-safe, and no-clobber through verified promotion. | Accepted |
 | [161](../adr-161-checkpoint-api-contract.md) | Checkpoint REST API contract | Makes cluster durability commits strict, supervised, and explicit about nondurable coordinator modes. | Accepted |
+| [182](../adr-182-validated-log-recovery.md) | Validated log recovery | Repairs only incomplete final writes before append, refuses complete corruption/incompatibility, and fences failed append handles. | Accepted |
 
 ---
 

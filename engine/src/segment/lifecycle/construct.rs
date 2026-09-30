@@ -110,7 +110,10 @@ impl Engine {
     /// Create the data directory (and its `segments` subdirectory) and open the
     /// WAL. Returns an error if any filesystem operation fails so callers can
     /// surface loss of durability instead of silently running without a WAL.
-    fn init_data_dir(dir: &std::path::Path, wal_sync_on_write: bool) -> std::io::Result<Wal> {
+    pub(in crate::segment) fn init_data_dir(
+        dir: &std::path::Path,
+        wal_sync_on_write: bool,
+    ) -> std::io::Result<Wal> {
         std::fs::create_dir_all(dir)?;
         std::fs::create_dir_all(dir.join("segments"))?;
         Wal::open(&dir.join("wal.log"), wal_sync_on_write)

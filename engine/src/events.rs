@@ -58,8 +58,9 @@ pub enum DurabilityOp {
     /// Loading persisted query sources at startup failed (`Engine::open`).
     /// Display-only: `_source` is unavailable for recovered queries.
     SourceStoreLoad,
-    /// The WAL tail was corrupt/torn and trailing bytes were skipped during
-    /// recovery. Informational: the torn tail was never acknowledged as durable.
+    /// An incomplete final WAL/translog write or zero padding was removed before
+    /// reopening for append. Informational; complete corrupt or incompatible
+    /// records instead refuse recovery with a typed error.
     WalTornTail,
     /// An ingest batch could not be durably committed and was rolled back
     /// entirely (nothing committed). Data at risk: the caller's batch did not land.

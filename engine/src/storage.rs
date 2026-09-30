@@ -21,6 +21,7 @@ use std::path::{Component, Path};
 
 mod backup;
 mod dict;
+pub(crate) mod framed_log;
 mod manifest;
 mod segment;
 mod sources;
@@ -62,18 +63,37 @@ pub(crate) fn validate_sidecar_basename(name: &str) -> io::Result<()> {
 /// Simple CRC-32 using the standard polynomial. Used for WAL entry integrity;
 /// segment files use atomic rename (write-to-tmp + rename) for integrity.
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
+    let mut crc = Crc32::new();
     for &b in data {
-        crc ^= u32::from(b);
+        crc.update(b);
+    }
+    crc.finish()
+}
+
+/// Incremental form lets recovery recognize a complete payload even when its
+/// length is damaged and an incomplete/padded suffix follows it.
+struct Crc32(u32);
+
+impl Crc32 {
+    fn new() -> Self {
+        Self(0xFFFF_FFFF)
+    }
+
+    #[inline]
+    fn update(&mut self, byte: u8) {
+        self.0 ^= u32::from(byte);
         for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
+            if self.0 & 1 != 0 {
+                self.0 = (self.0 >> 1) ^ 0xEDB8_8320;
             } else {
-                crc >>= 1;
+                self.0 >>= 1;
             }
         }
     }
-    !crc
+
+    fn finish(&self) -> u32 {
+        !self.0
+    }
 }
 
 /// Atomic rename with parent-directory fsync for crash durability.

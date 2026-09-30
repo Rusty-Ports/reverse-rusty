@@ -85,10 +85,17 @@ impl Engine {
             // (the engine came up empty) — voiding ADR-013's recovery contract on
             // exactly the start-empty-and-PUT path a fresh server runs.
             let fresh_wal_path = dir.join("wal.log");
+            // The infallible constructors can expose a degraded in-memory engine
+            // after an initialization error. Fallible open must instead propagate
+            // every WAL validation, repair, sync, and append-handle failure.
+            let mut fresh_config = config.clone();
+            fresh_config.data_dir = None;
             let mut engine = match vocab {
-                Some(v) => Self::with_vocab(v, config).map_err(|e| invalid_input(&e))?,
-                None => Self::with_config(norm, config),
+                Some(v) => Self::with_vocab(v, fresh_config).map_err(|e| invalid_input(&e))?,
+                None => Self::with_config(norm, fresh_config),
             };
+            engine.wal = Some(Self::init_data_dir(dir, config.wal_sync_on_write)?);
+            engine.config = Arc::new(config);
             if fresh_wal_path.exists() {
                 // Watermark 0: with no manifest, nothing is baked anywhere.
                 replay_wal_tail(&mut engine, &fresh_wal_path, 0)?;

@@ -22,6 +22,17 @@ reverse chronological and describe outcomes, not the current architecture or fut
   generation, attests that it connected to exactly that layout, then aborts or finishes a recorded
   intent once it holds exclusive shard claims.
 
+## 2026-09-30 — Validated log recovery before append
+
+- Repair and sync incomplete final WAL, coordinator/translog, and Raft writes before reopening for
+  append, so a later acknowledged mutation remains reachable on the next restart. Retain exact
+  repaired-byte diagnostics for standalone, coordinator, and data-node observers.
+- Refuse complete CRC failures, unknown or malformed payloads, and future WAL headers without
+  changing the original log. Encode each frame before writing and disable later appends after any
+  write/flush/sync failure ([ADR-182](decisions/adr-182-validated-log-recovery.md)).
+- Propagate pre-first-manifest initialization failures from fallible engine open. Reject oversized
+  live WAL tag fields as client errors without degrading storage health or replacing prior queries.
+
 ## 2026-09-30 — Durable peer-recovery targets
 
 - Commit a recovered data node's restart checkpoint before acknowledging recovery, so its copied

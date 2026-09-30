@@ -43,6 +43,15 @@ impl Engine {
         self.observer = None;
     }
 
+    /// LocalShard delivers startup diagnostics after releasing its engine mutex.
+    pub(crate) fn take_recovery_events(&mut self) -> Vec<crate::events::EngineEvent> {
+        std::mem::take(&mut self.pending_events)
+    }
+
+    pub(crate) fn queue_recovery_event(&mut self, event: crate::events::EngineEvent) {
+        self.pending_events.push(event);
+    }
+
     /// Emit an event to the observer (if set). No-op when no observer is registered.
     // The event is built at the call site solely to be emitted, then dropped; taking
     // it by value (vs `&`) costs nothing and keeps every call site free of `&` noise.
