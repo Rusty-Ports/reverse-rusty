@@ -222,7 +222,12 @@ impl ResizeOperations {
             }
         }
         if inner.records.len() >= MAX_RETAINED_RESIZE_OPERATIONS {
-            let Some(oldest_terminal) = inner.records.iter().position(|r| r.state.is_terminal())
+            // A failed record that still holds an uncommitted swap is pinned like an active
+            // one: its ID is the only operation allowed to finish that commit (ADR-179).
+            let Some(oldest_terminal) = inner
+                .records
+                .iter()
+                .position(|r| r.state.is_terminal() && r.uncommitted_generation.is_none())
             else {
                 return ResizeAdmission::Full;
             };

@@ -25,14 +25,15 @@ safe to automate (ADR-179):
   failed attempt had already swapped the serving layout, the retry passes its
   `if_placement_generation` precondition at that operation's own uncommitted generation and
   finishes the commit. When the
-  field is omitted, the server generates an ID and returns it.
+  field is omitted, the server generates an ID and returns it, in error responses after admission
+  as well as on success.
 - `if_placement_generation` is a compare-and-set precondition checked under the exclusive guards
   before the rebuild starts. A mismatch returns `409 placement_generation_mismatch` and changes
   nothing. Read the current value from the last resize response or
   [`GET /_cluster/state`](../observability/cluster-state.md).
 
-Operation records are process-local and bounded to the 64 most recent (active records are never
-evicted). A restart forgets them; use `if_placement_generation` when a retry must stay safe across a
+Operation records are process-local and bounded to the 64 most recent; active records, and failed
+records that still hold an uncommitted swap, are never evicted. A restart forgets them; use `if_placement_generation` when a retry must stay safe across a
 coordinator restart. Progress and outcomes are readable through
 [`GET /_cluster/resize`](resize-operations.md).
 

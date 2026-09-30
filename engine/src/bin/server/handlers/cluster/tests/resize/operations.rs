@@ -366,3 +366,44 @@ async fn a_conditional_operation_heals_its_own_uncommitted_swap() {
         "placement_generation_mismatch",
     );
 }
+
+#[tokio::test]
+async fn a_failure_names_the_generated_operation_so_it_can_heal() {
+    let base = test_state(&seed());
+    let initial = base.cluster.read().control_state().expect("state");
+    drop(base);
+    let state = state_with_control(Box::new(retry::FailResizeProposals {
+        inner: InMemoryControlPlane::new(initial),
+        remaining: AtomicUsize::new(1),
+    }));
+    let before = generation(&state);
+    let (status, failed) = post_json(
+        &state,
+        &format!(r#"{{"num_shards":4,"if_placement_generation":{before}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failed}");
+    assert_eq!(failed["error"]["type"], "control_plane_error");
+    let id = failed["operation_id"]
+        .as_str()
+        .expect("a failed response names its generated operation")
+        .to_string();
+    assert!(id.starts_with("resize-"), "{id}");
+
+    let (status, healed) = post_json(
+        &state,
+        &format!(r#"{{"num_shards":4,"operation_id":"{id}","if_placement_generation":{before}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{healed}");
+    assert_eq!(healed["operation_id"], id.as_str());
+    assert_eq!(
+        state
+            .cluster
+            .read()
+            .control_state()
+            .expect("state")
+            .num_shards,
+        4
+    );
+}

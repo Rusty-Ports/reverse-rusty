@@ -471,6 +471,9 @@ fn finish_cluster_resize_run(
     operation_id: String,
     outcome: ResizeRunOutcome,
 ) -> Response {
+    let rejected = |status: StatusCode, error_type: &str, reason: String| {
+        cluster_resize_operation_rejection(prom, status, error_type, &reason, &operation_id)
+    };
     match outcome {
         ResizeRunOutcome::Succeeded(success) => finish_cluster_resize_response(
             prom,
@@ -487,15 +490,17 @@ fn finish_cluster_resize_run(
             })
             .into_response(),
         ),
-        ResizeRunOutcome::NotStarted => cluster_resize_not_started_timeout(prom),
-        ResizeRunOutcome::Unavailable(reason) => cluster_resize_rejection(
-            prom,
+        ResizeRunOutcome::NotStarted => rejected(
+            StatusCode::REQUEST_TIMEOUT,
+            "resize_timeout",
+            NOT_STARTED_REASON.to_string(),
+        ),
+        ResizeRunOutcome::Unavailable(reason) => rejected(
             StatusCode::SERVICE_UNAVAILABLE,
             "resize_unavailable",
-            reason,
+            reason.to_string(),
         ),
-        ResizeRunOutcome::PreconditionFailed { current } => cluster_resize_rejection(
-            prom,
+        ResizeRunOutcome::PreconditionFailed { current } => rejected(
             StatusCode::CONFLICT,
             "placement_generation_mismatch",
             format!(
@@ -511,25 +516,41 @@ fn finish_cluster_resize_run(
                 status
             };
             let failure = execute::started_failure(&source);
-            cluster_resize_rejection(prom, status, &failure.error_type, failure.reason)
+            rejected(status, &failure.error_type, failure.reason)
         }
-        ResizeRunOutcome::WorkerFailed => cluster_resize_rejection(
-            prom,
+        ResizeRunOutcome::WorkerFailed => rejected(
             StatusCode::INTERNAL_SERVER_ERROR,
             "resize_unavailable",
-            "resize worker failed",
+            "resize worker failed".to_string(),
         ),
     }
 }
 
-fn cluster_resize_not_started_timeout(prom: &PrometheusMetrics) -> Response {
-    cluster_resize_rejection(
+/// A structured error that also names the admitted operation, so a caller that omitted
+/// `operation_id` can still inspect and retry that exact operation (ADR-179).
+fn cluster_resize_operation_rejection(
+    prom: &PrometheusMetrics,
+    status: StatusCode,
+    error_type: &str,
+    reason: &str,
+    operation_id: &str,
+) -> Response {
+    finish_cluster_resize_response(
         prom,
-        StatusCode::REQUEST_TIMEOUT,
-        "resize_timeout",
-        "timed out waiting for resize admission or exclusive cluster access; no resize was started",
+        (
+            status,
+            Json(serde_json::json!({
+                "error": { "type": error_type, "reason": reason },
+                "status": status.as_u16(),
+                "operation_id": operation_id,
+            })),
+        )
+            .into_response(),
     )
 }
+
+const NOT_STARTED_REASON: &str =
+    "timed out waiting for resize admission or exclusive cluster access; no resize was started";
 
 fn cluster_resize_rejection(
     prom: &PrometheusMetrics,

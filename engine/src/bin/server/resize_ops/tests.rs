@@ -181,3 +181,27 @@ fn autoscale_status_serializes_every_verdict_without_duplicate_keys() {
         assert!(value["verdict"].is_string(), "{text}");
     }
 }
+
+#[test]
+fn an_uncommitted_failed_record_is_pinned_against_eviction() {
+    let ops = ResizeOperations::new(false);
+    let pinned = execute(ops.admit(Some("pinned".into()), ResizeOrigin::Autoscaler, 6, Some(3)));
+    ops.mark_failed_uncommitted(&pinned, failure(), 4);
+    for i in 0..(2 * MAX_RETAINED_RESIZE_OPERATIONS) {
+        let id = execute(ops.admit(Some(format!("churn-{i}")), ResizeOrigin::Api, 2, None));
+        ops.mark_not_started(&id, failure());
+    }
+    let record = ops
+        .get("pinned")
+        .expect("an uncommitted swap must stay retryable");
+    assert_eq!(record.uncommitted_generation, Some(4));
+    assert_eq!(
+        execute(ops.admit(Some("pinned".into()), ResizeOrigin::Autoscaler, 6, Some(3))),
+        "pinned"
+    );
+    assert_eq!(
+        ops.get("pinned").expect("retained").uncommitted_generation,
+        Some(4),
+        "re-admission keeps the uncommitted generation for the worker's precondition"
+    );
+}

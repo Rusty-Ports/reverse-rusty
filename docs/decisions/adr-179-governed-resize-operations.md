@@ -52,7 +52,9 @@ records. It never takes the cluster lock. Each record carries an operation ID, o
 (`queued`/`running`/`succeeded`/`failed`/`not_started`), timestamps, and the attested outcome or
 sanitized failure. The dedicated resize worker writes `running` and the terminal state itself, so
 a record completes after an HTTP disconnect or loop abort. Drop guards mark a record
-`not_started` when its caller disappears before dispatch, and `failed` if the worker unwinds.
+`not_started` when its caller disappears before dispatch, and `failed` if the worker unwinds. A
+failed record that still holds an uncommitted swap is pinned against eviction like an active one,
+because only its ID can finish that commit.
 
 `POST /_cluster/resize` adds two optional body fields and two response fields:
 
@@ -67,7 +69,9 @@ a record completes after an HTTP disconnect or loop abort. Drop guards mark a re
   but failed to commit it, the record keeps that `uncommitted_generation`, and a retry of the same
   operation passes its precondition at exactly that generation and target so it can finish its
   own commit. Any other layout change still fails.
-- Responses now include `operation_id` and the attested `placement_generation`.
+- Responses now include `operation_id` and the attested `placement_generation`. Every error after
+  admission also carries `operation_id`, so a caller that let the server generate the ID can still
+  retry the one operation allowed to heal its own swap (codex review).
 
 `GET /_cluster/resize` lists retained operations newest first plus the latest autoscaler
 observation and verdict. `GET /_cluster/resize/{operation_id}` returns one record. Both are
