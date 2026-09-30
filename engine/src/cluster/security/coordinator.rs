@@ -28,7 +28,7 @@ pub(crate) struct CoordinatorLease {
     owner: AtomicU64,
     transition: Mutex<CoordinatorTransition>,
     changed: Notify,
-    install: tokio::sync::Mutex<()>,
+    install: Arc<tokio::sync::Mutex<()>>,
     ttl: Duration,
 }
 
@@ -57,7 +57,7 @@ impl CoordinatorLease {
             owner: AtomicU64::new(0),
             transition: Mutex::new(CoordinatorTransition::default()),
             changed: Notify::new(),
-            install: tokio::sync::Mutex::new(()),
+            install: Arc::new(tokio::sync::Mutex::new(())),
             ttl,
         }
     }
@@ -225,11 +225,18 @@ impl CoordinatorLease {
         self.transition().claimant.map_or(0, |claim| claim.waiters)
     }
 
-    /// Serialize node/slot installation after the ownership transition.
+    /// Serialize node/slot installation and checkpoint workers after the ownership transition.
     /// Same-id retries are authorized concurrently, but they must not both
     /// build and replace one slot around an intervening write.
     pub(crate) async fn lock_install(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.install.lock().await
+    }
+
+    /// A detached blocking seal must retain the same barrier until its disk writes finish,
+    /// even when its RPC future is dropped. Otherwise it can overwrite a replacement slot's
+    /// checkpoint through the old shard's independent engine mutex.
+    pub(crate) async fn lock_install_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.install).lock_owned().await
     }
 }
 

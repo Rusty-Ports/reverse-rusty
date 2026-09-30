@@ -166,6 +166,8 @@ recovery targets without a later seal, verifies base plus add/remove tail, and i
 failure before recovery acknowledgement. The recovery and concurrent handoff corpora also restart
 their targets. Remote checkpoint coverage verifies translog trimming and post-seal restart replay
 (ADR-181); the container harness repeats recall after restarting the recovered handoff target.
+Server unit coverage queues and cancels a seal worker, then re-adopts the slot and checks that
+the subsequent ingest survives reopen and a waiting seal rejects the stale placement stamp.
 
 ## Pressure & soak tests
 

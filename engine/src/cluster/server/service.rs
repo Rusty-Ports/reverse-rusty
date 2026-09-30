@@ -411,6 +411,9 @@ impl ShardService for ShardServer {
         request: Request<proto::SealRequest>,
     ) -> Result<Response<proto::SealReply>, Status> {
         let req = request.into_inner();
+        // Acquire before selecting or validating the state: an earlier replacement may
+        // have changed the slot or placement while this seal was waiting.
+        let install = self.coordinator_lease.lock_install_owned().await;
         self.validate_placement_config(
             crate::ownership::PlacementGeneration(req.placement_generation),
             req.num_shards,
@@ -420,12 +423,16 @@ impl ShardService for ShardServer {
         }
         let (_, state) = self.loaded_slot(req.shard_id)?;
         // Sealing may rewrite the source corpus and wait for filesystem sync. The worker
-        // owns the slot snapshot and completes its commit even if the RPC is cancelled.
-        let up_to_seqno = tokio::task::spawn_blocking(move || state.shard.seal_for_checkpoint())
-            .await
-            .map_err(|e| Status::internal(format!("shard seal worker failed: {e}")))?
-            .map_err(|e| Status::internal(format!("sealing shard checkpoint: {e}")))?
-            .0;
+        // owns the installation barrier as well as the snapshot, so cancellation cannot
+        // let adoption, recovery, or removal race this worker's checkpoint writes.
+        let up_to_seqno = tokio::task::spawn_blocking(move || {
+            let _install = install;
+            state.shard.seal_for_checkpoint()
+        })
+        .await
+        .map_err(|e| Status::internal(format!("shard seal worker failed: {e}")))?
+        .map_err(|e| Status::internal(format!("sealing shard checkpoint: {e}")))?
+        .0;
         Ok(Response::new(proto::SealReply {
             up_to_seqno,
             placement_generation: req.placement_generation,
@@ -539,6 +546,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::DropShardRequest>,
     ) -> Result<Response<proto::DropShardReply>, Status> {
+        let _install = self.coordinator_lease.lock_install().await;
         gc::drop_shard(self, request)
     }
 

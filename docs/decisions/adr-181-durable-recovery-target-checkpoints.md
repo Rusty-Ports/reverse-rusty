@@ -35,7 +35,10 @@ attests the placement generation and shard count. `RemoteShard` rejects mismatch
 no flush/sentinel fallback. An old peer fails `UNIMPLEMENTED`; roll data nodes before coordinators.
 Mesh authentication and coordinator ownership apply through the existing RPC middleware.
 The seal runs on a blocking worker and completes its commit after RPC cancellation, leaving the
-gRPC runtime available for reads and health checks.
+gRPC runtime available for reads and health checks. It retains the node's installation barrier
+until the worker finishes; adoption, recovery, and slot removal wait before replacing its state
+or files. Seals select and validate their slot only after acquiring that barrier. This serializes
+these maintenance operations on a node without adding a barrier to ordinary matching.
 
 A remote `ClusterEngine::checkpoint` seals each current primary. The REST response keeps
 `durable: false` and epoch zero because the coordinator has no manifest, but reports sealed primary
@@ -62,6 +65,9 @@ seal, checks the recovered base plus add/remove tail, and injects sidecar failur
 cannot acknowledge or publish without its commit. A remote checkpoint test checks translog shrink
 and restart replay of subsequent writes. The broad corpus peer-recovery and concurrent handoff
 oracles also restart their targets. The container harness repeats recall checks after target restart.
+A deterministic unit regression queues a seal behind a blocked worker, cancels its RPC, and verifies
+that re-adoption waits and its subsequent acknowledged ingest survives reopen. A waiting seal with
+the old placement stamp is refused after re-adoption.
 
 ADR-039's data-node restart guarantee now covers successful recovery targets. ADR-040's log bound
 requires seals to run; lease release permits reclamation at the next seal, not immediate autonomous

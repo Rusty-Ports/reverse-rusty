@@ -153,7 +153,7 @@ fn grpc_remote_checkpoint_trims_translog_and_replays_later_writes() {
         ..Default::default()
     };
     let lease = rt
-        .block_on(client.retention_lease(lease_request.clone()))
+        .block_on(client.retention_lease(lease_request))
         .expect("pin the source tail before its first write")
         .into_inner();
     cluster.add_query(11, &queries[0].1).expect("logged add");

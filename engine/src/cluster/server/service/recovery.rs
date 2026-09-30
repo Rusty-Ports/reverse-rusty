@@ -120,6 +120,9 @@ pub(super) async fn recover_from(
     request: Request<proto::RecoverFromRequest>,
 ) -> Result<Response<proto::RecoverFromReply>, Status> {
     let req = request.into_inner();
+    // Recovery replaces files and the slot state. Wait for every admitted seal worker,
+    // including detached workers whose RPC caller has already cancelled.
+    let _install = server.coordinator_lease.lock_install().await;
     server.validate_placement_config(
         crate::ownership::PlacementGeneration(req.placement_generation),
         req.num_shards,
