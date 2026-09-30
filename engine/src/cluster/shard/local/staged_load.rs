@@ -19,11 +19,20 @@ impl LocalShard {
         report
     }
 
-    /// Finish a staged load: write the source store once, then the checkpoint sidecar's segment
-    /// registry. Fails when a staged segment, the store, or the sidecar could not be persisted: a
+    /// Finish a staged load: compact to the configured policy, write the source store once, then
+    /// the checkpoint sidecar's segment registry. Fails when a staged segment, the store, or the sidecar could not be persisted: a
     /// restart reopens the slot from its sidecar, so a stale one would silently empty the load.
     pub(crate) fn finish_staged_load(&self) -> Result<(), ShardError> {
         let mut eng = self.lock();
+        // Staged segments are sealed without a memtable flush, the only place the compaction
+        // policy normally runs, so apply it here before the load can be proven: otherwise a large
+        // load would leave every search probing far more segments than `max_segments` allows.
+        // Each merge replaces at least two segments with one, so this ends.
+        let mut merges_left = eng.num_segments();
+        while merges_left > 0 && eng.maybe_compact().is_some() {
+            merges_left -= 1;
+        }
+        Self::publish(&eng, &self.snapshot);
         if !eng.persist_staged_sources() {
             return Err(ShardError::Log(
                 "staged load could not persist its segments and sources".into(),

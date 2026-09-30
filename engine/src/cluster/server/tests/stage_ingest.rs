@@ -240,3 +240,37 @@ async fn staged_jobs_hold_the_install_barrier_and_refuse_a_replaced_slot() {
     assert!(held);
     assert!(!server.coordinator_lease.install_is_held());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_load_compacts_to_the_segment_policy_before_finishing() {
+    let normalizer = norm();
+    let dict = Arc::new(frozen_dict(&["stageneedle"], &normalizer));
+    let config = EngineConfig {
+        memtable_flush_threshold: 3,
+        max_segments: 2,
+        ..EngineConfig::default()
+    };
+    let server = ShardServer::new(normalizer, dict, config);
+    let (client, state) = serve(server).await;
+
+    // Five two-row requests seal three staged segments; with the pre-existing one that is four,
+    // above the two-segment policy, so the finished load must have been compacted.
+    let (sender, reply) = open(&client);
+    for start in [0, 2, 4, 6, 8] {
+        sender.send(batch(0, start..start + 2)).await.expect("send");
+    }
+    drop(sender);
+    let reply = reply.await.expect("join").expect("staged load");
+    assert_eq!(reply.ingested, 10);
+    let snapshot = state.shard.metrics_snapshot();
+    assert!(
+        snapshot.num_segments() <= 2,
+        "{} segments exceed the policy",
+        snapshot.num_segments()
+    );
+    assert_eq!(
+        crate::cluster::shard::Shard::num_queries(&state.shard).expect("count"),
+        10,
+        "compaction keeps every staged row"
+    );
+}

@@ -17,11 +17,13 @@
 //! than guessing.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::cluster::control::{
     normalized_move_endpoint, ClusterState, ClusterStateChange, MoveCommandOutcome, NodeDescriptor,
     NodeId, ResizeCommand, ResizeIntentPhase,
 };
+use crate::cluster::handoff::HandoffShard;
 use crate::cluster::remote::RemoteShard;
 
 use super::{ClusterConfig, ClusterEngine, ShardError};
@@ -63,7 +65,8 @@ pub struct RemoteResizeReport {
 }
 
 /// A committed but not yet installed resize: the staged engine whose shards and ring become the
-/// serving layout.
+/// serving layout. Consensus already names that layout, so dropping this value without installing
+/// it makes the source coordinator stop serving until a restart routes to the committed layout.
 pub struct PreparedRemoteResize {
     operation_id: u64,
     staged: ClusterEngine,
@@ -72,6 +75,24 @@ pub struct PreparedRemoteResize {
     logical_ids: Vec<u64>,
     loaded: u64,
     retired: Vec<(u32, String)>,
+    abandoned: RetiredLayoutGuard,
+}
+
+/// Refuses serving through the source layout's positions when dropped while armed. Only a
+/// successful installation disarms it.
+struct RetiredLayoutGuard {
+    handoffs: Vec<Arc<HandoffShard>>,
+    armed: bool,
+}
+
+impl Drop for RetiredLayoutGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            for handoff in &self.handoffs {
+                handoff.refuse_serving();
+            }
+        }
+    }
 }
 
 /// The old layout after installation, awaiting retirement.
@@ -202,6 +223,10 @@ impl ClusterEngine {
                 .enumerate()
                 .map(|(position, endpoint)| (position as u32, endpoint))
                 .collect(),
+            abandoned: RetiredLayoutGuard {
+                handoffs: self.handoffs.clone(),
+                armed: true,
+            },
         })
     }
 
@@ -219,6 +244,7 @@ impl ClusterEngine {
             logical_ids,
             loaded,
             retired,
+            mut abandoned,
         } = prepared;
         let exported = logical_ids.len() as u64;
         let generation = staged.placement_generation();
@@ -271,6 +297,8 @@ impl ClusterEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.clear_pits();
+        // The committed layout now serves; the retired positions are no longer routed to.
+        abandoned.armed = false;
         self.resize_write_fence.store(false, Ordering::Release);
         Ok(RetiredRemoteLayout {
             operation_id,

@@ -366,3 +366,31 @@ fn grpc_remote_resize_stops_serving_when_a_committed_layout_cannot_be_installed(
         "{write:?}"
     );
 }
+
+#[test]
+fn grpc_remote_resize_stops_serving_when_a_prepared_resize_is_abandoned() {
+    let Fixture {
+        rt: _rt,
+        cluster,
+        targets,
+        ..
+    } = fixture(2);
+    let prepared = cluster
+        .prepare_remote_resize(&RemoteResizeRequest {
+            operation_id: 101,
+            num_shards: 2,
+            targets,
+        })
+        .expect("prepare commits the new layout");
+    cluster
+        .percolate("1994 acme")
+        .expect("reads serve the old layout until installation");
+    // Dropping the committed preparation (for example, a cancelled caller) must not leave the
+    // retired layout answering reads that could miss the committed layout's writes.
+    drop(prepared);
+    let read = cluster.percolate("1994 acme");
+    assert!(
+        matches!(read, Err(ShardError::ControlPlane(_))),
+        "an abandoned committed resize must stop serving: {read:?}"
+    );
+}

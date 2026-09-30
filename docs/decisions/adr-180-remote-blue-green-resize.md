@@ -101,13 +101,14 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
    targets that already hold data.
 5. It streams the corpus into the staged layout, placing byte-bounded, versioned batches under the
    new ring. Each target position receives one client-streaming `StageIngest` call: the target seals
-   segments of its memtable flush threshold as rows arrive and writes its source store and
-   checkpoint sidecar once, when the stream closes. A dropped, unfinished load cancels the call
-   rather than closing it, so a target never persists a partial load as complete. Each segment
-   and finish job holds the node's installation barrier, so a cancelled call's detached worker
-   can never write over a slot that adoption, recovery, or removal replaced. Placement
-   force-accepts, as log replay does, so a stored class-D query survives even when the current
-   admission knob is off; a stored query that no longer parses or places fails the resize.
+   segments of its memtable flush threshold as rows arrive and, when the stream closes, compacts
+   them to its `max_segments` policy and writes its source store and checkpoint sidecar once. A
+   dropped, unfinished load cancels the call rather than closing it, so a target never persists a
+   partial load as complete. Each segment and finish job holds the node's installation barrier, so a
+   cancelled call's detached worker can never write over a slot that adoption, recovery, or removal
+   replaced. Placement force-accepts, as log replay does, so a stored class-D query survives even
+   when the current admission knob is off; a stored query that no longer parses or places fails the
+   resize.
 6. When the current layout is durable (each slot reports it through the additive `durable`
    field on `Flush`), every target position must commit an ADR-181 `Seal`, which a volatile
    target refuses. Only then are its content fingerprint and count checked against what was
@@ -121,7 +122,8 @@ populated shards), swaps the ring, shards, handoff handles, metrics, and generat
 and lowers the fence. `finish_remote_resize` fences every retired slot, so a stale writer fails
 loud, and records `Finish`. If installation fails, the resize has already committed, so the retired
 layout is no longer the layout of record: every position refuses reads and writes until a restart
-routes to the committed layout, exactly as after an unproven commit.
+routes to the committed layout, exactly as after an unproven commit. A committed preparation dropped
+without installation (for example by a cancelled caller) stops serving the same way.
 
 A failure aborts the intent. Only this coordinator's `Commit` can make the new layout the layout of
 record, since startup aborts every uncommitted intent, so a failure before `Commit` is proposed
@@ -251,6 +253,12 @@ The ninth review found that a failed installation (for example a lost control-pl
 after the commit while the old layout kept serving; installation failures now refuse serving too,
 with a mutation-checked regression test.
 
+The tenth review found two more, both fixed with mutation-checked regression tests: dropping a
+committed `PreparedRemoteResize` without installing it left the old layout serving, so an
+abandonment guard now stops serving unless installation disarms it; and a staged load bypassed the
+compaction policy, which only runs on memtable flushes, so a large resize left far more segments
+than `max_segments`; the staged finish now compacts to the policy before the load is proven.
+
 ## Alternatives
 
 - **Stage beside the old layout on the same nodes.** Deferred: it needs per-slot placement
@@ -280,8 +288,9 @@ governor stays in-process, because provisioning target nodes is an external deci
   its deadline while the engine lock is held, for both the id snapshot and page reads.
 - **Staged-load tests** show a stream seals threshold-sized segments (not one per request), loads
   nothing from an empty stream, refuses a second shard id, writes a durable slot's source store
-  only when the stream closes, fails when its checkpoint sidecar cannot be written, and runs each
-  job under the installation barrier, refusing a slot replaced since the stream began.
+  only when the stream closes, compacts to the segment policy without losing rows, fails when its
+  checkpoint sidecar cannot be written, and runs each job under the installation barrier,
+  refusing a slot replaced since the stream began.
 - **Resize-intent state-machine tests** cover:
   - atomic idempotent commit and generation bumps;
   - invalid, co-located, unregistered, and unnormalized intents;
@@ -309,8 +318,8 @@ governor stays in-process, because provisioning target nodes is an external deci
     before `Commit`;
   - a lost `Begin` reply with a failed abort reopens writes, refuses a different operation, and
     lets a retry of the same operation complete;
-  - after an ambiguous commit, or a committed layout that cannot be installed, reads fail loud and
-    a retry cannot reopen writes;
+  - after an ambiguous commit, a committed layout that cannot be installed, or an abandoned
+    committed preparation, reads fail loud and a retry cannot reopen writes;
   - a coordinator attached to populated shards regains exhaustive delivery after the rebuild.
 - **Startup recovery tests.** An uncommitted intent is aborted and the committed one finished.
 - **Handler tests** cover `targets` validation by topology and origin, record the failed remote
