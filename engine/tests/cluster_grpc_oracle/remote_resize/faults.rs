@@ -117,11 +117,12 @@ fn grpc_remote_resize_keeps_writes_paused_when_the_commit_outcome_is_unknown() {
     } = fixture(2);
     let (mut cluster, faults) = Faulty::install(cluster);
     faults.lose_commit_reply.store(true, Ordering::SeqCst);
-    let failed = cluster.resize_remote(&RemoteResizeRequest {
+    let request = RemoteResizeRequest {
         operation_id: 31,
         num_shards: 2,
         targets,
-    });
+    };
+    let failed = cluster.resize_remote(&request);
     assert!(failed.is_err(), "{failed:?}");
     // Consensus may already name the new layout, so writes on the old one must stay refused.
     let write = cluster.add_query(9_600_001, "zzambiguous widget");
@@ -133,6 +134,18 @@ fn grpc_remote_resize_keeps_writes_paused_when_the_commit_outcome_is_unknown() {
     assert!(
         matches!(remove, Err(ShardError::ControlPlane(_))),
         "{remove:?}"
+    );
+
+    // A retry cannot know that outcome either. Once the control plane is reachable again it must
+    // be refused without lowering the fence it did not raise, or writes would land on the old
+    // layout and vanish when startup routes to the committed one.
+    faults.reads_broken.store(false, Ordering::SeqCst);
+    let retried = cluster.resize_remote(&request);
+    assert!(retried.is_err(), "{retried:?}");
+    let write = cluster.add_query(9_600_002, "zzambiguous gadget");
+    assert!(
+        matches!(write, Err(ShardError::ControlPlane(_))),
+        "a retry must not reopen writes after an ambiguous commit: {write:?}"
     );
 }
 

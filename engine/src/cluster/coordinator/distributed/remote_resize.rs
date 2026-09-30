@@ -119,7 +119,7 @@ impl ClusterEngine {
             ShardError::Config("remote resize requires a gRPC-connected cluster".into())
         })?;
         self.validate_remote_resize_request(request)?;
-        self.raise_resize_write_fence();
+        self.raise_resize_write_fence()?;
         on_fenced();
         let commit_proposed = std::cell::Cell::new(false);
         self.begin_and_build(&handle, request, &commit_proposed)
@@ -436,13 +436,30 @@ impl ClusterEngine {
 
     /// Raise the write fence, then take the mutation barrier exclusively so every mutation that
     /// passed the fence check before it was raised has finished applying to the old layout.
-    fn raise_resize_write_fence(&self) {
-        self.resize_write_fence.store(true, Ordering::Release);
+    ///
+    /// Refuses, leaving the fence untouched, when it is already raised: another resize is still
+    /// preparing or awaiting install, or an earlier one failed after proposing `Commit` without
+    /// proof that it did not apply. This attempt did not raise that fence and cannot know its
+    /// outcome, so lowering it on failure could accept writes the committed layout never receives.
+    fn raise_resize_write_fence(&self) -> Result<(), ShardError> {
+        if self
+            .resize_write_fence
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ShardError::ControlPlane(
+                "writes are paused by another remote resize, or by an earlier one whose commit \
+                 outcome is unresolved; wait for it, or restart the coordinator to resolve the \
+                 recorded intent, before resizing again"
+                    .into(),
+            ));
+        }
         drop(
             self.pit_open_barrier
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
+        Ok(())
     }
 
     /// Abort the intent after a failure and decide whether writes may reopen. Only this

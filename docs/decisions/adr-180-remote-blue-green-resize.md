@@ -124,7 +124,8 @@ did not apply: the abort was accepted and the served layout is still the committ
 layout then keeps serving and is writable, and the targets keep an unrouted staged layout that must
 be wiped before reuse. An unproven outcome keeps writes paused, because consensus may already name
 the new layout; a coordinator restart resolves the recorded intent and routes to the committed
-layout.
+layout. Until then every new resize is refused before it touches the fence: it did not raise that
+fence and cannot know the earlier outcome, so it must never lower it.
 
 ### Startup
 
@@ -220,6 +221,11 @@ The sixth review found three more, all fixed with mutation-checked regression te
 - a lost `Begin` reply returned without aborting, stranding a `Preparing` intent that refused even
   a retry of the same operation; any failure before `Commit` now reopens writes, and a retry of
   the same operation aborts its own leftover intent.
+
+The seventh review found that this reopen rule let a retry lower a fence left by an earlier attempt
+whose `Commit` outcome was unproven, accepting writes the committed layout would never receive. A
+resize now refuses to start while any fence is raised, leaving it untouched; the mutation-checked
+regression test retries after an ambiguous commit and shows writes stay paused.
 
 ## Alternatives
 
