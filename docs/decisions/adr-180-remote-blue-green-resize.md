@@ -108,7 +108,9 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 the copy:
 
 1. It validates the request and the cluster: remote, assignment-routed, exclusively owned by this
-   coordinator, replication factor 1, no queued partial writes.
+   coordinator, replication factor 1, no queued partial writes, and live routing naming exactly
+   the committed layout's nodes (after a raw handoff or map-only reassignment they differ, and the
+   export would read nodes that retirement never reaches).
 2. Before any network call, it raises a **resize write fence** and briefly takes the mutation
    barrier exclusively, so every accepted write lands before the export and every later add,
    upsert, remove, bulk load, or resync is refused. A resize that finds the fence already raised
@@ -164,7 +166,9 @@ Before choosing any route, `recover_durable_resize` runs, like durable-move reco
 2. A committed intent is finished.
 3. Every node of the committed layout must serve. A committed resize retires only nodes outside
    its layout, so a retired node inside it was retired by a resize that never committed; its
-   retirement is lifted.
+   retirement is lifted, but only after re-reading, while holding the node's claim, that it is
+   still in the committed layout and no resize is in flight. Positions still on an unseeded
+   genesis placeholder are skipped, so a fresh quorum bootstraps as before.
 
 After assembly, the coordinator attests that the layout it connected to matches the committed
 shard count, placement generation, and each position's primary node, and fails to start
@@ -193,6 +197,11 @@ and it adds the fingerprint check that makes the copy's completeness independent
 exclusivity. A separate cluster of findings (locks held across network calls) traced to a
 pre-existing server-wide hazard, request threads blocking the async runtime on synchronous locks,
 which is tracked outside this ADR.
+
+The first review of the revised design found three more, each fixed with a mutation-checked test:
+startup resolution ran before a fresh quorum was seeded and refused its placeholder assignments;
+the retirement sweep could lift a retirement that a concurrently committed resize had just made;
+and a resize after an uncommitted route change would export from one node and retire another.
 
 ## Alternatives
 

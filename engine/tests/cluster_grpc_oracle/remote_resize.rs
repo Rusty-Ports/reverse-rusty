@@ -490,3 +490,36 @@ fn grpc_remote_resize_restores_logical_id_convergence_for_an_attached_coordinato
     exhaustive(&attached, &titles[0]).expect("exhaustive delivery after the rebuild");
     assert_eq!(matches(&attached, &titles), before);
 }
+
+#[test]
+fn grpc_remote_resize_refuses_routing_that_disagrees_with_the_committed_layout() {
+    let Fixture {
+        rt: _rt,
+        mut cluster,
+        targets,
+        ..
+    } = fixture(2);
+    // A map-only reassignment: the committed map now names another node for position 0 while
+    // live routing still reads the original one. Export would read one node and retirement would
+    // target another, so the resize must refuse before touching either.
+    cluster
+        .reassign_shard(ShardAssignment {
+            position: 0,
+            primary: NodeId(2),
+            replicas: Vec::new(),
+        })
+        .expect("map-only reassignment");
+    let refused = cluster.resize_remote(&RemoteResizeRequest {
+        operation_id: 141,
+        num_shards: 2,
+        targets,
+    });
+    assert!(
+        matches!(&refused, Err(error) if error.to_string().contains("match the committed layout")),
+        "{refused:?}"
+    );
+    cluster
+        .add_query(9_900_141, "zzdisagreeing widget")
+        .expect("nothing was retired and writes stay open");
+    cluster.percolate("1994 acme").expect("reads keep serving");
+}

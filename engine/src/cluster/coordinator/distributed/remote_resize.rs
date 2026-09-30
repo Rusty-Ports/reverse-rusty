@@ -151,19 +151,15 @@ impl ClusterEngine {
         progress: &ResizeProgress,
     ) -> Result<PreparedRemoteResize, ShardError> {
         self.register_resize_targets(&request.targets)?;
+        // The export reads live routing, while fingerprints and retirement target the committed
+        // layout, so both must name the same nodes. An uncommitted route change (a raw handoff
+        // or a map-only reassignment) is refused rather than leaving a live node unretired.
+        self.attest_committed_layout().map_err(|error| {
+            ShardError::ControlPlane(format!(
+                "remote resize requires serving routing to match the committed layout: {error}"
+            ))
+        })?;
         let state = self.control_state()?;
-        if state.num_shards as usize != self.ring.num_shards()
-            || state.placement_generation != self.placement_generation().0
-        {
-            return Err(ShardError::ControlPlane(format!(
-                "remote resize requires serving routing to match the committed layout: serving \
-                 generation {}/{} shards, committed generation {}/{} shards",
-                self.placement_generation().0,
-                self.ring.num_shards(),
-                state.placement_generation,
-                state.num_shards
-            )));
-        }
         let state = self.finish_prior_resize(state, request.operation_id)?;
         let intent = resize_intent(&state, request)?;
         let expected_endpoints = expected_endpoints(&state)?;

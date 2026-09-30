@@ -149,7 +149,7 @@ fn resolve(
             })
         }
         Some(intent) => {
-            for endpoint in layout_endpoints(&state, &intent.expected.assignments)? {
+            for endpoint in layout_endpoints(&state, &intent.expected.assignments, false)? {
                 nodes.claim(&endpoint)?;
             }
             transition(
@@ -164,10 +164,26 @@ fn resolve(
         }
     };
     let state = read_state(control)?;
-    for endpoint in layout_endpoints(&state, &state.assignments)? {
-        if let Some(operation_id) = nodes.claim(&endpoint)?.filter(|&op| op != 0) {
-            nodes.unretire(&endpoint, operation_id)?;
+    for endpoint in layout_endpoints(&state, &state.assignments, true)? {
+        let Some(operation_id) = nodes.claim(&endpoint)?.filter(|&op| op != 0) else {
+            continue;
+        };
+        // Holding the claim, confirm the node still belongs to the committed layout and no resize
+        // is in flight. A resize that committed after the read above legitimately retired the
+        // nodes it left; lifting that would let a stale coordinator serve them again.
+        let now = read_state(control)?;
+        let wanted = normalized_move_endpoint(&endpoint);
+        let still_committed = now.moves.resize.is_none()
+            && layout_endpoints(&now, &now.assignments, true)?
+                .iter()
+                .any(|member| normalized_move_endpoint(member) == wanted);
+        if !still_committed {
+            return Err(ShardError::ControlPlane(format!(
+                "the committed layout changed while startup resolved remote resize; {endpoint} \
+                 stays retired, restart to resolve again"
+            )));
         }
+        nodes.unretire(&endpoint, operation_id)?;
     }
     Ok(recovery)
 }
@@ -193,10 +209,13 @@ fn transition(control: &dyn ControlPlane, command: ResizeCommand) -> Result<(), 
     }
 }
 
-/// Every distinct node endpoint (primaries and replicas) of `assignments`.
+/// Every distinct node endpoint (primaries and replicas) of `assignments`. With
+/// `skip_unaddressed`, positions still on an address-less placeholder (an unseeded genesis
+/// layout) are skipped rather than refused: no such node can have been retired.
 fn layout_endpoints(
     state: &ClusterState,
     assignments: &[ShardAssignment],
+    skip_unaddressed: bool,
 ) -> Result<Vec<String>, ShardError> {
     let mut seen = Vec::<String>::new();
     let mut endpoints = Vec::new();
@@ -204,17 +223,20 @@ fn layout_endpoints(
         for node_id in
             std::iter::once(assignment.primary).chain(assignment.replicas.iter().copied())
         {
-            let endpoint = state
+            let Some(endpoint) = state
                 .nodes
                 .iter()
                 .find(|node| node.id == node_id)
                 .and_then(|node| node.addr.clone())
-                .ok_or_else(|| {
-                    ShardError::ControlPlane(format!(
-                        "position {} is assigned to node {} with no registered endpoint",
-                        assignment.position, node_id.0
-                    ))
-                })?;
+            else {
+                if skip_unaddressed {
+                    continue;
+                }
+                return Err(ShardError::ControlPlane(format!(
+                    "position {} is assigned to node {} with no registered endpoint",
+                    assignment.position, node_id.0
+                )));
+            };
             let normalized = normalized_move_endpoint(&endpoint);
             if !seen.contains(&normalized) {
                 seen.push(normalized);
@@ -247,6 +269,8 @@ mod tests {
         retired: RefCell<HashMap<String, u64>>,
         claimable: bool,
         claims: RefCell<Vec<String>>,
+        /// Runs once, during the first claim.
+        on_claim: RefCell<Option<Box<dyn FnOnce()>>>,
     }
 
     impl FakeNodes {
@@ -260,6 +284,7 @@ mod tests {
                 ),
                 claimable,
                 claims: RefCell::new(Vec::new()),
+                on_claim: RefCell::new(None),
             }
         }
 
@@ -276,6 +301,9 @@ mod tests {
                 ));
             }
             self.claims.borrow_mut().push(endpoint.to_string());
+            if let Some(hook) = self.on_claim.borrow_mut().take() {
+                hook();
+            }
             Ok(Some(self.retired_by(endpoint)))
         }
 
@@ -290,22 +318,8 @@ mod tests {
         }
     }
 
-    fn plane_with_intent(operation_id: u64) -> InMemoryControlPlane {
-        let cp = InMemoryControlPlane::single_node(1, 64, 1);
-        for (id, endpoint) in [(1u64, OLD), (2, NEW)] {
-            cp.propose(ClusterStateChange::AddNode(NodeDescriptor {
-                id: NodeId(id),
-                addr: Some(endpoint.to_string()),
-                role: NodeRole::Data,
-            }))
-            .expect("node");
-        }
-        cp.propose(ClusterStateChange::AssignShard(ShardAssignment {
-            position: 0,
-            primary: NodeId(1),
-            replicas: Vec::new(),
-        }))
-        .expect("assign");
+    /// Record a resize intent moving position 0 from `OLD` to `NEW`.
+    fn begin_intent(cp: &InMemoryControlPlane, operation_id: u64) {
         let state = cp.cluster_state().expect("state");
         let intent = ResizeIntent {
             intent_version: RESIZE_INTENT_VERSION,
@@ -332,6 +346,25 @@ mod tests {
         };
         cp.propose_resize(ResizeCommand::Begin(intent))
             .expect("begin");
+    }
+
+    fn plane_with_intent(operation_id: u64) -> InMemoryControlPlane {
+        let cp = InMemoryControlPlane::single_node(1, 64, 1);
+        for (id, endpoint) in [(1u64, OLD), (2, NEW)] {
+            cp.propose(ClusterStateChange::AddNode(NodeDescriptor {
+                id: NodeId(id),
+                addr: Some(endpoint.to_string()),
+                role: NodeRole::Data,
+            }))
+            .expect("node");
+        }
+        cp.propose(ClusterStateChange::AssignShard(ShardAssignment {
+            position: 0,
+            primary: NodeId(1),
+            replicas: Vec::new(),
+        }))
+        .expect("assign");
+        begin_intent(&cp, operation_id);
         cp
     }
 
@@ -394,6 +427,35 @@ mod tests {
             "the retired layout never serves again"
         );
         assert_eq!(*nodes.claims.borrow(), vec![NEW.to_string()]);
+    }
+
+    #[test]
+    fn an_unseeded_genesis_layout_needs_no_node() {
+        let genesis = InMemoryControlPlane::single_node(3, 64, 1);
+        let nodes = FakeNodes::new(&[], true);
+        assert_eq!(resolve(&genesis, &nodes).expect("bootstrap proceeds"), None);
+        assert!(nodes.claims.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_retirement_committed_during_resolution_is_kept() {
+        // At the first read the retired node is in the committed layout, but a resize commits
+        // before the claim completes: that resize legitimately retired it.
+        let cp = std::sync::Arc::new(plane_with_intent(7));
+        cp.propose_resize(ResizeCommand::Abort { operation_id: 7 })
+            .expect("abort");
+        let nodes = FakeNodes::new(&[(OLD, 8)], true);
+        let racing = std::sync::Arc::clone(&cp);
+        *nodes.on_claim.borrow_mut() = Some(Box::new(move || {
+            begin_intent(&racing, 8);
+            commit(&racing, 8);
+        }));
+        assert!(resolve(&*cp, &nodes).is_err());
+        assert_eq!(
+            nodes.retired_by(OLD),
+            8,
+            "the committed resize's retirement stands"
+        );
     }
 
     #[test]
