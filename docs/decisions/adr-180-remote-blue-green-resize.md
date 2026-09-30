@@ -90,7 +90,9 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
    and alias rebuilds check the fence before asking for exclusive access; queueing for it behind
    the copy would stall every read. The route also returns the single administrative admission
    slot, which health probes share, once it holds the exclusive topology guard that keeps other
-   resizes out, so `/_health` keeps answering while reads continue.
+   resizes out, so `/_health` keeps answering while reads continue. It first takes a dedicated
+   remote-resize permit and holds it through the terminal result, so shutdown still joins the copy
+   and cutover before its cleanup.
 3. It registers the targets, reserves every participating endpoint in the move ledger, and
    records `Begin`. A committed intent left behind by a failed `Finish` is finished first, after
    its retired slots are fenced again, when the served layout is exactly the one it committed; an
@@ -112,8 +114,11 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
    loaded and recorded as `MarkReady`, so evidence never names rows a target restart could lose.
 7. It commits. An ambiguous commit is resolved by reading the committed layout back.
 
-`install_remote_resize` then takes `&mut self` briefly. It swaps the ring, shards, handoff handles,
-metrics, and generation, clears PITs, and lowers the fence. `finish_remote_resize` fences every
+`install_remote_resize` then takes `&mut self` briefly. It installs the exported logical ids as an
+authoritative, converged directory (the new layout was loaded coherently from a fixed snapshot, so
+exhaustive delivery and create-only admission work even when this coordinator had attached to
+populated shards), swaps the ring, shards, handoff handles, metrics, and generation, clears PITs,
+and lowers the fence. `finish_remote_resize` fences every
 retired slot, so a stale writer fails loud, and records `Finish`.
 
 A failure aborts the intent. Only this coordinator's `Commit` can make the new layout the layout of
@@ -123,9 +128,11 @@ leftover intent. After `Commit` was proposed, writes reopen only when the contro
 did not apply: the abort was accepted and the served layout is still the committed one. The old
 layout then keeps serving and is writable, and the targets keep an unrouted staged layout that must
 be wiped before reuse. An unproven outcome keeps writes paused, because consensus may already name
-the new layout; a coordinator restart resolves the recorded intent and routes to the committed
-layout. Until then every new resize is refused before it touches the fence: it did not raise that
-fence and cannot know the earlier outcome, so it must never lower it.
+the new layout, and stops reads too: once this coordinator's target leases lapse, another
+coordinator can serve the new layout and accept writes the old one never sees. A coordinator restart
+resolves the recorded intent and routes to the committed layout. Until then every new resize is
+refused before it touches the fence: it did not raise that fence and cannot know the earlier
+outcome, so it must never lower it.
 
 ### Startup
 
@@ -227,6 +234,17 @@ whose `Commit` outcome was unproven, accepting writes the committed layout would
 resize now refuses to start while any fence is raised, leaving it untouched; the mutation-checked
 regression test retries after an ambiguous commit and shows writes stay paused.
 
+The eighth review found three more, all fixed with mutation-checked regression tests:
+
+- after an unproven `Commit`, the coordinator kept answering reads from the old layout, which
+  could silently miss writes another coordinator accepted on the new one; every position now
+  refuses reads and writes until a restart;
+- returning the administrative slot and the write serializer early removed shutdown's only way
+  to join a detached copy; a dedicated remote-resize permit now covers it;
+- installation kept the old logical-id directory, so a coordinator that had attached to populated
+  shards still refused exhaustive delivery after a complete rebuild; the exported ids are now
+  installed as a converged directory.
+
 ## Alternatives
 
 - **Stage beside the old layout on the same nodes.** Deferred: it needs per-slot placement
@@ -284,9 +302,13 @@ governor stays in-process, because provisioning target nodes is an external deci
   - the fence goes up before the first control-plane call, and writes reopen after a failure
     before `Commit`;
   - a lost `Begin` reply with a failed abort reopens writes, refuses a different operation, and
-    lets a retry of the same operation complete.
+    lets a retry of the same operation complete;
+  - after an ambiguous commit, reads fail loud and a retry cannot reopen writes;
+  - a coordinator attached to populated shards regains exhaustive delivery after the rebuild.
 - **Startup recovery tests.** An uncommitted intent is aborted and the committed one finished.
 - **Handler tests** cover `targets` validation by topology and origin, record the failed remote
-  operation, and show a remote resize returns the administrative slot health probes share.
+  operation, and show a remote resize returns the administrative slot health probes share while
+  holding the permit shutdown joins.
+- **Handoff tests** show a refused position fails reads and writes loud.
 
 **See also:** ADR-043, ADR-078, ADR-086, ADR-175, ADR-176, ADR-179, ADR-181.

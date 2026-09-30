@@ -396,3 +396,90 @@ fn grpc_remote_resize_preserves_admitted_class_d_rows_when_the_knob_is_off() {
         "every stored row, including class D, survives"
     );
 }
+
+#[derive(Default)]
+struct CountingSink {
+    chunks: usize,
+}
+
+impl reverse_rusty::delivery::ChunkSink for CountingSink {
+    fn send_chunk(
+        &mut self,
+        _chunk: &reverse_rusty::delivery::MatchChunk,
+    ) -> Result<(), reverse_rusty::delivery::ChunkSinkError> {
+        self.chunks += 1;
+        Ok(())
+    }
+}
+
+fn exhaustive(cluster: &ClusterEngine, title: &str) -> Result<(), ShardError> {
+    cluster
+        .try_percolate_filtered_all(
+            title,
+            &[],
+            reverse_rusty::QueryScope::WithBroad,
+            None,
+            64,
+            None,
+            &mut CountingSink::default(),
+        )
+        .map(|_| ())
+}
+
+#[test]
+fn grpc_remote_resize_restores_logical_id_convergence_for_an_attached_coordinator() {
+    let Fixture {
+        rt,
+        cluster,
+        targets,
+        queries,
+        titles,
+    } = fixture(2);
+    let committed = cluster.control_state().expect("state");
+    let before = matches(&cluster, &titles);
+    drop(cluster);
+    // A restarted coordinator attaches to the populated layout: membership is enumerable, but
+    // enumeration cannot attest that every cross-shard write converged, so exhaustive delivery
+    // stays refused until the corpus is rebuilt onto fresh shards.
+    let norm = Arc::new(vocab());
+    let blue: Vec<String> = (1..=3u64)
+        .map(|id| {
+            committed
+                .nodes
+                .iter()
+                .find(|node| node.id == NodeId(id))
+                .and_then(|node| node.addr.clone())
+                .expect("blue endpoint")
+        })
+        .collect();
+    let mut attached = ClusterEngine::connect_remote_exclusive(
+        Arc::clone(&norm),
+        frozen_dict_over(&queries, &norm),
+        empty_tag_dict(),
+        &ClusterConfig {
+            num_shards: 3,
+            include_broad: true,
+            ..ClusterConfig::default()
+        },
+        &blue,
+        rt.handle(),
+        0xB1E0_0001,
+    )
+    .expect("attach")
+    .with_control_plane(Box::new(reverse_rusty::cluster::InMemoryControlPlane::new(
+        committed,
+    )));
+    assert!(exhaustive(&attached, &titles[0]).is_err());
+
+    attached
+        .resize_remote(&RemoteResizeRequest {
+            operation_id: 81,
+            num_shards: 2,
+            targets,
+        })
+        .expect("resize");
+    // The rebuilt layout was loaded coherently from a fixed snapshot, so its directory is
+    // authoritative and converged.
+    exhaustive(&attached, &titles[0]).expect("exhaustive delivery after the rebuild");
+    assert_eq!(matches(&attached, &titles), before);
+}

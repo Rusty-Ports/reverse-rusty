@@ -135,6 +135,13 @@ fn grpc_remote_resize_keeps_writes_paused_when_the_commit_outcome_is_unknown() {
         matches!(remove, Err(ShardError::ControlPlane(_))),
         "{remove:?}"
     );
+    // Reads stop too: another coordinator may already serve the committed new layout, so the
+    // old layout's results could silently miss its writes.
+    let read = cluster.percolate("1994 acme");
+    assert!(
+        matches!(read, Err(ShardError::ControlPlane(_))),
+        "reads must fail loud after an ambiguous commit: {read:?}"
+    );
 
     // A retry cannot know that outcome either. Once the control plane is reachable again it must
     // be refused without lowering the fence it did not raise, or writes would land on the old

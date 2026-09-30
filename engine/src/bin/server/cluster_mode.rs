@@ -428,6 +428,7 @@ pub(crate) async fn run(
         reassign_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_REASSIGNS,
         )),
+        remote_resize_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         rebalance_topology: if in_process {
             ClusterRebalanceTopology::InProcess
         } else if resolve_only {
@@ -798,6 +799,17 @@ pub(crate) async fn run(
                     error = %source,
                     "corpus-administration admission closed during cluster shutdown"
                 );
+                None
+            }
+        };
+    // A remote resize returns the corpus-administration slot for health probes once it holds
+    // the topology guard, and releases `write_serial` once its write fence is up; its own
+    // permit covers the copy and cutover through their terminal result.
+    let _remote_resize_shutdown_guard =
+        match quiesce_worker_admission_for_shutdown(&state.remote_resize_permits).await {
+            Ok(guard) => Some(guard),
+            Err(source) => {
+                error!(error = %source, "remote resize admission closed during cluster shutdown");
                 None
             }
         };

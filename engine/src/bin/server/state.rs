@@ -210,6 +210,10 @@ pub(crate) struct ClusterAppState {
     /// worker owns admission through its terminal durable outcome, including
     /// after an HTTP disconnect, and shutdown joins it before cleanup.
     pub(crate) reassign_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// One running remote resize (ADR-180). The worker takes it before returning the corpus
+    /// administration slot that health probes share, and holds it through its terminal result,
+    /// so shutdown joins the copy and cutover before cleanup.
+    pub(crate) remote_resize_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Whether rebalance may commit an advisory map, move from the committed
     /// map, or must refuse because live routing has another authority.
     pub(crate) rebalance_topology: ClusterRebalanceTopology,

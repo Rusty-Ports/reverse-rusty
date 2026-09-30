@@ -16,10 +16,18 @@ use super::{ClusterConfig, ClusterEngine, RemoteResizeRequest, ShardError};
 /// Queries buffered before each staged-layout placement pass.
 const EXPORT_BATCH: usize = 4096;
 
+/// A staged layout that holds the complete exported corpus, proven and committed.
+pub(super) struct StagedBuild {
+    pub(super) staged: ClusterEngine,
+    /// Distinct live logical ids exported, sorted: the new layout's complete membership.
+    pub(super) logical_ids: Vec<u64>,
+    /// Physical rows loaded (replicated rows count once per position).
+    pub(super) loaded: u64,
+}
+
 impl ClusterEngine {
     /// Build the staged layout on the empty targets, stream the live corpus into it, prove each
-    /// position, record `Ready`, and commit. Returns the staged engine, the distinct queries
-    /// exported, and the physical rows loaded.
+    /// position, record `Ready`, and commit.
     pub(super) fn build_and_commit(
         &self,
         handle: &tokio::runtime::Handle,
@@ -28,7 +36,7 @@ impl ClusterEngine {
         target_endpoints: &[String],
         source_durable: bool,
         commit_proposed: &std::cell::Cell<bool>,
-    ) -> Result<(ClusterEngine, u64, u64), ShardError> {
+    ) -> Result<StagedBuild, ShardError> {
         if self.pending_repairs() != 0 {
             return Err(ShardError::ControlPlane(
                 "a partial write was queued before the resize fence; run resync and retry".into(),
@@ -63,7 +71,7 @@ impl ClusterEngine {
             .enumerate()
             .map(|(position, endpoint)| self.slot_client(handle, endpoint, position))
             .collect::<Result<_, _>>()?;
-        let (exported, loaded) = self.load_staged_layout(&staged, &targets)?;
+        let (logical_ids, loaded) = self.load_staged_layout(&staged, &targets)?;
 
         let mut evidence = Vec::with_capacity(targets.len());
         for (position, target) in targets.iter().enumerate() {
@@ -93,17 +101,22 @@ impl ClusterEngine {
         })?;
         commit_proposed.set(true);
         self.commit_resize(request.operation_id, &intent.desired)?;
-        Ok((staged, exported, loaded.iter().sum()))
+        Ok(StagedBuild {
+            staged,
+            logical_ids,
+            loaded: loaded.iter().sum(),
+        })
     }
 
     /// Stream the deduplicated live corpus into the staged layout through one `StageIngest`
     /// stream per target position, so each target seals full-size segments and writes its source
-    /// store once. Returns the distinct queries exported and each position's loaded row count.
+    /// store once. Returns the sorted distinct logical ids exported and each position's loaded row
+    /// count.
     fn load_staged_layout(
         &self,
         staged: &ClusterEngine,
         targets: &[RemoteShard],
-    ) -> Result<(u64, Vec<u64>), ShardError> {
+    ) -> Result<(Vec<u64>, Vec<u64>), ShardError> {
         // Each source position's export may take up to its own export bound; the streams stay
         // open across all of them, plus one more bound to finish.
         let rounds = u32::try_from(self.shards.len())
@@ -116,6 +129,7 @@ impl ClusterEngine {
             .iter()
             .map(|target| target.open_staged_load(deadline))
             .collect();
+        let mut logical_ids = Vec::new();
         let exported = {
             let mut emit = |position: usize, chunk: &[PlacedQuery]| -> Result<(), ShardError> {
                 loads[position].send(chunk)
@@ -123,6 +137,7 @@ impl ClusterEngine {
             let mut batch = Vec::with_capacity(EXPORT_BATCH);
             let mut load_error: Option<ShardError> = None;
             let exported = self.export_live_corpus(&mut |query| {
+                logical_ids.push(query.logical_id);
                 batch.push((query.logical_id, query.version, query.dsl, query.tags));
                 if batch.len() >= EXPORT_BATCH {
                     let placed = staged.place_resize_batch(&batch, &mut emit);
@@ -152,7 +167,14 @@ impl ClusterEngine {
             }
             loaded.push(report.ingested as u64);
         }
-        Ok((exported, loaded))
+        if logical_ids.len() as u64 != exported {
+            return Err(ShardError::Protocol(format!(
+                "the export visited {} queries but reported {exported}",
+                logical_ids.len()
+            )));
+        }
+        logical_ids.sort_unstable();
+        Ok((logical_ids, loaded))
     }
 
     /// Commit, resolving an ambiguous proposal result by reading the committed layout back.

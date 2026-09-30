@@ -326,9 +326,15 @@ fn resize_worker(
     if !targets.is_empty() {
         // A remote copy keeps the old layout serving reads for its whole duration, so it must
         // not hold the single administrative slot that health probes also need. The exclusive
-        // topology guard, held from here to the end, keeps every other resize out instead.
+        // topology guard, held from here to the end, keeps every other resize out instead, and
+        // the remote resize permit (taken first, so shutdown never sees a gap) lets shutdown
+        // join the copy.
+        let Ok(running) = Arc::clone(&state.remote_resize_permits).try_acquire_owned() else {
+            return not_started();
+        };
         drop(permit);
         return super::remote::remote_resize_worker(
+            running,
             state,
             writes,
             gate,

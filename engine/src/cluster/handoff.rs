@@ -47,7 +47,7 @@
 //! [`ClusterState::epoch`]: super::control::ClusterState::epoch
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -78,6 +78,10 @@ pub(crate) struct HandoffShard {
     /// stamp. Read in step 6a only by `ClusterEngine::handoff_generations` (introspection);
     /// consumed for real by step 6b's `execute_handoff`.
     generation: AtomicU64,
+    /// Set when the coordinator can no longer prove this position's layout is the layout of
+    /// record (ADR-180: a remote resize whose `Commit` outcome is unresolved). Every fallible
+    /// call then fails loud instead of answering from a possibly retired layout.
+    refused: AtomicBool,
 }
 
 impl HandoffShard {
@@ -86,6 +90,7 @@ impl HandoffShard {
         HandoffShard {
             current: ArcSwap::from_pointee(initial),
             generation: AtomicU64::new(generation),
+            refused: AtomicBool::new(false),
         }
     }
 
@@ -105,6 +110,25 @@ impl HandoffShard {
     /// reads to fence the demoted owner). Surfaced via `ClusterEngine::handoff_generations`.
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    /// Stop serving through this position until the coordinator restarts (ADR-180). Reads and
+    /// writes fail loud; the endpoint accessors keep reporting the backing so orphan GC never
+    /// treats its slot as unrouted.
+    pub(crate) fn refuse_serving(&self) {
+        self.refused.store(true, Ordering::Release);
+    }
+
+    /// The current backing, unless serving has been refused.
+    fn serving(&self) -> Result<arc_swap::Guard<Arc<Box<dyn Shard>>>, ShardError> {
+        if self.refused.load(Ordering::Acquire) {
+            return Err(ShardError::ControlPlane(
+                "this coordinator stopped serving: a remote resize commit outcome is unresolved; \
+                 restart it to route to the committed layout"
+                    .into(),
+            ));
+        }
+        Ok(self.current.load())
     }
 }
 
@@ -139,8 +163,7 @@ impl Shard for Arc<HandoffShard> {
         include_broad: bool,
         pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        self.current
-            .load()
+        self.serving()?
             .percolate_filtered(title, include_broad, pred)
     }
 
@@ -152,7 +175,7 @@ impl Shard for Arc<HandoffShard> {
         context: &crate::ownership::OwnershipContext,
         current_position: u32,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        self.current.load().percolate_filtered_owned(
+        self.serving()?.percolate_filtered_owned(
             title,
             include_broad,
             pred,
@@ -168,8 +191,7 @@ impl Shard for Arc<HandoffShard> {
         pred: &TagPredicate,
         spec: &crate::rank::CompiledRankSpec,
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
-        self.current
-            .load()
+        self.serving()?
             .percolate_filtered_ranked(title, include_broad, pred, spec)
     }
 
@@ -182,7 +204,7 @@ impl Shard for Arc<HandoffShard> {
         context: &crate::ownership::OwnershipContext,
         current_position: u32,
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
-        self.current.load().percolate_filtered_ranked_owned(
+        self.serving()?.percolate_filtered_ranked_owned(
             title,
             include_broad,
             pred,
@@ -203,7 +225,7 @@ impl Shard for Arc<HandoffShard> {
         current_position: u32,
         deadline: Option<std::time::Instant>,
     ) -> Result<ShardRankedMatch, ShardError> {
-        self.current.load().percolate_top_k_owned(
+        self.serving()?.percolate_top_k_owned(
             title,
             include_broad,
             pred,
@@ -227,7 +249,7 @@ impl Shard for Arc<HandoffShard> {
         deadline: Option<std::time::Instant>,
         sink: &mut dyn crate::delivery::ChunkSink,
     ) -> Result<crate::delivery::ExhaustiveMatchResult, ShardError> {
-        self.current.load().percolate_all_owned(
+        self.serving()?.percolate_all_owned(
             title,
             include_broad,
             pred,
@@ -244,11 +266,11 @@ impl Shard for Arc<HandoffShard> {
     // replaces the backing, so its pins vanish and a mid-cursor page fails
     // typed (PitNotFound → 409 stale) instead of serving the new generation.
     fn open_pit(&self, pit: u64) -> Result<(), ShardError> {
-        self.current.load().open_pit(pit)
+        self.serving()?.open_pit(pit)
     }
 
     fn close_pit(&self, pit: u64) -> Result<(), ShardError> {
-        self.current.load().close_pit(pit)
+        self.serving()?.close_pit(pit)
     }
 
     fn percolate_top_k_owned_pit(
@@ -263,7 +285,7 @@ impl Shard for Arc<HandoffShard> {
         current_position: u32,
         deadline: Option<std::time::Instant>,
     ) -> Result<ShardRankedMatch, ShardError> {
-        self.current.load().percolate_top_k_owned_pit(
+        self.serving()?.percolate_top_k_owned_pit(
             pit,
             title,
             include_broad,
@@ -286,7 +308,7 @@ impl Shard for Arc<HandoffShard> {
         current_position: u32,
         deadline: Option<std::time::Instant>,
     ) -> Result<crate::cluster::shard::ShardBatchRankedMatch, ShardError> {
-        self.current.load().percolate_top_k_batch_owned(
+        self.serving()?.percolate_top_k_batch_owned(
             titles,
             include_broad,
             pred,
@@ -303,17 +325,16 @@ impl Shard for Arc<HandoffShard> {
         max_source_bytes: usize,
         deadline: Option<std::time::Instant>,
     ) -> Result<Vec<FetchedMatch>, ShardError> {
-        self.current
-            .load()
+        self.serving()?
             .fetch_matches(logical_ids, max_source_bytes, deadline)
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {
-        self.current.load().num_queries()
+        self.serving()?.num_queries()
     }
 
     fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
-        self.current.load().live_logical_ids()
+        self.serving()?.live_logical_ids()
     }
 
     fn visit_live_sources(
@@ -321,11 +342,11 @@ impl Shard for Arc<HandoffShard> {
         visit: &mut (dyn FnMut(crate::cluster::live_source_wire::LiveSourceRow) -> Result<(), ShardError>
                   + Send),
     ) -> Result<u64, ShardError> {
-        self.current.load().visit_live_sources(visit)
+        self.serving()?.visit_live_sources(visit)
     }
 
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
-        self.current.load().class_counts()
+        self.serving()?.class_counts()
     }
 
     fn validate_ownership(
@@ -334,8 +355,7 @@ impl Shard for Arc<HandoffShard> {
         generation: crate::ownership::PlacementGeneration,
         num_shards: u32,
     ) -> Result<(), ShardError> {
-        self.current
-            .load()
+        self.serving()?
             .validate_ownership(position, generation, num_shards)
     }
 
@@ -348,22 +368,22 @@ impl Shard for Arc<HandoffShard> {
     }
 
     fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
-        self.current.load().source_of(logical)
+        self.serving()?.source_of(logical)
     }
 
     fn document_of(
         &self,
         logical: u64,
     ) -> Result<Option<crate::storage::StoredSource>, ShardError> {
-        self.current.load().document_of(logical)
+        self.serving()?.document_of(logical)
     }
 
     fn has_live_query(&self, logical: u64) -> Result<bool, ShardError> {
-        self.current.load().has_live_query(logical)
+        self.serving()?.has_live_query(logical)
     }
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
-        self.current.load().ingest_extracted(items)
+        self.serving()?.ingest_extracted(items)
     }
 
     fn insert_extracted_with_tags(
@@ -374,8 +394,7 @@ impl Shard for Arc<HandoffShard> {
         text: &str,
         tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
-        self.current
-            .load()
+        self.serving()?
             .insert_extracted_with_tags(ex, logical, version, text, tags)
     }
 
@@ -388,45 +407,44 @@ impl Shard for Arc<HandoffShard> {
         tags: &[(String, String)],
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<Option<u32>, ShardError> {
-        self.current
-            .load()
+        self.serving()?
             .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
-        self.current.load().delete_by_logical_id(logical)
+        self.serving()?.delete_by_logical_id(logical)
     }
 
     fn flush(&self) -> Result<(), ShardError> {
-        self.current.load().flush()
+        self.serving()?.flush()
     }
 
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
-        self.current.load().seal_for_checkpoint()
+        self.serving()?.seal_for_checkpoint()
     }
 
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
-        self.current.load().segment_filenames()
+        self.serving()?.segment_filenames()
     }
 
     fn next_seg_id(&self) -> Result<u64, ShardError> {
-        self.current.load().next_seg_id()
+        self.serving()?.next_seg_id()
     }
 
     fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
-        self.current.load().translog_tail(from)
+        self.serving()?.translog_tail(from)
     }
 
     fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
-        self.current.load().acquire_retention_lease()
+        self.serving()?.acquire_retention_lease()
     }
 
     fn renew_retention_lease(&self, lease: u64, to: LogPos) -> Result<(), ShardError> {
-        self.current.load().renew_retention_lease(lease, to)
+        self.serving()?.renew_retention_lease(lease, to)
     }
 
     fn release_retention_lease(&self, lease: u64) -> Result<(), ShardError> {
-        self.current.load().release_retention_lease(lease)
+        self.serving()?.release_retention_lease(lease)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -440,7 +458,7 @@ impl Shard for Arc<HandoffShard> {
         replica_dir: &Path,
         max_passes: usize,
     ) -> Result<(), ShardError> {
-        self.current.load().add_recovered_replica(
+        self.serving()?.add_recovered_replica(
             norm,
             dict,
             tag_dict,

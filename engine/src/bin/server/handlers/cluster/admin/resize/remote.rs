@@ -29,6 +29,7 @@ pub(super) fn intent_operation_id(operation_id: &str) -> u64 {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn remote_resize_worker(
+    _running: tokio::sync::OwnedSemaphorePermit,
     state: &ClusterAppState,
     writes: MutexGuard<'_, ()>,
     gate: &Mutex<ResizeStart>,

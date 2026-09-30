@@ -68,7 +68,8 @@ pub struct PreparedRemoteResize {
     operation_id: u64,
     staged: ClusterEngine,
     old_num_shards: usize,
-    exported: u64,
+    /// The new layout's complete membership, installed as the converged logical-id directory.
+    logical_ids: Vec<u64>,
     loaded: u64,
     retired: Vec<(u32, String)>,
 }
@@ -178,7 +179,11 @@ impl ClusterEngine {
                 )));
             }
         }
-        let (staged, exported, loaded) = self.build_and_commit(
+        let load::StagedBuild {
+            staged,
+            logical_ids,
+            loaded,
+        } = self.build_and_commit(
             handle,
             request,
             &intent,
@@ -190,7 +195,7 @@ impl ClusterEngine {
             operation_id: request.operation_id,
             staged,
             old_num_shards: state.num_shards as usize,
-            exported,
+            logical_ids,
             loaded,
             retired: expected_endpoints
                 .into_iter()
@@ -209,10 +214,11 @@ impl ClusterEngine {
             operation_id,
             staged,
             old_num_shards,
-            exported,
+            logical_ids,
             loaded,
             retired,
         } = prepared;
+        let exported = logical_ids.len() as u64;
         let generation = staged.placement_generation();
         let state = self.control_state()?;
         if state.placement_generation != generation.0
@@ -227,6 +233,11 @@ impl ClusterEngine {
                 state.num_shards
             )));
         }
+        // The directory mirrors the rebuilt corpus exactly, as after an in-process rebuild: the new
+        // layout was loaded coherently from a fixed snapshot while writes were fenced, so it
+        // restores create-only admission and exhaustive-delivery convergence even when this
+        // coordinator attached to populated shards without either.
+        self.replace_logical_ids(logical_ids)?;
         self.ring = staged.ring;
         self.shards = staged.shards;
         self.handoffs = staged.handoffs;
@@ -469,7 +480,8 @@ impl ClusterEngine {
     /// the same operation aborts its own leftover intent. Once `Commit` was proposed, writes reopen
     /// only when the control plane proves it did not apply: the abort was accepted and the
     /// committed layout is still the one being served. Otherwise writes stay fenced, because a
-    /// write accepted on the old layout would vanish if consensus already named the new one; a
+    /// write accepted on the old layout would vanish if consensus already named the new one, and
+    /// reads stop too, because another coordinator may already serve the new layout; a
     /// coordinator restart resolves the recorded intent and routes to the committed layout.
     fn fail_resize(
         &self,
@@ -491,11 +503,18 @@ impl ClusterEngine {
         if reopen {
             self.resize_write_fence.store(false, Ordering::Release);
         } else {
+            // Consensus may already name the new layout, and once this coordinator's target
+            // leases lapse another coordinator can serve it and accept writes the old layout
+            // never sees. Reads from the old layout could then silently miss them, so every
+            // position stops serving until a restart routes to the committed layout.
+            for handoff in &self.handoffs {
+                handoff.refuse_serving();
+            }
             self.emit(crate::events::EngineEvent::DurabilityFailure {
                 op: crate::events::DurabilityOp::ReplicaDesync,
                 detail: format!(
-                    "remote resize {operation_id} failed with an unproven outcome; writes stay \
-                     paused until a coordinator restart resolves the recorded intent"
+                    "remote resize {operation_id} failed with an unproven outcome; this \
+                     coordinator stops serving until a restart resolves the recorded intent"
                 ),
                 error: failure.to_string(),
             });

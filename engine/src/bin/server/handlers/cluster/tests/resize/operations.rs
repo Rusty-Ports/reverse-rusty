@@ -447,7 +447,7 @@ fn resolve_only_state(config: &ClusterConfig) -> Arc<ClusterAppState> {
 
 #[cfg(feature = "distributed")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_remote_resize_hands_back_the_admin_slot_health_probes_share() {
+async fn a_remote_resize_frees_health_admission_but_stays_joinable_by_shutdown() {
     let state = resolve_only_state(&ClusterConfig {
         num_shards: 3,
         include_broad: true,
@@ -489,10 +489,18 @@ async fn a_remote_resize_hands_back_the_admin_slot_health_probes_share() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // Shutdown joins detached administration by acquiring its permits, so the copy must still
+    // hold one of its own.
+    assert_eq!(
+        state.remote_resize_permits.available_permits(),
+        0,
+        "shutdown must be able to wait for the running copy"
+    );
     release_sender.send(()).expect("release");
     holder.join().expect("holder");
     let (status, failed) = request.await.expect("request task");
     assert_eq!(status, StatusCode::BAD_REQUEST, "{failed}");
+    assert_eq!(state.remote_resize_permits.available_permits(), 1);
 }
 
 #[cfg(feature = "distributed")]
