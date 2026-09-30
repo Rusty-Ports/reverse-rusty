@@ -1,9 +1,11 @@
 //! Remote blue/green resize worker (ADR-180): prepare under the shared cluster lock so reads keep
-//! serving the old layout, install under a brief exclusive lock, then retire the old slots.
+//! serving the old layout, install under a brief exclusive lock, then retire the old slots. The
+//! REST write serializer is released as soon as the engine's write fence is up, so writers are
+//! refused by the fence instead of blocking runtime workers for the whole copy.
 
 use std::time::Instant;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 
 use reverse_rusty::cluster::{NodeDescriptor, RemoteResizeRequest};
 
@@ -28,6 +30,7 @@ pub(super) fn intent_operation_id(operation_id: &str) -> u64 {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn remote_resize_worker(
     state: &ClusterAppState,
+    writes: MutexGuard<'_, ()>,
     gate: &Mutex<ResizeStart>,
     started_sender: tokio::sync::oneshot::Sender<()>,
     record: &WorkerRecordGuard,
@@ -77,8 +80,11 @@ pub(super) fn remote_resize_worker(
         num_shards,
         targets,
     };
-    // Reads continue on the old layout while the new one is built and committed.
-    let prepared = cluster.prepare_remote_resize(&request);
+    // Reads continue on the old layout while the new one is built and committed. Holding the
+    // write serializer until the fence is up keeps a vocabulary rebuild from queueing for the
+    // exclusive lock behind this copy, which would stall every read; vocabulary handlers check
+    // the fence before asking for that lock.
+    let prepared = cluster.prepare_remote_resize_then(&request, move || drop(writes));
     drop(cluster);
     let result = prepared.and_then(|prepared| {
         // The new layout is committed; the swap itself is brief and cannot be skipped.

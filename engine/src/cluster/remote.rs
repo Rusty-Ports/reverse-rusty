@@ -189,6 +189,7 @@ mod connect;
 mod live_sources;
 mod logical_ids;
 mod shard_impl;
+mod stage_ingest;
 
 #[cfg(test)]
 mod tests;

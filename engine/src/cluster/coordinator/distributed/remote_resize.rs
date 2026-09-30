@@ -17,25 +17,21 @@
 //! than guessing.
 
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use crate::cluster::control::{
     normalized_move_endpoint, ClusterState, ClusterStateChange, MoveCommandOutcome, NodeDescriptor,
-    NodeId, ResizeCommand, ResizeIntent, ResizeIntentPhase, ResizeLayout, ResizePositionEvidence,
+    NodeId, ResizeCommand, ResizeIntentPhase,
 };
 use crate::cluster::remote::RemoteShard;
-use crate::cluster::shard::Shard;
 
 use super::{ClusterConfig, ClusterEngine, ShardError};
 
+mod load;
 mod plan;
 mod recovery;
 
 use plan::{expected_endpoints, member_endpoint, resize_intent};
 pub use recovery::{recover_durable_resize, ResizeRecovery};
-
-/// Queries buffered before each staged-layout load call.
-const EXPORT_BATCH: usize = 4096;
 
 /// One remote resize request.
 #[derive(Clone, Debug)]
@@ -105,6 +101,19 @@ impl ClusterEngine {
         &self,
         request: &RemoteResizeRequest,
     ) -> Result<PreparedRemoteResize, ShardError> {
+        self.prepare_remote_resize_then(request, || {})
+    }
+
+    /// [`Self::prepare_remote_resize`], running `on_fenced` once the write fence is raised and
+    /// every in-flight mutation has drained, before the copy starts. A server passes a closure
+    /// that releases its own write serialization, so queued writers are refused by the fence
+    /// instead of waiting out the copy. `on_fenced` does not run when the resize fails before
+    /// the fence is raised.
+    pub fn prepare_remote_resize_then(
+        &self,
+        request: &RemoteResizeRequest,
+        on_fenced: impl FnOnce(),
+    ) -> Result<PreparedRemoteResize, ShardError> {
         let handle = self.handle.clone().ok_or_else(|| {
             ShardError::Config("remote resize requires a gRPC-connected cluster".into())
         })?;
@@ -152,6 +161,7 @@ impl ClusterEngine {
             }
         }
         self.raise_resize_write_fence();
+        on_fenced();
         match self.build_and_commit(&handle, request, &intent, &target_endpoints, source_durable) {
             Ok((staged, exported, loaded)) => Ok(PreparedRemoteResize {
                 operation_id: request.operation_id,
@@ -331,6 +341,15 @@ impl ClusterEngine {
                 "remote resize requires a remote, assignment-routed cluster".into(),
             ));
         }
+        // The write fence only pauses this coordinator's writers. Exclusive shard claims keep
+        // every other coordinator off the source slots, so nothing can land after the export.
+        if self.coordinator_id.is_none() {
+            return Err(ShardError::Config(
+                "remote resize requires an exclusive coordinator (connect_remote_exclusive); a \
+                 shared coordinator cannot keep other writers off the source slots"
+                    .into(),
+            ));
+        }
         if self.pending_repairs() != 0 {
             return Err(ShardError::ControlPlane(
                 "remote resize requires every queued partial write to be repaired first; run \
@@ -425,105 +444,6 @@ impl ClusterEngine {
         failure
     }
 
-    fn build_and_commit(
-        &self,
-        handle: &tokio::runtime::Handle,
-        request: &RemoteResizeRequest,
-        intent: &ResizeIntent,
-        target_endpoints: &[String],
-        source_durable: bool,
-    ) -> Result<(ClusterEngine, u64, u64), ShardError> {
-        if self.pending_repairs() != 0 {
-            return Err(ShardError::ControlPlane(
-                "a partial write was queued before the resize fence; run resync and retry".into(),
-            ));
-        }
-        let config = ClusterConfig {
-            num_shards: request.num_shards,
-            vnodes: self.vnodes,
-            replication_factor: 1,
-            per_shard: self.per_shard.clone(),
-            include_broad: self.include_broad,
-            remote_placement_generation: intent.desired.placement_generation,
-            ..ClusterConfig::default()
-        };
-        let staged = Self::connect_remote_with_security_mode(
-            Arc::clone(&self.norm),
-            Arc::clone(&self.dict),
-            Arc::clone(&self.tag_dict),
-            &config,
-            target_endpoints,
-            handle,
-            self.client_security.clone(),
-            self.coordinator_id,
-        )?;
-        if staged.num_queries()? != 0 {
-            return Err(ShardError::Config(
-                "remote resize targets must be empty; wipe their data directories and retry".into(),
-            ));
-        }
-
-        let mut loaded = vec![0u64; request.num_shards];
-        let mut batch = Vec::with_capacity(EXPORT_BATCH);
-        let mut load_error: Option<ShardError> = None;
-        let exported = self.export_live_corpus(&mut |query| {
-            batch.push((query.logical_id, query.version, query.dsl, query.tags));
-            if batch.len() >= EXPORT_BATCH {
-                let result = staged.load_resize_batch(&batch, &mut loaded);
-                batch.clear();
-                if let Err(error) = result {
-                    load_error = Some(error);
-                    return Err(ShardError::Protocol("staged layout load failed".into()));
-                }
-            }
-            Ok(())
-        });
-        if let Some(error) = load_error {
-            return Err(error);
-        }
-        let exported = exported?;
-        staged.load_resize_batch(&batch, &mut loaded)?;
-
-        let mut evidence = Vec::with_capacity(request.num_shards);
-        for (position, endpoint) in target_endpoints.iter().enumerate() {
-            let client = RemoteShard::connect_for_coordinator_with_security(
-                endpoint,
-                handle.clone(),
-                self.dict.fingerprint(),
-                self.tag_dict.fingerprint(),
-                position as u32,
-                self.coordinator_id,
-                &self.client_security,
-            )?;
-            // Prove the loaded rows survive a target restart before they can become the layout
-            // of record: a durable `Seal` (ADR-181) commits segments, sources, and the sidecar,
-            // and a volatile target refuses it. A volatile source layout has nothing to prove.
-            if source_durable {
-                client.seal_for_checkpoint()?;
-            }
-            let (fingerprint_lo, fingerprint_hi, live_count) = client.content_fingerprint()?;
-            if live_count != loaded[position] {
-                return Err(ShardError::Protocol(format!(
-                    "staged position {position} holds {live_count} rows but {} were loaded",
-                    loaded[position]
-                )));
-            }
-            evidence.push(ResizePositionEvidence {
-                position: position as u32,
-                fingerprint_lo,
-                fingerprint_hi,
-                live_count,
-            });
-        }
-        self.expect_resize_outcome(ResizeCommand::MarkReady {
-            operation_id: request.operation_id,
-            evidence,
-        })?;
-        self.commit_resize(request.operation_id, &intent.desired)?;
-        let loaded_total = loaded.iter().sum();
-        Ok((staged, exported, loaded_total))
-    }
-
     fn expect_resize_outcome(&self, command: ResizeCommand) -> Result<(), ShardError> {
         match self.propose_resize(command)? {
             MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => Ok(()),
@@ -531,53 +451,6 @@ impl ClusterEngine {
                 "remote resize transition was refused ({outcome:?})"
             ))),
         }
-    }
-
-    /// Commit, resolving an ambiguous proposal result by reading the committed layout back.
-    fn commit_resize(&self, operation_id: u64, desired: &ResizeLayout) -> Result<(), ShardError> {
-        let proposed = self.propose_resize(ResizeCommand::Commit { operation_id });
-        if matches!(
-            proposed,
-            Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
-        ) {
-            return Ok(());
-        }
-        let state = self.control_state()?;
-        if state.num_shards == desired.num_shards
-            && state.placement_generation == desired.placement_generation
-            && state.assignments == desired.assignments
-        {
-            return Ok(());
-        }
-        Err(match proposed {
-            Ok(outcome) => {
-                ShardError::ControlPlane(format!("remote resize commit was refused ({outcome:?})"))
-            }
-            Err(error) => error,
-        })
-    }
-
-    /// Whether any slot of the current layout persists to disk.
-    fn layout_is_durable(
-        &self,
-        handle: &tokio::runtime::Handle,
-        endpoints: &[String],
-    ) -> Result<bool, ShardError> {
-        for (position, endpoint) in endpoints.iter().enumerate() {
-            let client = RemoteShard::connect_for_coordinator_with_security(
-                endpoint,
-                handle.clone(),
-                self.dict.fingerprint(),
-                self.tag_dict.fingerprint(),
-                position as u32,
-                self.coordinator_id,
-                &self.client_security,
-            )?;
-            if client.is_durable()? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     fn fence_retired_slot(

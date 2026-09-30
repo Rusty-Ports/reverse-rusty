@@ -140,7 +140,7 @@ fn produce(
             ));
         }
         let documents = shard
-            .live_source_page(page)
+            .live_source_page(page, deadline)
             .map_err(|error| read_status(&error))?;
         for (logical_id, dsl, version, _, raw_tags, _, _, _) in documents {
             let item = proto::LiveSource {

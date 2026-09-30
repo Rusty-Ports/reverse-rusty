@@ -140,16 +140,6 @@ impl Engine {
         duplicate
     }
 
-    /// Sorted distinct logical ids with at least one live exact row: the fixed snapshot a
-    /// remote resize export pages through (ADR-180). Index-side, so a live row whose source
-    /// is missing is still listed and fails its document fetch instead of vanishing.
-    #[cfg(feature = "distributed")]
-    pub(crate) fn live_exact_logical_ids_sorted(&self) -> Vec<u64> {
-        let mut ids: Vec<u64> = self.live_exact_logical_ids().into_iter().collect();
-        ids.sort_unstable();
-        ids
-    }
-
     /// One live source document by logical id, with the same integrity checks as
     /// [`Self::live_source_documents_tagged`]. `Ok(None)` means `logical` has no live exact row
     /// now; `Err(logical)` means its source is missing or disagrees with the exact row.

@@ -44,6 +44,10 @@ service ShardService {
   rpc LiveSources (LiveSourcesRequest) returns (stream LiveSourcesFrame);
   // ---- writes ----
   rpc IngestExtracted (IngestRequest) returns (IngestReply);
+  // Remote resize load (ADR-180): stream a fresh slot's corpus as bounded requests for one
+  // shard. The shard seals memtable-threshold-sized segments as rows arrive and writes its
+  // source store and checkpoint sidecar once, when the client closes the stream.
+  rpc StageIngest (stream IngestRequest) returns (IngestReply);
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
   rpc Delete          (DeleteRequest) returns (DeleteReply);
   rpc Flush           (FlushRequest)  returns (FlushReply);

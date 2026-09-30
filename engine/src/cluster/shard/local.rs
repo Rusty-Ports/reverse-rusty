@@ -76,3 +76,5 @@ mod mutations;
 mod open;
 mod ranked;
 mod shard_impl;
+#[cfg(feature = "distributed")]
+mod staged_load;

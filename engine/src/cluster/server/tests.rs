@@ -144,3 +144,4 @@ mod limits;
 mod live_sources;
 mod logical_ids;
 mod seal;
+mod stage_ingest;

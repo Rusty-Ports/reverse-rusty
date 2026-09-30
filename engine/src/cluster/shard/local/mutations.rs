@@ -96,7 +96,7 @@ impl LocalShard {
     /// update is surfaced as a [`DurabilityFailure`](crate::events::EngineEvent)
     /// (data-at-risk: a self-restart before the next successful seal would miss
     /// the bulk) rather than failing the infallible build-path ingest.
-    fn refresh_sidecar_segments(&self, eng: &Engine) {
+    pub(super) fn refresh_sidecar_segments(&self, eng: &Engine) {
         let Some(dir) = &self.data_dir else { return };
         let emit_fail = |detail: String, error: String| {
             self.emit(&crate::events::EngineEvent::DurabilityFailure {

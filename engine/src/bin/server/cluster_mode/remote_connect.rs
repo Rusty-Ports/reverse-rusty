@@ -266,6 +266,11 @@ pub(crate) fn connect_remote_cluster(
         ),
         None => {}
     }
+    // The topology was read before connecting; another coordinator could have committed a new
+    // layout since. An assignment-routed coordinator serves only the committed layout.
+    if route_by_assignments {
+        cluster.attest_committed_layout()?;
+    }
 
     if !queries.is_empty() {
         match cluster.num_queries()? {

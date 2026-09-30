@@ -31,8 +31,9 @@ addressing stay unchanged.
 ### Corpus export
 
 A new `LiveSources` streaming RPC exports one slot's live corpus. The server snapshots the sorted
-live logical ids under the engine lock. It then fetches documents (source, stored version, raw tags)
-in pages of 256 under short lock holds, and sends byte-capped frames through a bounded channel
+live logical ids from the index rows; the lock wait, scan, and sort all observe the export deadline.
+It then fetches documents (source, stored version, raw tags) in pages of 256 under short lock holds,
+each lock wait also bounded by the deadline, and sends byte-capped frames through a bounded channel
 followed by an explicit completion frame. The export fails loud when:
 
 - a document disappears or its source disagrees with its exact row;
@@ -77,20 +78,29 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 
 `prepare_remote_resize` runs under a shared reference, so reads keep serving the old layout:
 
-1. It validates the cluster: remote, assignment-routed, replication factor 1, no queued partial
-   writes. A committed intent left behind by a failed `Finish` is finished first, after its
-   retired slots are fenced again, when the served layout is exactly the one it committed.
+1. It validates the cluster: remote, assignment-routed, exclusively owned by this coordinator,
+   replication factor 1, no queued partial writes. Exclusive shard claims keep every other
+   coordinator off the source slots, which the local write fence alone cannot. A committed intent
+   left behind by a failed `Finish` is finished first, after its retired slots are fenced again,
+   when the served layout is exactly the one it committed.
 2. It registers the targets, reserves every participating endpoint in the move ledger, and
    records `Begin`.
 3. It raises a **resize write fence** and briefly takes the mutation barrier exclusively. Every
    mutation checks the fence under that barrier, so each accepted write lands before the export,
-   and every later add, upsert, remove, bulk load, or resync is refused. The HTTP route also holds
-   the REST write serializer.
+   and every later add, upsert, remove, bulk load, or resync is refused. The HTTP route holds the
+   REST write serializer until the fence is up, then releases it, so queued writers are refused
+   at once instead of blocking runtime workers for the whole copy. Vocabulary and alias rebuilds
+   check the fence before asking for exclusive access; queueing for it behind the copy would stall
+   every read.
 4. It builds the staged layout with the ordinary remote builder at generation `N + 1`, refusing
    targets that already hold data.
-5. It streams the corpus into the staged layout in byte-bounded, versioned batches placed under
-   the new ring. Placement force-accepts, as log replay does, so a stored class-D query survives
-   even when the current admission knob is off.
+5. It streams the corpus into the staged layout, placing byte-bounded, versioned batches under the
+   new ring. Each target position receives one client-streaming `StageIngest` call: the target seals
+   segments of its memtable flush threshold as rows arrive and writes its source store and
+   checkpoint sidecar once, when the stream closes. A dropped, unfinished load cancels the call
+   rather than closing it, so a target never persists a partial load as complete. Placement
+   force-accepts, as log replay does, so a stored class-D query survives even when the current
+   admission knob is off; a stored query that no longer parses or places fails the resize.
 6. When the current layout is durable (each slot reports it through the additive `durable`
    field on `Flush`), every target position must commit an ADR-181 `Seal`, which a volatile
    target refuses. Only then are its content fingerprint and count checked against what was
@@ -119,6 +129,10 @@ A resolve-only coordinator treats the committed document as the layout of record
   finishes a committed one, then logs which nodes to wipe or decommission. Claiming first means a
   live coordinator still running the resize makes this startup fail to connect instead of having
   its resize aborted.
+- Before resolving an intent, and before serving at all, it attests that the layout it connected
+  to matches the committed shard count, placement generation, and each position's primary node.
+  A coordinator that read the topology just before another coordinator committed fails to start
+  instead of finishing the intent and serving the retired layout.
 
 CLI-seeded and static modes still require their CLI topology to match.
 
@@ -158,6 +172,20 @@ The second review found six more, all fixed:
 - the export did not reclaim a restarted source's coordinator lease; opening the stream (never
   consuming it) is now retried once after a reclaim.
 
+The third review found five more, all fixed with regression tests; the attestation, exclusivity,
+fence-ordering, and staged-load fixes were mutation-checked:
+
+- startup could finish a committed intent while serving the layout it retired; it now attests
+  the served layout first;
+- a shared (non-exclusive) coordinator could resize while another coordinator still wrote to the
+  source slots; resize now requires exclusive ownership;
+- the HTTP route held the REST write serializer for the whole copy, pinning runtime workers of
+  every queued writer; it is released once the fence is up;
+- every load batch rewrote the target's whole source store and added a small segment; the load is
+  now one `StageIngest` stream per target with full-size segments and a single store write;
+- the export's id snapshot and page reads waited on the engine lock without a deadline; every lock
+  wait and the snapshot sort now observe it.
+
 ## Alternatives
 
 - **Stage beside the old layout on the same nodes.** Deferred: it needs per-slot placement
@@ -183,7 +211,11 @@ governor stays in-process, because provisioning target nodes is an external deci
 ## Proof
 
 - **Wire tests** cover the export collector: completion, ordering, count, limit, identity, and
-  visitor refusal.
+  visitor refusal. Shard tests show the export snapshot collapses duplicate rows and gives up at
+  its deadline while the engine lock is held, for both the id snapshot and page reads.
+- **Staged-load tests** show a stream seals threshold-sized segments (not one per request), loads
+  nothing from an empty stream, refuses a second shard id, and writes a durable slot's source store
+  only when the stream closes.
 - **Resize-intent state-machine tests** cover:
   - atomic idempotent commit and generation bumps;
   - invalid, co-located, unregistered, and unnormalized intents;
@@ -202,7 +234,11 @@ governor stays in-process, because provisioning target nodes is an external deci
   - the export count is exact after the cutover;
   - every write kind is refused between prepare and install;
   - a co-located target, and a retired node that still holds data, are refused cleanly: nothing is
-    committed, the intent is aborted, and writes stay open.
+    committed, the intent is aborted, and writes stay open;
+  - the fenced callback runs only once writes are refused, and the fence check vocabulary rebuilds
+    rely on fails until install;
+  - a shared coordinator is refused;
+  - a coordinator that still serves the retired layout refuses to resolve the committed intent.
 - **Startup recovery tests.** An uncommitted intent is aborted and the committed one finished.
 - **Handler tests** cover `targets` validation by topology and record the failed remote
   operation.

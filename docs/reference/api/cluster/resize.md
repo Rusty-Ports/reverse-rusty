@@ -139,9 +139,12 @@ new layout goes to `targets[p % len(targets)]`, and unknown target ids are regis
 then runs these steps:
 
 1. Record a durable resize intent.
-2. Pause writes: adds, upserts, removes, and repair are refused with `503` while reads keep serving
-   the old layout.
-3. Copy the live corpus onto the targets under the new ring.
+2. Pause writes: adds, upserts, removes, repair, and vocabulary or alias changes are refused with
+   `503` while reads keep serving the old layout. A write request is refused immediately rather
+   than queued behind the copy.
+3. Copy the live corpus onto the targets under the new ring. Each target receives one stream, seals
+   segments of the memtable flush size, and writes its source store once at the end. A stored query
+   that no longer parses or places fails the resize instead of being left out.
 4. Prove each new position's content fingerprint and count.
 5. Commit the new shard count, placement generation, and assignments in one control-plane
    transition.
@@ -159,7 +162,10 @@ failed response is therefore not proof that nothing committed: before wiping the
 decommissioning the old nodes, confirm in [`GET /_cluster/state`](../observability/cluster-state.md)
 which layout `num_shards`, `placement_generation`, and the assignments name. Startup resolves a
 recorded intent only after the coordinator has exclusively claimed its shards, so it cannot abort a
-resize that another live coordinator is still running. Replication factor above 1 is refused.
+resize that another live coordinator is still running. It also checks that the layout it connected
+to (shard count, placement generation, and each position's node) is the committed one, and fails
+to start otherwise, so a coordinator that read the topology just before another coordinator's commit
+never serves the retired layout. Replication factor above 1 is refused.
 Decommission the old nodes once the resize succeeds.
 
 A static or CLI-seeded remote coordinator returns `501 not_supported_in_cluster_mode` before

@@ -13,12 +13,14 @@ reverse chronological and describe outcomes, not the current architecture or fut
 
 - Resize a resolve-only remote cluster online: `POST /_cluster/resize` with `targets` builds the new
   layout on fresh shard servers, pauses writes while reads keep serving, streams the deduplicated
-  corpus through the new bounded `LiveSources` export RPC, proves each new position's fingerprint,
+  corpus through the new bounded `LiveSources` export RPC into one `StageIngest` load stream per
+  target (full-size segments, one source-store write), proves each new position's fingerprint,
   commits the shard count, placement generation, and assignments in one control-plane transition,
   swaps routing, and fences the retired slots ([ADR-180](decisions/adr-180-remote-blue-green-resize.md)).
 - Record the transition as a replicated, idempotent resize intent behind a one-way control format 5
   and `RRL5` log header. Resolve-only startup adopts the committed shard count and placement
-  generation, then aborts or finishes a recorded intent once it holds exclusive shard claims.
+  generation, attests that it connected to exactly that layout, then aborts or finishes a recorded
+  intent once it holds exclusive shard claims.
 
 ## 2026-09-30 — Durable peer-recovery targets
 

@@ -1,6 +1,9 @@
 //! Coordinator-startup resolution of a recorded remote-resize intent (ADR-180).
 
-use crate::cluster::control::{MoveCommandOutcome, ResizeCommand, ResizeIntentPhase};
+use crate::cluster::control::{
+    normalized_move_endpoint, ClusterState, ControlPlane, MoveCommandOutcome, ResizeCommand,
+    ResizeIntentPhase,
+};
 
 use super::{ClusterEngine, ShardError};
 
@@ -9,8 +12,68 @@ impl ClusterEngine {
     /// only after the coordinator has claimed its shards exclusively: a live coordinator that is
     /// still running the resize then holds those claims, so this coordinator fails to connect
     /// instead of aborting the resize underneath it.
+    ///
+    /// Resolution makes the committed layout authoritative, so it first attests that this
+    /// coordinator serves exactly that layout. A coordinator assembled from an older read (for
+    /// example, one that connected just before another coordinator committed) fails here instead
+    /// of finishing the intent and serving the retired layout.
     pub fn recover_resize_intent(&self) -> Result<Option<ResizeRecovery>, ShardError> {
-        recover_durable_resize(self.control.as_ref())
+        let state = self.control_state()?;
+        if state.moves.resize.is_none() {
+            return Ok(None);
+        }
+        self.attest_serving_layout(&state)?;
+        resolve_resize_intent(self.control.as_ref(), &state)
+    }
+
+    /// Fail unless this coordinator serves exactly the committed layout: its shard count,
+    /// placement generation, and every position's primary endpoint. An assignment-routed
+    /// coordinator checks this before serving, because its topology was read before it connected.
+    pub fn attest_committed_layout(&self) -> Result<(), ShardError> {
+        self.attest_serving_layout(&self.control_state()?)
+    }
+
+    fn attest_serving_layout(&self, state: &ClusterState) -> Result<(), ShardError> {
+        let generation = self.placement_generation().0;
+        if state.num_shards as usize != self.shards.len()
+            || state.placement_generation != generation
+        {
+            return Err(ShardError::ControlPlane(format!(
+                "this coordinator serves placement generation {generation} with {} shards, but \
+                 the committed layout is generation {} with {} shards; restart it with \
+                 --route-by-assignments to route to the committed layout",
+                self.shards.len(),
+                state.placement_generation,
+                state.num_shards
+            )));
+        }
+        for (position, shard) in self.shards.iter().enumerate() {
+            let committed = state
+                .assignments
+                .iter()
+                .find(|assignment| assignment.position as usize == position)
+                .and_then(|assignment| {
+                    state
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == assignment.primary)
+                })
+                .and_then(|node| node.addr.as_deref())
+                .map(normalized_move_endpoint);
+            let serving = shard
+                .live_primary_endpoint()
+                .as_deref()
+                .map(normalized_move_endpoint);
+            if committed.is_none() || committed != serving {
+                return Err(ShardError::ControlPlane(format!(
+                    "position {position} is served from {} but committed to {}; restart the \
+                     coordinator with --route-by-assignments to route to the committed layout",
+                    serving.as_deref().unwrap_or("no remote node"),
+                    committed.as_deref().unwrap_or("no registered node")
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -28,14 +91,23 @@ pub enum ResizeRecovery {
 /// committed one. A committed intent is finished: consensus already names the new layout. The
 /// retired slots cannot be fenced here without their data-node handles, so a finished recovery
 /// reports them for operator decommissioning. Returns `None` when no intent is recorded; any
-/// refused or failed transition fails startup rather than serving an ambiguous layout.
+/// refused or failed transition fails startup rather than serving an ambiguous layout. A caller
+/// that already serves a layout should use [`ClusterEngine::recover_resize_intent`], which first
+/// attests that layout against the committed one.
 pub fn recover_durable_resize(
-    control: &dyn crate::cluster::control::ControlPlane,
+    control: &dyn ControlPlane,
 ) -> Result<Option<ResizeRecovery>, ShardError> {
     let state = control
         .cluster_state()
         .map_err(|error| ShardError::ControlPlane(error.to_string()))?;
-    let Some(intent) = state.moves.resize.clone() else {
+    resolve_resize_intent(control, &state)
+}
+
+fn resolve_resize_intent(
+    control: &dyn ControlPlane,
+    state: &ClusterState,
+) -> Result<Option<ResizeRecovery>, ShardError> {
+    let Some(intent) = state.moves.resize.as_ref() else {
         return Ok(None);
     };
     let operation_id = intent.operation_id;

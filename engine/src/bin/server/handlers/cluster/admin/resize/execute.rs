@@ -318,13 +318,14 @@ fn resize_worker(
             .checked_duration_since(Instant::now())
             .and_then(|budget| state.write_serial.try_lock_for(budget))
     };
-    let Some(_writes) = writes else {
+    let Some(writes) = writes else {
         return not_started();
     };
     #[cfg(feature = "distributed")]
     if !targets.is_empty() {
         return super::remote::remote_resize_worker(
             state,
+            writes,
             gate,
             started_sender,
             record,
@@ -337,6 +338,7 @@ fn resize_worker(
     }
     #[cfg(not(feature = "distributed"))]
     drop(targets);
+    let _writes = writes;
     let cluster = if no_wait {
         state.cluster.try_write()
     } else {

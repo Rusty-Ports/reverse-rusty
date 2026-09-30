@@ -177,6 +177,12 @@ impl ShardService for LegacyOwnershipServer {
     ) -> Result<Response<raw::IngestReply>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
+    async fn stage_ingest(
+        &self,
+        _req: Request<tonic::Streaming<raw::IngestRequest>>,
+    ) -> Result<Response<raw::IngestReply>, Status> {
+        Err(Status::unimplemented("legacy peer has no staged load"))
+    }
     async fn insert_extracted(
         &self,
         _req: Request<raw::InsertRequest>,

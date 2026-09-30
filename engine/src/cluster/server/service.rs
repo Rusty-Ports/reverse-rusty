@@ -21,7 +21,6 @@ use crate::cluster::node_metrics::ShardRpc;
 use crate::cluster::proto;
 use crate::cluster::proto::shard_service_server::ShardService;
 use crate::cluster::shard::Shard;
-use crate::segment::PlacedQuery;
 
 use super::{compile_item, ShardServer};
 
@@ -45,6 +44,7 @@ mod logical_ids;
 mod ranked;
 mod ranked_batch;
 mod recovery;
+mod stage_ingest;
 
 #[tonic::async_trait]
 impl ShardService for ShardServer {
@@ -293,40 +293,8 @@ impl ShardService for ShardServer {
         let req = request.into_inner();
         let (slot, st) = self.loaded_slot(req.shard_id)?;
         slot.check_not_fenced()?;
-        let items = req.items;
-        let mut lc = String::new();
-        let mut rejected_parse = 0u64;
-        let mut extracted: Vec<PlacedQuery> = Vec::with_capacity(items.len());
-        for it in items {
-            let placement = proto::placement_from_proto(it.placement.clone())
-                .map_err(|error| Status::failed_precondition(error.to_string()))?;
-            self.validate_placement_config(placement.generation(), placement.num_shards())?;
-            placement
-                .validate_for_shard(req.shard_id, placement.generation(), placement.num_shards())
-                .map_err(|error| Status::failed_precondition(error.to_string()))?;
-            match compile_item(&self.norm, &st.dict, &it.dsl, &mut lc) {
-                // Carry the raw tags forward; the shard's engine resolves them read-only against the
-                // adopted frozen tag space (ADR-055).
-                Some(ex) => extracted.push(PlacedQuery {
-                    logical: it.logical_id,
-                    ex,
-                    dsl: it.dsl,
-                    // Store the wire version verbatim — the coordinator's REST layer already
-                    // defaulted an absent version to 1 before placing, so an explicit value
-                    // (incl. 0) is caller-supplied and must round-trip identically to the
-                    // in-process / single-node path. Clamping here was a deployment-dependent
-                    // divergence: the coordinator logged N while the shard stored N.max(1).
-                    version: it.version,
-                    source_generation: None,
-                    tags: proto::tags_from_proto(it.tags),
-                    // The wire is dict-agnostic (raw tags only) — pre-resolved ids never arrive.
-                    tag_ids: Vec::new(),
-                    rank: crate::rank::RankValues::default(),
-                    placement,
-                }),
-                None => rejected_parse += 1,
-            }
-        }
+        let (extracted, rejected_parse) =
+            stage_ingest::compile_ingest_items(self, req.shard_id, &st, req.items)?;
         let report = st.shard.ingest_local(&extracted);
         slot.latency.observe(ShardRpc::Ingest, started.elapsed());
         Ok(Response::new(proto::IngestReply {
@@ -334,6 +302,13 @@ impl ShardService for ShardServer {
             rejected_parse: rejected_parse + report.rejected_parse as u64,
             rejected_class_d: report.rejected_class_d as u64,
         }))
+    }
+
+    async fn stage_ingest(
+        &self,
+        request: Request<tonic::Streaming<proto::IngestRequest>>,
+    ) -> Result<Response<proto::IngestReply>, Status> {
+        stage_ingest::stage_ingest(self, request).await
     }
 
     async fn insert_extracted(

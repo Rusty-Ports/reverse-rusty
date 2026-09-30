@@ -12,6 +12,8 @@ use axum::{extract::State, response::Response};
 use serde::Serialize;
 use tracing::{info, instrument};
 
+use parking_lot::RwLockWriteGuard;
+use reverse_rusty::cluster::{ClusterEngine, ShardError};
 use reverse_rusty::config::EngineConfig;
 
 use crate::handlers::alias::{
@@ -66,6 +68,18 @@ pub(crate) async fn cluster_get_vocab(
     finish_vocab_worker(&state.prom, worker.await)
 }
 
+/// Take the exclusive cluster lock for a vocabulary rebuild. Call it while holding
+/// `write_serial`. A remote resize (ADR-180) releases `write_serial` once its write fence is up but
+/// keeps shared access for its whole copy; waiting for exclusive access then would stall every
+/// read behind this request, so a raised fence refuses the rebuild instead. The resize raises the
+/// fence only while it holds `write_serial`, so the check cannot race it.
+fn lock_for_rebuild(
+    state: &ClusterAppState,
+) -> Result<RwLockWriteGuard<'_, ClusterEngine>, ShardError> {
+    state.cluster.read().ensure_resize_write_fence_open()?;
+    Ok(state.cluster.write())
+}
+
 /// PUT /_vocab — replace the cluster vocabulary (ADR-046 mechanism 2): re-mint the
 /// dict, re-place every query, atomic swap; durable clusters checkpoint the new
 /// state. The non-local refusal comes back as a 400 (tags + multi-word activate, ADR-074/076).
@@ -83,8 +97,7 @@ pub(crate) async fn cluster_put_vocab(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _w = work_state.write_serial.lock();
-        let mut cluster = work_state.cluster.write();
-        cluster.set_vocab(vocab)
+        lock_for_rebuild(&work_state).and_then(|mut cluster| cluster.set_vocab(vocab))
     });
     match worker.await {
         Ok(rebuilt) => {
@@ -137,8 +150,7 @@ pub(crate) async fn cluster_learn_and_apply_vocab(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _w = work_state.write_serial.lock();
-        let mut cluster = work_state.cluster.write();
-        cluster.learn_and_apply_with(&config)
+        lock_for_rebuild(&work_state).and_then(|mut cluster| cluster.learn_and_apply_with(&config))
     });
     let response = match worker.await {
         Ok(Ok(recompiled)) => {
@@ -204,8 +216,9 @@ pub(crate) async fn cluster_import_aliases(
         let _permit = permit;
         let (synonyms, rules) = payload.validate()?;
         let _w = work_state.write_serial.lock();
-        let mut cluster = work_state.cluster.write();
-        Ok::<_, String>((rules, cluster.import_alias_synonyms(&synonyms)))
+        let report = lock_for_rebuild(&work_state)
+            .and_then(|mut cluster| cluster.import_alias_synonyms(&synonyms));
+        Ok::<_, String>((rules, report))
     });
     let response = match worker.await {
         Ok(Ok((rules, Ok(report)))) => {
@@ -251,8 +264,8 @@ pub(crate) async fn cluster_learn_aliases(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _w = work_state.write_serial.lock();
-        let mut cluster = work_state.cluster.write();
-        cluster.learn_aliases_and_apply(min_count)
+        lock_for_rebuild(&work_state)
+            .and_then(|mut cluster| cluster.learn_aliases_and_apply(min_count))
     });
     let response = match worker.await {
         Ok(Ok(report)) => {

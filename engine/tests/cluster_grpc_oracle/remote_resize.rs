@@ -16,6 +16,9 @@ use tonic::transport::server::TcpIncoming;
 
 use crate::harness::*;
 
+mod durable;
+mod faults;
+
 fn spawn(rt: &tokio::runtime::Runtime, norm: &Arc<reverse_rusty::normalize::Normalizer>) -> String {
     let server = ShardServer::pending(Arc::clone(norm), EngineConfig::default());
     let _enter = rt.enter();
@@ -57,13 +60,14 @@ fn fixture(targets: usize) -> Fixture {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let cluster = ClusterEngine::connect_remote(
+    let cluster = ClusterEngine::connect_remote_exclusive(
         Arc::clone(&norm),
         Arc::clone(&dict),
         empty_tag_dict(),
         &config,
         &blue,
         rt.handle(),
+        0xB1E0_0001,
     )
     .expect("connect blue");
     cluster.ingest(&queries).expect("ingest");
@@ -187,15 +191,27 @@ fn grpc_remote_resize_pauses_writes_until_the_new_layout_is_installed() {
         targets,
         ..
     } = fixture(2);
+    // A server releases its own write serialization from this callback, so it must run only
+    // once the fence already refuses writes.
+    let refused_when_fenced = std::cell::Cell::new(None);
     let prepared = cluster
-        .prepare_remote_resize(&RemoteResizeRequest {
-            operation_id: 5,
-            num_shards: 2,
-            targets,
-        })
+        .prepare_remote_resize_then(
+            &RemoteResizeRequest {
+                operation_id: 5,
+                num_shards: 2,
+                targets,
+            },
+            || {
+                let write = cluster.add_query(9_800_003, "zzfenced early");
+                refused_when_fenced.set(Some(matches!(write, Err(ShardError::ControlPlane(_)))));
+            },
+        )
         .expect("prepare");
-    // The new layout is committed but not yet serving: reads still work, writes are refused.
+    assert_eq!(refused_when_fenced.get(), Some(true));
+    // The new layout is committed but not yet serving: reads still work, writes are refused,
+    // and so is the exclusive lock a vocabulary rebuild would queue for.
     assert_eq!(cluster.control_state().expect("state").num_shards, 2);
+    assert!(cluster.ensure_resize_write_fence_open().is_err());
     cluster
         .percolate("1994 acme")
         .expect("reads keep serving the old layout");
@@ -212,6 +228,9 @@ fn grpc_remote_resize_pauses_writes_until_the_new_layout_is_installed() {
         );
     }
     let retired = cluster.install_remote_resize(prepared).expect("install");
+    cluster
+        .ensure_resize_write_fence_open()
+        .expect("install lowers the fence");
     cluster
         .add_query(9_800_001, "zzfenced widget")
         .expect("writes reopen after install");
@@ -274,173 +293,6 @@ fn grpc_remote_resize_refuses_colocated_or_dirty_targets_and_keeps_serving() {
     }
 }
 
-/// A control plane that can apply a resize commit but lose its reply (and later reads), or refuse
-/// one `Finish`, to exercise ambiguous-outcome handling.
-struct Faulty {
-    inner: reverse_rusty::cluster::InMemoryControlPlane,
-    lose_commit_reply: std::sync::atomic::AtomicBool,
-    reads_broken: std::sync::atomic::AtomicBool,
-    refuse_finish_once: std::sync::atomic::AtomicBool,
-}
-
-impl Faulty {
-    fn install(
-        cluster: ClusterEngine,
-        lose_commit_reply: bool,
-        refuse_finish_once: bool,
-    ) -> ClusterEngine {
-        let initial = cluster.control_state().expect("state");
-        cluster.with_control_plane(Box::new(Self {
-            inner: reverse_rusty::cluster::InMemoryControlPlane::new(initial),
-            lose_commit_reply: std::sync::atomic::AtomicBool::new(lose_commit_reply),
-            reads_broken: std::sync::atomic::AtomicBool::new(false),
-            refuse_finish_once: std::sync::atomic::AtomicBool::new(refuse_finish_once),
-        }))
-    }
-
-    fn broken() -> reverse_rusty::cluster::ControlError {
-        reverse_rusty::cluster::ControlError::Backend("injected control-plane fault".into())
-    }
-}
-
-impl reverse_rusty::cluster::ControlPlane for Faulty {
-    fn cluster_state(
-        &self,
-    ) -> Result<Arc<reverse_rusty::cluster::ClusterState>, reverse_rusty::cluster::ControlError>
-    {
-        if self.reads_broken.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(Self::broken());
-        }
-        self.inner.cluster_state()
-    }
-
-    fn version(
-        &self,
-    ) -> Result<reverse_rusty::cluster::StateVersion, reverse_rusty::cluster::ControlError> {
-        self.inner.version()
-    }
-
-    fn propose(
-        &self,
-        change: reverse_rusty::cluster::ClusterStateChange,
-    ) -> Result<reverse_rusty::cluster::StateVersion, reverse_rusty::cluster::ControlError> {
-        self.inner.propose(change)
-    }
-
-    fn propose_resize(
-        &self,
-        command: reverse_rusty::cluster::ResizeCommand,
-    ) -> Result<reverse_rusty::cluster::MoveProposalResult, reverse_rusty::cluster::ControlError>
-    {
-        use std::sync::atomic::Ordering;
-        match &command {
-            reverse_rusty::cluster::ResizeCommand::Commit { .. }
-                if self.lose_commit_reply.swap(false, Ordering::SeqCst) =>
-            {
-                self.inner.propose_resize(command)?;
-                self.reads_broken.store(true, Ordering::SeqCst);
-                Err(Self::broken())
-            }
-            reverse_rusty::cluster::ResizeCommand::Finish { .. }
-                if self.refuse_finish_once.swap(false, Ordering::SeqCst) =>
-            {
-                Err(Self::broken())
-            }
-            _ => {
-                if self.reads_broken.load(Ordering::SeqCst) {
-                    return Err(Self::broken());
-                }
-                self.inner.propose_resize(command)
-            }
-        }
-    }
-
-    fn change_membership(
-        &self,
-        voters: Vec<NodeId>,
-    ) -> Result<reverse_rusty::cluster::StateVersion, reverse_rusty::cluster::ControlError> {
-        self.inner.change_membership(voters)
-    }
-
-    fn leader(&self) -> Result<Option<NodeId>, reverse_rusty::cluster::ControlError> {
-        self.inner.leader()
-    }
-}
-
-#[test]
-fn grpc_remote_resize_keeps_writes_paused_when_the_commit_outcome_is_unknown() {
-    let Fixture {
-        rt: _rt,
-        cluster,
-        targets,
-        ..
-    } = fixture(2);
-    let mut cluster = Faulty::install(cluster, true, false);
-    let failed = cluster.resize_remote(&RemoteResizeRequest {
-        operation_id: 31,
-        num_shards: 2,
-        targets,
-    });
-    assert!(failed.is_err(), "{failed:?}");
-    // Consensus may already name the new layout, so writes on the old one must stay refused.
-    let write = cluster.add_query(9_600_001, "zzambiguous widget");
-    assert!(
-        matches!(write, Err(ShardError::ControlPlane(_))),
-        "an ambiguous commit must keep writes paused: {write:?}"
-    );
-    let remove = cluster.remove_query(1);
-    assert!(
-        matches!(remove, Err(ShardError::ControlPlane(_))),
-        "{remove:?}"
-    );
-}
-
-#[test]
-fn grpc_remote_resize_finishes_a_leftover_committed_intent_before_the_next_one() {
-    let Fixture {
-        rt: _rt,
-        cluster,
-        targets,
-        titles,
-        ..
-    } = fixture(5);
-    let mut cluster = Faulty::install(cluster, false, true);
-    let before = matches(&cluster, &titles);
-    let first = cluster
-        .resize_remote(&RemoteResizeRequest {
-            operation_id: 41,
-            num_shards: 2,
-            targets: targets[..2].to_vec(),
-        })
-        .expect("first resize");
-    assert!(
-        !first.finished,
-        "the injected fault leaves the intent committed"
-    );
-    assert!(cluster
-        .control_state()
-        .expect("state")
-        .moves
-        .resize
-        .is_some());
-    let second = cluster
-        .resize_remote(&RemoteResizeRequest {
-            operation_id: 42,
-            num_shards: 3,
-            targets: targets[2..].to_vec(),
-        })
-        .expect("the next resize finishes the leftover intent first");
-    assert!(second.finished);
-    assert_eq!(cluster.num_shards(), 3);
-    assert!(cluster
-        .control_state()
-        .expect("state")
-        .moves
-        .resize
-        .is_none());
-    assert_eq!(matches(&cluster, &titles), before);
-}
-
 #[test]
 fn grpc_remote_resize_preserves_admitted_class_d_rows_when_the_knob_is_off() {
     let queries: Vec<(u64, String)> = vec![
@@ -468,6 +320,17 @@ fn grpc_remote_resize_preserves_admitted_class_d_rows_when_the_knob_is_off() {
     )
     .expect("connect accepting coordinator");
     writer.ingest(&queries).expect("ingest including class D");
+    // A shared coordinator cannot keep other writers off the source slots, so it may not resize.
+    let shared = writer.prepare_remote_resize(&RemoteResizeRequest {
+        operation_id: 1,
+        num_shards: 3,
+        targets: vec![descriptor(31, "http://127.0.0.1:9")],
+    });
+    assert!(
+        matches!(&shared, Err(ShardError::Config(message)) if message.contains("exclusive")),
+        "a shared coordinator must be refused: {:?}",
+        shared.as_ref().err()
+    );
     drop(writer);
 
     // A later coordinator runs with the admission knob off; stored class-D rows must survive.
@@ -476,13 +339,14 @@ fn grpc_remote_resize_preserves_admitted_class_d_rows_when_the_knob_is_off() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::connect_remote(
+    let mut cluster = ClusterEngine::connect_remote_exclusive(
         Arc::clone(&norm),
         Arc::clone(&dict),
         empty_tag_dict(),
         &strict,
         &blue,
         rt.handle(),
+        0xB1E0_0002,
     )
     .expect("connect strict coordinator");
     for (position, endpoint) in blue.iter().enumerate() {
@@ -531,116 +395,4 @@ fn grpc_remote_resize_preserves_admitted_class_d_rows_when_the_knob_is_off() {
         after, before,
         "every stored row, including class D, survives"
     );
-}
-
-fn spawn_durable(
-    rt: &tokio::runtime::Runtime,
-    norm: &Arc<reverse_rusty::normalize::Normalizer>,
-    dir: std::path::PathBuf,
-) -> String {
-    let server = ShardServer::pending_durable(Arc::clone(norm), EngineConfig::default(), dir);
-    let _enter = rt.enter();
-    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().expect("address")).expect("bind");
-    let address: SocketAddr = incoming.local_addr().expect("bound address");
-    let _task: JoinHandle<()> = rt.spawn(async move {
-        server.serve_with_incoming(incoming).await.expect("serve");
-    });
-    format!("http://{address}")
-}
-
-#[test]
-fn grpc_remote_resize_of_a_durable_cluster_requires_durable_targets() {
-    let queries: Vec<(u64, String)> = (1..=40)
-        .map(|i| (i, format!("zzdurable{i} widget")))
-        .collect();
-    let norm = Arc::new(vocab());
-    let dict = frozen_dict_over(&queries, &norm);
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
-    let root =
-        std::env::temp_dir().join(format!("rr_remote_resize_durable_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let blue: Vec<String> = (0..2)
-        .map(|i| spawn_durable(&rt, &norm, root.join(format!("blue{i}"))))
-        .collect();
-    let config = ClusterConfig {
-        num_shards: 2,
-        include_broad: true,
-        ..ClusterConfig::default()
-    };
-    let mut cluster = ClusterEngine::connect_remote(
-        Arc::clone(&norm),
-        Arc::clone(&dict),
-        empty_tag_dict(),
-        &config,
-        &blue,
-        rt.handle(),
-    )
-    .expect("connect");
-    cluster.ingest(&queries).expect("ingest");
-    for (position, endpoint) in blue.iter().enumerate() {
-        let id = position as u64 + 1;
-        cluster
-            .register_node(descriptor(id, endpoint))
-            .expect("register");
-        cluster
-            .reassign_shard(ShardAssignment {
-                position: position as u32,
-                primary: NodeId(id),
-                replicas: Vec::new(),
-            })
-            .expect("assign");
-    }
-
-    // Volatile targets cannot hold a durable corpus: the resize fails cleanly.
-    let volatile = vec![
-        descriptor(11, &spawn(&rt, &norm)),
-        descriptor(12, &spawn(&rt, &norm)),
-    ];
-    let refused = cluster.resize_remote(&RemoteResizeRequest {
-        operation_id: 61,
-        num_shards: 2,
-        targets: volatile,
-    });
-    assert!(refused.is_err(), "{refused:?}");
-    let state = cluster.control_state().expect("state");
-    assert_eq!(state.num_shards, 2);
-    assert_eq!(state.assignments[0].primary, NodeId(1), "nothing committed");
-    assert!(state.moves.resize.is_none());
-    cluster
-        .add_query(9_500_001, "zzdurablewrite widget")
-        .expect("writes reopen after a clean refusal");
-
-    // Durable targets are sealed before the evidence and the resize commits.
-    let durable = vec![
-        descriptor(21, &spawn_durable(&rt, &norm, root.join("green0"))),
-        descriptor(22, &spawn_durable(&rt, &norm, root.join("green1"))),
-        descriptor(23, &spawn_durable(&rt, &norm, root.join("green2"))),
-    ];
-    let report = cluster
-        .resize_remote(&RemoteResizeRequest {
-            operation_id: 62,
-            num_shards: 3,
-            targets: durable,
-        })
-        .expect("resize onto durable targets");
-    assert_eq!(report.num_shards, 3);
-    for i in 0..3 {
-        assert!(
-            root.join(format!("green{i}"))
-                .join("shard_000")
-                .join("shard.ckpt")
-                .exists()
-                || root
-                    .join(format!("green{i}"))
-                    .join(format!("shard_{i:03}"))
-                    .join("shard.ckpt")
-                    .exists(),
-            "target {i} committed a durable checkpoint"
-        );
-    }
-    assert!(cluster
-        .percolate("zzdurable7 widget lamp")
-        .expect("percolate")
-        .contains(&7));
-    let _ = std::fs::remove_dir_all(&root);
 }
