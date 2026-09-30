@@ -406,6 +406,32 @@ impl ShardService for ShardServer {
         Ok(Response::new(proto::FlushReply {}))
     }
 
+    async fn seal(
+        &self,
+        request: Request<proto::SealRequest>,
+    ) -> Result<Response<proto::SealReply>, Status> {
+        let req = request.into_inner();
+        self.validate_placement_config(
+            crate::ownership::PlacementGeneration(req.placement_generation),
+            req.num_shards,
+        )?;
+        if self.data_dir.is_none() {
+            return Err(Status::failed_precondition("Seal requires a durable shard"));
+        }
+        let up_to_seqno = self
+            .loaded_slot(req.shard_id)?
+            .1
+            .shard
+            .seal_for_checkpoint()
+            .map_err(|e| Status::internal(format!("sealing shard checkpoint: {e}")))?
+            .0;
+        Ok(Response::new(proto::SealReply {
+            up_to_seqno,
+            placement_generation: req.placement_generation,
+            num_shards: req.num_shards,
+        }))
+    }
+
     // ---- peer recovery (ADR-035/036, clustering build-path step 4b) ----
     type FetchSegmentsStream =
         Pin<Box<dyn Stream<Item = Result<proto::FetchSegmentsChunk, Status>> + Send>>;

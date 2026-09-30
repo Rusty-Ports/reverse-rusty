@@ -376,3 +376,45 @@ pub(crate) fn stream_add(cluster: &ClusterEngine, id: u64, dsl: &str) {
         }
     }
 }
+
+/// A durable node whose serving task is stopped before reopening its directory.
+pub(crate) struct RestartableNode {
+    pub(crate) dir: PathBuf,
+    pub(crate) endpoint: String,
+    task: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+}
+
+impl RestartableNode {
+    pub(crate) fn start(rt: &tokio::runtime::Runtime, norm: &Arc<Normalizer>, tag: &str) -> Self {
+        let dir = server_dir(tag);
+        let server =
+            ShardServer::pending_durable(Arc::clone(norm), EngineConfig::default(), dir.clone());
+        Self::serve(rt, server, dir)
+    }
+
+    fn serve(rt: &tokio::runtime::Runtime, server: ShardServer, dir: PathBuf) -> Self {
+        let _enter = rt.enter();
+        let incoming = tonic::transport::server::TcpIncoming::bind("127.0.0.1:0".parse().unwrap())
+            .expect("bind");
+        let addr = incoming.local_addr().expect("address");
+        let task = rt.spawn(server.serve_with_incoming(incoming));
+        wait_until_listening(addr);
+        Self {
+            dir,
+            endpoint: format!("http://{addr}"),
+            task,
+        }
+    }
+
+    pub(crate) fn restart(self, rt: &tokio::runtime::Runtime, norm: &Arc<Normalizer>) -> Self {
+        self.task.abort();
+        assert!(rt
+            .block_on(self.task)
+            .expect_err("task cancelled")
+            .is_cancelled());
+        let server =
+            ShardServer::open_durable(Arc::clone(norm), EngineConfig::default(), self.dir.clone())
+                .expect("restore recovered slot from its checkpoint and tail");
+        Self::serve(rt, server, self.dir)
+    }
+}

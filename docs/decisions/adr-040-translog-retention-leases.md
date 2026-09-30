@@ -71,3 +71,11 @@
   in-process peer recovery the lease protects), ADR-031 (the `LogPos`/`ClusterLog` machinery), ADR-042 (the
   allocator that will drive cross-node promotion), ADR-033 (shared-nothing),
   `src/cluster/{shard,replica,coordinator,server,remote}.rs`, `engine/grpc/proto/shard.proto` (`RetentionLease`).
+
+## Later outcome — remote seal scheduling (2026-09-30)
+
+[ADR-181](adr-181-durable-recovery-target-checkpoints.md) adds a real per-slot `Seal` RPC and
+remote primary checkpoint sweep. The original no-unbounded-growth claim requires seals to run:
+releasing a lease permits trimming at the next seal rather than driving autonomous GC. There is
+no server-local seal timer; current operator guidance lives in the
+[cluster deployment runbook](../operations/cluster-deployment.md#7-backup--restore).

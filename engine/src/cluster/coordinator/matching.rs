@@ -567,6 +567,18 @@ impl ClusterEngine {
         self.data_dir.is_some()
     }
 
+    /// Whether shard execution is hosted on remote nodes, each with its own durability.
+    pub fn is_remote(&self) -> bool {
+        #[cfg(feature = "distributed")]
+        {
+            self.handle.is_some()
+        }
+        #[cfg(not(feature = "distributed"))]
+        {
+            false
+        }
+    }
+
     /// The per-shard engine configuration the cluster was assembled with.
     pub fn per_shard_config(&self) -> &crate::config::EngineConfig {
         &self.per_shard

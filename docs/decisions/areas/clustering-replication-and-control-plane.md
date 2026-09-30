@@ -17,6 +17,8 @@ Replication, peer recovery, translogs, cluster state, consensus, and control-pla
 | [164](../adr-164-node-registration-api-contract.md) | Node-registration REST API contract | Makes native membership upserts strict, versioned, bounded, off-runtime, and explicit about voter and placement separation. | Accepted |
 | [165](../adr-165-node-deregistration-api-contract.md) | Node-deregistration REST API contract | Makes native descriptor removal strict, guarded, versioned, bounded, and explicit about safe drain-before-delete staging. | Accepted |
 
+| [181](../adr-181-durable-recovery-target-checkpoints.md) | Durable recovery target checkpoints | Commits a recovered slot before acknowledgement and exposes real node-local seals through remote checkpoints. | Accepted |
+
 ---
 
 Shipped changes are recorded in [CHANGELOG.md](../../CHANGELOG.md); unfinished work belongs in

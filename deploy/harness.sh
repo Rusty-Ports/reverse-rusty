@@ -337,6 +337,19 @@ done < <(head -20 "$writer_log.accepted")
 assert_equals_baseline "$WORK/baseline.txt" "after handoff"
 echo "    handoff complete under load ($accepted writes accepted); zero FN; probes ≡ baseline"
 
+step "leg 4b — restart the recovered handoff target without an intervening seal"
+compose restart target >/dev/null
+wait_for_green "recovered target restart"
+while IFS= read -r id; do
+  i=$((id - 9100))
+  r=$(percolate "zzload$i unique$i sealed")
+  [[ "$r" == HTTP:* ]] && fail "restarted target percolate failed: $r"
+  echo "$r" | jq -e --argjson id "$id" 'index($id) != null' >/dev/null \
+    || fail "acknowledged write $id missing after recovered target restart"
+done < "$writer_log.accepted"
+assert_equals_baseline "$WORK/baseline.txt" "after recovered target restart"
+echo "    recovered target restarted; all $accepted acknowledged writes match; probes ≡ baseline"
+
 # ---------------------------------------------------------------------------
 step "leg 5 — control-plane rolling restart (durable Raft state)"
 for c in control0 control1 control2; do

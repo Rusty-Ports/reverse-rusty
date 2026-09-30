@@ -16,7 +16,9 @@ impl ClusterEngine {
     /// base segments so the on-disk set is a clean materialization of the live state ≤
     /// `up_to`), then commit the coordinator manifest (the atomic commit point: new
     /// per-shard segment registry + log cursor + bumped epoch), then truncate the captured
-    /// log prefix and GC orphaned segment files. A no-op on an in-memory cluster.
+    /// log prefix and GC orphaned segment files. A remote coordinator seals each primary's
+    /// node-local checkpoint without a coordinator manifest or cross-shard snapshot. An
+    /// in-memory cluster only compacts its derived logical-id directory.
     ///
     /// Crash-safety: the manifest write is the single commit point (tmp + CRC + rename).
     /// A crash BEFORE it leaves the old (registry, cursor) authoritative — the freshly
@@ -25,6 +27,11 @@ impl ClusterEngine {
     /// segments and replays only the (now shorter) tail — also correct.
     pub fn checkpoint(&self) -> Result<(), ShardError> {
         let Some(dir) = self.data_dir.clone() else {
+            if self.is_remote() {
+                for shard in &self.shards {
+                    shard.seal_for_checkpoint()?;
+                }
+            }
             // Even an in-memory checkpoint remains a useful explicit maintenance
             // boundary for the derived unique-id directory.
             self.compact_logical_ids();

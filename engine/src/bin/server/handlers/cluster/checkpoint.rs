@@ -131,8 +131,8 @@ struct CheckpointResponse {
     /// manifest. A stateless or in-memory coordinator reports false.
     durable: bool,
     epoch: u64,
-    /// Logical shard positions sealed into the durable checkpoint. This is zero
-    /// when `durable` is false, including on a stateless remote coordinator.
+    /// Logical primary positions sealed. Remote slots have individual checkpoints even
+    /// though their stateless coordinator cannot publish a durable cluster manifest.
     shards_checkpointed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'static str>,
@@ -147,9 +147,13 @@ impl CheckpointResponse {
             durable: success.durable,
             epoch: success.epoch,
             shards_checkpointed: success.shards_checkpointed,
-            message: (!success.durable).then_some(
-                "no durable checkpoint was created because the coordinator has no data directory",
-            ),
+            message: if success.durable {
+                None
+            } else if success.shards_checkpointed > 0 {
+                Some("remote primary checkpoints committed; no cluster recovery point was created because the coordinator has no data directory")
+            } else {
+                Some("no durable checkpoint was created because the coordinator has no data directory")
+            },
         }
     }
 }
@@ -182,7 +186,11 @@ async fn execute_checkpoint(
         let _writer = work_state.write_serial.lock();
         let cluster = work_state.cluster.read();
         let durable = cluster.is_durable();
-        let shards_checkpointed = if durable { cluster.num_shards() } else { 0 };
+        let shards_checkpointed = if durable || cluster.is_remote() {
+            cluster.num_shards()
+        } else {
+            0
+        };
         cluster.checkpoint().map(|()| CheckpointSuccess {
             durable,
             epoch: cluster.epoch(),
