@@ -2,6 +2,8 @@
 //! fsync policy is invisible to recovery.
 
 use crate::harness::*;
+use reverse_rusty::events::{DurabilityOp, EngineEvent};
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn torn_log_tail_recovers_acknowledged_writes() {
@@ -26,6 +28,19 @@ fn torn_log_tail_recovers_acknowledged_writes() {
     }
 
     let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&events);
+    reopened.set_observer(Arc::new(move |event: &EngineEvent| {
+        if let EngineEvent::DurabilityFailure {
+            op: DurabilityOp::WalTornTail,
+            error,
+            ..
+        } = event
+        {
+            seen.lock().unwrap().push(error.clone());
+        }
+    }));
+    assert_eq!(*events.lock().unwrap(), vec!["7 bytes"]);
     let brute = Brute::build(&final_live(&queries, &added, &removed));
     let mut lc = String::new();
     let mut feats: Vec<u32> = Vec::new();
@@ -37,6 +52,33 @@ fn torn_log_tail_recovers_acknowledged_writes() {
             .into_iter()
             .collect();
         assert_eq!(got, want, "torn-tail reopen {t:?}");
+    }
+
+    let later_id = u64::MAX - 1;
+    reopened
+        .upsert_query(later_id, &queries[0].1, 1)
+        .expect("append after repair");
+    drop(reopened);
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("second reopen");
+    reopened.set_observer(Arc::new(|event| {
+        assert!(
+            !matches!(
+                event,
+                EngineEvent::DurabilityFailure {
+                    op: DurabilityOp::WalTornTail,
+                    ..
+                }
+            ),
+            "clean second restart must not repeat the diagnostic"
+        );
+    }));
+    let mut live = final_live(&queries, &added, &removed);
+    live.push((later_id, queries[0].1.clone()));
+    let brute = Brute::build(&live);
+    for title in &titles {
+        let want = brute.matches(title, &mut lc, &mut feats);
+        let got: HashSet<_> = reopened.percolate(title).unwrap().into_iter().collect();
+        assert_eq!(got, want, "second restart after repair {title:?}");
     }
 
     let _ = std::fs::remove_dir_all(&dir);

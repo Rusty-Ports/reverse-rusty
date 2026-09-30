@@ -1,5 +1,7 @@
 //! Unit tests for the translog retention-lease bookkeeping (ADR-040/048).
 
+mod recovery;
+
 #[cfg(test)]
 mod retention_lease_tests {
     use crate::cluster::shard::retention::RetentionLeases;

@@ -52,13 +52,15 @@ fn replay_wal_tail(
     watermark: u64,
 ) -> std::io::Result<()> {
     let recovery = Wal::recover(wal_path)?;
-    if recovery.skipped_bytes > 0 {
+    let repaired_bytes = engine.wal.as_mut().map_or(0, Wal::take_repaired_tail_bytes);
+    let skipped_bytes = recovery.skipped_bytes + repaired_bytes;
+    if skipped_bytes > 0 {
         engine
             .pending_events
             .push(crate::events::EngineEvent::DurabilityFailure {
                 op: crate::events::DurabilityOp::WalTornTail,
-                detail: "WAL recovery skipped corrupt/torn data at tail".to_string(),
-                error: format!("{} bytes", recovery.skipped_bytes),
+                detail: "WAL recovery repaired an incomplete final write".to_string(),
+                error: format!("{skipped_bytes} bytes"),
             });
     }
     for entry in recovery.entries {

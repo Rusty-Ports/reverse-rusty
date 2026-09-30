@@ -128,3 +128,11 @@
 - **See also:** ADR-064 (the program), ADR-006 (never gate on MUST_NOT — the invariant this extends),
   ADR-026 (the broad lane), ADR-056 (re-anchoring — why the cover must be optimizer-derived), ADR-065
   (the cluster follow-on home), [`matching.md`](../design/matching.md) §4.
+
+## Later outcome — 2026-09-30
+
+[ADR-182](adr-182-validated-log-recovery.md) supersedes the earlier permissive WAL-tail policy:
+complete CRC failures and unknown or malformed payloads now refuse recovery without changing bytes.
+Current readers fence unsupported WAL headers and upgrade known legacy headers before append; only
+incomplete final writes or zero padding are repaired. Older binaries that ignored the header still
+require the documented backup/clean-flush rollback precautions.

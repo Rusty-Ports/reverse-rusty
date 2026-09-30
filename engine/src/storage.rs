@@ -21,6 +21,7 @@ use std::path::{Component, Path};
 
 mod backup;
 mod dict;
+pub(crate) mod framed_log;
 mod manifest;
 mod segment;
 mod sources;

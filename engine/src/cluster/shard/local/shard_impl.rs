@@ -470,7 +470,15 @@ impl Shard for LocalShard {
     }
 
     fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
-        Ok(self.translog.replay(from)?.entries)
+        let replay = self.translog.replay(from)?;
+        if replay.skipped_bytes > 0 {
+            self.emit(&crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::WalTornTail,
+                detail: "shard translog replay encountered an incomplete final write".into(),
+                error: format!("{} bytes", replay.skipped_bytes),
+            });
+        }
+        Ok(replay.entries)
     }
 
     fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
@@ -504,14 +512,17 @@ impl Shard for LocalShard {
     }
 
     // ---- observability (ADR-021/048) ----
-    /// Install the coordinator's observer (fanned in by `ClusterEngine::set_observer`). Before
-    /// ADR-048 a plain `LocalShard` ignored this; it now stores the sink so a TTL lease reap is
-    /// observable. No pending-event buffer: a reap only fires at checkpoint time, long after an
-    /// observer attaches at cluster build/open, so there is nothing to replay.
+    /// Install the coordinator's observer and deliver buffered startup diagnostics.
+    /// Callbacks run outside the engine and sink locks, so an observer can inspect
+    /// the recovered shard while handling its event.
     fn set_event_sink(&self, sink: EventSink) {
         *self
             .event_sink
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(sink);
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&sink));
+        let pending = self.lock().take_recovery_events();
+        for event in &pending {
+            sink(event);
+        }
     }
 }

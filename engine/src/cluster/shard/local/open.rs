@@ -326,8 +326,17 @@ impl LocalShard {
         // Replay the un-sealed tail (ops > P) into the engine ONLY — the ops are already on disk
         // in the translog, so re-appending would duplicate them. Position-filtered, so it never
         // double-applies an op already baked into the attached segments.
-        let tail = shard.translog.replay(floor)?.entries;
-        for (_pos, m) in &tail {
+        let replay = shard.translog.replay(floor)?;
+        if replay.skipped_bytes > 0 {
+            shard
+                .lock()
+                .queue_recovery_event(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::WalTornTail,
+                    detail: "shard translog recovery repaired an incomplete final write".into(),
+                    error: format!("{} bytes", replay.skipped_bytes),
+                });
+        }
+        for (_pos, m) in &replay.entries {
             shard.apply_to_engine(m)?;
         }
         Ok(shard)

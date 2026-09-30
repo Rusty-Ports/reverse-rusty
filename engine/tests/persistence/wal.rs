@@ -5,6 +5,66 @@ use crate::harness::*;
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::segment::Engine;
 
+#[test]
+fn repaired_tail_is_reported_once_and_new_writes_survive_the_next_restart() {
+    use reverse_rusty::events::{DurabilityOp, EngineEvent};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    for manifest in [false, true] {
+        let dir = test_dir(&format!("wal_repair_observer_manifest_{manifest}"));
+        let config = EngineConfig {
+            data_dir: Some(dir.clone()),
+            memtable_flush_threshold: usize::MAX,
+            wal_sync_on_write: true,
+            ..EngineConfig::default()
+        };
+        {
+            let mut engine = Engine::with_config(make_norm(), config.clone());
+            if manifest {
+                engine.build_from_queries(&[(99, "placeholder seed".into())]);
+            }
+            engine.try_insert_live("wireless mouse", 1, 1).unwrap();
+        }
+        let path = dir.join("wal.log");
+        let valid_len = std::fs::metadata(&path).unwrap().len();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&[32, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd])
+            .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::open(make_norm(), config.clone()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), valid_len);
+        let observer = |events: Arc<Mutex<Vec<String>>>| {
+            move |event: &EngineEvent| {
+                if let EngineEvent::DurabilityFailure {
+                    op: DurabilityOp::WalTornTail,
+                    error,
+                    ..
+                } = event
+                {
+                    events.lock().unwrap().push(error.clone());
+                }
+            }
+        };
+        engine.set_observer(observer(Arc::clone(&events)));
+        engine.set_observer(observer(Arc::clone(&events)));
+        assert_eq!(*events.lock().unwrap(), vec!["8 bytes"]);
+        engine.try_insert_live("mechanical keyboard", 2, 1).unwrap();
+        drop(engine);
+        let mut engine = Engine::open(make_norm(), config).unwrap();
+        engine.set_observer(observer(Arc::clone(&events)));
+        assert_eq!(*events.lock().unwrap(), vec!["8 bytes"]);
+        assert!(match_ids(&engine, "wireless mouse").contains(&1));
+        assert!(match_ids(&engine, "mechanical keyboard").contains(&2));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// A crash BEFORE the first manifest commit (no flush/bulk/build yet) leaves
 /// acknowledged writes only in `wal.log`. `Engine::open`'s fresh path used to
 /// construct an empty engine WITHOUT replaying that tail — silently losing every
@@ -188,13 +248,10 @@ fn wal_recovery_inserts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A bit flipped INSIDE a CRC-valid frame in the MIDDLE of the log: recovery must stop
-/// at the corrupt frame and surface everything after it as skipped — never resync past
-/// it and replay later entries (which would silently drop one mutation while keeping
-/// its successors, a reordering the WAL contract forbids). The junk-at-tail test above
-/// cannot distinguish stop-at-first-bad from skip-and-continue; this pins it.
+/// A complete corrupt frame may contain an acknowledged write. Refuse the entire
+/// recovery without resynchronizing, truncating, or silently returning a partial prefix.
 #[test]
-fn wal_recovery_stops_at_a_mid_file_bitflip_and_never_resyncs() {
+fn wal_recovery_refuses_a_mid_file_bitflip_without_modifying_the_log() {
     use reverse_rusty::wal::Wal;
 
     let dir = test_dir("wal_midfile_bitflip");
@@ -217,27 +274,17 @@ fn wal_recovery_stops_at_a_mid_file_bitflip_and_never_resyncs() {
     // Flip one bit in the middle of frame 2's BODY (its CRC no longer matches).
     let target = frame2_start + 8 + frame2_len / 2;
     bytes[target] ^= 0x01;
-    let tail_after_frame1 = bytes.len() - frame2_start;
     std::fs::write(&wal_path, &bytes).unwrap();
 
-    let recovery = Wal::recover(&wal_path).unwrap();
     assert_eq!(
-        recovery.entries.len(),
-        1,
-        "recovery must stop AT the corrupt frame: only the first record is replayable \
-         (resyncing to record 3 would silently drop record 2 while keeping its successor)"
+        Wal::recover(&wal_path).err().unwrap().kind(),
+        std::io::ErrorKind::InvalidData
     );
-    match &recovery.entries[0] {
-        reverse_rusty::wal::WalEntry::Insert { logical, text, .. } => {
-            assert_eq!(*logical, 1);
-            assert_eq!(text, "first record aaa");
-        }
-        other => panic!("expected the first insert, got {other:?}"),
-    }
     assert_eq!(
-        recovery.skipped_bytes, tail_after_frame1,
-        "everything from the corrupt frame onward must be reported as skipped"
+        Wal::open(&wal_path, true).err().unwrap().kind(),
+        std::io::ErrorKind::InvalidData
     );
+    assert_eq!(std::fs::read(&wal_path).unwrap(), bytes);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

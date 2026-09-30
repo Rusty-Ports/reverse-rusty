@@ -43,6 +43,35 @@ fn wal_append_acked_writes_survive_sigkill() {
                 fsync,
                 &format!("wal_append/fsync={fsync}/iter={i}"),
             );
+            // Reuse the actual SIGKILL artifact. The first open must repair it before
+            // acknowledging a new write, and the next crash must recover that write.
+            let cfg = reverse_rusty::config::EngineConfig {
+                data_dir: Some(dir.clone()),
+                wal_sync_on_write: fsync,
+                memtable_flush_threshold: usize::MAX,
+                ..reverse_rusty::config::EngineConfig::default()
+            };
+            let mut engine = reverse_rusty::segment::Engine::open(
+                reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+                cfg.clone(),
+            )
+            .unwrap();
+            engine
+                .try_insert_live("restart canary", u64::MAX, 1)
+                .unwrap();
+            drop(engine); // abrupt engine lifetime end: no flush or checkpoint
+            let engine = reverse_rusty::segment::Engine::open(
+                reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+                cfg,
+            )
+            .unwrap();
+            let mut scratch = reverse_rusty::segment::MatchScratch::new();
+            let mut ids = Vec::new();
+            engine.match_title("restart canary", &mut scratch, &mut ids, true);
+            assert!(
+                ids.contains(&u64::MAX),
+                "new acknowledgement lost on second restart"
+            );
         }
     }
     assert!(

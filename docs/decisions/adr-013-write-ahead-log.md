@@ -41,3 +41,11 @@
   failed WAL append rejects the write rather than degrading durability silently, so callers can
   retry (the server maps `WriteError::Wal` to HTTP 503).
 - **See also:** [ingestion-and-updates.md](../design/ingestion-and-updates.md) §3
+
+## Later outcome — 2026-09-30
+
+[ADR-182](adr-182-validated-log-recovery.md) supersedes the earlier permissive WAL-tail policy:
+complete CRC failures and unknown or malformed payloads now refuse recovery without changing bytes.
+Current readers fence unsupported WAL headers and upgrade known legacy headers before append; only
+incomplete final writes or zero padding are repaired. Older binaries that ignored the header still
+require the documented backup/clean-flush rollback precautions.
