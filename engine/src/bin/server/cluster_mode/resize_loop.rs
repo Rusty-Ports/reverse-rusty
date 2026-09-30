@@ -58,8 +58,22 @@ pub(crate) fn spawn_resize_loop(
             ..AutoscaleConfig::default()
         };
         let mut governor = ResizeGovernor::new();
+        let mut pending: Option<GovernedOperation> = None;
         loop {
             tokio::time::sleep(config.interval).await;
+            // An accepted operation that swapped the serving layout but failed to commit it
+            // keeps durable writes paused (ADR-178). Retry that exact operation until it
+            // commits, before and independently of any new growth decision.
+            if let Some(operation) = pending.take() {
+                match run_operation(&state, &operation, true).await {
+                    OperationResult::Produced(generation) => {
+                        governor.record_outcome(Instant::now(), Some(generation));
+                    }
+                    OperationResult::NeedsCommit => pending = Some(operation),
+                    OperationResult::NoChange => governor.record_outcome(Instant::now(), None),
+                }
+                continue;
+            }
             let Some(observation) = observe(&state, &autoscale).await else {
                 continue;
             };
@@ -78,11 +92,37 @@ pub(crate) fn spawn_resize_loop(
                 if_placement_generation,
             } = verdict
             {
-                let produced = execute(&state, from, to, if_placement_generation).await;
-                governor.record_outcome(Instant::now(), produced);
+                let Some(operation) = admit(&state, from, to, if_placement_generation) else {
+                    governor.record_outcome(Instant::now(), None);
+                    continue;
+                };
+                match run_operation(&state, &operation, false).await {
+                    OperationResult::Produced(generation) => {
+                        governor.record_outcome(Instant::now(), Some(generation));
+                    }
+                    OperationResult::NeedsCommit => pending = Some(operation),
+                    OperationResult::NoChange => governor.record_outcome(Instant::now(), None),
+                }
             }
         }
     })
+}
+
+/// One admitted automatic operation, retained so a failed commit can be retried under the
+/// same operation ID.
+struct GovernedOperation {
+    id: String,
+    to: usize,
+    if_placement_generation: u64,
+}
+
+enum OperationResult {
+    /// The operation committed this placement generation.
+    Produced(u64),
+    /// The layout did not change.
+    NoChange,
+    /// The serving layout changed but is not durably committed; retry the same operation.
+    NeedsCommit,
 }
 
 /// Collect one observation off the async runtime: the cluster read lock can wait behind an
@@ -106,46 +146,76 @@ async fn observe(
     }
 }
 
-/// Execute one accepted operation. Returns the placement generation it produced, or `None`
-/// when the layout did not change.
-async fn execute(
+/// Admit one accepted operation under a generated autoscaler ID.
+fn admit(
     state: &Arc<ClusterAppState>,
     from: usize,
     to: usize,
     if_placement_generation: u64,
-) -> Option<u64> {
-    let id = match state.resize_operations.admit(
+) -> Option<GovernedOperation> {
+    match state.resize_operations.admit(
         None,
         ResizeOrigin::Autoscaler,
         to,
         Some(if_placement_generation),
     ) {
-        ResizeAdmission::Execute(id) => id,
+        ResizeAdmission::Execute(id) => {
+            info!(
+                operation_id = %id,
+                from,
+                to,
+                if_placement_generation,
+                "governed resize accepted"
+            );
+            Some(GovernedOperation {
+                id,
+                to,
+                if_placement_generation,
+            })
+        }
         other => {
             warn!(
                 ?other,
                 "governed resize: operation registry refused the operation"
             );
-            return None;
+            None
         }
-    };
-    info!(
-        operation_id = %id,
-        from,
-        to,
-        if_placement_generation,
-        "governed resize accepted"
-    );
+    }
+}
+
+/// Run one governed operation through the ordinary resize path. A `retry` first re-admits the
+/// same failed record; the registry keeps its uncommitted generation, which lets the worker's
+/// precondition accept the operation's own swap.
+async fn run_operation(
+    state: &Arc<ClusterAppState>,
+    operation: &GovernedOperation,
+    retry: bool,
+) -> OperationResult {
+    if retry
+        && !matches!(
+            state.resize_operations.admit(
+                Some(operation.id.clone()),
+                ResizeOrigin::Autoscaler,
+                operation.to,
+                Some(operation.if_placement_generation),
+            ),
+            ResizeAdmission::Execute(_)
+        )
+    {
+        warn!(operation_id = %operation.id, "governed resize: retained operation is not retryable");
+        return OperationResult::NoChange;
+    }
     let outcome = run_resize(
         state,
         ResizeRun {
-            operation_id: id.clone(),
-            num_shards: to,
-            if_placement_generation: Some(if_placement_generation),
+            operation_id: operation.id.clone(),
+            num_shards: operation.to,
+            if_placement_generation: Some(operation.if_placement_generation),
             manager_timeout: AUTOSCALE_RESIZE_MANAGER_TIMEOUT,
         },
     )
     .await;
+    let id = &operation.id;
     match outcome {
         ResizeRunOutcome::Succeeded(success) => {
             info!(
@@ -156,32 +226,54 @@ async fn execute(
                 placement_generation = success.placement_generation,
                 "governed resize completed"
             );
-            Some(success.placement_generation)
+            OperationResult::Produced(success.placement_generation)
         }
         ResizeRunOutcome::NotStarted => {
             info!(operation_id = %id, "governed resize not started before its deadline");
-            None
+            uncommitted_or(state, id, OperationResult::NoChange)
         }
         ResizeRunOutcome::PreconditionFailed { current } => {
             info!(
                 operation_id = %id,
                 current,
-                if_placement_generation,
+                if_placement_generation = operation.if_placement_generation,
                 "governed resize skipped: the layout changed since observation"
             );
-            None
+            OperationResult::NoChange
         }
         ResizeRunOutcome::Unavailable(reason) => {
             warn!(operation_id = %id, reason, "governed resize unavailable");
-            None
+            uncommitted_or(state, id, OperationResult::NoChange)
         }
         ResizeRunOutcome::Failed(error) => {
             warn!(operation_id = %id, error = %error, "governed resize failed");
-            None
+            uncommitted_or(state, id, OperationResult::NoChange)
         }
         ResizeRunOutcome::WorkerFailed => {
             warn!(operation_id = %id, "governed resize worker failed");
-            None
+            uncommitted_or(state, id, OperationResult::NoChange)
         }
+    }
+}
+
+/// `NeedsCommit` when the operation's record holds an uncommitted swapped generation (from
+/// this attempt or an earlier one), otherwise `fallback`.
+fn uncommitted_or(
+    state: &Arc<ClusterAppState>,
+    id: &str,
+    fallback: OperationResult,
+) -> OperationResult {
+    let uncommitted = state
+        .resize_operations
+        .get(id)
+        .and_then(|record| record.uncommitted_generation);
+    if uncommitted.is_some() {
+        warn!(
+            operation_id = %id,
+            "governed resize swapped the serving layout without committing it; retrying next interval"
+        );
+        OperationResult::NeedsCommit
+    } else {
+        fallback
     }
 }

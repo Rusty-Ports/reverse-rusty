@@ -91,6 +91,11 @@ pub(crate) struct ResizeOperation {
     pub(crate) outcome: Option<ResizeOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<ResizeFailure>,
+    /// The serving placement generation a failed attempt of this operation swapped in but did
+    /// not commit (ADR-178/179). A retry of the same operation may pass its precondition at
+    /// this generation, so it can finish its own commit; it is cleared on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uncommitted_generation: Option<u64>,
 }
 
 impl ResizeOperation {
@@ -235,6 +240,7 @@ impl ResizeOperations {
             finished_at_ms: None,
             outcome: None,
             error: None,
+            uncommitted_generation: None,
         });
         ResizeAdmission::Execute(id)
     }
@@ -262,6 +268,24 @@ impl ResizeOperations {
             r.finished_at_ms = Some(now_ms);
             r.outcome = Some(outcome);
             r.error = None;
+            r.uncommitted_generation = None;
+        });
+    }
+
+    /// A started attempt failed after swapping in `generation` without committing it. The
+    /// record keeps that generation across re-admission so the same operation can heal.
+    pub(crate) fn mark_failed_uncommitted(
+        &self,
+        id: &str,
+        failure: ResizeFailure,
+        generation: u64,
+    ) {
+        let now_ms = unix_ms_now();
+        self.update(id, |r| {
+            r.state = ResizeState::Failed;
+            r.finished_at_ms = Some(now_ms);
+            r.error = Some(failure);
+            r.uncommitted_generation = Some(generation);
         });
     }
 

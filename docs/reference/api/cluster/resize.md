@@ -21,7 +21,10 @@ safe to automate (ADR-179):
   the same request under a retained ID replays the recorded success with `"replayed": true` and
   does not rebuild; an operation that is still queued or running returns `409 resize_in_progress`;
   different parameters under a retained ID return `409 operation_id_conflict`. A failed or
-  not-started operation re-executes under its ID, which keeps retry-to-heal available. When the
+  not-started operation re-executes under its ID, which keeps retry-to-heal available: if the
+  failed attempt had already swapped the serving layout, the retry passes its
+  `if_placement_generation` precondition at that operation's own uncommitted generation and
+  finishes the commit. When the
   field is omitted, the server generates an ID and returns it.
 - `if_placement_generation` is a compare-and-set precondition checked under the exclusive guards
   before the rebuild starts. A mismatch returns `409 placement_generation_mismatch` and changes

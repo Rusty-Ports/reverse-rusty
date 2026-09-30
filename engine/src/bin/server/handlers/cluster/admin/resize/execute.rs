@@ -327,7 +327,15 @@ fn resize_worker(
     }
     let _sent = started_sender.send(());
     let current = cluster.placement_generation().0;
-    if if_generation.is_some_and(|expected| expected != current) {
+    // A retry of an operation whose earlier attempt swapped the serving layout but failed to
+    // commit it may proceed at exactly that generation, so it can finish its own commit
+    // (ADR-178/179). Any other layout change still fails the precondition.
+    let heals_own_swap = record
+        .ops
+        .get(&record.id)
+        .and_then(|r| r.uncommitted_generation)
+        .is_some_and(|generation| generation == current && cluster.num_shards() == num_shards);
+    if if_generation.is_some_and(|expected| expected != current) && !heals_own_swap {
         record.ops.mark_failed(
             &record.id,
             ResizeFailure {
@@ -374,7 +382,16 @@ fn resize_worker(
                 placement_generation: success.placement_generation,
             },
         ),
-        Err(source) => record.ops.mark_failed(&record.id, started_failure(source)),
+        Err(source) => {
+            let serving = cluster.placement_generation().0;
+            if serving == current {
+                record.ops.mark_failed(&record.id, started_failure(source));
+            } else {
+                record
+                    .ops
+                    .mark_failed_uncommitted(&record.id, started_failure(source), serving);
+            }
+        }
     }
     ClusterResizeWorkerOutcome::Finished(result)
 }

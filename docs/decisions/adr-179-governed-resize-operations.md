@@ -62,7 +62,11 @@ a record completes after an HTTP disconnect or loop abort. Drop guards mark a re
   not-started record re-executes under the same ID, which preserves ADR-167's retry-to-heal path.
   An omitted ID is generated and returned.
 - `if_placement_generation` is checked under the exclusive guards, before the rebuild starts. A
-  mismatch returns `409 placement_generation_mismatch` and changes nothing.
+  mismatch returns `409 placement_generation_mismatch` and changes nothing. One exception keeps
+  retry-to-heal available (codex review): when an operation's attempt swapped the serving layout
+  but failed to commit it, the record keeps that `uncommitted_generation`, and a retry of the same
+  operation passes its precondition at exactly that generation and target so it can finish its
+  own commit. Any other layout change still fails.
 - Responses now include `operation_id` and the attested `placement_generation`.
 
 `GET /_cluster/resize` lists retained operations newest first plus the latest autoscaler
@@ -79,7 +83,10 @@ against durable serving state.
 verdict, and executes an accepted operation through the same admission slot, dedicated worker,
 exclusive guards, and terminal attestation as the REST path. Each automatic operation carries its
 observed placement generation as a precondition, so a concurrent operator resize makes it fail
-closed instead of stacking a second change. The loop requires an in-process cluster and a positive
+closed instead of stacking a second change. If an automatic operation swaps the serving layout but
+fails to commit it, which pauses durable writes under ADR-178, the loop retries that same
+operation every interval, before and independently of any new growth decision, until it commits
+(codex review). The loop requires an in-process cluster and a positive
 `--autoscale-split-threshold`. Startup refuses remote topologies because remote shard-count
 changes are not implemented. Shutdown aborts the loop first, and an in-flight rebuild keeps its
 permit until the shutdown checkpoint acquires it.

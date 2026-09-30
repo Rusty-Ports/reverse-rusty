@@ -309,3 +309,60 @@ async fn a_request_that_never_starts_is_recorded_not_started() {
     assert_eq!(record.state, crate::resize_ops::ResizeState::NotStarted);
     assert_eq!(state.cluster.read().num_shards(), 3);
 }
+
+#[tokio::test]
+async fn a_conditional_operation_heals_its_own_uncommitted_swap() {
+    let base = test_state(&seed());
+    let initial = base.cluster.read().control_state().expect("state");
+    drop(base);
+    let state = state_with_control(Box::new(retry::FailResizeProposals {
+        inner: InMemoryControlPlane::new(initial),
+        remaining: AtomicUsize::new(1),
+    }));
+    let before = generation(&state);
+    let body = format!(
+        r#"{{"num_shards":4,"operation_id":"cas-heal","if_placement_generation":{before}}}"#
+    );
+
+    let (status, _, bytes) =
+        send_raw(&state, resize_request("/_cluster/resize", body.clone())).await;
+    assert_error(
+        status,
+        &bytes,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "control_plane_error",
+    );
+    assert_eq!(generation(&state), before + 1, "the serving swap happened");
+    let (_, record) = get_json(&state, "/_cluster/resize/cas-heal").await;
+    assert_eq!(record["state"], "failed", "{record}");
+    assert_eq!(record["uncommitted_generation"], before + 1, "{record}");
+
+    // The identical request's original precondition is now stale, but it names this
+    // operation's own uncommitted swap, so the retry finishes the commit.
+    let (status, healed) = post_json(&state, &body).await;
+    assert_eq!(status, StatusCode::OK, "{healed}");
+    assert_eq!(healed["num_shards"], 4);
+    assert_eq!(healed["placement_generation"], before + 1);
+    let control = state.cluster.read().control_state().expect("state");
+    assert_eq!(control.num_shards, 4);
+    assert_eq!(control.placement_generation, before + 1);
+    let (_, record) = get_json(&state, "/_cluster/resize/cas-heal").await;
+    assert_eq!(record["state"], "succeeded", "{record}");
+    assert!(record.get("uncommitted_generation").is_none(), "{record}");
+
+    // An unrelated conditional request at the pre-swap generation is still refused.
+    let (status, _, bytes) = send_raw(
+        &state,
+        resize_request(
+            "/_cluster/resize",
+            format!(r#"{{"num_shards":5,"if_placement_generation":{before}}}"#),
+        ),
+    )
+    .await;
+    assert_error(
+        status,
+        &bytes,
+        StatusCode::CONFLICT,
+        "placement_generation_mismatch",
+    );
+}

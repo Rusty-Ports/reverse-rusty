@@ -63,6 +63,7 @@ only terminal records, and a process restart forgets them.
 | `accepted_at_ms`, `started_at_ms`, `finished_at_ms` | Unix-epoch milliseconds; absent until the phase is reached. |
 | `outcome` | Present on success: the attested transition, final control `version`, and `placement_generation`. |
 | `error` | Present on failure or not-started: a sanitized `{type, reason}`. |
+| `uncommitted_generation` | Present when a failed attempt swapped the serving layout but did not commit it. Retrying the same operation (same ID and parameters) may pass its precondition at this generation to finish the commit; durable writes stay paused until it does. |
 
 `autoscaler.enabled` reflects `--autoscale-resize-interval-secs`. `last_observation` is absent until
 the loop's first observation. Its `verdict` is one of:
