@@ -118,8 +118,10 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 authoritative, converged directory (the new layout was loaded coherently from a fixed snapshot, so
 exhaustive delivery and create-only admission work even when this coordinator had attached to
 populated shards), swaps the ring, shards, handoff handles, metrics, and generation, clears PITs,
-and lowers the fence. `finish_remote_resize` fences every
-retired slot, so a stale writer fails loud, and records `Finish`.
+and lowers the fence. `finish_remote_resize` fences every retired slot, so a stale writer fails
+loud, and records `Finish`. If installation fails, the resize has already committed, so the retired
+layout is no longer the layout of record: every position refuses reads and writes until a restart
+routes to the committed layout, exactly as after an unproven commit.
 
 A failure aborts the intent. Only this coordinator's `Commit` can make the new layout the layout of
 record, since startup aborts every uncommitted intent, so a failure before `Commit` is proposed
@@ -245,6 +247,10 @@ The eighth review found three more, all fixed with mutation-checked regression t
   shards still refused exhaustive delivery after a complete rebuild; the exported ids are now
   installed as a converged directory.
 
+The ninth review found that a failed installation (for example a lost control-plane read) returned
+after the commit while the old layout kept serving; installation failures now refuse serving too,
+with a mutation-checked regression test.
+
 ## Alternatives
 
 - **Stage beside the old layout on the same nodes.** Deferred: it needs per-slot placement
@@ -303,7 +309,8 @@ governor stays in-process, because provisioning target nodes is an external deci
     before `Commit`;
   - a lost `Begin` reply with a failed abort reopens writes, refuses a different operation, and
     lets a retry of the same operation complete;
-  - after an ambiguous commit, reads fail loud and a retry cannot reopen writes;
+  - after an ambiguous commit, or a committed layout that cannot be installed, reads fail loud and
+    a retry cannot reopen writes;
   - a coordinator attached to populated shards regains exhaustive delivery after the rebuild.
 - **Startup recovery tests.** An uncommitted intent is aborted and the committed one finished.
 - **Handler tests** cover `targets` validation by topology and origin, record the failed remote

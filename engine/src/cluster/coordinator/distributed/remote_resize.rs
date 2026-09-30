@@ -205,7 +205,9 @@ impl ClusterEngine {
         })
     }
 
-    /// Swap the serving ring and shards to a committed staged layout and reopen writes.
+    /// Swap the serving ring and shards to a committed staged layout and reopen writes. Any
+    /// failure leaves writes fenced and stops reads too, since the retired layout is no longer the
+    /// layout of record.
     pub fn install_remote_resize(
         &mut self,
         prepared: PreparedRemoteResize,
@@ -220,24 +222,43 @@ impl ClusterEngine {
         } = prepared;
         let exported = logical_ids.len() as u64;
         let generation = staged.placement_generation();
-        let state = self.control_state()?;
-        if state.placement_generation != generation.0
-            || state.num_shards as usize != staged.ring.num_shards()
-        {
-            return Err(ShardError::ControlPlane(format!(
-                "refusing to install a staged layout at generation {}/{} shards: the committed \
-                 layout is generation {}/{} shards",
-                generation.0,
-                staged.ring.num_shards(),
-                state.placement_generation,
-                state.num_shards
-            )));
+        let checked = self.control_state().and_then(|state| {
+            if state.placement_generation != generation.0
+                || state.num_shards as usize != staged.ring.num_shards()
+            {
+                return Err(ShardError::ControlPlane(format!(
+                    "refusing to install a staged layout at generation {}/{} shards: the \
+                     committed layout is generation {}/{} shards",
+                    generation.0,
+                    staged.ring.num_shards(),
+                    state.placement_generation,
+                    state.num_shards
+                )));
+            }
+            // The directory mirrors the rebuilt corpus exactly, as after an in-process rebuild:
+            // the new layout was loaded coherently from a fixed snapshot while writes were
+            // fenced, so it restores create-only admission and exhaustive-delivery convergence
+            // even when this coordinator attached to populated shards without either.
+            self.replace_logical_ids(logical_ids)
+        });
+        if let Err(error) = checked {
+            // The resize committed, so the retired layout is no longer the layout of record, yet
+            // this coordinator cannot install the new one. Once its target leases lapse another
+            // coordinator can serve the committed layout, so stop serving until a restart routes
+            // there, exactly as after an unproven commit.
+            for handoff in &self.handoffs {
+                handoff.refuse_serving();
+            }
+            self.emit(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::ReplicaDesync,
+                detail: format!(
+                    "remote resize {operation_id} committed but could not be installed; this \
+                     coordinator stops serving until a restart routes to the committed layout"
+                ),
+                error: error.to_string(),
+            });
+            return Err(error);
         }
-        // The directory mirrors the rebuilt corpus exactly, as after an in-process rebuild: the new
-        // layout was loaded coherently from a fixed snapshot while writes were fenced, so it
-        // restores create-only admission and exhaustive-delivery convergence even when this
-        // coordinator attached to populated shards without either.
-        self.replace_logical_ids(logical_ids)?;
         self.ring = staged.ring;
         self.shards = staged.shards;
         self.handoffs = staged.handoffs;

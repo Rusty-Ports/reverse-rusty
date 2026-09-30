@@ -333,3 +333,36 @@ fn grpc_remote_resize_recovers_from_a_lost_begin_reply() {
         .is_none());
     assert_eq!(matches(&cluster, &titles), before);
 }
+
+#[test]
+fn grpc_remote_resize_stops_serving_when_a_committed_layout_cannot_be_installed() {
+    let Fixture {
+        rt: _rt,
+        cluster,
+        targets,
+        ..
+    } = fixture(2);
+    let (mut cluster, faults) = Faulty::install(cluster);
+    let prepared = cluster
+        .prepare_remote_resize(&RemoteResizeRequest {
+            operation_id: 91,
+            num_shards: 2,
+            targets,
+        })
+        .expect("prepare commits the new layout");
+    // The commit applied, so the retired layout is no longer the layout of record. If the
+    // installation cannot confirm it, this coordinator must not keep answering from the old one.
+    faults.reads_broken.store(true, Ordering::SeqCst);
+    assert!(cluster.install_remote_resize(prepared).is_err());
+    faults.reads_broken.store(false, Ordering::SeqCst);
+    let read = cluster.percolate("1994 acme");
+    assert!(
+        matches!(read, Err(ShardError::ControlPlane(_))),
+        "reads must fail loud after a failed installation: {read:?}"
+    );
+    let write = cluster.add_query(9_900_001, "zzuninstalled widget");
+    assert!(
+        matches!(write, Err(ShardError::ControlPlane(_))),
+        "{write:?}"
+    );
+}
