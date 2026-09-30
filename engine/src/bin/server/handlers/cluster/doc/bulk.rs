@@ -33,7 +33,18 @@ pub(crate) async fn cluster_bulk_route(
             return bulk_rejection(&state.prom, error.status, error.error_type, error.reason);
         }
     };
-    cluster_bulk_inner(&state, items)
+    // The batch holds `write_serial` and makes remote write RPCs, so it runs on a blocking thread,
+    // never on an async worker (see `run_cluster_write`).
+    let worker_state = Arc::clone(&state);
+    match tokio::task::spawn_blocking(move || cluster_bulk_inner(&worker_state, items)).await {
+        Ok(response) => response,
+        Err(error) => bulk_rejection(
+            &state.prom,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cluster_write_failed",
+            format!("cluster bulk worker failed: {error}"),
+        ),
+    }
 }
 
 fn cluster_bulk_inner(state: &Arc<ClusterAppState>, items: Vec<ParsedBulkItem>) -> Response {

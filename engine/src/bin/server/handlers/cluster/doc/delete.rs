@@ -36,11 +36,8 @@ pub(crate) async fn cluster_delete_doc(
     };
     params.acknowledge_refresh_policy();
 
-    let result = {
-        let _w = state.write_serial.lock();
-        let cluster = state.cluster.read();
-        cluster.remove_query(id)
-    };
+    let result =
+        super::super::run_cluster_write(&state, move |cluster| cluster.remove_query(id)).await;
     let (status, response) = render_delete_result(id, result);
     state
         .prom

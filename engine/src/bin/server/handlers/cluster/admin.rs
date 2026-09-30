@@ -257,14 +257,25 @@ pub(crate) async fn cluster_flush_route(
         Err(response) => return *response,
     };
     let force = params.force_requested();
-    let _flush = match acquire_flush(&state.flush_serial, params, &state.prom) {
-        Ok(guard) => guard,
-        Err(response) => return *response,
-    };
-    let (shards, result) = {
-        let _w = state.write_serial.lock();
-        let cluster = state.cluster.read();
-        (cluster.num_shards(), cluster.flush())
+    // Flush admission, `write_serial`, and the remote flush RPCs all wait, so they run on a
+    // blocking thread, never on an async worker (see `run_cluster_write`).
+    let worker_state = Arc::clone(&state);
+    let flushed = tokio::task::spawn_blocking(move || {
+        let _flush = acquire_flush(&worker_state.flush_serial, params, &worker_state.prom)?;
+        let _w = worker_state.write_serial.lock();
+        let cluster = worker_state.cluster.read();
+        Ok::<_, Box<Response>>((cluster.num_shards(), cluster.flush()))
+    })
+    .await;
+    let (shards, result) = match flushed {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(response)) => return *response,
+        Err(error) => (
+            0,
+            Err(reverse_rusty::cluster::ShardError::Protocol(format!(
+                "cluster flush worker failed: {error}"
+            ))),
+        ),
     };
     match result {
         Ok(()) => {

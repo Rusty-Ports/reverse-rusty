@@ -77,6 +77,9 @@ mod remote_connect;
 /// module-size budget. `distributed`-gated: it drives the data-moving reconcile.
 #[cfg(feature = "distributed")]
 mod reconcile_loop;
+mod rpc_runtime;
+
+pub(crate) use rpc_runtime::cluster_rpc_handle;
 pub(crate) mod resize_loop;
 
 /// Hold one single-slot worker admission boundary through durability cleanup.
@@ -334,8 +337,9 @@ pub(crate) async fn run(
 
     // Assemble the cluster OFF the runtime workers: build/open are plain sync work,
     // and the gRPC connect path's sync→async bridge must not run on a runtime
-    // worker thread (it would nest `block_on`).
-    let handle = tokio::runtime::Handle::current();
+    // worker thread (it would nest `block_on`). Every cluster connection is bound to
+    // the dedicated RPC runtime, never the HTTP one (see `rpc_runtime`).
+    let handle = cluster_rpc_handle();
     let data_dir = cluster_config.data_dir.clone();
     let cfg = cluster_config.clone();
     let control_endpoints: Vec<String> = cli.control_endpoint.clone();

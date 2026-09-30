@@ -15,6 +15,7 @@ The multi-shard correctness core, remote shard seam, shared feature space, and d
 | [034](../adr-034-cross-process-dict-shipping.md) | Cross-process dict shipping over gRPC | Ships the frozen dictionary during adoption so a data node need not rebuild the corpus. | Accepted |
 | [176](../adr-176-remote-logical-id-directory.md) | Remote logical-ID directory | Reconstructs create-only admission from bounded shard snapshots while keeping convergence evidence separate. | Accepted |
 | [177](../adr-177-per-id-cluster-write-locks.md) | Per-ID cluster write locks | Removes stripe collisions while bounding lock storage to active callers and preserving log/apply and bulk exclusion. | Accepted |
+| [183](../adr-183-cluster-rpc-runtime-isolation.md) | Cluster RPC runtime isolation | Drives cluster RPCs on a dedicated runtime and moves write-handler lock waits to blocking threads, so concurrent writes can no longer deadlock a remote coordinator. | Accepted |
 
 ---
 

@@ -356,3 +356,59 @@ async fn rejections_are_loud_not_silent() {
     .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
 }
+
+/// A write waiting on `write_serial` must wait on a blocking thread, never on an async worker: on
+/// a single-threaded runtime a parked worker stalls every other request (and, with remote shards,
+/// the RPCs the serializer's holder needs to finish).
+#[test]
+fn a_queued_write_never_parks_the_async_runtime() {
+    let state = test_state(&seed());
+    let holder_state = Arc::clone(&state);
+    let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
+    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel::<()>(1);
+    let holder = std::thread::spawn(move || {
+        let _writes = holder_state.write_serial.lock();
+        locked_sender.send(()).expect("signal the held serializer");
+        release_receiver.recv().expect("release the serializer");
+    });
+    locked_receiver.recv().expect("serializer held");
+
+    let (read_sender, read_receiver) = std::sync::mpsc::channel();
+    let server_state = Arc::clone(&state);
+    let server = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let put_state = Arc::clone(&server_state);
+            let put = tokio::spawn(async move {
+                send(
+                    &put_state,
+                    req(
+                        "PUT",
+                        "/_doc/20",
+                        &serde_json::json!({"query": "1997 acme"}),
+                    ),
+                )
+                .await
+            });
+            // Let the PUT start and queue behind the held serializer.
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            let (status, _) = send(&server_state, req_empty("GET", "/")).await;
+            read_sender.send(status).expect("report the read");
+            put.await.expect("put task")
+        })
+    });
+    let read = read_receiver.recv_timeout(std::time::Duration::from_secs(10));
+    release_sender.send(()).expect("release");
+    holder.join().expect("holder");
+    let (put_status, body) = server.join().expect("server");
+    assert_eq!(
+        read.expect("a read must be served while a write waits on the serializer"),
+        StatusCode::OK
+    );
+    assert_eq!(put_status, StatusCode::CREATED, "{body}");
+}

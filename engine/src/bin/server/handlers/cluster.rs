@@ -38,6 +38,28 @@ mod vocab;
 #[cfg(test)]
 mod tests;
 
+/// Run a cluster mutation on a blocking thread, never on an async worker. It waits on
+/// `write_serial` and the cluster lock and then makes remote write RPCs; a worker parked on those
+/// waits would starve every other request. The RPCs themselves run on the dedicated cluster
+/// runtime (see `cluster_mode::rpc_runtime`), so the lock holder always progresses.
+pub(crate) async fn run_cluster_write<T: Send + 'static>(
+    state: &std::sync::Arc<crate::state::ClusterAppState>,
+    work: impl FnOnce(&reverse_rusty::cluster::ClusterEngine) -> Result<T, ShardError> + Send + 'static,
+) -> Result<T, ShardError> {
+    let state = std::sync::Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let _writes = state.write_serial.lock();
+        let cluster = state.cluster.read();
+        work(&cluster)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        Err(ShardError::Protocol(format!(
+            "cluster write worker failed: {error}"
+        )))
+    })
+}
+
 pub(crate) use admin::{
     cluster_backup, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_compact,
     cluster_flush_route, cluster_gc, cluster_handoff, cluster_health, cluster_metrics,
