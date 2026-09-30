@@ -45,8 +45,8 @@ The client checks frame identity, a stable total, strictly increasing ids, and a
 equal to everything delivered. It never retries a partially consumed stream. It shares the node's
 single snapshot permit with `LiveLogicalIds`. Every send waits for channel capacity no later than
 the deadline and failure delivery never waits, so a stalled reader cannot pin the producer or the
-permit; the client bounds consumption with the same absolute deadline. `ClusterEngine::export_live_corpus` dedups replicated
-rows across positions.
+permit; the client bounds consumption with the same absolute deadline.
+`ClusterEngine::export_live_corpus` dedups replicated rows across positions.
 
 ### Replicated resize intent
 
@@ -78,20 +78,23 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 
 `prepare_remote_resize` runs under a shared reference, so reads keep serving the old layout:
 
-1. It validates the cluster: remote, assignment-routed, exclusively owned by this coordinator,
-   replication factor 1, no queued partial writes. Exclusive shard claims keep every other
-   coordinator off the source slots, which the local write fence alone cannot. A committed intent
-   left behind by a failed `Finish` is finished first, after its retired slots are fenced again,
-   when the served layout is exactly the one it committed.
-2. It registers the targets, reserves every participating endpoint in the move ledger, and
-   records `Begin`.
-3. It raises a **resize write fence** and briefly takes the mutation barrier exclusively. Every
-   mutation checks the fence under that barrier, so each accepted write lands before the export,
-   and every later add, upsert, remove, bulk load, or resync is refused. The HTTP route holds the
-   REST write serializer until the fence is up, then releases it, so queued writers are refused
-   at once instead of blocking runtime workers for the whole copy. Vocabulary and alias rebuilds
-   check the fence before asking for exclusive access; queueing for it behind the copy would stall
-   every read.
+1. It validates the request and the cluster: remote, assignment-routed, exclusively owned by this
+   coordinator, replication factor 1, no queued partial writes. Exclusive shard claims keep every
+   other coordinator off the source slots, which the local write fence alone cannot.
+2. Before any control-plane or mesh call, it raises a **resize write fence** and briefly takes the
+   mutation barrier exclusively. Every mutation checks the fence under that barrier, so each
+   accepted write lands before the export, and every later add, upsert, remove, bulk load, or
+   resync is refused. The HTTP route holds the REST write serializer only until the fence is up.
+   Request threads blocked on that serializer could otherwise starve the runtime these calls
+   need, and queued writers are then refused at once instead of waiting out the copy. Vocabulary
+   and alias rebuilds check the fence before asking for exclusive access; queueing for it behind
+   the copy would stall every read. The route also returns the single administrative admission
+   slot, which health probes share, once it holds the exclusive topology guard that keeps other
+   resizes out, so `/_health` keeps answering while reads continue.
+3. It registers the targets, reserves every participating endpoint in the move ledger, and
+   records `Begin`. A committed intent left behind by a failed `Finish` is finished first, after
+   its retired slots are fenced again, when the served layout is exactly the one it committed; an
+   uncommitted intent left by an earlier attempt of the same operation is aborted first.
 4. It builds the staged layout with the ordinary remote builder at generation `N + 1`, refusing
    targets that already hold data.
 5. It streams the corpus into the staged layout, placing byte-bounded, versioned batches under the
@@ -113,11 +116,15 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 metrics, and generation, clears PITs, and lowers the fence. `finish_remote_resize` fences every
 retired slot, so a stale writer fails loud, and records `Finish`.
 
-A failure aborts the intent, and lowers the fence only when the control plane proves the resize did
-not commit: the abort was accepted and the served layout is still the committed one. The old layout
-then keeps serving and is writable, and the targets keep an unrouted staged layout that must be
-wiped before reuse. An unproven outcome keeps writes paused, because consensus may already name the
-new layout; a coordinator restart resolves the recorded intent and routes to the committed layout.
+A failure aborts the intent. Only this coordinator's `Commit` can make the new layout the layout of
+record, since startup aborts every uncommitted intent, so a failure before `Commit` is proposed
+always reopens writes, even when the abort itself is lost; retrying the same operation clears the
+leftover intent. After `Commit` was proposed, writes reopen only when the control plane proves it
+did not apply: the abort was accepted and the served layout is still the committed one. The old
+layout then keeps serving and is writable, and the targets keep an unrouted staged layout that must
+be wiped before reuse. An unproven outcome keeps writes paused, because consensus may already name
+the new layout; a coordinator restart resolves the recorded intent and routes to the committed
+layout.
 
 ### Startup
 
@@ -202,6 +209,18 @@ barrier, so an adoption, recovery, or removal could replace the slot while the o
 wrote the same files. Each worker now confirms the slot is unchanged and unfenced under the barrier
 and holds it until the job finishes, as `Seal` does.
 
+The sixth review found three more, all fixed with mutation-checked regression tests:
+
+- the route held the single administrative admission slot for the whole copy, so health probes
+  timed out and a readiness or liveness probe could pull or restart the coordinator mid-resize;
+  it is returned once the exclusive topology guard is held;
+- the REST write serializer stayed held through target registration, the durability probe, and
+  `Begin`, so request threads waiting on it could starve the runtime those calls needed; the fence
+  is now raised, and the serializer released, before any network call;
+- a lost `Begin` reply returned without aborting, stranding a `Preparing` intent that refused even
+  a retry of the same operation; any failure before `Commit` now reopens writes, and a retry of
+  the same operation aborts its own leftover intent.
+
 ## Alternatives
 
 - **Stage beside the old layout on the same nodes.** Deferred: it needs per-slot placement
@@ -255,9 +274,13 @@ governor stays in-process, because provisioning target nodes is an external deci
   - the fenced callback runs only once writes are refused, and the fence check vocabulary rebuilds
     rely on fails until install;
   - a shared coordinator is refused;
-  - a coordinator that still serves the retired layout refuses to resolve the committed intent.
+  - a coordinator that still serves the retired layout refuses to resolve the committed intent;
+  - the fence goes up before the first control-plane call, and writes reopen after a failure
+    before `Commit`;
+  - a lost `Begin` reply with a failed abort reopens writes, refuses a different operation, and
+    lets a retry of the same operation complete.
 - **Startup recovery tests.** An uncommitted intent is aborted and the committed one finished.
-- **Handler tests** cover `targets` validation by topology and origin, and record the failed
-  remote operation.
+- **Handler tests** cover `targets` validation by topology and origin, record the failed remote
+  operation, and show a remote resize returns the administrative slot health probes share.
 
 **See also:** ADR-043, ADR-078, ADR-086, ADR-175, ADR-176, ADR-179, ADR-181.

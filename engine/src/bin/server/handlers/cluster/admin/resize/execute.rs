@@ -198,13 +198,13 @@ pub(crate) async fn run_resize(state: &Arc<ClusterAppState>, run: ResizeRun) -> 
     let if_generation = run.if_placement_generation;
     let targets = run.targets;
     let completion = match supervise_cluster_resize_worker(move || {
-        let _permit = permit;
         let mut record = WorkerRecordGuard {
             ops: worker_ops,
             id: worker_id,
             finished: false,
         };
         let outcome = resize_worker(
+            permit,
             &worker_state,
             &worker_gate,
             started_sender,
@@ -285,6 +285,7 @@ fn unavailable(queued: &mut QueuedRecordGuard, reason: &'static str) -> ResizeRu
 
 #[allow(clippy::too_many_arguments)]
 fn resize_worker(
+    permit: tokio::sync::OwnedSemaphorePermit,
     state: &ClusterAppState,
     gate: &Mutex<ResizeStart>,
     started_sender: tokio::sync::oneshot::Sender<()>,
@@ -323,6 +324,10 @@ fn resize_worker(
     };
     #[cfg(feature = "distributed")]
     if !targets.is_empty() {
+        // A remote copy keeps the old layout serving reads for its whole duration, so it must
+        // not hold the single administrative slot that health probes also need. The exclusive
+        // topology guard, held from here to the end, keeps every other resize out instead.
+        drop(permit);
         return super::remote::remote_resize_worker(
             state,
             writes,
@@ -338,6 +343,7 @@ fn resize_worker(
     }
     #[cfg(not(feature = "distributed"))]
     drop(targets);
+    let _permit = permit;
     let _writes = writes;
     let cluster = if no_wait {
         state.cluster.try_write()

@@ -157,17 +157,18 @@ durable `Seal` before its evidence is recorded, and a target started without `--
 refused. Every copy of a query stored on several positions must agree; disagreeing
 copies (for example, an unrepaired partial upsert) fail the export, so repair or upsert them first.
 
-A failure before the commit aborts and reopens writes. If the control plane cannot prove the commit
-did not happen, writes stay paused until a coordinator restart resolves the recorded intent. A
-failed response is therefore not proof that nothing committed: before wiping the targets or
-decommissioning the old nodes, confirm in [`GET /_cluster/state`](../observability/cluster-state.md)
-which layout `num_shards`, `placement_generation`, and the assignments name. Startup resolves a
-recorded intent only after the coordinator has exclusively claimed its shards, so it cannot abort a
-resize that another live coordinator is still running. It also checks that the layout it connected
-to (shard count, placement generation, and each position's node) is the committed one, and fails
-to start otherwise, so a coordinator that read the topology just before another coordinator's commit
-never serves the retired layout. Replication factor above 1 is refused.
-Decommission the old nodes once the resize succeeds.
+A failure before the commit is proposed aborts and reopens writes; retrying the same `operation_id`
+clears any intent it left behind. If the commit was proposed and the control plane cannot prove it
+did not apply, writes stay paused until a coordinator restart resolves the recorded intent.
+`/_health` keeps answering throughout, since reads keep serving. A failed response is therefore not
+proof that nothing committed: before wiping the targets or decommissioning the old nodes, confirm in
+[`GET /_cluster/state`](../observability/cluster-state.md) which layout `num_shards`,
+`placement_generation`, and the assignments name. Startup resolves a recorded intent only after the
+coordinator has exclusively claimed its shards, so it cannot abort a resize that another live
+coordinator is still running. It also checks that the layout it connected to (shard count, placement
+generation, and each position's node) is the committed one, and fails to start otherwise, so a
+coordinator that read the topology just before another coordinator's commit never serves the retired
+layout. Replication factor above 1 is refused. Decommission the old nodes once the resize succeeds.
 
 A static or CLI-seeded remote coordinator returns `501 not_supported_in_cluster_mode` before
 admission: its routing follows the CLI endpoint list, so changing the ring there would make routing

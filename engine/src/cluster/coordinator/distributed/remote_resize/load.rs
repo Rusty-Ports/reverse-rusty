@@ -27,6 +27,7 @@ impl ClusterEngine {
         intent: &ResizeIntent,
         target_endpoints: &[String],
         source_durable: bool,
+        commit_proposed: &std::cell::Cell<bool>,
     ) -> Result<(ClusterEngine, u64, u64), ShardError> {
         if self.pending_repairs() != 0 {
             return Err(ShardError::ControlPlane(
@@ -90,6 +91,7 @@ impl ClusterEngine {
             operation_id: request.operation_id,
             evidence,
         })?;
+        commit_proposed.set(true);
         self.commit_resize(request.operation_id, &intent.desired)?;
         Ok((staged, exported, loaded.iter().sum()))
     }

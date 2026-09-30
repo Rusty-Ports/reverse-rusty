@@ -105,10 +105,11 @@ impl ClusterEngine {
     }
 
     /// [`Self::prepare_remote_resize`], running `on_fenced` once the write fence is raised and
-    /// every in-flight mutation has drained, before the copy starts. A server passes a closure
-    /// that releases its own write serialization, so queued writers are refused by the fence
-    /// instead of waiting out the copy. `on_fenced` does not run when the resize fails before
-    /// the fence is raised.
+    /// every in-flight mutation has drained, before any control-plane or mesh RPC. A server passes
+    /// a closure that releases its own write serialization: request threads waiting on it must
+    /// never hold up the runtime these RPCs need, and queued writers are then refused by the fence
+    /// instead of waiting out the copy. `on_fenced` does not run when the request itself is
+    /// invalid.
     pub fn prepare_remote_resize_then(
         &self,
         request: &RemoteResizeRequest,
@@ -118,6 +119,23 @@ impl ClusterEngine {
             ShardError::Config("remote resize requires a gRPC-connected cluster".into())
         })?;
         self.validate_remote_resize_request(request)?;
+        self.raise_resize_write_fence();
+        on_fenced();
+        let commit_proposed = std::cell::Cell::new(false);
+        self.begin_and_build(&handle, request, &commit_proposed)
+            .map_err(|failure| {
+                self.fail_resize(request.operation_id, failure, commit_proposed.get())
+            })
+    }
+
+    /// Record `Begin`, then build, prove, and commit the staged layout. `commit_proposed` is set
+    /// just before the `Commit` proposal, the only step that can change the layout of record.
+    fn begin_and_build(
+        &self,
+        handle: &tokio::runtime::Handle,
+        request: &RemoteResizeRequest,
+        commit_proposed: &std::cell::Cell<bool>,
+    ) -> Result<PreparedRemoteResize, ShardError> {
         self.register_resize_targets(&request.targets)?;
         let state = self.control_state()?;
         if state.num_shards as usize != self.ring.num_shards()
@@ -132,7 +150,7 @@ impl ClusterEngine {
                 state.num_shards
             )));
         }
-        let state = self.finish_prior_committed_resize(state)?;
+        let state = self.finish_prior_resize(state, request.operation_id)?;
         let intent = resize_intent(&state, request)?;
         let expected_endpoints = expected_endpoints(&state)?;
         let target_endpoints: Vec<String> = intent
@@ -144,7 +162,7 @@ impl ClusterEngine {
 
         // A durable layout may only move onto durable targets; a volatile one (tests, caches) may
         // move onto either.
-        let source_durable = self.layout_is_durable(&handle, &expected_endpoints)?;
+        let source_durable = self.layout_is_durable(handle, &expected_endpoints)?;
 
         // Exclude moves, GC, and other resizes on every participating endpoint for the copy.
         let mut footprint = expected_endpoints.clone();
@@ -160,23 +178,26 @@ impl ClusterEngine {
                 )));
             }
         }
-        self.raise_resize_write_fence();
-        on_fenced();
-        match self.build_and_commit(&handle, request, &intent, &target_endpoints, source_durable) {
-            Ok((staged, exported, loaded)) => Ok(PreparedRemoteResize {
-                operation_id: request.operation_id,
-                staged,
-                old_num_shards: state.num_shards as usize,
-                exported,
-                loaded,
-                retired: expected_endpoints
-                    .into_iter()
-                    .enumerate()
-                    .map(|(position, endpoint)| (position as u32, endpoint))
-                    .collect(),
-            }),
-            Err(failure) => Err(self.fail_resize(request.operation_id, failure)),
-        }
+        let (staged, exported, loaded) = self.build_and_commit(
+            handle,
+            request,
+            &intent,
+            &target_endpoints,
+            source_durable,
+            commit_proposed,
+        )?;
+        Ok(PreparedRemoteResize {
+            operation_id: request.operation_id,
+            staged,
+            old_num_shards: state.num_shards as usize,
+            exported,
+            loaded,
+            retired: expected_endpoints
+                .into_iter()
+                .enumerate()
+                .map(|(position, endpoint)| (position as u32, endpoint))
+                .collect(),
+        })
     }
 
     /// Swap the serving ring and shards to a committed staged layout and reopen writes.
@@ -276,13 +297,23 @@ impl ClusterEngine {
     /// A previous resize may have committed and installed but failed to record `Finish`. Its
     /// intent would block every later resize and move, so finish it first when the served layout is
     /// exactly the one it committed, fencing that intent's retired slots again (idempotent).
-    fn finish_prior_committed_resize(
+    fn finish_prior_resize(
         &self,
         state: ClusterState,
+        operation_id: u64,
     ) -> Result<ClusterState, ShardError> {
         let Some(prior) = state.moves.resize.clone() else {
             return Ok(state);
         };
+        // An earlier attempt of this same operation left its uncommitted intent behind (for
+        // example after a lost reply). Nothing routes to its staged layout and only this
+        // coordinator could commit it, so abort it and start over.
+        if prior.operation_id == operation_id
+            && !matches!(prior.phase, ResizeIntentPhase::Committed(_))
+        {
+            self.expect_resize_outcome(ResizeCommand::Abort { operation_id })?;
+            return self.control_state();
+        }
         let serving_committed = matches!(prior.phase, ResizeIntentPhase::Committed(_))
             && state.num_shards == prior.desired.num_shards
             && state.placement_generation == prior.desired.placement_generation
@@ -414,22 +445,33 @@ impl ClusterEngine {
         );
     }
 
-    /// Abort the intent after a failure, and lower the write fence only when the control plane
-    /// proves the resize did not commit: the abort was accepted and the committed layout is still
-    /// the one being served. An ambiguous outcome keeps writes fenced, because a write accepted on
-    /// the old layout would vanish if consensus had already named the new one; a coordinator
-    /// restart resolves the recorded intent and routes to the committed layout.
-    fn fail_resize(&self, operation_id: u64, failure: ShardError) -> ShardError {
+    /// Abort the intent after a failure and decide whether writes may reopen. Only this
+    /// coordinator's `Commit` can make the new layout authoritative (startup aborts every
+    /// uncommitted intent), so until `Commit` has been proposed the old layout is certainly still
+    /// the layout of record and writes reopen even if the abort could not be recorded; a retry of
+    /// the same operation aborts its own leftover intent. Once `Commit` was proposed, writes reopen
+    /// only when the control plane proves it did not apply: the abort was accepted and the
+    /// committed layout is still the one being served. Otherwise writes stay fenced, because a
+    /// write accepted on the old layout would vanish if consensus already named the new one; a
+    /// coordinator restart resolves the recorded intent and routes to the committed layout.
+    fn fail_resize(
+        &self,
+        operation_id: u64,
+        failure: ShardError,
+        commit_proposed: bool,
+    ) -> ShardError {
         let aborted = matches!(
             self.propose_resize(ResizeCommand::Abort { operation_id }),
             Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
         );
-        let still_serving_committed = self.control_state().is_ok_and(|state| {
-            state.num_shards as usize == self.ring.num_shards()
-                && state.placement_generation == self.placement_generation().0
-                && state.moves.resize.is_none()
-        });
-        if aborted && still_serving_committed {
+        let reopen = !commit_proposed
+            || (aborted
+                && self.control_state().is_ok_and(|state| {
+                    state.num_shards as usize == self.ring.num_shards()
+                        && state.placement_generation == self.placement_generation().0
+                        && state.moves.resize.is_none()
+                }));
+        if reopen {
             self.resize_write_fence.store(false, Ordering::Release);
         } else {
             self.emit(crate::events::EngineEvent::DurabilityFailure {

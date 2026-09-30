@@ -435,6 +435,67 @@ async fn targets_are_validated_against_the_topology() {
 }
 
 #[cfg(feature = "distributed")]
+fn resolve_only_state(config: &ClusterConfig) -> Arc<ClusterAppState> {
+    let cluster =
+        ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), config, &seed())
+            .expect("cluster");
+    state_from_cluster_with_rebalance_topology(
+        cluster,
+        crate::state::ClusterRebalanceTopology::ResolveOnlyRemote,
+    )
+}
+
+#[cfg(feature = "distributed")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remote_resize_hands_back_the_admin_slot_health_probes_share() {
+    let state = resolve_only_state(&ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    });
+    // Hold the exclusive cluster lock on a dedicated thread so the remote worker parks after it
+    // has taken the topology and write guards.
+    let holder_state = Arc::clone(&state);
+    let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
+    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel::<()>(1);
+    let holder = std::thread::spawn(move || {
+        let _cluster = holder_state.cluster.write();
+        locked_sender.send(()).expect("signal cluster lock");
+        release_receiver.recv().expect("release cluster lock");
+    });
+    locked_receiver.recv().expect("cluster locked");
+    let request_state = Arc::clone(&state);
+    let request = tokio::spawn(async move {
+        post_json(
+            &request_state,
+            r#"{"num_shards":4,"operation_id":"remote-health","targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+        )
+        .await
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !state.write_serial.is_locked() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never took the write guard"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // A remote copy keeps reads serving, so it must return the single administrative permit
+    // that `/_health` also waits for; otherwise probes time out for the whole copy.
+    while state.stats_permits.available_permits() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the remote resize kept the permit health probes need"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    release_sender.send(()).expect("release");
+    holder.join().expect("holder");
+    let (status, failed) = request.await.expect("request task");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{failed}");
+}
+
+#[cfg(feature = "distributed")]
 #[tokio::test]
 async fn a_resolve_only_remote_resize_requires_targets() {
     let config = ClusterConfig {
@@ -442,16 +503,7 @@ async fn a_resolve_only_remote_resize_requires_targets() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let cluster = ClusterEngine::build(
-        Normalizer::default_vocab().expect("vocab"),
-        &config,
-        &seed(),
-    )
-    .expect("cluster");
-    let state = state_from_cluster_with_rebalance_topology(
-        cluster,
-        crate::state::ClusterRebalanceTopology::ResolveOnlyRemote,
-    );
+    let state = resolve_only_state(&config);
     let (status, _, bytes) = send_raw(
         &state,
         resize_request("/_cluster/resize", r#"{"num_shards":4}"#),
