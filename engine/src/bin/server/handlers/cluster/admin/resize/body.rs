@@ -69,21 +69,28 @@ impl ClusterResizeBody {
                 let mut ids: Vec<u64> = targets.iter().map(|t| t.id).collect();
                 ids.sort_unstable();
                 ids.dedup();
-                if ids.len() != targets.len()
-                    || targets
-                        .iter()
-                        .any(|t| t.endpoint.is_empty() || t.endpoint.len() > 2048)
-                {
-                    return Err("`targets` need distinct ids and non-empty endpoints".to_string());
+                if ids.len() != targets.len() {
+                    return Err("`targets` need distinct ids".to_string());
                 }
+                // Unknown targets are registered as data nodes before the resize connects to
+                // them, so each endpoint must be a valid mesh origin, exactly as node
+                // registration requires.
                 targets
                     .into_iter()
-                    .map(|t| reverse_rusty::cluster::NodeDescriptor {
-                        id: reverse_rusty::cluster::NodeId(t.id),
-                        addr: Some(t.endpoint),
-                        role: reverse_rusty::cluster::NodeRole::Data,
+                    .enumerate()
+                    .map(|(index, t)| {
+                        let addr =
+                            crate::handlers::cluster::node_register::validate_node_addr(t.endpoint)
+                                .map_err(|reason| {
+                                    format!("`targets[{index}].endpoint`: {reason}")
+                                })?;
+                        Ok(reverse_rusty::cluster::NodeDescriptor {
+                            id: reverse_rusty::cluster::NodeId(t.id),
+                            addr: Some(addr),
+                            role: reverse_rusty::cluster::NodeRole::Data,
+                        })
                     })
-                    .collect()
+                    .collect::<Result<_, String>>()?
             }
         };
         Ok(ClusterResizeRequest {

@@ -459,6 +459,26 @@ async fn a_resolve_only_remote_resize_requires_targets() {
     .await;
     assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
 
+    // Unknown targets are registered as data nodes, so each endpoint must be a mesh origin; a
+    // malformed one is refused before any operation starts or any node is registered.
+    for endpoint in ["not-a-uri", "ftp://127.0.0.1:1", "http://127.0.0.1:1/path"] {
+        let body = format!(
+            r#"{{"num_shards":4,"operation_id":"bad-origin","targets":[{{"id":11,"endpoint":"{endpoint}"}}]}}"#
+        );
+        let (status, _, bytes) = send_raw(&state, resize_request("/_cluster/resize", body)).await;
+        assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+    }
+    let (status, _) = get_json(&state, "/_cluster/resize/bad-origin").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(state
+        .cluster
+        .read()
+        .control_state()
+        .expect("state")
+        .nodes
+        .iter()
+        .all(|node| node.id.0 != 11));
+
     // With targets, the worker reaches the engine, which refuses a cluster that is not
     // remote and assignment-routed; the refusal is recorded and nothing changes.
     let (status, failed) = post_json(

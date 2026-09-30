@@ -97,35 +97,37 @@ impl LocalShard {
     /// (data-at-risk: a self-restart before the next successful seal would miss
     /// the bulk) rather than failing the infallible build-path ingest.
     pub(super) fn refresh_sidecar_segments(&self, eng: &Engine) {
-        let Some(dir) = &self.data_dir else { return };
-        let emit_fail = |detail: String, error: String| {
+        if let Err((detail, error)) = self.write_sidecar_segments(eng) {
             self.emit(&crate::events::EngineEvent::DurabilityFailure {
                 op: crate::events::DurabilityOp::ManifestWrite,
                 detail,
                 error,
             });
+        }
+    }
+
+    /// Rewrite the checkpoint sidecar's segment registry, PRESERVING
+    /// `local_checkpoint`. A volatile shard has no sidecar. Errors carry a
+    /// detail and the underlying cause.
+    pub(super) fn write_sidecar_segments(&self, eng: &Engine) -> Result<(), (String, String)> {
+        let Some(dir) = &self.data_dir else {
+            return Ok(());
         };
-        let prev = match translog::read_sidecar(dir) {
-            Ok(c) => c.map_or(0, |c| c.local_checkpoint),
-            Err(e) => {
-                emit_fail(
-                    "reading shard.ckpt to refresh after bulk ingest".into(),
+        let prev = translog::read_sidecar(dir)
+            .map_err(|e| {
+                (
+                    "reading shard.ckpt to refresh after bulk ingest".to_string(),
                     e.to_string(),
-                );
-                return;
-            }
-        };
-        let segment_files = match eng.segment_filenames() {
-            Ok(f) => f,
-            Err(e) => {
-                emit_fail(
-                    "collecting segment filenames after bulk ingest".into(),
-                    e.to_string(),
-                );
-                return;
-            }
-        };
-        if let Err(e) = translog::write_sidecar(
+                )
+            })?
+            .map_or(0, |c| c.local_checkpoint);
+        let segment_files = eng.segment_filenames().map_err(|e| {
+            (
+                "collecting segment filenames after bulk ingest".to_string(),
+                e.to_string(),
+            )
+        })?;
+        translog::write_sidecar(
             dir,
             &translog::ShardCheckpoint {
                 next_seg_id: eng.next_seg_id(),
@@ -135,9 +137,13 @@ impl LocalShard {
                 compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
                 source_file_name: eng.source_file_name().to_string(),
             },
-        ) {
-            emit_fail("writing shard.ckpt after bulk ingest".into(), e.to_string());
-        }
+        )
+        .map_err(|e| {
+            (
+                "writing shard.ckpt after bulk ingest".to_string(),
+                e.to_string(),
+            )
+        })
     }
 
     /// Lock the engine, recovering the guard if a prior writer panicked: a poisoned

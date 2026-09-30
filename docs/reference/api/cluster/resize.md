@@ -134,9 +134,10 @@ curl -X POST 'localhost:9200/_cluster/resize' -H 'Content-Type: application/json
               {"id": 22, "endpoint": "https://shard-22:50051"}]}'
 ```
 
-The targets must be empty shard servers that host no slot of the current layout. Position `p` of the
-new layout goes to `targets[p % len(targets)]`, and unknown target ids are registered. The operation
-then runs these steps:
+The targets must be empty shard servers that host no slot of the current layout. Each endpoint must
+be an `http` or `https` origin, validated like [node registration](register-node.md). Position `p`
+of the new layout goes to `targets[p % len(targets)]`, and unknown target ids are registered. The
+operation then runs these steps:
 
 1. Record a durable resize intent.
 2. Pause writes: adds, upserts, removes, repair, and vocabulary or alias changes are refused with

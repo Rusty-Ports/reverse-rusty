@@ -19,8 +19,9 @@ impl LocalShard {
         report
     }
 
-    /// Finish a staged load: write the source store once, then refresh the checkpoint sidecar's
-    /// segment registry. Fails when a staged segment or the store could not be persisted.
+    /// Finish a staged load: write the source store once, then the checkpoint sidecar's segment
+    /// registry. Fails when a staged segment, the store, or the sidecar could not be persisted: a
+    /// restart reopens the slot from its sidecar, so a stale one would silently empty the load.
     pub(crate) fn finish_staged_load(&self) -> Result<(), ShardError> {
         let mut eng = self.lock();
         if !eng.persist_staged_sources() {
@@ -28,7 +29,7 @@ impl LocalShard {
                 "staged load could not persist its segments and sources".into(),
             ));
         }
-        self.refresh_sidecar_segments(&eng);
-        Ok(())
+        self.write_sidecar_segments(&eng)
+            .map_err(|(detail, error)| ShardError::Log(format!("staged load: {detail}: {error}")))
     }
 }

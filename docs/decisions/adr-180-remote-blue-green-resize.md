@@ -186,6 +186,14 @@ fence-ordering, and staged-load fixes were mutation-checked:
 - the export's id snapshot and page reads waited on the engine lock without a deadline; every lock
   wait and the snapshot sort now observe it.
 
+The fourth review found two more, both fixed with mutation-checked regression tests:
+
+- a staged load ignored a failed checkpoint-sidecar write, so a durable target loaded from a
+  volatile layout (which skips `Seal`) could reopen empty; the load now fails instead;
+- a malformed target endpoint was registered as a data node before the connect failed, leaving
+  membership that later rebalances would target; targets are now validated as mesh origins, like
+  node registration.
+
 ## Alternatives
 
 - **Stage beside the old layout on the same nodes.** Deferred: it needs per-slot placement
@@ -214,8 +222,8 @@ governor stays in-process, because provisioning target nodes is an external deci
   visitor refusal. Shard tests show the export snapshot collapses duplicate rows and gives up at
   its deadline while the engine lock is held, for both the id snapshot and page reads.
 - **Staged-load tests** show a stream seals threshold-sized segments (not one per request), loads
-  nothing from an empty stream, refuses a second shard id, and writes a durable slot's source store
-  only when the stream closes.
+  nothing from an empty stream, refuses a second shard id, writes a durable slot's source store
+  only when the stream closes, and fails when its checkpoint sidecar cannot be written.
 - **Resize-intent state-machine tests** cover:
   - atomic idempotent commit and generation bumps;
   - invalid, co-located, unregistered, and unnormalized intents;
@@ -240,7 +248,7 @@ governor stays in-process, because provisioning target nodes is an external deci
   - a shared coordinator is refused;
   - a coordinator that still serves the retired layout refuses to resolve the committed intent.
 - **Startup recovery tests.** An uncommitted intent is aborted and the committed one finished.
-- **Handler tests** cover `targets` validation by topology and record the failed remote
-  operation.
+- **Handler tests** cover `targets` validation by topology and origin, and record the failed
+  remote operation.
 
 **See also:** ADR-043, ADR-078, ADR-086, ADR-175, ADR-176, ADR-179, ADR-181.

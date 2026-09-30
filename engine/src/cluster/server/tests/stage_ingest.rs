@@ -161,3 +161,40 @@ async fn staged_load_writes_the_source_store_once_when_the_stream_closes() {
     assert!(state.shard.persistence_healthy());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_load_fails_when_its_checkpoint_sidecar_cannot_be_written() {
+    let dir = std::env::temp_dir().join(format!("rr_stage_ingest_ckpt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let normalizer = norm();
+    let dict = Arc::new(frozen_dict(&["stageneedle"], &normalizer));
+    let server = ShardServer::new_durable(normalizer, dict, three_row_segments(), dir.clone())
+        .expect("server");
+    let (client, _state) = serve(server).await;
+    // A directory where the sidecar's temp file goes makes every sidecar write fail. A restart
+    // would reopen from the stale sidecar and lose the load, so the load must not succeed.
+    let mut sidecar_dirs = vec![dir.clone()];
+    let mut pending = vec![dir.clone()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+            if entry.path().is_dir() {
+                pending.push(entry.path());
+            } else if entry.file_name() == "shard.ckpt" {
+                sidecar_dirs.push(next.clone());
+            }
+        }
+    }
+    for sidecar_dir in &sidecar_dirs {
+        std::fs::create_dir_all(sidecar_dir.join("shard.ckpt.tmp")).expect("obstruct sidecar");
+    }
+
+    let (sender, reply) = open(&client);
+    sender.send(batch(0, 0..2)).await.expect("send");
+    drop(sender);
+    let status = reply
+        .await
+        .expect("join")
+        .expect_err("an unwritable sidecar fails the load");
+    assert!(status.message().contains("shard.ckpt"), "{status:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
