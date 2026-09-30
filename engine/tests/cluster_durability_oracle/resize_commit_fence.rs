@@ -155,14 +155,78 @@ fn committed_rebuilds_do_not_accumulate_superseded_source_sidecars() {
     for k in [4, 2, 5, 3] {
         cluster.resize(k).expect("resize");
     }
+    let committed = read_cluster_manifest(&dir.join("cluster_manifest.bin"))
+        .expect("manifest")
+        .placement_generation
+        .0;
     let sidecars = source_sidecars(&dir);
-    assert_eq!(
-        sidecars.len(),
-        3,
-        "exactly one committed source sidecar per shard should remain: {sidecars:?}"
+    let stale: Vec<&String> = sidecars
+        .iter()
+        .filter(|name| {
+            name.rsplit('/')
+                .next()
+                .and_then(|n| n.strip_prefix("sources_g"))
+                .and_then(|n| n.strip_suffix(".dat"))
+                .and_then(|g| g.parse::<u64>().ok())
+                .is_some_and(|g| g < committed)
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "superseded generation sidecars must be reclaimed: {stale:?}"
+    );
+    // One committed generation-named sidecar per surviving shard, plus at most the canonical
+    // `sources.dat` from the initial build, which this path never reclaims.
+    assert!(
+        sidecars.len() <= 6,
+        "reclamation must stop accumulation across rebuilds: {sidecars:?}"
     );
     drop(cluster);
     let reopened = ClusterEngine::open(&dir, vocab(), None).expect("reopen");
     assert_eq!(reopened.num_shards(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sidecar_reclamation_keeps_peer_recovered_replica_sources() {
+    let (queries, titles) = build_corpus();
+    let dir = unique_dir("resize_sidecar_gc_replicas");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        replication_factor: 2,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    {
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("durable build");
+        cluster.resize(2).expect("resize");
+    }
+    // Reopen: each replica is peer-recovered into its canonical `sources.dat`, while the
+    // primary keeps the generation-named sidecar the manifest selects.
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).expect("reopen");
+    let replica_sources: Vec<std::path::PathBuf> = (0..2)
+        .map(|s| dir.join(format!("shard_{s:03}/replica_001/sources.dat")))
+        .filter(|p| p.exists())
+        .collect();
+    assert!(
+        !replica_sources.is_empty(),
+        "precondition: recovered replicas use sources.dat"
+    );
+    reopened.checkpoint().expect("checkpoint");
+    for path in &replica_sources {
+        assert!(
+            path.exists(),
+            "an active replica sidecar was reclaimed: {}",
+            path.display()
+        );
+    }
+    let brute = Brute::build(&queries);
+    let mut lc = String::new();
+    let mut feats = Vec::new();
+    for title in titles.iter().take(100) {
+        let got: HashSet<u64> = reopened.percolate(title).unwrap().into_iter().collect();
+        assert_eq!(got, brute.matches(title, &mut lc, &mut feats), "{title:?}");
+    }
+    drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
 }

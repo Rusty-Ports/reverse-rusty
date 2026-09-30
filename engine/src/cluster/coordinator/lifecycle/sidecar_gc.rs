@@ -1,35 +1,43 @@
 //! Post-commit reclamation of superseded per-shard source sidecars.
 //!
-//! A blue/green rebuild (resize or vocabulary change) writes each position's complete source
-//! corpus to a generation-named sidecar, and the coordinator manifest selects it atomically with
-//! the segment registry. Once a manifest commits, every other sidecar in that position's primary
-//! and replica directories is unreachable: the committed manifest never selects it, and a later
-//! rebuild at the same generation deletes any stale copy before writing. Without reclamation each
-//! rebuild would leave one full corpus copy per shard copy on disk.
+//! A blue/green rebuild (resize or vocabulary change) writes every copy of every position —
+//! primary and in-process replicas — to a fresh `sources_g<generation>.dat` named by the new
+//! placement generation, and the coordinator manifest selects the primary's sidecar atomically
+//! with the segment registry. Peer recovery, by contrast, always restores a replica into the
+//! canonical `sources.dat`. So after a manifest commits at generation `G`, an active sidecar is
+//! either `sources_g<G>.dat` or `sources.dat`; a generation-named sidecar below `G` belongs to a
+//! superseded layout that no copy can still select. Only those are reclaimed. `sources.dat` is
+//! never removed here: it may be a recovered replica's live store, and removing it under a
+//! concurrent lazy remap would silently empty that store. Without reclamation, each rebuild
+//! would leave one full source corpus per shard copy on disk.
 
 use std::path::Path;
 
 use crate::cluster::coordinator::{shard_dir, ClusterEngine};
 use crate::events::{DurabilityOp, EngineEvent};
 
-/// Whether `name` has the exact shape of a cluster source sidecar: the legacy `sources.dat` or
-/// a generation-selected `sources_g<20 digits>.dat`. Anything else is left untouched.
-fn is_source_sidecar(name: &str) -> bool {
-    if name == "sources.dat" {
-        return true;
+/// The generation encoded in a `sources_g<20 digits>.dat` sidecar name, or `None` for any other
+/// name (including the canonical `sources.dat`).
+fn superseded_generation(name: &str) -> Option<u64> {
+    let digits = name.strip_prefix("sources_g")?.strip_suffix(".dat")?;
+    if digits.len() != 20 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
-    name.strip_prefix("sources_g")
-        .and_then(|rest| rest.strip_suffix(".dat"))
-        .is_some_and(|digits| digits.len() == 20 && digits.bytes().all(|b| b.is_ascii_digit()))
+    digits.parse().ok()
 }
 
 impl ClusterEngine {
-    /// Reclaim source sidecars superseded by the just-committed manifest in each position's
-    /// primary directory and its in-process replica directories.
-    pub(super) fn gc_superseded_source_sidecars(&self, dir: &Path, committed: &[String]) {
-        for (s, keep) in committed.iter().enumerate() {
+    /// Reclaim generation-named source sidecars older than `committed_generation` in each
+    /// position's primary directory and its in-process replica directories.
+    pub(super) fn gc_superseded_source_sidecars(
+        &self,
+        dir: &Path,
+        num_shards: usize,
+        committed_generation: u64,
+    ) {
+        for s in 0..num_shards {
             let primary = shard_dir(dir, s);
-            self.remove_superseded_sidecars(&primary, keep);
+            self.remove_superseded_sidecars(&primary, committed_generation);
             let Ok(entries) = std::fs::read_dir(&primary) else {
                 continue;
             };
@@ -40,25 +48,24 @@ impl ClusterEngine {
                     .is_some_and(|n| n.starts_with("replica_"))
                     && entry.file_type().is_ok_and(|t| t.is_dir());
                 if is_replica {
-                    self.remove_superseded_sidecars(&entry.path(), keep);
+                    self.remove_superseded_sidecars(&entry.path(), committed_generation);
                 }
             }
         }
     }
 
-    /// Remove every source sidecar in `dir` other than `keep`. Best effort: a file left behind is
-    /// never selected by the committed manifest and is retried by the next checkpoint.
-    fn remove_superseded_sidecars(&self, dir: &Path, keep: &str) {
+    /// Remove every generation-named sidecar in `dir` older than `committed_generation`. Best
+    /// effort: a file left behind is never selected and is retried by the next checkpoint.
+    fn remove_superseded_sidecars(&self, dir: &Path, committed_generation: u64) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name == keep
-                || !is_source_sidecar(name)
-                || !entry.file_type().is_ok_and(|t| t.is_file())
-            {
+            let superseded = superseded_generation(name)
+                .is_some_and(|generation| generation < committed_generation);
+            if !superseded || !entry.file_type().is_ok_and(|t| t.is_file()) {
                 continue;
             }
             match std::fs::remove_file(entry.path()) {
@@ -79,16 +86,24 @@ impl ClusterEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::is_source_sidecar;
+    use super::superseded_generation;
 
     #[test]
-    fn recognizes_only_exact_sidecar_names() {
-        assert!(is_source_sidecar("sources.dat"));
-        assert!(is_source_sidecar("sources_g00000000000000000007.dat"));
-        assert!(!is_source_sidecar("sources_g7.dat"));
-        assert!(!is_source_sidecar("sources_g0000000000000000000x.dat"));
-        assert!(!is_source_sidecar("sources_g00000000000000000007.dat.tmp"));
-        assert!(!is_source_sidecar("sources.dat.bak"));
-        assert!(!is_source_sidecar("segments"));
+    fn only_exact_generation_names_are_candidates() {
+        assert_eq!(
+            superseded_generation("sources_g00000000000000000007.dat"),
+            Some(7)
+        );
+        assert_eq!(superseded_generation("sources.dat"), None);
+        assert_eq!(superseded_generation("sources_g7.dat"), None);
+        assert_eq!(
+            superseded_generation("sources_g0000000000000000000x.dat"),
+            None
+        );
+        assert_eq!(
+            superseded_generation("sources_g00000000000000000007.dat.tmp"),
+            None
+        );
+        assert_eq!(superseded_generation("segments"), None);
     }
 }

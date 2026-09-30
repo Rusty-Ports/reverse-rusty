@@ -35,16 +35,24 @@ corpus per shard copy on disk indefinitely.
   alias-import retry, and an ordinary checkpoint all publish a manifest carrying the serving
   generation and update the mirrored value. No new state, format, or recovery step is introduced,
   and in-memory clusters are unaffected.
-- **Reclaim superseded sidecars after commit.** After the manifest write succeeds, checkpoint
-  removes every exactly shaped source sidecar (`sources.dat` or `sources_g<20 digits>.dat`) in each
-  position's primary and `replica_*` directories other than the one the committed manifest selects.
-  Removal is best effort and retried by the next checkpoint. Readers that still hold an older
-  store keep their existing memory mapping, the same lifecycle already used for superseded segment
-  files. While the previous manifest remains authoritative, its sidecar is never touched, which
+- **Reclaim superseded sidecars after commit.** Every rebuild writes every copy of a position,
+  primary and in-process replicas, to `sources_g<generation>.dat` named by the new placement
+  generation, while peer recovery always restores a replica into the canonical `sources.dat`. After
+  a manifest commits generation `G`, an active sidecar is therefore `sources_g<G>.dat` or
+  `sources.dat`. Checkpoint removes only exactly shaped `sources_g<20 digits>.dat` files whose
+  generation is below `G`, in each primary and `replica_*` directory. It never removes
+  `sources.dat`, which may be a recovered replica's live store. Removal is best effort and retried
+  by the next checkpoint. Readers that still hold an older store keep their memory mapping, the
+  lifecycle already used for superseded segment files. Reclamation runs only after a manifest
+  write succeeds, so the sidecar of a still-authoritative manifest is never a candidate, which
   preserves ADR-118's crash-window invariant.
 
 ## Alternatives
 
+- **Keep only the name the manifest selects.** Rejected (codex review): the manifest selects the
+  primary's sidecar, but a replica recovered after reopen serves from `sources.dat`, so applying
+  the primary's selector to replica directories deleted live replica stores; with lazy sources, a
+  concurrent flush could then remap an empty store.
 - **Log a layout-change record so replay can follow the green generation.** Rejected: replay would
   need the complete green segment set and control state that the failed commit did not publish,
   turning a rare retry window into a second recovery protocol.
@@ -57,16 +65,18 @@ corpus per shard copy on disk indefinitely.
 
 A failed post-swap commit now costs write availability for adds and upserts until an operator (or a
 later checkpoint) completes it, instead of risking an unopenable cluster. Disk use after repeated
-rebuilds stays at one source corpus per shard copy.
+rebuilds is bounded to the current generation plus the initial `sources.dat`, instead of growing
+with every rebuild.
 
 ## Proof
 
 `tests/cluster_durability_oracle/resize_commit_fence.rs` injects a control failure after the swap
 and proves: add and upsert are refused while removes still apply; a crash reopens the previous
 layout with the remove replayed; a same-count retry or checkpoint lifts the fence and the next write
-survives reopen; alias import has the same fence; and repeated committed resizes leave exactly one
-source sidecar per shard. Disabling the fence fails three of those tests. The source-generation
-suite now checks that the blue sidecar stays intact while authoritative and is reclaimed after the
-green commit.
+survives reopen; alias import has the same fence; repeated committed resizes leave no superseded
+generation sidecar; and a replicated cluster reopened after a resize keeps its peer-recovered replica
+`sources.dat` through the next checkpoint. Disabling the fence fails three of those tests, and the
+replica test fails against the earlier keep-only-the-selected-name rule. The source-generation
+suite now checks that the blue sidecar stays intact while authoritative.
 
 **See also:** ADR-046, ADR-078, ADR-118, ADR-167.

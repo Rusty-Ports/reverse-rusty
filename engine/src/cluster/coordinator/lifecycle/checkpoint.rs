@@ -111,7 +111,7 @@ impl ClusterEngine {
             });
         }
         self.gc_orphan_segments(&dir, &segment_registry);
-        self.gc_superseded_source_sidecars(&dir, &self.source_files);
+        self.gc_superseded_source_sidecars(&dir, self.shards.len(), self.placement_generation().0);
         self.compact_logical_ids();
         Ok(())
     }

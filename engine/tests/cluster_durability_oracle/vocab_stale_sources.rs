@@ -239,8 +239,11 @@ fn source_generations_coexist_across_the_rebuild_commit() {
     for &s in &blue_holders {
         let path = dir.join(format!("shard_{s:03}")).join("sources.dat");
         assert!(
-            !path.exists(),
-            "the superseded blue sidecar on shard {s} must be reclaimed after the green commit"
+            reverse_rusty::storage::SourceStore::open(&path, true)
+                .expect("reopen the canonical sidecar after the green commit")
+                .get(q)
+                .is_some(),
+            "sidecar reclamation never removes the canonical sources.dat on shard {s}"
         );
     }
 
