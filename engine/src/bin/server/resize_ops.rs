@@ -96,13 +96,30 @@ pub(crate) struct ResizeOperation {
     /// this generation, so it can finish its own commit; it is cleared on success.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) uncommitted_generation: Option<u64>,
+    /// Target nodes of a remote resize (ADR-180); empty for the in-process rebuild.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) targets: Vec<ResizeTargetRecord>,
+}
+
+/// One remote-resize target as recorded and reported.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct ResizeTargetRecord {
+    pub(crate) id: u64,
+    pub(crate) endpoint: String,
 }
 
 impl ResizeOperation {
-    fn same_request(&self, origin: ResizeOrigin, num_shards: usize, if_gen: Option<u64>) -> bool {
+    fn same_request(
+        &self,
+        origin: ResizeOrigin,
+        num_shards: usize,
+        if_gen: Option<u64>,
+        targets: &[ResizeTargetRecord],
+    ) -> bool {
         self.origin == origin
             && self.num_shards == num_shards
             && self.if_placement_generation == if_gen
+            && self.targets == targets
     }
 }
 
@@ -208,11 +225,29 @@ impl ResizeOperations {
         num_shards: usize,
         if_placement_generation: Option<u64>,
     ) -> ResizeAdmission {
+        self.admit_with_targets(
+            operation_id,
+            origin,
+            num_shards,
+            if_placement_generation,
+            Vec::new(),
+        )
+    }
+
+    /// [`Self::admit`] for a remote resize: the targets are part of the request identity.
+    pub(crate) fn admit_with_targets(
+        &self,
+        operation_id: Option<String>,
+        origin: ResizeOrigin,
+        num_shards: usize,
+        if_placement_generation: Option<u64>,
+        targets: Vec<ResizeTargetRecord>,
+    ) -> ResizeAdmission {
         let now_ms = unix_ms_now();
         let mut inner = self.inner.lock();
         if let Some(id) = operation_id.as_deref() {
             if let Some(existing) = inner.records.iter_mut().find(|r| r.operation_id == id) {
-                if !existing.same_request(origin, num_shards, if_placement_generation) {
+                if !existing.same_request(origin, num_shards, if_placement_generation, &targets) {
                     return ResizeAdmission::Conflict(Box::new(existing.clone()));
                 }
                 match existing.state {
@@ -270,6 +305,7 @@ impl ResizeOperations {
             outcome: None,
             error: None,
             uncommitted_generation: None,
+            targets,
         });
         ResizeAdmission::Execute(id)
     }

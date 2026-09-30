@@ -370,7 +370,7 @@ The cluster exposes powerful primitives, but “self-tuning” is not the curren
 | Suggested shard count | `recommended_shard_count` computes an operator-invoked recommendation from configured capacity assumptions |
 | In-process shard-count change | `resize` / `resize_to_recommended` rebuild live source under a fresh ring and atomically swap; durable mode commits the new layout. REST operations carry an idempotent operation ID and an optional placement-generation precondition |
 | Automatic in-process growth | opt-in governed loop: hysteresis, cooldown, bounded grow-only steps, a futility hold, and a generation precondition turn a persistent split recommendation into one recorded resize |
-| Remote shard-count change | not built; requires fresh/coordinated deployment or rebuild |
+| Remote shard-count change | resolve-only coordinators resize onto fresh target nodes: durable intent, paused writes, corpus export, fingerprint evidence, atomic commit of count/generation/assignments, routing swap, and fenced old slots (ADR-180); same-node staging and RF>1 are not built |
 | Node membership rebalance | HRW planner is built; resolve-only remote mode durably records and proves data movement before conditionally changing routing, while CLI-seeded and static remote modes are refused |
 | Skew handoff | autoscaler can drive a fenced data-moving handoff when no conflicting rebalance ran |
 | Corpus split pressure | `RecommendSplit` is advisory in `tick`; the governed loop may act on it in-process; targeted online splitting is not built |

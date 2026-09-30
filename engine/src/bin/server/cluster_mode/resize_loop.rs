@@ -212,6 +212,7 @@ async fn run_operation(
             num_shards: operation.to,
             if_placement_generation: Some(operation.if_placement_generation),
             manager_timeout: AUTOSCALE_RESIZE_MANAGER_TIMEOUT,
+            targets: Vec::new(),
         },
     )
     .await;

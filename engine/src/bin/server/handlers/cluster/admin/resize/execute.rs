@@ -27,6 +27,8 @@ pub(crate) struct ResizeRun {
     pub(crate) num_shards: usize,
     pub(crate) if_placement_generation: Option<u64>,
     pub(crate) manager_timeout: Duration,
+    /// Fresh target nodes for a remote resize (ADR-180); empty for the in-process rebuild.
+    pub(crate) targets: Vec<reverse_rusty::cluster::NodeDescriptor>,
 }
 
 /// The terminal result of [`run_resize`] as seen by its caller.
@@ -48,13 +50,17 @@ pub(crate) enum ResizeRunOutcome {
 }
 
 #[derive(Clone, Copy)]
-enum ResizeStart {
+pub(super) enum ResizeStart {
     Queued,
     Started,
     Cancelled,
 }
 
-fn begin_cluster_resize(gate: &Mutex<ResizeStart>, deadline: Instant, no_wait: bool) -> bool {
+pub(super) fn begin_cluster_resize(
+    gate: &Mutex<ResizeStart>,
+    deadline: Instant,
+    no_wait: bool,
+) -> bool {
     let mut start = gate.lock();
     if matches!(*start, ResizeStart::Cancelled) || (!no_wait && Instant::now() >= deadline) {
         *start = ResizeStart::Cancelled;
@@ -83,7 +89,7 @@ impl Drop for CancelQueuedClusterResize {
     }
 }
 
-fn not_started_failure() -> ResizeFailure {
+pub(super) fn not_started_failure() -> ResizeFailure {
     ResizeFailure {
         error_type: "resize_timeout".into(),
         reason: "admission or exclusive cluster access was not obtained before the manager \
@@ -109,9 +115,9 @@ impl Drop for QueuedRecordGuard {
 }
 
 /// Marks a record failed if the worker unwinds before reporting a terminal state.
-struct WorkerRecordGuard {
-    ops: Arc<ResizeOperations>,
-    id: String,
+pub(super) struct WorkerRecordGuard {
+    pub(super) ops: Arc<ResizeOperations>,
+    pub(super) id: String,
     finished: bool,
 }
 
@@ -190,6 +196,7 @@ pub(crate) async fn run_resize(state: &Arc<ClusterAppState>, run: ResizeRun) -> 
     let worker_id = run.operation_id.clone();
     let num_shards = run.num_shards;
     let if_generation = run.if_placement_generation;
+    let targets = run.targets;
     let completion = match supervise_cluster_resize_worker(move || {
         let _permit = permit;
         let mut record = WorkerRecordGuard {
@@ -206,6 +213,7 @@ pub(crate) async fn run_resize(state: &Arc<ClusterAppState>, run: ResizeRun) -> 
             no_wait,
             num_shards,
             if_generation,
+            targets,
         );
         record.finished = true;
         outcome
@@ -285,6 +293,7 @@ fn resize_worker(
     no_wait: bool,
     num_shards: usize,
     if_generation: Option<u64>,
+    targets: Vec<reverse_rusty::cluster::NodeDescriptor>,
 ) -> ClusterResizeWorkerOutcome {
     let not_started = || {
         record
@@ -312,6 +321,22 @@ fn resize_worker(
     let Some(_writes) = writes else {
         return not_started();
     };
+    #[cfg(feature = "distributed")]
+    if !targets.is_empty() {
+        return super::remote::remote_resize_worker(
+            state,
+            gate,
+            started_sender,
+            record,
+            deadline,
+            no_wait,
+            num_shards,
+            if_generation,
+            targets,
+        );
+    }
+    #[cfg(not(feature = "distributed"))]
+    drop(targets);
     let cluster = if no_wait {
         state.cluster.try_write()
     } else {

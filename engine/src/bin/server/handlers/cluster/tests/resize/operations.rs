@@ -407,3 +407,93 @@ async fn a_failure_names_the_generated_operation_so_it_can_heal() {
         4
     );
 }
+
+#[tokio::test]
+async fn targets_are_validated_against_the_topology() {
+    let state = test_state(&seed());
+    let (status, _, bytes) = send_raw(
+        &state,
+        resize_request(
+            "/_cluster/resize",
+            r#"{"num_shards":4,"targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+        ),
+    )
+    .await;
+    assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+
+    for body in [
+        r#"{"num_shards":4,"targets":[]}"#,
+        r#"{"num_shards":4,"targets":null}"#,
+        r#"{"num_shards":4,"targets":[{"id":1,"endpoint":""}]}"#,
+        r#"{"num_shards":4,"targets":[{"id":1,"endpoint":"a"},{"id":1,"endpoint":"b"}]}"#,
+        r#"{"num_shards":4,"targets":[{"id":1,"endpoint":"a","extra":true}]}"#,
+    ] {
+        let (status, _, bytes) = send_raw(&state, resize_request("/_cluster/resize", body)).await;
+        assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+    }
+    assert_eq!(state.cluster.read().num_shards(), 3);
+}
+
+#[cfg(feature = "distributed")]
+#[tokio::test]
+async fn a_resolve_only_remote_resize_requires_targets() {
+    let config = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::build(
+        Normalizer::default_vocab().expect("vocab"),
+        &config,
+        &seed(),
+    )
+    .expect("cluster");
+    let state = state_from_cluster_with_rebalance_topology(
+        cluster,
+        crate::state::ClusterRebalanceTopology::ResolveOnlyRemote,
+    );
+    let (status, _, bytes) = send_raw(
+        &state,
+        resize_request("/_cluster/resize", r#"{"num_shards":4}"#),
+    )
+    .await;
+    assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
+
+    // With targets, the worker reaches the engine, which refuses a cluster that is not
+    // remote and assignment-routed; the refusal is recorded and nothing changes.
+    let (status, failed) = post_json(
+        &state,
+        r#"{"num_shards":4,"operation_id":"remote-1","targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{failed}");
+    assert_eq!(failed["operation_id"], "remote-1");
+    let (_, record) = get_json(&state, "/_cluster/resize/remote-1").await;
+    assert_eq!(record["state"], "failed", "{record}");
+    assert_eq!(record["targets"][0]["id"], 11);
+    assert_eq!(state.cluster.read().num_shards(), 3);
+
+    let static_state = state_from_cluster_with_rebalance_topology(
+        ClusterEngine::build(
+            Normalizer::default_vocab().expect("vocab"),
+            &config,
+            &seed(),
+        )
+        .expect("cluster"),
+        crate::state::ClusterRebalanceTopology::StaticRemote,
+    );
+    let (status, _, bytes) = send_raw(
+        &static_state,
+        resize_request(
+            "/_cluster/resize",
+            r#"{"num_shards":4,"targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+        ),
+    )
+    .await;
+    assert_error(
+        status,
+        &bytes,
+        StatusCode::NOT_IMPLEMENTED,
+        "not_supported_in_cluster_mode",
+    );
+}

@@ -9,6 +9,17 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-09-30 — Remote blue/green resize
+
+- Resize a resolve-only remote cluster online: `POST /_cluster/resize` with `targets` builds the new
+  layout on fresh shard servers, pauses writes while reads keep serving, streams the deduplicated
+  corpus through the new bounded `LiveSources` export RPC, proves each new position's fingerprint,
+  commits the shard count, placement generation, and assignments in one control-plane transition,
+  swaps routing, and fences the retired slots ([ADR-180](decisions/adr-180-remote-blue-green-resize.md)).
+- Record the transition as a replicated, idempotent resize intent behind a one-way control format 5
+  and `RRL5` log header. Resolve-only startup adopts the committed shard count and placement
+  generation and aborts or finishes a recorded intent before routing.
+
 ## 2026-09-30 — Governed resize operations
 
 - Name and observe in-process resizes: `POST /_cluster/resize` accepts an idempotent `operation_id`

@@ -1,9 +1,10 @@
-# `POST /_cluster/resize` — Resize an in-process cluster
+# `POST /_cluster/resize` — Resize a cluster
 
 > [Cluster control APIs](../cluster.md) · [REST API hub](../../api.md)
 
-This strict native operation rebuilds an in-process cluster under a fresh consistent-hash ring and
-atomically replaces the serving shard set (ADR-078/167). Every live query is re-extracted from its
+This strict native operation rebuilds a cluster under a fresh consistent-hash ring and atomically
+replaces the serving shard set: in place for an in-process cluster (ADR-078/167), or onto fresh
+nodes for a resolve-only remote cluster (ADR-180, [below](#strictness-topology-and-errors)). Every live query is re-extracted from its
 stored source and re-placed under the new ring; vocabulary, the frozen feature/tag spaces, query
 tags, ranking values, and Boolean semantics are preserved.
 
@@ -121,12 +122,43 @@ admission. `GET` reads [operation records](resize-operations.md); any other meth
 with `Allow: GET, POST`. Every route-reached response is structured
 JSON, `Cache-Control: no-store`, and observed under the fixed `cluster_resize` metric label.
 
-Only an in-process cluster is supported. A static, CLI-seeded assignment-routed, or resolve-only
-remote coordinator returns `501 not_supported_in_cluster_mode` before admission. Changing a remote
-ring without first rebuilding and attesting every remote position would make routing disagree with
-stored placement and create silent false negatives. Use the documented separate-cluster
-blue/green procedure instead; online remote resize remains a
-[roadmap item](../../../roadmap.md#remote-cluster-resize).
+An in-process cluster rebuilds in place and rejects `targets`.
+
+A **resolve-only remote coordinator** (`--route-by-assignments`, `--control-endpoint`, no
+`--shard-endpoint`) resizes onto fresh nodes and requires `targets` (ADR-180):
+
+```bash
+curl -X POST 'localhost:9200/_cluster/resize' -H 'Content-Type: application/json' -d '{
+  "num_shards": 12, "operation_id": "grow-to-12",
+  "targets": [{"id": 21, "endpoint": "https://shard-21:50051"},
+              {"id": 22, "endpoint": "https://shard-22:50051"}]}'
+```
+
+The targets must be empty shard servers that host no slot of the current layout. Position `p` of the
+new layout goes to `targets[p % len(targets)]`, and unknown target ids are registered. The operation
+then runs these steps:
+
+1. Record a durable resize intent.
+2. Pause writes: adds, upserts, removes, and repair are refused with `503` while reads keep serving
+   the old layout.
+3. Copy the live corpus onto the targets under the new ring.
+4. Prove each new position's content fingerprint and count.
+5. Commit the new shard count, placement generation, and assignments in one control-plane
+   transition.
+6. Swap routing.
+7. Fence the old slots so a stale writer fails loud.
+
+A failure before the commit aborts and reopens writes, leaving the targets holding an unrouted layout
+that must be wiped before reuse. After a coordinator crash, startup aborts an uncommitted intent or
+finishes a committed one before serving. Replication factor above 1 is refused. Decommission the old
+nodes once the resize succeeds.
+
+A static or CLI-seeded remote coordinator returns `501 not_supported_in_cluster_mode` before
+admission: its routing follows the CLI endpoint list, so changing the ring there would make routing
+disagree with stored placement. Use the separate-cluster blue/green procedure in
+[cluster deployment](../../../operations/cluster-deployment.md#5-scaling) for those topologies.
+Remaining remote-resize work is tracked in the
+[roadmap](../../../roadmap.md#remote-cluster-resize).
 
 Invalid input is 400, a pre-start deadline is 408, an operation-ID conflict, in-progress duplicate,
 or failed precondition is 409, an oversized body is 413, a missing/wrong media type is 415, a

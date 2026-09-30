@@ -20,13 +20,18 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::cluster::control::{
-    normalized_move_endpoint, ClusterState, ClusterStateChange, MoveCommandOutcome,
-    MoveMemberIdentity, NodeDescriptor, NodeId, ResizeCommand, ResizeIntent, ResizeIntentPhase,
-    ResizeLayout, ResizePositionEvidence, ShardAssignment, RESIZE_INTENT_VERSION,
+    normalized_move_endpoint, ClusterStateChange, MoveCommandOutcome, NodeDescriptor, NodeId,
+    ResizeCommand, ResizeIntent, ResizeIntentPhase, ResizeLayout, ResizePositionEvidence,
 };
 use crate::cluster::remote::RemoteShard;
 
 use super::{ClusterConfig, ClusterEngine, ShardError};
+
+mod plan;
+mod recovery;
+
+use plan::{expected_endpoints, member_endpoint, resize_intent};
+pub use recovery::{recover_durable_resize, ResizeRecovery};
 
 /// Queries buffered before each staged-layout load call.
 const EXPORT_BATCH: usize = 4096;
@@ -509,139 +514,5 @@ impl ClusterEngine {
         )?
         .fence(generation)
         .map(|_| ())
-    }
-}
-
-/// The primary endpoint of every current position, in position order.
-fn expected_endpoints(state: &ClusterState) -> Result<Vec<String>, ShardError> {
-    state
-        .assignments
-        .iter()
-        .map(|assignment| {
-            if !assignment.replicas.is_empty() {
-                return Err(ShardError::Config(
-                    "remote resize supports replication factor 1".into(),
-                ));
-            }
-            state
-                .nodes
-                .iter()
-                .find(|node| node.id == assignment.primary)
-                .and_then(|node| node.addr.clone())
-                .ok_or_else(|| {
-                    ShardError::ControlPlane(format!(
-                        "position {} is assigned to node {} with no registered endpoint",
-                        assignment.position, assignment.primary.0
-                    ))
-                })
-        })
-        .collect()
-}
-
-fn member_endpoint(intent: &ResizeIntent, node: NodeId) -> Result<String, ShardError> {
-    intent
-        .members
-        .iter()
-        .find(|member| member.node == node)
-        .map(|member| member.endpoint.clone())
-        .ok_or_else(|| ShardError::Config(format!("target node {} has no endpoint", node.0)))
-}
-
-/// The complete intent: the committed layout, and the new layout with position `p` on
-/// `targets[p % targets.len()]` at the next placement generation.
-fn resize_intent(
-    state: &ClusterState,
-    request: &RemoteResizeRequest,
-) -> Result<ResizeIntent, ShardError> {
-    let num_shards = u32::try_from(request.num_shards)
-        .map_err(|_| ShardError::Config("remote resize shard count is out of range".into()))?;
-    let placement_generation = state
-        .placement_generation
-        .checked_add(1)
-        .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
-    let assignments = (0..num_shards)
-        .map(|position| ShardAssignment {
-            position,
-            primary: request.targets[position as usize % request.targets.len()].id,
-            replicas: Vec::new(),
-        })
-        .collect();
-    let mut members: Vec<MoveMemberIdentity> = request
-        .targets
-        .iter()
-        .take(request.num_shards)
-        .map(|target| MoveMemberIdentity {
-            node: target.id,
-            endpoint: target
-                .addr
-                .as_deref()
-                .map(normalized_move_endpoint)
-                .unwrap_or_default(),
-        })
-        .collect();
-    members.sort_by_key(|member| member.node);
-    Ok(ResizeIntent {
-        intent_version: RESIZE_INTENT_VERSION,
-        operation_id: request.operation_id,
-        expected: ResizeLayout {
-            num_shards: state.num_shards,
-            placement_generation: state.placement_generation,
-            assignments: state.assignments.clone(),
-        },
-        desired: ResizeLayout {
-            num_shards,
-            placement_generation,
-            assignments,
-        },
-        members,
-        phase: ResizeIntentPhase::Preparing,
-    })
-}
-
-/// What coordinator startup did with a recorded remote-resize intent (ADR-180).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResizeRecovery {
-    /// An uncommitted intent was aborted; the previous layout remains authoritative.
-    Aborted { operation_id: u64 },
-    /// A committed intent was finished; the committed (new) layout is authoritative.
-    Finished { operation_id: u64 },
-}
-
-/// Resolve a recorded remote-resize intent before routes are assembled (ADR-180). An uncommitted
-/// intent is aborted: its staged layout was never routed, and the previous layout is still the
-/// committed one. A committed intent is finished: consensus already names the new layout. The
-/// retired slots cannot be fenced here without their data-node handles, so a finished recovery
-/// reports them for operator decommissioning. Returns `None` when no intent is recorded; any
-/// refused or failed transition fails startup rather than serving an ambiguous layout.
-pub fn recover_durable_resize(
-    control: &dyn crate::cluster::control::ControlPlane,
-) -> Result<Option<ResizeRecovery>, ShardError> {
-    let state = control
-        .cluster_state()
-        .map_err(|error| ShardError::ControlPlane(error.to_string()))?;
-    let Some(intent) = state.moves.resize.clone() else {
-        return Ok(None);
-    };
-    let operation_id = intent.operation_id;
-    let (command, recovery) = match intent.phase {
-        ResizeIntentPhase::Preparing | ResizeIntentPhase::Ready(_) => (
-            ResizeCommand::Abort { operation_id },
-            ResizeRecovery::Aborted { operation_id },
-        ),
-        ResizeIntentPhase::Committed(_) => (
-            ResizeCommand::Finish { operation_id },
-            ResizeRecovery::Finished { operation_id },
-        ),
-    };
-    let outcome = control
-        .propose_resize(command)
-        .map_err(|error| ShardError::ControlPlane(error.to_string()))?
-        .outcome;
-    match outcome {
-        MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => Ok(Some(recovery)),
-        outcome => Err(ShardError::ControlPlane(format!(
-            "could not resolve remote-resize intent {operation_id} at startup ({outcome:?}); \
-             inspect the control-plane state before serving"
-        ))),
     }
 }
