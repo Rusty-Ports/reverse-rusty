@@ -84,6 +84,7 @@ fn state_from_cluster_with_rebalance_topology(
         auth: None,
         pit_tokens: crate::pit::PitTokens::generate(),
         pit_config: reverse_rusty::PitConfig::default(),
+        resize_operations: Arc::new(crate::resize_ops::ResizeOperations::new(false)),
     })
 }
 
@@ -329,6 +330,10 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
             any(cluster_resize).layer(axum::extract::DefaultBodyLimit::max(
                 CLUSTER_RESIZE_BODY_LIMIT,
             )),
+        )
+        .route(
+            "/_cluster/resize/{operation_id}",
+            any(cluster_resize_operation),
         )
         .route(
             "/_cluster/resync",

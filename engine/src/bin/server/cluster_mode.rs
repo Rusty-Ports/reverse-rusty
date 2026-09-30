@@ -48,11 +48,11 @@ use crate::handlers::{
     cluster_learn_vocab, cluster_metrics, cluster_mpercolate_route, cluster_put_doc,
     cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
-    cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
-    cluster_v2_mpercolate_route, cluster_v2_search_route, cluster_validate_and_apply_feedback,
-    settings_method_not_allowed, vocab_learn_apply_method_not_allowed,
-    vocab_learn_method_not_allowed, vocab_method_not_allowed, ALIAS_DISCOVER_BODY_LIMIT,
-    ALIAS_DISCOVER_RECORD_BODY_LIMIT, ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
+    cluster_resize_operation, cluster_resync, cluster_root, cluster_search_route, cluster_state,
+    cluster_stats, cluster_v2_mpercolate_route, cluster_v2_search_route,
+    cluster_validate_and_apply_feedback, settings_method_not_allowed,
+    vocab_learn_apply_method_not_allowed, vocab_learn_method_not_allowed, vocab_method_not_allowed,
+    ALIAS_DISCOVER_BODY_LIMIT, ALIAS_DISCOVER_RECORD_BODY_LIMIT, ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
     ALIAS_FEEDBACK_READ_BODY_LIMIT, ALIAS_FEEDBACK_RESET_BODY_LIMIT, ALIAS_IMPORT_BODY_LIMIT,
     ALIAS_LEARN_APPLY_BODY_LIMIT, ALIAS_READ_BODY_LIMIT, BACKUP_BODY_LIMIT,
     CAT_SEGMENTS_BODY_LIMIT, CAT_SHARDS_BODY_LIMIT, CHECKPOINT_BODY_LIMIT, CLUSTER_GC_BODY_LIMIT,
@@ -77,6 +77,7 @@ mod remote_connect;
 /// module-size budget. `distributed`-gated: it drives the data-moving reconcile.
 #[cfg(feature = "distributed")]
 mod reconcile_loop;
+pub(crate) mod resize_loop;
 
 /// Hold one single-slot worker admission boundary through durability cleanup.
 ///
@@ -212,6 +213,39 @@ pub(crate) async fn run(
         );
         std::process::exit(1);
     }
+
+    // ADR-179: the opt-in governed resize loop. It drives the in-process blue/green resize, so a
+    // remote topology is refused before any data is touched (remote resize is roadmap work).
+    let autoscale_resize = cli.autoscale_resize_interval_secs.map(|secs| {
+        if !in_process {
+            error!(
+                "--autoscale-resize-interval-secs requires an in-process cluster: remote \
+                 shard-count changes are not implemented (ADR-179)"
+            );
+            std::process::exit(1);
+        }
+        let Some(split_corpus_threshold) = cli.autoscale_split_threshold.filter(|&t| t > 0) else {
+            error!("--autoscale-resize-interval-secs requires --autoscale-split-threshold > 0");
+            std::process::exit(1);
+        };
+        let governor = reverse_rusty::cluster::ResizeGovernorConfig {
+            required_observations: cli.autoscale_resize_observations,
+            cooldown: std::time::Duration::from_secs(cli.autoscale_resize_cooldown_secs),
+            max_step: cli.autoscale_resize_max_step,
+            max_shards: cli.autoscale_resize_max_shards,
+            min_relief_percent: cli.autoscale_resize_min_relief_percent,
+        };
+        let problems = governor.validate();
+        if !problems.is_empty() {
+            error!(problems = %problems.join("; "), "invalid governed resize configuration");
+            std::process::exit(1);
+        }
+        resize_loop::AutoscaleResizeConfig {
+            interval: std::time::Duration::from_secs(secs.max(1)),
+            split_corpus_threshold,
+            governor,
+        }
+    });
 
     // The ring size: --shards for an in-process OR a resolve-only-boot cluster (validated against the
     // quorum's committed num_shards on attach), else the --shard-endpoint count.
@@ -432,6 +466,9 @@ pub(crate) async fn run(
             max_keep_alive: std::time::Duration::from_secs(cli.pit_max_keep_alive_secs),
             max_open: cli.max_open_pits,
         },
+        resize_operations: Arc::new(crate::resize_ops::ResizeOperations::new(
+            autoscale_resize.is_some(),
+        )),
     });
 
     let app = Router::new()
@@ -617,6 +654,10 @@ pub(crate) async fn run(
             any(cluster_resize).layer(DefaultBodyLimit::max(CLUSTER_RESIZE_BODY_LIMIT)),
         )
         .route(
+            "/_cluster/resize/{operation_id}",
+            any(cluster_resize_operation),
+        )
+        .route(
             "/_cluster/resync",
             any(cluster_resync).layer(DefaultBodyLimit::max(CLUSTER_RESYNC_BODY_LIMIT)),
         )
@@ -675,6 +716,11 @@ pub(crate) async fn run(
         reconcile_loop::spawn_reconcile_loop(Arc::clone(&state), &cfg)
     });
 
+    // ADR-179: the opt-in governed resize loop, aborted first at shutdown like the reconciler.
+    let resize_task = autoscale_resize
+        .clone()
+        .map(|config| resize_loop::spawn_resize_loop(Arc::clone(&state), config));
+
     tokio::select! {
         result = server_fut => {
             if let Err(e) = result {
@@ -698,6 +744,10 @@ pub(crate) async fn run(
     #[cfg(feature = "distributed")]
     if let Some(task) = reconcile_task {
         info!("stopping reconcile loop");
+        task.abort();
+    }
+    if let Some(task) = resize_task {
+        info!("stopping governed resize loop");
         task.abort();
     }
 

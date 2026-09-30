@@ -3,7 +3,7 @@
 //! decision (incl. advisories). The policy itself lives in [`crate::cluster::autoscale`].
 
 use crate::cluster::autoscale::{
-    evaluate, AutoscaleConfig, AutoscaleDecision, LoadSnapshot, ScalingAction,
+    evaluate, AutoscaleConfig, AutoscaleDecision, LoadSnapshot, ResizeObservation, ScalingAction,
 };
 use crate::cluster::control::{NodeDescriptor, NodeId};
 use crate::cluster::shard::ShardError;
@@ -38,6 +38,31 @@ impl ClusterEngine {
             replicated_corpus,
             num_shards: state.num_shards,
             replication_factor: config.target_replication_factor,
+        })
+    }
+
+    /// Collect one [`ResizeObservation`] for the [`ResizeGovernor`](crate::cluster::ResizeGovernor)
+    /// (ADR-179): the serving shard count and placement generation, the advisory
+    /// [`recommended_shard_count`](crate::cluster::recommended_shard_count), and the largest
+    /// per-shard selective corpus (the load a split can relieve). Fail-closed like
+    /// [`Self::collect_load`]. The layout fields come from the serving ring rather than control
+    /// state, so the governor's precondition names exactly what a resize would replace.
+    pub fn resize_observation(
+        &self,
+        config: &AutoscaleConfig,
+    ) -> Result<ResizeObservation, ShardError> {
+        let snapshot = self.collect_load(config)?;
+        let max_selective_corpus = snapshot
+            .shard_corpus
+            .iter()
+            .map(|&corpus| corpus.saturating_sub(snapshot.replicated_corpus))
+            .max()
+            .unwrap_or(0);
+        Ok(ResizeObservation {
+            num_shards: self.num_shards(),
+            placement_generation: self.placement_generation().0,
+            recommended: crate::cluster::recommended_shard_count(&snapshot, config),
+            max_selective_corpus,
         })
     }
 

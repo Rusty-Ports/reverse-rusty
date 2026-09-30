@@ -166,28 +166,38 @@ lossless through persistence and reopen.
 
 ## Priority 3 — distributed lifecycle and ranked-path efficiency
 
-### Automatic and remote cluster resize
+### Remote cluster resize
 
-**Problem.** In-process resize is a manual blue/green rebuild. The autoscaler can recommend a split
-but cannot safely execute repeated resizes, and a remote cluster cannot re-key data online.
+**Problem.** In-process resize is a governed blue/green rebuild with operation records and opt-in
+automatic growth (ADR-179), but a remote cluster still cannot change its shard count online:
+operators stand up a separate cluster, re-ingest, and cut over by hand.
+
+**Constraint discovered.** A shard node adopts one node-wide placement space: its persisted
+feature space records a single placement generation and shard count, and every slot RPC validates
+against it. Blue and green layouts therefore cannot coexist on one node today. Remote blue/green
+needs per-slot placement configuration (or a node-level staged layout) addressed by generation,
+with a durable format fence.
 
 **Direction.**
 
-1. Add hysteresis, cooldown, idempotency keys, progress state, and abort recovery around the
-   existing in-process resize.
-2. Generalize the operation to a remote blue/green topology: create target slots, stream the
-   re-placed corpus, validate fingerprints and query counts, atomically switch committed routing,
-   then garbage-collect the old layout.
-3. If measured rebuild cost justifies the additional state machine, add a targeted online split:
-   build shadow children, drain the mutation tail, prove their fingerprints, and switch the affected
-   ring range atomically. Do not introduce dual routing as an unmeasured prerequisite.
+1. Let a node host slots for the committed layout and one staged layout, each validated against its
+   own generation and shard count.
+2. Stream the live corpus (source, version, tags, and rank values) from the committed layout,
+   re-place it under the target ring, and build the staged slots.
+3. Record the transition as a replicated resize intent in the control document, following
+   ADR-175's `Begin`/`Ready`/`Commit` discipline: validate per-position fingerprints and counts,
+   conditionally commit the new shard count, placement generation, and assignments together, then
+   switch coordinator routing and retire the old slots through the GC path.
+4. Keep writes consistent across the copy, either by holding the coordinator write barrier (as the
+   in-process path does) or by a measured catch-up drain.
+5. Reuse the ADR-179 governor and operation records as the controller.
+6. If measured rebuild cost justifies it, add a targeted online split that re-keys only the affected
+   ring range. Do not introduce dual routing as an unmeasured prerequisite.
 
-The controller must distinguish a recommendation from an accepted operation; corpus-size noise must
-not create resize thrash.
-
-**Completion.** Repeated grow/shrink operations converge under concurrent writes and injected
-failure, restart resumes or safely aborts an operation, and every acknowledged query remains
-matchable before and after the routing cutover.
+**Completion.** Repeated remote grow/shrink operations converge under concurrent writes and injected
+failure, a coordinator restart resumes or safely aborts a recorded intent, stale coordinators fail
+loud against retired slots, and every acknowledged query remains matchable before and after the
+routing cutover.
 
 ### Staged replica recovery outside the fence window
 

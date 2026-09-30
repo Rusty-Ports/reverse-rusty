@@ -2,9 +2,9 @@
 
 use super::*;
 
-struct FailResizeProposals {
-    inner: InMemoryControlPlane,
-    remaining: AtomicUsize,
+pub(super) struct FailResizeProposals {
+    pub(super) inner: InMemoryControlPlane,
+    pub(super) remaining: AtomicUsize,
 }
 
 impl ControlPlane for FailResizeProposals {

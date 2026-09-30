@@ -189,8 +189,14 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/resize -H "authorization: Bearer
 This is a synchronous in-process blue/green rebuild under a fresh ring (ADR-078/167) — correct and
 durable, but **in-process only**. The strict request, admission, timeout, response, and retry contract
 is in the [`/_cluster/resize` API reference](../reference/api/cluster/resize.md).
-`recommended_shard_count` (the autoscaler's load-based advisory) is a library/auto driver concept,
-not a REST knob; pick `num_shards` yourself, optionally guided by `/_stats`.
+Pass an `operation_id` so a retry after a lost connection replays the recorded result instead of
+repeating the change, and `if_placement_generation` so a stale retry cannot undo a later resize;
+`GET /_cluster/resize` shows each operation's progress. To grow automatically instead, start the
+in-process coordinator with `--autoscale-resize-interval-secs` and `--autoscale-split-threshold`
+(ADR-179): a persistent split recommendation becomes one bounded, recorded resize, followed by a
+cooldown, and growth stops when a resize fails to relieve the hottest shard. Automatic operation
+only grows; shrink explicitly. Flag details are in
+[coordinator mode](../reference/api/server/coordinator-mode.md).
 
 **The remote topology** (this compose — shards on separate nodes) has **no online resize**: changing K
 re-keys the ring, and a coordinator restarted at the new K routes on the new ring while the existing data
@@ -203,7 +209,7 @@ is still placed under the old one — searches in that window silently miss quer
 3. Cut traffic over (swap the published port / proxy upstream), then decommission blue.
 
 Do **not** add a shard to the live cluster and re-ingest in place. Cross-process / online resize is
-tracked in the [roadmap](../roadmap.md#automatic-and-remote-cluster-resize) under ADR-078's
+tracked in the [roadmap](../roadmap.md#remote-cluster-resize) under ADR-078's
 compatibility constraints.
 
 **Before any assignment-changing move**, switch the coordinator from its first-boot CLI-seeded

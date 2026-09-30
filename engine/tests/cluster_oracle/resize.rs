@@ -282,3 +282,72 @@ fn resize_to_recommended_grows_and_preserves_recall() {
         );
     }
 }
+
+#[test]
+fn repeated_resizes_under_concurrent_writes_keep_every_acknowledged_query() {
+    use reverse_rusty::cluster::AddOutcome;
+    use std::sync::{Mutex, RwLock};
+
+    let (queries, titles) = build_corpus();
+    let split = queries.len() / 2;
+    let (base, incoming) = queries.split_at(split);
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster = RwLock::new(ClusterEngine::build(vocab(), &cfg, base).expect("build cluster"));
+    let acknowledged: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+    let halves: Vec<&[(u64, String)]> = incoming.chunks(incoming.len().div_ceil(2)).collect();
+
+    std::thread::scope(|scope| {
+        for half in &halves {
+            let cluster = &cluster;
+            let acknowledged = &acknowledged;
+            scope.spawn(move || {
+                for (id, dsl) in *half {
+                    let outcome = cluster
+                        .read()
+                        .expect("cluster lock")
+                        .add_query(*id, dsl)
+                        .expect("an in-process add either applies or is rejected");
+                    if matches!(outcome, AddOutcome::Placed { .. } | AddOutcome::Replicated) {
+                        acknowledged
+                            .lock()
+                            .expect("ack lock")
+                            .push((*id, dsl.clone()));
+                    }
+                    // Readers must not starve the resizer's exclusive acquire.
+                    std::thread::yield_now();
+                }
+            });
+        }
+        let cluster = &cluster;
+        scope.spawn(move || {
+            for k in [5usize, 2, 7, 4, 1, 3] {
+                cluster
+                    .write()
+                    .expect("cluster lock")
+                    .resize(k)
+                    .expect("resize under concurrent writes");
+                std::thread::yield_now();
+            }
+        });
+    });
+
+    let cluster = cluster.into_inner().expect("cluster lock");
+    assert_eq!(cluster.num_shards(), 3);
+    let mut live: Vec<(u64, String)> = base.to_vec();
+    live.extend(acknowledged.into_inner().expect("ack lock"));
+    let brute = Brute::build(&live);
+    let mut lc = String::new();
+    let mut feats = Vec::new();
+    for title in &titles {
+        let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+        let truth = brute.matches(title, &mut lc, &mut feats);
+        assert_eq!(
+            got, truth,
+            "every acknowledged query must match exactly after concurrent resizes on {title:?}"
+        );
+    }
+}

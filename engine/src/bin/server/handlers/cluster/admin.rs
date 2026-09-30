@@ -39,7 +39,8 @@ pub(crate) use reconcile::CLUSTER_RECONCILE_BODY_TIMEOUT;
 pub(crate) use reconcile::{cluster_reconcile, CLUSTER_RECONCILE_BODY_LIMIT};
 #[cfg(test)]
 pub(crate) use resize::CLUSTER_RESIZE_BODY_TIMEOUT;
-pub(crate) use resize::{cluster_resize, CLUSTER_RESIZE_BODY_LIMIT};
+pub(crate) use resize::{cluster_resize, cluster_resize_operation, CLUSTER_RESIZE_BODY_LIMIT};
+pub(crate) use resize::{run_resize, ResizeRun, ResizeRunOutcome};
 #[cfg(test)]
 pub(crate) use resync::CLUSTER_RESYNC_BODY_TIMEOUT;
 pub(crate) use resync::{cluster_resync, CLUSTER_RESYNC_BODY_LIMIT};

@@ -141,7 +141,7 @@ cluster-level counters + a per-shard `reverse_rusty_cluster_shard_queries{shard=
   3. Cut traffic over (swap the Service/Ingress upstream), then `helm uninstall` blue.
 
   Cross-process / online resize remains a
-  [roadmap item](../roadmap.md#automatic-and-remote-cluster-resize) under ADR-078's constraints.
+  [roadmap item](../roadmap.md#remote-cluster-resize) under ADR-078's constraints.
 - **RF>1:** not modeled by this chart at v1 (`replicationFactor` is documentation-only). A replica per
   position needs a second StatefulSet per shard + the coordinator's `--replication-factor`; see
   [cluster-deployment.md §5](cluster-deployment.md) and the

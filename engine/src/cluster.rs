@@ -66,7 +66,10 @@ mod server;
 #[cfg(feature = "distributed")]
 pub(crate) const GC_PROTOCOL_VERSION: u32 = 2;
 
-pub use autoscale::{evaluate, AutoscaleConfig, AutoscaleDecision, LoadSnapshot, ScalingAction};
+pub use autoscale::{
+    evaluate, AutoscaleConfig, AutoscaleDecision, LoadSnapshot, ResizeGovernor,
+    ResizeGovernorConfig, ResizeObservation, ResizeVerdict, ScalingAction, MAX_GOVERNED_SHARDS,
+};
 pub use control::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane,
     MoveCommand, MoveCommandOutcome, MoveControlState, MoveInitialAuthority, MoveIntent,

@@ -368,11 +368,12 @@ The cluster exposes powerful primitives, but “self-tuning” is not the curren
 | Capability | Current behavior |
 |---|---|
 | Suggested shard count | `recommended_shard_count` computes an operator-invoked recommendation from configured capacity assumptions |
-| In-process shard-count change | `resize` / `resize_to_recommended` rebuild live source under a fresh ring and atomically swap; durable mode commits the new layout |
+| In-process shard-count change | `resize` / `resize_to_recommended` rebuild live source under a fresh ring and atomically swap; durable mode commits the new layout. REST operations carry an idempotent operation ID and an optional placement-generation precondition |
+| Automatic in-process growth | opt-in governed loop: hysteresis, cooldown, bounded grow-only steps, a futility hold, and a generation precondition turn a persistent split recommendation into one recorded resize |
 | Remote shard-count change | not built; requires fresh/coordinated deployment or rebuild |
 | Node membership rebalance | HRW planner is built; resolve-only remote mode durably records and proves data movement before conditionally changing routing, while CLI-seeded and static remote modes are refused |
 | Skew handoff | autoscaler can drive a fenced data-moving handoff when no conflicting rebalance ran |
-| Corpus split pressure | `RecommendSplit` is advisory; targeted online splitting is not built |
+| Corpus split pressure | `RecommendSplit` is advisory in `tick`; the governed loop may act on it in-process; targeted online splitting is not built |
 | Scale-out recommendation | advisory; provisioning nodes is external |
 | Reconcile loop | opt-in only on a resolve-only coordinator; idempotent, singly admitted convergence of committed HRW placement using physical moves |
 | Parallel movement | opt-in conflict-free waves; shared endpoints serialize through the move ledger |
@@ -382,7 +383,18 @@ The cluster exposes powerful primitives, but “self-tuning” is not the curren
 repairs queued partial applies opportunistically, evaluates the pure policy, and executes the safe
 subset. On a resolve-only remote cluster, membership rebalance moves data rather than changing the
 map alone; CLI-seeded and static endpoint-order remote routing fail closed.
-Split/scale-out recommendations remain decisions for an external operator or controller.
+Split/scale-out recommendations are not executed by `tick`.
+
+Resizing has a different cost profile from rebalance: every call rebuilds the corpus, so
+idempotence alone is not a thrash guard. The clock-injected `ResizeGovernor` separates a
+recommendation from an accepted operation. Growth must persist for a configured number of
+observations of one layout; any layout change restarts the streak and a cooldown; one operation
+adds a bounded number of shards up to a ceiling; and the first observation after a governed
+operation measures whether the hottest selective shard was relieved. Content-routed placement keeps
+one hot anchor on one position, so when a split cannot relieve it the governor holds instead of
+growing to the ceiling. The server loop executes an accepted operation through the ordinary resize
+admission path with the observed placement generation as a precondition (ADR-179). Remote
+shard-count changes and scale-out remain decisions for an external operator.
 
 Adding positions does not reduce the replicated C/D corpus per node unless physical placement changes,
 so `collect_load` subtracts the replicated broad share when assessing selective split pressure.

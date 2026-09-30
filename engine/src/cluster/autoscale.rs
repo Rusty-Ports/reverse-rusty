@@ -34,18 +34,21 @@
 //!    its largest primary shard to the least-loaded node. Advisory this increment — the
 //!    move mechanism (`execute_handoff`) is gRPC-gated and not driven here.
 //! 3. **Per-shard corpus over threshold → [`RecommendSplit`](ScalingAction::RecommendSplit)
-//!    (advisory).** Advisory only: there is no split mechanism yet (the ring's `num_shards`
-//!    is fixed at construction; splitting needs ring re-keying + a `recommended_shard_count`
-//!    signal — a future increment).
+//!    (advisory).** `evaluate` never executes it. The in-process resize mechanism (ADR-078)
+//!    can apply [`recommended_shard_count`](crate::cluster::recommended_shard_count), and the
+//!    [`ResizeGovernor`] (ADR-179) decides when a persistent recommendation becomes an accepted,
+//!    bounded operation.
 //!
 //! ## Determinism + the no-op default
 //! [`evaluate`] uses no clock and no randomness, iterates in positional/sorted order, and
 //! breaks every tie deterministically — the same [`LoadSnapshot`] always yields the same
 //! [`AutoscaleDecision`] (the property the unit tests pin). [`AutoscaleConfig::default`] is
 //! **disabled**, so a default-config cluster's `tick` is a no-op and every pre-existing
-//! oracle stays byte-identical. There is no time-based hysteresis: `rebalance` is
+//! oracle stays byte-identical. `evaluate` has no time-based hysteresis: `rebalance` is
 //! idempotent and `evaluate` is a pure function of the snapshot, so back-to-back ticks on
-//! unchanged membership cannot thrash — the idempotence *is* the hysteresis.
+//! unchanged membership cannot thrash — the idempotence *is* the hysteresis. Resizing is not
+//! idempotent in cost, so its hysteresis lives in the separate, clock-injected
+//! [`ResizeGovernor`].
 //!
 //! Dependency-free / lean core: pure computation over the already-`serde` control types, no
 //! tokio, no gRPC.
@@ -55,6 +58,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::control::{NodeDescriptor, NodeId, ShardAssignment};
+
+mod resize_governor;
+
+pub use resize_governor::{
+    ResizeGovernor, ResizeGovernorConfig, ResizeObservation, ResizeVerdict, MAX_GOVERNED_SHARDS,
+};
 
 /// Tunable knobs for the autoscaler policy. [`Default`] is **disabled** (every field off),
 /// so a cluster that never opts in is byte-identical to one with no autoscaler at all.
@@ -305,7 +314,7 @@ fn corpus_split(
             });
             decision.rationale.push(format!(
                 "shard {pos} selective corpus {selective} exceeds split threshold {}; recommend \
-                 split (advisory only — no split mechanism this increment)",
+                 split (advisory; a resize governor decides whether to act)",
                 config.split_corpus_threshold
             ));
         }
