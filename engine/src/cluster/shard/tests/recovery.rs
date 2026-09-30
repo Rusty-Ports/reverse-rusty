@@ -1,0 +1,98 @@
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+
+use crate::cluster::shard::{LocalShard, Shard};
+use crate::cluster::translog::TRANSLOG_FILE;
+use crate::config::EngineConfig;
+use crate::dict::Dict;
+use crate::events::{DurabilityOp, EngineEvent};
+use crate::normalize::Normalizer;
+use crate::tagdict::TagDict;
+
+#[test]
+fn self_restart_repairs_tail_reports_it_outside_locks_and_preserves_new_appends() {
+    let norm = Arc::new(Normalizer::default_vocab().unwrap());
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let queries: Vec<_> = ["wireless mouse", "mechanical keyboard"]
+        .into_iter()
+        .map(|dsl| {
+            let ast = crate::dsl::parse(dsl).unwrap();
+            (
+                dsl,
+                crate::compile::extract(&ast, &norm, &mut dict, &mut lc),
+            )
+        })
+        .collect();
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tags = TagDict::new();
+    tags.mark_finalized();
+    let tags = Arc::new(tags);
+    let dir = std::env::temp_dir().join(format!("rr_shard_tail_repair_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        wal_sync_on_write: true,
+        ..EngineConfig::default()
+    };
+    let open = || {
+        Arc::new(
+            LocalShard::new_durable(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                Arc::clone(&tags),
+                config.clone(),
+            )
+            .unwrap(),
+        )
+    };
+    let shard = open();
+    shard
+        .insert_extracted_with_tags(&queries[0].1, 1, 1, queries[0].0, &[])
+        .unwrap();
+    drop(shard);
+    let path = dir.join(TRANSLOG_FILE);
+    let valid_len = std::fs::metadata(&path).unwrap().len();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&[32, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd])
+        .unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let shard = open();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), valid_len);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&events);
+    let weak = Arc::downgrade(&shard);
+    shard.set_event_sink(Arc::new(move |event| {
+        if let EngineEvent::DurabilityFailure {
+            op: DurabilityOp::WalTornTail,
+            error,
+            ..
+        } = event
+        {
+            // Acquires the engine mutex: callback under that mutex would deadlock.
+            assert_eq!(weak.upgrade().unwrap().live_sources().unwrap().len(), 1);
+            seen.lock().unwrap().push(error.clone());
+        }
+    }));
+    assert_eq!(*events.lock().unwrap(), vec!["8 bytes"]);
+    shard.set_event_sink(Arc::new(|_| {
+        panic!("startup event must drain exactly once")
+    }));
+    shard
+        .insert_extracted_with_tags(&queries[1].1, 2, 1, queries[1].0, &[])
+        .unwrap();
+    drop(shard);
+    let shard = open();
+    shard.set_event_sink(Arc::new(|_| {
+        panic!("clean restart must not report another torn tail")
+    }));
+    let mut ids = shard.live_logical_ids().unwrap();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2]);
+    let _ = std::fs::remove_dir_all(dir);
+}

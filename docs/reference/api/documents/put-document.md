@@ -90,6 +90,11 @@ query unreachable by any filter on that key. An **empty tag key** is also a loud
 `priority_key` means "no priority term" (the gRPC wire cannot express it), so an empty-key tag
 would be reachable by some ranking paths and not others.
 
+Standalone durable live writes limit each tag key and value to **65,535 UTF-8 bytes**, the WAL's
+field encoding. A longer field returns **400** before writing or replacing the query and leaves
+storage health unchanged. The same limit applies to WAL-backed bulk items; direct segment builds
+and cluster logs use their own wider field encoding.
+
 ```bash
 # ES-style siblings:
 curl -X PUT localhost:9200/_doc/1 -H 'Content-Type: application/json' \

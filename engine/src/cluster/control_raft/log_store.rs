@@ -29,7 +29,7 @@ struct LogStoreInner {
     /// embedding — byte-identical to ADR-038); `Some` ⇒ persisted under this manager node's raft
     /// dir, with `log_file` the CRC-framed append handle and `fsync` the durability policy.
     paths: Option<control_store::RaftPaths>,
-    log_file: Option<std::fs::File>,
+    log_file: Option<crate::storage::framed_log::LogAppender>,
     log_format: control_store::LogFormat,
     fsync: bool,
 }
@@ -107,6 +107,9 @@ fn rewrite_and_reopen(inner: &mut LogStoreInner) -> std::io::Result<()> {
     let Some(path) = inner.paths.as_ref().map(control_store::RaftPaths::log) else {
         return Ok(());
     };
+    if let Some(file) = &mut inner.log_file {
+        file.disable();
+    }
     {
         let records: Vec<&Entry<TypeConfig>> = inner.log.values().collect();
         control_store::rewrite_records(&path, &records, inner.fsync, inner.log_format)?;
@@ -126,6 +129,9 @@ fn fence_durable_moves(inner: &mut LogStoreInner) -> std::io::Result<()> {
         inner.log_format = control_store::LogFormat::DurableMoves;
         return Ok(());
     };
+    if let Some(file) = &mut inner.log_file {
+        file.disable();
+    }
     let records: Vec<&Entry<TypeConfig>> = inner.log.values().collect();
     control_store::rewrite_records(
         &path,
@@ -269,5 +275,27 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         }
         rewrite_and_reopen(&mut inner).map_err(|e| StorageIOError::write_logs(&e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::framed_log::write_frame;
+
+    #[test]
+    fn incompatible_entry_refuses_reopen_before_repairing_any_bytes() {
+        let dir =
+            std::env::temp_dir().join(format!("rr_raft_incompatible_entry_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("raft-log.bin");
+        let mut bytes = b"RRRL".to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        write_frame(&mut bytes, br#"{"future_entry_variant":true}"#).unwrap();
+        bytes.extend_from_slice(&[0xaa; 3]);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(LogStore::open(&dir, true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

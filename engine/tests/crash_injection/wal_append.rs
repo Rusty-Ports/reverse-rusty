@@ -13,7 +13,7 @@ use crate::harness::{
 
 #[test]
 #[ignore = "crash-injection: spawns + SIGKILLs a real process; run via the check.sh crash lane or `cargo test --release --test crash_injection -- --ignored`"]
-fn wal_append_acked_writes_survive_sigkill() {
+fn wal_append_acked_writes_survive_two_sigkills_in_the_same_directory() {
     let corpus = Corpus::generate("wal_append", 0xC0DE_0001, 16_000, 500);
     let full = full_reference(&corpus);
     let iters = crash_iters();
@@ -34,14 +34,31 @@ fn wal_append_acked_writes_survive_sigkill() {
                 res.killed,
                 "[wal_append] writer finished before the kill — raise the corpus size"
             );
+            let second = spawn_and_kill(
+                "wal_append",
+                &dir,
+                &corpus.tsv,
+                &["--offset".into(), "8000".into()],
+                fsync,
+                Trigger::Acks(2_000),
+                jitter_for(i + 1),
+            );
+            assert!(
+                second.killed,
+                "second writer must be killed after acknowledging progress"
+            );
+            let mut acked = res.acked;
+            acked.extend(second.acked);
+            acked.sort_unstable();
+            acked.dedup();
             exercised += reopen_and_diff(
                 &dir,
                 &corpus,
                 &full,
-                &res.acked,
-                &res.tombed,
+                &acked,
+                &[],
                 fsync,
-                &format!("wal_append/fsync={fsync}/iter={i}"),
+                &format!("wal_append/double-kill/fsync={fsync}/iter={i}"),
             );
         }
     }

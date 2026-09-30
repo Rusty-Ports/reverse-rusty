@@ -4,6 +4,8 @@
 
 use super::*;
 
+mod recovery;
+
 fn scratch_path(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
         "reverse_rusty_clog_{}_{}.log",

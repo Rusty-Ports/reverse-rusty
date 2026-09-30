@@ -1,9 +1,11 @@
 use super::{
-    crc32, Path, Wal, WalEntry, Write, OP_DELETE_LOGICAL, OP_FLUSH_CHECKPOINT, OP_INSERT,
+    LogAppender, Path, Wal, WalEntry, Write, OP_DELETE_LOGICAL, OP_FLUSH_CHECKPOINT, OP_INSERT,
     OP_INSERT_CLASS_D, OP_TOMBSTONE, OP_UPSERT, OP_UPSERT_CLASS_D, SOURCE_GENERATION_MAGIC,
     WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION,
 };
+use crate::storage::framed_log::repair_tail;
 use std::io;
+use std::io::{Seek, SeekFrom};
 
 impl Wal {
     /// Open or create a WAL file. If the file exists, scans it to find the next
@@ -14,8 +16,17 @@ impl Wal {
     pub fn open(path: &Path, fsync_each_write: bool) -> io::Result<Self> {
         if path.exists() {
             // Open existing, find the max sequence number and current pending count.
-            let (entries, _skipped) = Self::read_entries(path)?;
-            let next_seq = entries.iter().map(WalEntry::seq).max().unwrap_or(0) + 1;
+            let (scan, version) = Self::read_entries(path)?;
+            let entries = scan.records;
+            let next_seq = entries
+                .iter()
+                .map(WalEntry::seq)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "WAL sequence space exhausted")
+                })?;
             // Pending = entries after the last checkpoint (same set recover() replays).
             let pending_entries = match entries
                 .iter()
@@ -24,15 +35,25 @@ impl Wal {
                 Some(idx) => (entries.len() - idx - 1) as u64,
                 None => entries.len() as u64,
             };
-            let size_bytes = std::fs::metadata(path)?.len();
+            repair_tail(path, scan.valid_len + scan.torn_bytes, scan.valid_len)?;
+            // Never write a header through O_APPEND: a legacy file may contain known
+            // modern frames, and all subsequent writes must advertise the current format.
+            if version < WAL_VERSION {
+                let mut header = std::fs::OpenOptions::new().write(true).open(path)?;
+                header.seek(SeekFrom::Start(4))?;
+                header.write_all(&WAL_VERSION.to_le_bytes())?;
+                header.sync_all()?;
+            }
+            let size_bytes = scan.valid_len as u64;
             let file = std::fs::OpenOptions::new().append(true).open(path)?;
             Ok(Wal {
-                file,
+                file: LogAppender::new(file),
                 path: path.to_path_buf(),
                 next_seq,
                 fsync_each_write,
                 size_bytes,
                 pending_entries,
+                repaired_tail_bytes: scan.torn_bytes,
             })
         } else {
             // Create new
@@ -41,27 +62,27 @@ impl Wal {
             file.write_all(&WAL_VERSION.to_le_bytes())?;
             file.sync_all()?;
             Ok(Wal {
-                file,
+                file: LogAppender::new(file),
                 path: path.to_path_buf(),
                 next_seq: 1,
                 fsync_each_write,
                 size_bytes: WAL_HEADER_SIZE as u64,
                 pending_entries: 0,
+                repaired_tail_bytes: 0,
             })
         }
     }
 
-    /// Flush an append to its configured durability level: an `fsync` (durable
-    /// across power loss) when `fsync_each_write` is set, otherwise a userspace
-    /// flush that leaves the bytes in the OS page cache until the next
-    /// checkpoint (durable across process crash only).
-    #[inline]
-    fn sync_after_append(&mut self) -> io::Result<()> {
-        if self.fsync_each_write {
-            self.file.sync_all()
-        } else {
-            self.file.flush()
-        }
+    fn take_seq(&mut self) -> io::Result<u64> {
+        let seq = self.next_seq;
+        self.next_seq = seq
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("WAL sequence space exhausted"))?;
+        Ok(seq)
+    }
+
+    pub(crate) fn take_repaired_tail_bytes(&mut self) -> usize {
+        std::mem::take(&mut self.repaired_tail_bytes)
     }
 
     /// Append an Insert entry. Returns the sequence number assigned. `tags` are the
@@ -266,19 +287,38 @@ impl Wal {
         priority: Option<i64>,
         source_generation: Option<u64>,
     ) -> io::Result<u64> {
-        let seq = self.next_seq;
-        self.next_seq += 1;
+        if source_generation == Some(0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "zero WAL source generation",
+            ));
+        }
+        let seq = self.take_seq()?;
 
         let text_bytes = text.as_bytes();
         // tag section: tag_count(2) + per tag key_len(2)+key + val_len(2)+value
         let mut tag_bytes = Vec::new();
-        tag_bytes.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+        let tag_count = u16::try_from(tags.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many WAL tags"))?;
+        tag_bytes.extend_from_slice(&tag_count.to_le_bytes());
         for (k, v) in tags {
             let kb = k.as_bytes();
             let vb = v.as_bytes();
-            tag_bytes.extend_from_slice(&(kb.len() as u16).to_le_bytes());
+            let key_len = u16::try_from(kb.len()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "WAL tag key exceeds u16 length",
+                )
+            })?;
+            let value_len = u16::try_from(vb.len()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "WAL tag value exceeds u16 length",
+                )
+            })?;
+            tag_bytes.extend_from_slice(&key_len.to_le_bytes());
             tag_bytes.extend_from_slice(kb);
-            tag_bytes.extend_from_slice(&(vb.len() as u16).to_le_bytes());
+            tag_bytes.extend_from_slice(&value_len.to_le_bytes());
             tag_bytes.extend_from_slice(vb);
         }
         // payload: logical(8) + version(4) + text_len(4) + text + tag section
@@ -295,14 +335,13 @@ impl Wal {
         body.push(op);
         body.extend_from_slice(&logical.to_le_bytes());
         body.extend_from_slice(&version.to_le_bytes());
-        body.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
+        let text_len = u32::try_from(text_bytes.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "WAL text exceeds u32 length")
+        })?;
+        body.extend_from_slice(&text_len.to_le_bytes());
         body.extend_from_slice(text_bytes);
         body.extend_from_slice(&tag_bytes);
         if let Some(source_generation) = source_generation {
-            debug_assert_ne!(
-                source_generation, 0,
-                "engine-owned WAL generations are non-zero"
-            );
             body.extend_from_slice(&SOURCE_GENERATION_MAGIC);
             body.extend_from_slice(&source_generation.to_le_bytes());
             body.push(u8::from(priority.is_some()));
@@ -313,11 +352,7 @@ impl Wal {
             body.extend_from_slice(&value.to_le_bytes());
         }
 
-        let crc = crc32(&body);
-        self.file.write_all(&(body.len() as u32).to_le_bytes())?;
-        self.file.write_all(&crc.to_le_bytes())?;
-        self.file.write_all(&body)?;
-        self.sync_after_append()?;
+        self.file.append(&body, self.fsync_each_write)?;
         // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
         self.size_bytes += 8 + body.len() as u64;
         self.pending_entries += 1;
@@ -326,8 +361,7 @@ impl Wal {
 
     /// Append a Tombstone entry.
     pub fn append_tombstone(&mut self, seg_idx: u32, local_id: u32) -> io::Result<u64> {
-        let seq = self.next_seq;
-        self.next_seq += 1;
+        let seq = self.take_seq()?;
 
         let mut body = Vec::with_capacity(8 + 1 + 8);
         body.extend_from_slice(&seq.to_le_bytes());
@@ -335,11 +369,7 @@ impl Wal {
         body.extend_from_slice(&seg_idx.to_le_bytes());
         body.extend_from_slice(&local_id.to_le_bytes());
 
-        let crc = crc32(&body);
-        self.file.write_all(&(body.len() as u32).to_le_bytes())?;
-        self.file.write_all(&crc.to_le_bytes())?;
-        self.file.write_all(&body)?;
-        self.sync_after_append()?;
+        self.file.append(&body, self.fsync_each_write)?;
         // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
         self.size_bytes += 8 + body.len() as u64;
         self.pending_entries += 1;
@@ -351,19 +381,14 @@ impl Wal {
     /// [`Engine::delete_by_logical_id`](crate::segment::Engine::delete_by_logical_id).
     /// One frame per delete, regardless of how many physical copies it removes.
     pub fn append_delete_logical(&mut self, logical: u64) -> io::Result<u64> {
-        let seq = self.next_seq;
-        self.next_seq += 1;
+        let seq = self.take_seq()?;
 
         let mut body = Vec::with_capacity(8 + 1 + 8);
         body.extend_from_slice(&seq.to_le_bytes());
         body.push(OP_DELETE_LOGICAL);
         body.extend_from_slice(&logical.to_le_bytes());
 
-        let crc = crc32(&body);
-        self.file.write_all(&(body.len() as u32).to_le_bytes())?;
-        self.file.write_all(&crc.to_le_bytes())?;
-        self.file.write_all(&body)?;
-        self.sync_after_append()?;
+        self.file.append(&body, self.fsync_each_write)?;
         // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
         self.size_bytes += 8 + body.len() as u64;
         self.pending_entries += 1;
@@ -373,21 +398,22 @@ impl Wal {
     /// Append a FlushCheckpoint entry. Indicates that all prior WAL entries
     /// have been materialized into sealed segments.
     pub fn append_flush_checkpoint(&mut self, segment_file: &str) -> io::Result<u64> {
-        let seq = self.next_seq;
-        self.next_seq += 1;
+        let seq = self.take_seq()?;
 
         let name_bytes = segment_file.as_bytes();
         let mut body = Vec::with_capacity(8 + 1 + 4 + name_bytes.len());
         body.extend_from_slice(&seq.to_le_bytes());
         body.push(OP_FLUSH_CHECKPOINT);
-        body.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        let name_len = u32::try_from(name_bytes.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "WAL checkpoint name exceeds u32 length",
+            )
+        })?;
+        body.extend_from_slice(&name_len.to_le_bytes());
         body.extend_from_slice(name_bytes);
 
-        let crc = crc32(&body);
-        self.file.write_all(&(body.len() as u32).to_le_bytes())?;
-        self.file.write_all(&crc.to_le_bytes())?;
-        self.file.write_all(&body)?;
-        self.file.sync_all()?; // fsync on checkpoint
+        self.file.append(&body, true)?; // fsync on checkpoint
         self.size_bytes += 8 + body.len() as u64; // length prefix + CRC + body
         self.pending_entries = 0; // checkpoint materializes all prior mutations
         Ok(seq)
@@ -424,17 +450,19 @@ impl Wal {
     /// recovered manifest's watermark.
     pub fn ensure_seq_after(&mut self, watermark: u64) {
         if self.next_seq <= watermark {
-            self.next_seq = watermark + 1;
+            self.next_seq = watermark.saturating_add(1);
         }
     }
 
     /// Reset the WAL: truncate to just the header. Called after a successful
     /// compaction + manifest write when all data is in sealed segments.
     pub fn reset(&mut self) -> io::Result<()> {
-        self.file = std::fs::File::create(&self.path)?;
-        self.file.write_all(&WAL_MAGIC)?;
-        self.file.write_all(&WAL_VERSION.to_le_bytes())?;
-        self.file.sync_all()?;
+        self.file.disable();
+        let mut file = std::fs::File::create(&self.path)?;
+        file.write_all(&WAL_MAGIC)?;
+        file.write_all(&WAL_VERSION.to_le_bytes())?;
+        file.sync_all()?;
+        self.file = LogAppender::new(file);
         self.size_bytes = WAL_HEADER_SIZE as u64;
         self.pending_entries = 0;
         // Don't reset next_seq — keep it monotonic across resets
@@ -447,9 +475,11 @@ impl Wal {
     /// this is the deterministic way to inject a write fault).
     #[cfg(test)]
     pub(crate) fn break_writes_for_test(&mut self) {
-        self.file = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&self.path)
-            .expect("reopen WAL read-only");
+        self.file = LogAppender::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(&self.path)
+                .expect("reopen WAL read-only"),
+        );
     }
 }

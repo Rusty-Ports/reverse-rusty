@@ -104,6 +104,8 @@ impl Engine {
         // would otherwise truncate the u16 tag column and silently drop a real tag.
         self.check_tag_limit(tags)
             .map_err(crate::error::WriteError::Parse)?;
+        self.check_wal_fields(text, tags)
+            .map_err(crate::error::WriteError::Parse)?;
         // Extract + class-gate BEFORE the WAL (ADR-068): the log records only
         // ACCEPTED mutations, so replay re-applies unconditionally — live ≡ replay
         // by construction even if the accept_class_d knob flips between runs.
@@ -242,6 +244,8 @@ impl Engine {
         // Reject an over-large tag set before the WAL too, for the same reason as on
         // insert — and so a failed replace never tombstones the prior version.
         self.check_tag_limit(tags)
+            .map_err(crate::error::WriteError::Parse)?;
+        self.check_wal_fields(text, tags)
             .map_err(crate::error::WriteError::Parse)?;
         // Extract + class-gate BEFORE the WAL (ADR-068): the log records only
         // ACCEPTED mutations, so replay re-applies unconditionally — live ≡

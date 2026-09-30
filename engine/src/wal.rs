@@ -38,12 +38,16 @@
 //!   `SGEN, source_generation: u64, priority_present: u8, [priority: i64]`.
 //!   New engine writes always carry the non-zero generation assigned before the
 //!   append so recovery can preserve mutation order across WAL and bulk segments.
-//!   The header version remains informational: old readers stop after the tag
-//!   section (and ignore an extension they do not recognize).
+//!   Recovery accepts known legacy shapes, rejects newer headers, and upgrades a
+//!   supported old header before writing current frames (ADR-182). Older binaries
+//!   predating this validation must not be used for rollback on an unflushed tail.
 //!
-//! On recovery, we scan forward from the beginning, skipping entries with bad CRC
-//! (torn writes from a crash). Entries before the last FlushCheckpoint are skipped
-//! (those mutations are already in sealed segments).
+//! Recovery validates the header and every complete length/CRC/payload frame.
+//! Only an incomplete final write or zero padding is repairable: open truncates
+//! and synchronizes that suffix before permitting another append. Complete CRC
+//! failures, unknown operations, and malformed payloads refuse recovery without
+//! modifying the file. A failed append disables later writes on the same handle.
+//! Entries before the last FlushCheckpoint need no replay (already in segments).
 //!
 //! ## Durability policy
 //!
@@ -60,27 +64,16 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::storage::crc32;
+use crate::storage::framed_log::LogAppender;
 
 const WAL_MAGIC: [u8; 4] = *b"PWAL";
-// v1: original layout. v2 (ADR-049): the Insert payload gains an optional trailing tag
-// section. The version is informational — the parser detects per entry whether tags are
-// present (by trailing bytes), so v1 and v2 entries coexist. v3 (ADR-066): adds the
-// DeleteByLogical op; older entries are unchanged (an old binary reading a v3 tail stops
-// at the first op-3 frame and reports it as skipped bytes, like a torn tail). v4
-// (ADR-067): adds the Upsert op (atomic replace-by-id), same coexistence story. v5
-// (ADR-068): adds the InsertClassD/UpsertClassD ops — payload-identical to
-// Insert/Upsert, the op code itself marking "accepted under the class-D lane". The
-// marker is load-bearing for UPGRADE correctness: binaries before v5 logged a frame
-// BEFORE classifying, so an old file can hold op-0/op-4 frames whose write was
-// acknowledged as RejectedClassD — replay applies the legacy ops under the old reject
-// gate (reproducing the writer's decision) and only the op-5/6 frames as accepted.
-// Same rollback story as v3/v4: an old binary stops at the first op-5/6 frame and
-// reports skipped bytes. v6 (ADR-108) adds no opcode: an optional trailing i64
-// extends insert-shaped payloads, so old readers safely ignore it after tags.
-// v7 (ADR-116) replaces that unmarked tail on new writes with a marked source
-// generation + optional priority extension. The marker and exact tail length
-// distinguish v7 from v6 while older readers continue to ignore the extra bytes.
+// v1: generation-less insert/tombstone/checkpoint. v2 (ADR-049): optional tags.
+// v3 (ADR-066): logical delete. v4 (ADR-067): atomic upsert. v5 (ADR-068):
+// InsertClassD/UpsertClassD record the writer's class-D accept decision, so replay
+// never resurrects a legacy op-0/op-4 write acknowledged as RejectedClassD.
+// v6 (ADR-108): optional priority i64. v7 (ADR-116): marked source generation
+// and optional priority. ADR-182 fences headers but preserves all known legacy
+// frame shapes, including mixed files created by writers that did not bump headers.
 const WAL_VERSION: u32 = 7;
 const WAL_HEADER_SIZE: usize = 8; // magic + version
 const SOURCE_GENERATION_MAGIC: [u8; 4] = *b"SGEN";
@@ -176,13 +169,13 @@ impl WalEntry {
 #[derive(Debug)]
 pub struct WalRecovery {
     pub entries: Vec<WalEntry>,
-    /// Bytes at the tail that could not be parsed (torn writes / corruption).
+    /// Exact bytes in an incomplete final write or zero padding; corruption is an error.
     pub skipped_bytes: usize,
 }
 
 /// Append-only write-ahead log.
 pub struct Wal {
-    file: std::fs::File,
+    file: LogAppender,
     path: PathBuf,
     next_seq: u64,
     /// When true, every append `fsync`s before returning (durable across power
@@ -197,6 +190,8 @@ pub struct Wal {
     /// checkpoint or reset — mutations not yet materialized into a sealed
     /// segment. Mirrors the set replayed by [`Wal::recover`].
     pending_entries: u64,
+    /// Repair happens before replay; retain the exact count for startup diagnostics.
+    repaired_tail_bytes: usize,
 }
 
 mod recovery;

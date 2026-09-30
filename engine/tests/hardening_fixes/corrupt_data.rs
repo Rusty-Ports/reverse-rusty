@@ -3,10 +3,10 @@
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::segment::Engine;
 
-use crate::harness::{make_norm, sample_queries, test_dir};
+use crate::harness::{make_norm, match_ids, sample_queries, test_dir};
 
 #[test]
-fn corrupt_wal_file_recovers_gracefully() {
+fn incomplete_final_wal_write_recovers_without_losing_the_committed_corpus() {
     let dir = test_dir("corrupt_wal");
     let config = EngineConfig {
         data_dir: Some(dir.clone()),
@@ -16,24 +16,47 @@ fn corrupt_wal_file_recovers_gracefully() {
     engine.insert_live("wireless mouse 1986 vertex", 1, 1);
     engine.insert_live("mechanical keyboard new", 2, 1);
     engine.flush();
+    engine
+        .try_insert_live("noise cancelling headphones", 3, 1)
+        .unwrap();
+    drop(engine);
 
-    // Append garbage to the WAL file (simulates torn write)
+    // Keep only the new frame header and four payload bytes: an actual
+    // incomplete final write, rather than arbitrary corruption.
     let wal_path = dir.join("wal.log");
-    if wal_path.exists() {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&wal_path)
-            .unwrap();
-        f.write_all(&[0xFF; 37]).unwrap(); // corrupt trailing data
-    }
+    let bytes = std::fs::read(&wal_path).unwrap();
+    assert!(bytes.len() > 20);
+    std::fs::write(&wal_path, &bytes[..20]).unwrap();
 
-    // Reopen should succeed — corrupt tail is skipped
-    let reopened = Engine::open(make_norm(), config);
-    assert!(
-        reopened.is_ok(),
-        "engine should open despite corrupt WAL tail"
-    );
+    let reopened = Engine::open(make_norm(), config).unwrap();
+    assert_eq!(std::fs::metadata(&wal_path).unwrap().len(), 8);
+    assert_eq!(match_ids(&reopened, "wireless mouse 1986 vertex"), vec![1]);
+    assert_eq!(match_ids(&reopened, "mechanical keyboard new"), vec![2]);
+    assert!(match_ids(&reopened, "noise cancelling headphones").is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn ambiguous_wal_garbage_is_refused_without_changing_the_log() {
+    let dir = test_dir("ambiguous_wal_tail");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let mut engine = Engine::open(make_norm(), config.clone()).unwrap();
+    engine.try_insert_live("wireless mouse", 1, 1).unwrap();
+    drop(engine);
+    let wal_path = dir.join("wal.log");
+    let mut bytes = std::fs::read(&wal_path).unwrap();
+    // The former synthetic "torn" fixture has a matching payload-prefix CRC:
+    // CRC32([0xff; 4]) == 0xffffffff. Its damaged-length interpretation is
+    // ambiguous, so it must be preserved and refused rather than truncated.
+    bytes.extend_from_slice(&[0xff; 37]);
+    std::fs::write(&wal_path, &bytes).unwrap();
+    let error = Engine::open(make_norm(), config).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&wal_path).unwrap(), bytes);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

@@ -100,6 +100,15 @@ pre-upgrade backup:
   source generation around ADR-108's optional priority. Legacy v1–v6 frames remain readable as
   generation-zero data. ADR-109 advances the coordinator log and per-shard translog to v4;
   clustered v1–v3 logs are rebuild-only because their writes lack placement identity.
+  [ADR-182](../decisions/adr-182-validated-log-recovery.md) makes every complete CRC or payload
+  validation failure a refused open, including unknown opcodes, extensions, and placement metadata.
+  WAL headers outside v1–v7 are rejected without modifying the file; a fully validated older header
+  is upgraded to v7 before modern appends. Safe incomplete final writes or zero padding are truncated
+  and synced before append. `wal_torn_tail` reports the exact removed byte count; it no longer labels
+  complete corruption as a recoverable tail. Preserve a refused log for diagnosis and restore a
+  verified backup or rebuild from the authoritative corpus; never clear it just to make startup pass.
+  Older releases that ignored WAL header versions still cannot enforce this fence: do not roll back
+  to them with an unflushed mutation tail. Restore the pre-upgrade backup instead.
 - **ADR-175 durable reassignment:** the first durable move command atomically rewrites the control
   log to the one-way `RRL4` header before appending, and current snapshots carry move-control format
   4. `RRL2`/`RRL3` and move-control formats 2/3 were unreleased weaker-predicate prototypes and are

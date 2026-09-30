@@ -15,11 +15,9 @@
 //!
 //! ## Why a separate file format (not the engine [`Wal`](crate::wal::Wal))
 //! The engine WAL's tombstone is a *per-shard physical* `(seg_idx, local_id)`; the
-//! coordinator mutates by *logical id*. The engine WAL's parser also treats an unknown
-//! op code as a torn tail, so widening it for cluster ops is subtly wrong. We instead
-//! copy its proven CRC-framing / forward-scan / torn-tail recovery pattern into an
-//! independent file with logical-level ops, so a cluster log and an engine WAL can never
-//! be confused.
+//! coordinator mutates by *logical id*. The formats retain separate headers and
+//! payload decoders, sharing only the cold-path framing, strict validation, safe
+//! tail repair, and sticky append-failure guard (ADR-182).
 //!
 //! ## On-disk frame (mirrors `wal.rs`)
 //! ```text
@@ -34,8 +32,9 @@
 //! ```
 //! v4 requires explicit placement identity for ADD/UPSERT and therefore rejects v1–v3 logs with
 //! an actionable rebuild error; re-deriving ownership under a newer ring/generation would be unsafe.
-//! On recovery we scan forward, stopping at the first bad-CRC / truncated frame (a torn
-//! tail from a crash); the skipped byte count is surfaced as a diagnostic. The
+//! Recovery validates all complete frames and refuses CRC errors or incompatible
+//! payloads. Open removes and synchronizes only an incomplete final write or zero
+//! padding before allowing append; its exact byte count survives until replay. The
 //! checkpoint *cursor* (which records are already captured by a base snapshot) and the
 //! *epoch* live in the coordinator manifest — the atomic commit point — not in this
 //! file, so [`ClusterLog::replay`] takes the cursor as an argument and a checkpoint
@@ -47,7 +46,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use super::shard::ShardError;
-use crate::storage::crc32;
+use crate::storage::framed_log::{repair_tail, scan_records, write_frame, FrameScan, LogAppender};
+
+mod codec;
 
 const CLOG_MAGIC: [u8; 4] = *b"CMLG";
 // v2 (ADR-055): optional trailing tags. v3 (ADR-070): atomic UPSERT. v4 (ADR-109):
@@ -106,8 +107,8 @@ pub(crate) enum ClusterMutation {
 /// the ordered mutations to apply plus a torn-tail byte count.
 pub(crate) struct ClusterReplay {
     pub entries: Vec<(LogPos, ClusterMutation)>,
-    /// Trailing bytes that could not be parsed (a torn write from a crash). Never
-    /// acknowledged as durable, so dropping them is safe.
+    /// Exact bytes repaired on open plus any currently incomplete final write or
+    /// zero padding. Complete corrupt or incompatible records instead fail replay.
     pub skipped_bytes: usize,
 }
 
@@ -194,12 +195,13 @@ impl ClusterLog for NullClusterLog {
 /// A `std::sync::Mutex` both gives interior mutability and enforces the single-writer
 /// total order a Raft leader will also want.
 struct FileState {
-    file: std::fs::File,
+    file: LogAppender,
     path: PathBuf,
     /// Next position to assign — kept monotonic across checkpoints/reopens (seeded from
     /// the manifest's snapshot cursor as a floor, so a truncated-then-reopened log never
     /// reissues a position).
     next_seq: u64,
+    repaired_tail_bytes: usize,
 }
 
 /// A durable, CRC-framed, append-only cluster log (the file backend of [`ClusterLog`]).
@@ -216,24 +218,31 @@ impl FileClusterLog {
     /// seeds the position counter so it stays monotonic even after a checkpoint
     /// truncated the file.
     pub(crate) fn open(path: &Path, fsync_each_write: bool, floor_pos: LogPos) -> io::Result<Self> {
-        let (file, next_seq) = if path.exists() {
-            let (entries, _skipped) = Self::read_entries(path)?;
-            let max_seq = entries.iter().map(|(p, _)| p.0).max().unwrap_or(0);
-            let next_seq = max_seq.max(floor_pos.0) + 1;
+        let (file, next_seq, repaired_tail_bytes) = if path.exists() {
+            let scan = Self::read_entries(path)?;
+            let max_seq = scan.records.iter().map(|(p, _)| p.0).max().unwrap_or(0);
+            let next_seq = max_seq.max(floor_pos.0).checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "cluster log position exhausted")
+            })?;
+            repair_tail(path, scan.valid_len + scan.torn_bytes, scan.valid_len)?;
             let file = std::fs::OpenOptions::new().append(true).open(path)?;
-            (file, next_seq)
+            (file, next_seq, scan.torn_bytes)
         } else {
+            let next_seq = floor_pos.0.checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "cluster log position exhausted")
+            })?;
             let mut file = std::fs::File::create(path)?;
             file.write_all(&CLOG_MAGIC)?;
             file.write_all(&CLOG_VERSION.to_le_bytes())?;
             file.sync_all()?;
-            (file, floor_pos.0 + 1)
+            (file, next_seq, 0)
         };
         Ok(FileClusterLog {
             state: Mutex::new(FileState {
-                file,
+                file: LogAppender::new(file),
                 path: path.to_path_buf(),
                 next_seq,
+                repaired_tail_bytes,
             }),
             fsync_each_write,
         })
@@ -250,10 +259,8 @@ impl FileClusterLog {
 
     /// Encode one mutation's body: `seq | op | payload` (the CRC'd, length-framed part).
     fn encode_body(seq: u64, m: &ClusterMutation) -> Vec<u8> {
-        // The shared ADD/UPSERT payload: `logical | version | dsl_len | dsl | [tag block]`.
-        // ADR-055: the tag block is appended ONLY when non-empty, so an untagged frame is
-        // byte-identical to a v1 record (and the durability oracle's two-backend diff stays
-        // exact). Each tag is a length-prefixed key + value.
+        // V4 ADD/UPSERT always carries the tag count and write-time placement.
+        // Each tag is a length-prefixed key + value.
         fn encode_add_like(
             body: &mut Vec<u8>,
             op: u8,
@@ -315,7 +322,7 @@ impl FileClusterLog {
 
     /// Read every valid record from a log file. Returns positioned mutations plus the
     /// byte count of any trailing data that could not be parsed (torn tail).
-    fn read_entries(path: &Path) -> io::Result<(Vec<(LogPos, ClusterMutation)>, usize)> {
+    fn read_entries(path: &Path) -> io::Result<FrameScan<(LogPos, ClusterMutation)>> {
         let data = std::fs::read(path)?;
         if data.len() < CLOG_HEADER_SIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "clog too small"));
@@ -338,161 +345,23 @@ impl FileClusterLog {
                 },
             ));
         }
-        Ok(Self::parse_entries(&data[CLOG_HEADER_SIZE..]))
+        Self::parse_entries(&data)
     }
 
-    fn parse_entries(data: &[u8]) -> (Vec<(LogPos, ClusterMutation)>, usize) {
-        fn get_u32(buf: &[u8], off: usize) -> Option<u32> {
-            buf.get(off..off + 4)
-                .and_then(|s| s.try_into().ok())
-                .map(u32::from_le_bytes)
-        }
-        fn get_u64(buf: &[u8], off: usize) -> Option<u64> {
-            buf.get(off..off + 8)
-                .and_then(|s| s.try_into().ok())
-                .map(u64::from_le_bytes)
-        }
-        // ADR-055: decode one length-prefixed `(klen u32|k|vlen u32|v)` tag at `off`, returning the
-        // pair and the next offset, or `None` on any bounds / UTF-8 error (a torn tail).
-        fn parse_tag(buf: &[u8], off: usize) -> Option<(String, String, usize)> {
-            let klen = (buf
-                .get(off..off + 4)?
-                .try_into()
-                .ok()
-                .map(u32::from_le_bytes)?) as usize;
-            let ks = off + 4;
-            let k = std::str::from_utf8(buf.get(ks..ks + klen)?).ok()?;
-            let vlen_off = ks + klen;
-            let vlen = (buf
-                .get(vlen_off..vlen_off + 4)?
-                .try_into()
-                .ok()
-                .map(u32::from_le_bytes)?) as usize;
-            let vs = vlen_off + 4;
-            let v = std::str::from_utf8(buf.get(vs..vs + vlen)?).ok()?;
-            Some((k.to_string(), v.to_string(), vs + vlen))
-        }
-        // Decode the shared ADD/UPSERT payload (`logical | version | dsl_len | dsl |
-        // [tag block]`); `None` on any malformed byte (treated as a torn tail by the
-        // caller, mirroring the rest of the parse).
-        #[allow(clippy::type_complexity)]
-        fn parse_add_like(
-            payload: &[u8],
-        ) -> Option<(
-            u64,
-            u32,
-            String,
-            Vec<(String, String)>,
-            crate::ownership::QueryPlacement,
-        )> {
-            if payload.len() < 16 {
-                return None;
+    fn parse_entries(data: &[u8]) -> io::Result<FrameScan<(LogPos, ClusterMutation)>> {
+        let mut previous_seq = 0;
+        let scan = scan_records(data, CLOG_HEADER_SIZE, |body| {
+            let entry = codec::decode(body)?;
+            if entry.0 .0 <= previous_seq {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "cluster log positions must be strictly increasing",
+                ));
             }
-            let logical = get_u64(payload, 0)?;
-            let version = get_u32(payload, 8)?;
-            let dsl_len = get_u32(payload, 12)? as usize;
-            let dsl = std::str::from_utf8(payload.get(16..16 + dsl_len)?).ok()?;
-            // ADR-055: optional trailing tag block. An untagged record ends exactly at
-            // the DSL, so `toff == payload.len()` ⇒ empty tags.
-            let mut toff = 16 + dsl_len;
-            let mut tags: Vec<(String, String)> = Vec::new();
-            let tag_count = get_u32(payload, toff)? as usize;
-            toff += 4;
-            for _ in 0..tag_count {
-                let (k, v, next) = parse_tag(payload, toff)?;
-                tags.push((k, v));
-                toff = next;
-            }
-            let generation = get_u64(payload, toff)?;
-            toff += 8;
-            let num_shards = get_u32(payload, toff)?;
-            toff += 4;
-            let mode = *payload.get(toff)?;
-            toff += 1;
-            let count = get_u32(payload, toff)? as usize;
-            toff += 4;
-            let mut positions = Vec::with_capacity(count);
-            for _ in 0..count {
-                positions.push(get_u32(payload, toff)?);
-                toff += 4;
-            }
-            if toff != payload.len() {
-                return None;
-            }
-            let placement = crate::ownership::QueryPlacement::from_raw(
-                crate::ownership::PlacementGeneration(generation),
-                num_shards,
-                mode,
-                positions,
-            )
-            .ok()?;
-            Some((logical, version, dsl.to_string(), tags, placement))
-        }
-
-        let mut entries = Vec::new();
-        let mut cursor = 0usize;
-
-        while cursor + 8 <= data.len() {
-            let Some(total_len) = get_u32(data, cursor).map(|v| v as usize) else {
-                break;
-            };
-            let Some(stored_crc) = get_u32(data, cursor + 4) else {
-                break;
-            };
-            cursor += 8;
-            if cursor + total_len > data.len() {
-                break;
-            }
-            let body = &data[cursor..cursor + total_len];
-            if crc32(body) != stored_crc {
-                break;
-            }
-            // body = seq(8) + op(1) + payload
-            if total_len < 9 {
-                break;
-            }
-            let Some(seq) = get_u64(body, 0) else { break };
-            let op = body[8];
-            let payload = &body[9..];
-
-            let mutation = match op {
-                OP_ADD => match parse_add_like(payload) {
-                    Some((logical, version, dsl, tags, placement)) => ClusterMutation::Add {
-                        logical,
-                        version,
-                        dsl,
-                        tags,
-                        placement,
-                    },
-                    None => break,
-                },
-                OP_UPSERT => match parse_add_like(payload) {
-                    Some((logical, version, dsl, tags, placement)) => ClusterMutation::Upsert {
-                        logical,
-                        version,
-                        dsl,
-                        tags,
-                        placement,
-                    },
-                    None => break,
-                },
-                OP_REMOVE => {
-                    if payload.len() < 8 {
-                        break;
-                    }
-                    let Some(logical) = get_u64(payload, 0) else {
-                        break;
-                    };
-                    ClusterMutation::Remove { logical }
-                }
-                _ => break,
-            };
-            entries.push((LogPos(seq), mutation));
-            cursor += total_len;
-        }
-
-        let skipped_bytes = data.len() - cursor;
-        (entries, skipped_bytes)
+            previous_seq = entry.0 .0;
+            Ok(entry)
+        })?;
+        Ok(scan)
     }
 }
 
@@ -500,29 +369,28 @@ impl ClusterLog for FileClusterLog {
     fn append(&self, m: &ClusterMutation) -> Result<LogPos, ShardError> {
         let mut st = self.lock();
         let seq = st.next_seq;
+        // An I/O failure can leave a complete record with an uncertain durability
+        // outcome. Do not reissue its position if a checkpoint replaces this handle.
+        st.next_seq = seq
+            .checked_add(1)
+            .ok_or_else(|| ShardError::Log("cluster log position exhausted".into()))?;
         let body = Self::encode_body(seq, m);
-        let crc = crc32(&body);
-
-        let write = (|| -> io::Result<()> {
-            st.file.write_all(&(body.len() as u32).to_le_bytes())?;
-            st.file.write_all(&crc.to_le_bytes())?;
-            st.file.write_all(&body)?;
-            if self.fsync_each_write {
-                st.file.sync_all()
-            } else {
-                st.file.flush()
-            }
-        })();
-        write.map_err(|e| ShardError::Log(format!("append: {e}")))?;
-        st.next_seq += 1;
+        st.file
+            .append(&body, self.fsync_each_write)
+            .map_err(|e| ShardError::Log(format!("append: {e}")))?;
         Ok(LogPos(seq))
     }
 
     fn replay(&self, from: LogPos) -> Result<ClusterReplay, ShardError> {
-        let path = { self.lock().path.clone() };
-        let (all, skipped_bytes) =
-            Self::read_entries(&path).map_err(|e| ShardError::Log(format!("replay: {e}")))?;
-        let entries = all.into_iter().filter(|(p, _)| *p > from).collect();
+        let mut st = self.lock();
+        let scan =
+            Self::read_entries(&st.path).map_err(|e| ShardError::Log(format!("replay: {e}")))?;
+        let skipped_bytes = scan.torn_bytes + std::mem::take(&mut st.repaired_tail_bytes);
+        let entries = scan
+            .records
+            .into_iter()
+            .filter(|(p, _)| *p > from)
+            .collect();
         Ok(ClusterReplay {
             entries,
             skipped_bytes,
@@ -538,10 +406,15 @@ impl ClusterLog for FileClusterLog {
         // Rewrite the file keeping only records strictly after `up_to` (those not yet
         // captured by the base snapshot). Atomic via tmp + rename so a crash mid-rewrite
         // leaves the old (already-consistent) file in place.
-        let (all, _skipped) = Self::read_entries(&st.path)
+        let scan = Self::read_entries(&st.path)
             .map_err(|e| ShardError::Log(format!("checkpoint read: {e}")))?;
-        let kept: Vec<(LogPos, ClusterMutation)> =
-            all.into_iter().filter(|(p, _)| *p > up_to).collect();
+        let kept: Vec<(LogPos, ClusterMutation)> = scan
+            .records
+            .into_iter()
+            .filter(|(p, _)| *p > up_to)
+            .collect();
+
+        st.file.disable();
 
         let rewrite = (|| -> io::Result<()> {
             let tmp = st.path.with_extension("clog.tmp");
@@ -550,10 +423,7 @@ impl ClusterLog for FileClusterLog {
             f.write_all(&CLOG_VERSION.to_le_bytes())?;
             for (pos, m) in &kept {
                 let body = Self::encode_body(pos.0, m);
-                let crc = crc32(&body);
-                f.write_all(&(body.len() as u32).to_le_bytes())?;
-                f.write_all(&crc.to_le_bytes())?;
-                f.write_all(&body)?;
+                write_frame(&mut f, &body)?;
             }
             f.sync_all()?;
             drop(f);
@@ -566,10 +436,12 @@ impl ClusterLog for FileClusterLog {
         rewrite.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
 
         // Re-open the appending handle on the rewritten file.
-        st.file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&st.path)
-            .map_err(|e| ShardError::Log(format!("checkpoint reopen: {e}")))?;
+        st.file = LogAppender::new(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&st.path)
+                .map_err(|e| ShardError::Log(format!("checkpoint reopen: {e}")))?,
+        );
         Ok(())
     }
 
@@ -586,10 +458,12 @@ impl FileClusterLog {
     /// `Wal::break_writes_for_test`).
     pub(crate) fn break_writes_for_test(&self) {
         let mut st = self.lock();
-        st.file = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&st.path)
-            .expect("reopen clog read-only");
+        st.file = LogAppender::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(&st.path)
+                .expect("reopen clog read-only"),
+        );
     }
 }
 

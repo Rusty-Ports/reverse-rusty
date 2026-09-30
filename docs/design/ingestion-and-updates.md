@@ -92,6 +92,13 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   checkpoints similarly select per-shard segments in the cluster manifest, with coordinator and
   per-shard log tails for post-checkpoint recovery. Logs may be truncated after commit, so segments
   and retained source are part of the authoritative corpus.
+- **Log reopen validates before append** ([ADR-182](../decisions/adr-182-validated-log-recovery.md)).
+  WAL, coordinator/translog, and Raft readers reject complete CRC failures and incompatible payloads.
+  Only an incomplete final write or zero padding is removable; open truncates that suffix and syncs
+  the cut before allowing new writes. A damaged length that hides a complete CRC-valid payload or
+  later frame refuses repair. A failed write, flush, or sync disables further appends on that handle
+  until recovery. Fallible open propagates initialization failures even before the first manifest.
+  Exact repaired-byte diagnostics survive startup and are delivered when an observer attaches.
 - **Segments are immutable** (Lucene/LSM): the write path is append-only; complexity is pushed to
   the merge, which is the right place for it.
 - **Updates/deletes are tombstones**, not in-place edits: update = compile new version into the

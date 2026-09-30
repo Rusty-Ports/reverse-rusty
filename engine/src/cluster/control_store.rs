@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::storage::crc32;
+use crate::storage::framed_log::{repair_tail, scan_records, write_frame, LogAppender};
 
 /// Header of the record log: magic + format version. V4 is a one-way compatibility fence: an old
 /// binary knows only `RRRL` (or one of the unsupported move prototypes) and therefore rejects a log
@@ -114,9 +114,10 @@ impl RaftPaths {
     }
 }
 
-/// Ensure the log file exists with a valid header, and return an **append** handle. Creating
-/// the dir + header is idempotent; a real I/O failure surfaces.
-pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<std::fs::File> {
+/// Validate the header and complete JSON frames, sync any safe tail repair, then
+/// return an append handle. LogStore first validates the concrete Entry schema;
+/// this helper also refuses CRC errors and invalid JSON before modifying bytes.
+pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<LogAppender> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -129,6 +130,11 @@ pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<std::fs::
                 format!("raft log: expected {format:?}, found {found:?}"),
             ));
         }
+        let scan = scan_records(&data, LOG_HEADER, |body| {
+            serde_json::from_slice::<serde_json::Value>(body)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        })?;
+        repair_tail(path, data.len(), scan.valid_len)?;
     } else {
         let mut f = std::fs::File::create(path)?;
         let (magic, version) = format.header();
@@ -136,33 +142,27 @@ pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<std::fs::
         f.write_all(&version.to_le_bytes())?;
         f.sync_all()?;
     }
-    std::fs::OpenOptions::new().append(true).open(path)
+    Ok(LogAppender::new(
+        std::fs::OpenOptions::new().append(true).open(path)?,
+    ))
 }
 
 /// Append one serde record to an open append handle: `len u32 | crc u32 | json(body)`. fsync
 /// (durable before return) when `fsync` is set, else flush to the OS page cache. The framing +
 /// torn-tail recovery mirror [`clog`](super::clog) / `wal.rs`.
 pub(super) fn append_record<T: Serialize>(
-    file: &mut std::fs::File,
+    file: &mut LogAppender,
     value: &T,
     fsync: bool,
 ) -> io::Result<()> {
     let body =
         serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let crc = crc32(&body);
-    file.write_all(&(body.len() as u32).to_le_bytes())?;
-    file.write_all(&crc.to_le_bytes())?;
-    file.write_all(&body)?;
-    if fsync {
-        file.sync_all()
-    } else {
-        file.flush()
-    }
+    file.append(&body, fsync).map(|_| ())
 }
 
-/// Read every valid record from a log file, oldest-first (forward scan, stopping at the first
-/// bad-CRC / truncated frame — a torn tail from a crash, which was never acknowledged durable so
-/// dropping it is safe). A missing file reads as empty (a fresh node).
+/// Read every decoded record, oldest-first. Ignore only an incomplete final
+/// write or zero padding; complete CRC/schema failures are InvalidData. Reading
+/// never changes the file. A missing file reads as empty (a fresh node).
 pub(super) fn read_records<T: DeserializeOwned>(path: &Path) -> io::Result<(Vec<T>, LogFormat)> {
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -172,38 +172,15 @@ pub(super) fn read_records<T: DeserializeOwned>(path: &Path) -> io::Result<(Vec<
         Err(e) => return Err(e),
     };
     let format = parse_log_format(&data)?;
-    let get_u32 = |off: usize| -> Option<u32> {
-        data.get(off..off + 4)
-            .and_then(|s| s.try_into().ok())
-            .map(u32::from_le_bytes)
-    };
-    let mut out = Vec::new();
-    let mut cursor = LOG_HEADER;
-    while cursor + 8 <= data.len() {
-        let Some(len) = get_u32(cursor).map(|v| v as usize) else {
-            break;
-        };
-        let Some(stored_crc) = get_u32(cursor + 4) else {
-            break;
-        };
-        cursor += 8;
-        if cursor + len > data.len() {
-            break; // truncated body (torn tail)
-        }
-        let body = &data[cursor..cursor + len];
-        if crc32(body) != stored_crc {
-            break; // bad CRC (torn tail)
-        }
-        let value = serde_json::from_slice::<T>(body).map_err(|e| {
+    let scan = scan_records(&data, LOG_HEADER, |body| {
+        serde_json::from_slice::<T>(body).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("raft log: valid frame has incompatible payload: {e}"),
+                format!("raft log: complete frame has incompatible payload: {e}"),
             )
-        })?;
-        out.push(value);
-        cursor += len;
-    }
-    Ok((out, format))
+        })
+    })?;
+    Ok((scan.records, format))
 }
 
 /// Atomically rewrite the log to exactly `records` (header + framed bodies) — the durable form of
@@ -223,10 +200,7 @@ pub(super) fn rewrite_records<T: Serialize>(
     for value in records {
         let body =
             serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let crc = crc32(&body);
-        f.write_all(&(body.len() as u32).to_le_bytes())?;
-        f.write_all(&crc.to_le_bytes())?;
-        f.write_all(&body)?;
+        write_frame(&mut f, &body)?;
     }
     if fsync {
         f.sync_all()?;
@@ -331,7 +305,42 @@ mod tests {
         }
         let (recs, _): (Vec<(u64, String)>, _) = read_records(&path).unwrap();
         assert_eq!(recs.len(), 2, "the two whole records survive a torn tail");
+        let mut file = ensure_log(&path, LogFormat::Legacy).unwrap();
+        append_record(&mut file, &(3u64, "gamma".to_string()), true).unwrap();
+        drop(file);
+        let (recs, _): (Vec<(u64, String)>, _) = read_records(&path).unwrap();
+        assert_eq!(
+            recs,
+            vec![(1, "alpha".into()), (2, "beta".into()), (3, "gamma".into())]
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crc_failure_or_complete_invalid_json_refuses_append_open_without_modification() {
+        let dir = scratch("corrupt_frames");
+        let path = dir.join("raft-log.bin");
+        for bad_crc in [false, true] {
+            let mut bytes = Vec::from(LOG_MAGIC_V1);
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            write_frame(&mut bytes, b"unknown invalid json").unwrap();
+            if bad_crc {
+                bytes[12] ^= 1;
+            }
+            write_frame(&mut bytes, b"[2,\"later valid record\"]").unwrap();
+            bytes.extend_from_slice(&[0xaa; 3]);
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                read_records::<(u64, String)>(&path).err().unwrap().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                ensure_log(&path, LogFormat::Legacy).err().unwrap().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
