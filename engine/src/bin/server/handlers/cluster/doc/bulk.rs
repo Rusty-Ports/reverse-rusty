@@ -35,8 +35,23 @@ pub(crate) async fn cluster_bulk_route(
     };
     // The batch holds `write_serial` and makes remote write RPCs, so it runs on a blocking thread,
     // never on an async worker (see `run_cluster_write`).
+    let permit = match super::super::admit_cluster_write(&state).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            return bulk_rejection(
+                &state.prom,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cluster_write_unavailable",
+                error.to_string(),
+            );
+        }
+    };
     let worker_state = Arc::clone(&state);
-    match tokio::task::spawn_blocking(move || cluster_bulk_inner(&worker_state, items)).await {
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        cluster_bulk_inner(&worker_state, items)
+    });
+    match worker.await {
         Ok(response) => response,
         Err(error) => bulk_rejection(
             &state.prom,

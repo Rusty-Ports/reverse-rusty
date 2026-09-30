@@ -15,6 +15,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
   locks on HTTP worker threads while the lock holder's shard RPCs needed those same workers. Cluster
   RPCs now run on a dedicated runtime, and PUT, DELETE, bulk, and flush wait for their locks on
   blocking threads ([ADR-183](decisions/adr-183-cluster-rpc-runtime-isolation.md)).
+- Bound queued cluster writes: at most 32 writes hold blocking threads at once, and a write keeps
+  its admission until it finishes even if its client disconnects.
 
 ## 2026-09-30 — Remote blue/green resize
 

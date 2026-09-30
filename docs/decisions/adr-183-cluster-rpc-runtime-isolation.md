@@ -31,8 +31,13 @@ for the write lock) made the window larger.
 2. **Write handlers wait off the async workers.** PUT, DELETE, bulk, and flush acquire their locks
    and run their remote writes on a blocking thread (`run_cluster_write`, and the equivalent wrap
    for bulk and flush), so a queued write never parks an HTTP worker and other requests keep being
-   served. The global request-concurrency limit bounds how many blocking threads writes can
-   occupy.
+   served.
+3. **Write admission outlives the request.** A blocking worker cannot be cancelled, so a write
+   whose client disconnects keeps running after its handler future is dropped, and the
+   request-concurrency slot that future held is freed. Each write therefore first awaits a permit
+   from a dedicated semaphore (`MAX_QUEUED_CLUSTER_WRITES`, 32) and moves it into the worker, which
+   releases it only when the write finishes. At most 32 writers can hold blocking threads, however
+   many clients disconnect. A request cancelled while waiting for a permit never starts its write.
 
 ## Alternatives
 
@@ -48,7 +53,9 @@ for the write lock) made the window larger.
 ## Consequences
 
 Cluster RPC progress is independent of HTTP load. Writes queued behind a long lock holder no
-longer degrade unrelated requests. The coordinator runs a second, small runtime.
+longer degrade unrelated requests. The coordinator runs a second, small runtime. Beyond 32 queued
+writes, further writes wait asynchronously for admission; a disconnected client's admitted write
+still completes, exactly as it would have if the client had stayed.
 
 ## Proof
 
@@ -57,5 +64,9 @@ longer degrade unrelated requests. The coordinator runs a second, small runtime.
 - A handler test holds `write_serial`, queues a PUT on a single-threaded runtime, and requires a
   concurrent read to be served. It fails (within its timeout) when the PUT waits on the async
   worker, as it did before this change.
+- A handler test queues more writes than there are permits behind a held `write_serial`, cancels
+  every request, and requires the permits to stay held until the admitted workers finish, and
+  exactly the admitted writes to apply. It fails if the permit is dropped with the handler future,
+  released before the worker's write completes, or not taken at all.
 
 **See also:** ADR-029, ADR-047, ADR-085, ADR-180.

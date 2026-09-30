@@ -38,6 +38,18 @@ mod vocab;
 #[cfg(test)]
 mod tests;
 
+/// Admit one cluster write onto a blocking thread (ADR-183). The permit is awaited, so a request
+/// cancelled while it waits starts nothing; the caller moves the permit into the worker, so the
+/// capacity stays taken until the write finishes, even if its client has disconnected.
+pub(crate) async fn admit_cluster_write(
+    state: &crate::state::ClusterAppState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ShardError> {
+    std::sync::Arc::clone(&state.write_permits)
+        .acquire_owned()
+        .await
+        .map_err(|_| ShardError::Protocol("cluster write admission is closed".into()))
+}
+
 /// Run a cluster mutation on a blocking thread, never on an async worker. It waits on
 /// `write_serial` and the cluster lock and then makes remote write RPCs; a worker parked on those
 /// waits would starve every other request. The RPCs themselves run on the dedicated cluster
@@ -46,8 +58,10 @@ pub(crate) async fn run_cluster_write<T: Send + 'static>(
     state: &std::sync::Arc<crate::state::ClusterAppState>,
     work: impl FnOnce(&reverse_rusty::cluster::ClusterEngine) -> Result<T, ShardError> + Send + 'static,
 ) -> Result<T, ShardError> {
+    let permit = admit_cluster_write(state).await?;
     let state = std::sync::Arc::clone(state);
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let _writes = state.write_serial.lock();
         let cluster = state.cluster.read();
         work(&cluster)

@@ -49,6 +49,9 @@ fn state_from_cluster_with_rebalance_topology(
         cluster: RwLock::new(cluster),
         topology_guard: RwLock::new(()),
         write_serial: Mutex::new(()),
+        write_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_QUEUED_CLUSTER_WRITES,
+        )),
         flush_serial: Mutex::new(()),
         durability_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,

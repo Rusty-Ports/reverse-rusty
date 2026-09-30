@@ -416,6 +416,9 @@ pub(crate) async fn run(
         cluster: RwLock::new(cluster),
         topology_guard: RwLock::new(()),
         write_serial: Mutex::new(()),
+        write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_QUEUED_CLUSTER_WRITES,
+        )),
         flush_serial: Mutex::new(()),
         durability_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,

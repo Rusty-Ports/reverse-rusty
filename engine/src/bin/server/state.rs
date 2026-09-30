@@ -55,6 +55,10 @@ pub(crate) const MAX_CONCURRENT_CLUSTER_HANDOFFS: usize = 1;
 /// duplicate calls cannot accumulate detached workers; automatic reconcile
 /// and rebalance retain their own conflict-aware engine scheduling.
 pub(crate) const MAX_CONCURRENT_CLUSTER_REASSIGNS: usize = 1;
+/// Cluster writes (PUT, DELETE, bulk, flush) admitted onto blocking threads at once. They run one
+/// at a time behind `write_serial`, so this bounds how many blocking threads queued writes can
+/// hold, including writes whose clients have disconnected.
+pub(crate) const MAX_QUEUED_CLUSTER_WRITES: usize = 32;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
@@ -185,6 +189,10 @@ pub(crate) struct ClusterAppState {
     /// Serializes mutating requests (the `Mutex<Engine>` analogue), so concurrent
     /// bulk batches don't interleave their per-item apply order. Reads never take it.
     pub(crate) write_serial: Mutex<()>,
+    /// Admission for cluster writes run on blocking threads (ADR-183). A permit is taken before
+    /// the worker starts and held until it finishes, so a disconnected client can never leave more
+    /// than [`MAX_QUEUED_CLUSTER_WRITES`] detached writers holding blocking threads.
+    pub(crate) write_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Explicit-flush admission, separate from the general write serializer for
     /// the same `wait_if_ongoing` reason as [`AppState::flush_serial`].
     pub(crate) flush_serial: Mutex<()>,
