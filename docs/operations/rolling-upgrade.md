@@ -122,9 +122,11 @@ pre-upgrade backup:
   header, and snapshots that have observed one carry control format 5. Formats only move forward.
   Binaries that know only `RRL4`/format 4 reject them rather than dropping a resize intent, so
   upgrade every control member, shard, and coordinator before the first remote resize; rollback
-  past that point requires the pre-upgrade control-volume backup. The new `LiveSources` and
-  `StageIngest` RPCs are answered only by upgraded shard servers, so upgrade both the old layout's
-  nodes and the targets.
+  past that point requires the pre-upgrade control-volume backup. The new `LiveSources`,
+  `StageIngest`, `Retire`, and `Unretire` RPCs are answered only by upgraded shard servers, so
+  upgrade both the old layout's nodes and the targets. A retired node records its retirement in
+  `retired.bin` beside `feature_space.bin`; an older binary ignores that file, so never roll a
+  retired node back.
 - **Adopted shard state:** ADR-109 adopted feature-space v2 records placement generation and shard
   count. Legacy adopted data-node state must be wiped and reseeded.
 - **The mesh wire:** ADR-109 fields are protobuf-additive syntactically, but semantically mandatory.

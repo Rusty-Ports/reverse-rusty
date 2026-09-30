@@ -3,34 +3,37 @@
 //! The committed layout stays authoritative and readable while a complete new layout is built on
 //! separate, empty shard servers:
 //!
-//! 1. **prepare** (`&self`): record a `Preparing` intent, raise the resize write fence and drain
-//!    in-flight mutations, build the target layout at placement generation `N + 1`, stream the
-//!    deduplicated live corpus into it, record per-position fingerprint evidence as `Ready`, and
-//!    conditionally commit the new shard count, generation, and assignments together;
-//! 2. **install** (`&mut self`): swap the serving ring and shards to the committed layout and
-//!    lower the fence;
-//! 3. **finish** (`&self`): fence the retired slots so a stale writer fails loud, then finish the
-//!    intent.
+//! 1. **prepare** (`&self`): raise the resize write fence and drain in-flight mutations, record a
+//!    `Preparing` intent, build the target layout at placement generation `N + 1`, stream the
+//!    deduplicated live corpus into it, prove every target position, **retire** every node of the
+//!    current layout at the storage layer (each retirement also proves its slots did not change
+//!    since the export), record `Ready`, and commit the new shard count, generation, and
+//!    assignments together;
+//! 2. **install** (`&mut self`, no network call): swap the serving ring and shards to the
+//!    committed layout and lower the fence;
+//! 3. **finish** (`&self`): finish the intent.
 //!
-//! Any failure before the commit lowers the fence and aborts the intent, leaving the old layout
-//! serving untouched. An ambiguous commit is resolved by reading the control state back rather
-//! than guessing.
+//! Layout authority is enforced by the data nodes, not by this coordinator's memory: from the
+//! moment `Commit` may apply, the old nodes are durably retired and refuse every read and write
+//! from any coordinator. A failure before `Commit` is proposed unretires them and reopens writes;
+//! after that, they are unretired only when the control plane proves the commit did not apply.
+//! Coordinator startup resolves whatever a crash, cancellation, or lost reply left behind.
 
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use crate::cluster::control::{
     normalized_move_endpoint, ClusterState, ClusterStateChange, MoveCommandOutcome, NodeDescriptor,
     NodeId, ResizeCommand, ResizeIntentPhase,
 };
-use crate::cluster::handoff::HandoffShard;
-use crate::cluster::remote::RemoteShard;
+use crate::cluster::remote::unretire_node;
 
 use super::{ClusterConfig, ClusterEngine, ShardError};
 
 mod load;
 mod plan;
 mod recovery;
+mod retire;
 
 use plan::{expected_endpoints, member_endpoint, resize_intent};
 pub use recovery::{recover_durable_resize, ResizeRecovery};
@@ -57,7 +60,7 @@ pub struct RemoteResizeReport {
     pub exported: u64,
     /// Physical rows loaded into the new layout (replicated rows count once per position).
     pub loaded: u64,
-    /// Old-layout slots fenced after the cutover.
+    /// Old-layout slots durably retired before the commit.
     pub retired_slots: usize,
     /// Whether the control-plane intent was finished. `false` leaves a committed intent that the
     /// next resize attempt or coordinator startup finishes.
@@ -65,8 +68,9 @@ pub struct RemoteResizeReport {
 }
 
 /// A committed but not yet installed resize: the staged engine whose shards and ring become the
-/// serving layout. Consensus already names that layout, so dropping this value without installing
-/// it makes the source coordinator stop serving until a restart routes to the committed layout.
+/// serving layout. The old layout's nodes are already retired, so dropping this value without
+/// installing it leaves this coordinator failing loud until a restart routes to the committed
+/// layout.
 pub struct PreparedRemoteResize {
     operation_id: u64,
     staged: ClusterEngine,
@@ -74,34 +78,25 @@ pub struct PreparedRemoteResize {
     /// The new layout's complete membership, installed as the converged logical-id directory.
     logical_ids: Vec<u64>,
     loaded: u64,
-    retired: Vec<(u32, String)>,
-    abandoned: RetiredLayoutGuard,
+    retired_slots: usize,
 }
 
-/// Refuses serving through the source layout's positions when dropped while armed. Only a
-/// successful installation disarms it.
-struct RetiredLayoutGuard {
-    handoffs: Vec<Arc<HandoffShard>>,
-    armed: bool,
+/// How far a remote resize got, which decides how a failure is resolved.
+#[derive(Default)]
+pub(super) struct ResizeProgress {
+    /// Old-layout nodes a `Retire` was sent to (including one whose reply was lost).
+    retired_endpoints: RefCell<Vec<String>>,
+    /// Set just before `Commit` is proposed, the only step that can change the layout of record.
+    commit_proposed: Cell<bool>,
 }
 
-impl Drop for RetiredLayoutGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            for handoff in &self.handoffs {
-                handoff.refuse_serving();
-            }
-        }
-    }
-}
-
-/// The old layout after installation, awaiting retirement.
+/// An installed resize awaiting `Finish`.
 pub struct RetiredRemoteLayout {
     operation_id: u64,
     old_num_shards: usize,
     exported: u64,
     loaded: u64,
-    slots: Vec<(u32, String)>,
+    retired_slots: usize,
 }
 
 impl ClusterEngine {
@@ -143,20 +138,17 @@ impl ClusterEngine {
         self.validate_remote_resize_request(request)?;
         self.raise_resize_write_fence()?;
         on_fenced();
-        let commit_proposed = std::cell::Cell::new(false);
-        self.begin_and_build(&handle, request, &commit_proposed)
-            .map_err(|failure| {
-                self.fail_resize(request.operation_id, failure, commit_proposed.get())
-            })
+        let progress = ResizeProgress::default();
+        self.begin_and_build(&handle, request, &progress)
+            .map_err(|failure| self.fail_resize(&handle, request.operation_id, failure, &progress))
     }
 
-    /// Record `Begin`, then build, prove, and commit the staged layout. `commit_proposed` is set
-    /// just before the `Commit` proposal, the only step that can change the layout of record.
+    /// Record `Begin`, then build, prove, retire, and commit.
     fn begin_and_build(
         &self,
         handle: &tokio::runtime::Handle,
         request: &RemoteResizeRequest,
-        commit_proposed: &std::cell::Cell<bool>,
+        progress: &ResizeProgress,
     ) -> Result<PreparedRemoteResize, ShardError> {
         self.register_resize_targets(&request.targets)?;
         let state = self.control_state()?;
@@ -204,13 +196,17 @@ impl ClusterEngine {
             staged,
             logical_ids,
             loaded,
+            retired_slots,
         } = self.build_and_commit(
             handle,
             request,
             &intent,
-            &target_endpoints,
+            &load::Layouts {
+                expected: &expected_endpoints,
+                targets: &target_endpoints,
+            },
             source_durable,
-            commit_proposed,
+            progress,
         )?;
         Ok(PreparedRemoteResize {
             operation_id: request.operation_id,
@@ -218,21 +214,14 @@ impl ClusterEngine {
             old_num_shards: state.num_shards as usize,
             logical_ids,
             loaded,
-            retired: expected_endpoints
-                .into_iter()
-                .enumerate()
-                .map(|(position, endpoint)| (position as u32, endpoint))
-                .collect(),
-            abandoned: RetiredLayoutGuard {
-                handoffs: self.handoffs.clone(),
-                armed: true,
-            },
+            retired_slots,
         })
     }
 
-    /// Swap the serving ring and shards to a committed staged layout and reopen reads and writes.
-    /// It makes no network call. Any failure leaves the retired layout refusing reads and writes,
-    /// since it is no longer the layout of record.
+    /// Swap the serving ring and shards to a committed staged layout and reopen writes. It makes no
+    /// network call: it runs under the exclusive cluster lock that request threads may wait on.
+    /// Preparation already confirmed the commit (an applied proposal or a matching read-back), and
+    /// the recorded intent keeps every other layout change out until `Finish`.
     pub fn install_remote_resize(
         &mut self,
         prepared: PreparedRemoteResize,
@@ -243,39 +232,16 @@ impl ClusterEngine {
             old_num_shards,
             logical_ids,
             loaded,
-            retired,
-            mut abandoned,
+            retired_slots,
         } = prepared;
         let exported = logical_ids.len() as u64;
         let generation = staged.placement_generation();
-        // Installation is network-free: it runs under the exclusive cluster lock that request
-        // threads may be waiting on, so a control-plane round trip here could stall the runtime
-        // it needs. Preparation already confirmed the commit (an applied proposal or a matching
-        // read-back), and the recorded intent keeps every other layout change out until `Finish`.
-        //
         // The directory mirrors the rebuilt corpus exactly, as after an in-process rebuild: the new
         // layout was loaded coherently from a fixed snapshot while writes were fenced, so it
         // restores create-only admission and exhaustive-delivery convergence even when this
-        // coordinator attached to populated shards without either.
-        let checked = self.replace_logical_ids(logical_ids);
-        if let Err(error) = checked {
-            // The resize committed, so the retired layout is no longer the layout of record, yet
-            // this coordinator cannot install the new one. Once its target leases lapse another
-            // coordinator can serve the committed layout, so stop serving until a restart routes
-            // there, exactly as after an unproven commit.
-            for handoff in &self.handoffs {
-                handoff.refuse_serving();
-            }
-            self.emit(crate::events::EngineEvent::DurabilityFailure {
-                op: crate::events::DurabilityOp::ReplicaDesync,
-                detail: format!(
-                    "remote resize {operation_id} committed but could not be installed; this \
-                     coordinator stops serving until a restart routes to the committed layout"
-                ),
-                error: error.to_string(),
-            });
-            return Err(error);
-        }
+        // coordinator attached to populated shards without either. A failure leaves the retired
+        // old nodes refusing every request, so nothing answers from the superseded layout.
+        self.replace_logical_ids(logical_ids)?;
         self.ring = staged.ring;
         self.shards = staged.shards;
         self.handoffs = staged.handoffs;
@@ -288,21 +254,20 @@ impl ClusterEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.clear_pits();
-        // The committed layout now serves; the retired positions are no longer routed to.
-        abandoned.armed = false;
         self.resize_write_fence.store(false, Ordering::Release);
         Ok(RetiredRemoteLayout {
             operation_id,
             old_num_shards,
             exported,
             loaded,
-            slots: retired,
+            retired_slots,
         })
     }
 
-    /// Fence every retired slot so a stale writer fails loud, then finish the intent. Both are
-    /// best effort: the committed layout is already serving, and a remaining intent is finished
-    /// by the next attempt or coordinator startup.
+    /// Finish the intent. Best effort: the committed layout is already serving and its old nodes
+    /// are retired, and a remaining intent is finished by the next attempt or coordinator startup.
+    /// Takes the installed layout by value so one installation is finished once.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn finish_remote_resize(
         &self,
         retired: RetiredRemoteLayout,
@@ -312,24 +277,8 @@ impl ClusterEngine {
             old_num_shards,
             exported,
             loaded,
-            slots,
+            retired_slots,
         } = retired;
-        let state = self.control_state()?;
-        let fence_generation = state.epoch.max(1);
-        let mut fenced = 0;
-        for (shard_id, endpoint) in &slots {
-            match self.fence_retired_slot(endpoint, *shard_id, fence_generation) {
-                Ok(()) => fenced += 1,
-                Err(error) => self.emit(crate::events::EngineEvent::DurabilityFailure {
-                    op: crate::events::DurabilityOp::ReplicaDesync,
-                    detail: format!(
-                        "remote resize could not fence retired slot {shard_id} on {endpoint}; \
-                         decommission that node before reusing it"
-                    ),
-                    error: error.to_string(),
-                }),
-            }
-        }
         let finished = matches!(
             self.propose_resize(ResizeCommand::Finish { operation_id }),
             Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
@@ -340,14 +289,14 @@ impl ClusterEngine {
             placement_generation: self.placement_generation().0,
             exported,
             loaded,
-            retired_slots: fenced,
+            retired_slots,
             finished,
         })
     }
 
     /// A previous resize may have committed and installed but failed to record `Finish`. Its
     /// intent would block every later resize and move, so finish it first when the served layout is
-    /// exactly the one it committed, fencing that intent's retired slots again (idempotent).
+    /// exactly the one it committed (its old nodes were retired before it committed).
     fn finish_prior_resize(
         &self,
         state: ClusterState,
@@ -377,16 +326,6 @@ impl ClusterEngine {
                  coordinator to resolve it",
                 prior.operation_id
             )));
-        }
-        let old_layout = ClusterState {
-            num_shards: prior.expected.num_shards,
-            assignments: prior.expected.assignments.clone(),
-            ..state.clone()
-        };
-        let fence_generation = state.epoch.max(1);
-        for (position, endpoint) in expected_endpoints(&old_layout)?.iter().enumerate() {
-            // Best effort, as in `finish_remote_resize`: the committed layout is already serving.
-            let _fenced = self.fence_retired_slot(endpoint, position as u32, fence_generation);
         }
         self.expect_resize_outcome(ResizeCommand::Finish {
             operation_id: prior.operation_id,
@@ -513,58 +452,89 @@ impl ClusterEngine {
         Ok(())
     }
 
-    /// Abort the intent after a failure and decide whether writes may reopen. Only this
-    /// coordinator's `Commit` can make the new layout authoritative (startup aborts every
-    /// uncommitted intent), so until `Commit` has been proposed the old layout is certainly still
-    /// the layout of record and writes reopen even if the abort could not be recorded; a retry of
-    /// the same operation aborts its own leftover intent. Once `Commit` was proposed, writes reopen
-    /// only when the control plane proves it did not apply: the abort was accepted and the
-    /// committed layout is still the one being served. Otherwise writes stay fenced, because a
-    /// write accepted on the old layout would vanish if consensus already named the new one, and
-    /// reads stop too, because another coordinator may already serve the new layout; a
-    /// coordinator restart resolves the recorded intent and routes to the committed layout.
+    /// Resolve a failed preparation.
+    ///
+    /// Only this coordinator's `Commit` can make the new layout the layout of record: startup aborts
+    /// every uncommitted intent. So before `Commit` is proposed, the old layout is certainly still
+    /// authoritative: the nodes this attempt retired are unretired, the intent is aborted, and
+    /// writes reopen. A node whose unretire fails keeps refusing requests (failing loud, never
+    /// answering wrongly) until coordinator startup lifts it.
+    ///
+    /// Once `Commit` was proposed, the old nodes stay retired, refusing every read and write from any
+    /// coordinator, unless the control plane proves the commit did not apply: the abort was
+    /// accepted and the committed layout is still the served one. Otherwise writes stay fenced and
+    /// the retired nodes keep failing loud until a coordinator restart routes to the committed
+    /// layout.
     fn fail_resize(
         &self,
+        handle: &tokio::runtime::Handle,
         operation_id: u64,
         failure: ShardError,
-        commit_proposed: bool,
+        progress: &ResizeProgress,
     ) -> ShardError {
-        let aborted = matches!(
-            self.propose_resize(ResizeCommand::Abort { operation_id }),
-            Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
-        );
-        let reopen = !commit_proposed
-            || (aborted
+        let retired = progress.retired_endpoints.borrow().clone();
+        let proven = !progress.commit_proposed.get() || {
+            let aborted = matches!(
+                self.propose_resize(ResizeCommand::Abort { operation_id }),
+                Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
+            );
+            aborted
                 && self.control_state().is_ok_and(|state| {
                     state.num_shards as usize == self.ring.num_shards()
                         && state.placement_generation == self.placement_generation().0
                         && state.moves.resize.is_none()
-                }));
-        if reopen {
-            // Reads stopped just before `Commit` was proposed; the old layout is provably still the
-            // layout of record, so it serves again.
-            for handoff in &self.handoffs {
-                handoff.resume_serving();
-            }
-            self.resize_write_fence.store(false, Ordering::Release);
-        } else {
-            // Consensus may already name the new layout, and once this coordinator's target
-            // leases lapse another coordinator can serve it and accept writes the old layout
-            // never sees. Reads from the old layout could then silently miss them, so every
-            // position stops serving until a restart routes to the committed layout.
-            for handoff in &self.handoffs {
-                handoff.refuse_serving();
-            }
-            self.emit(crate::events::EngineEvent::DurabilityFailure {
-                op: crate::events::DurabilityOp::ReplicaDesync,
-                detail: format!(
-                    "remote resize {operation_id} failed with an unproven outcome; this \
-                     coordinator stops serving until a restart resolves the recorded intent"
-                ),
-                error: failure.to_string(),
-            });
+                })
+        };
+        if !proven {
+            self.report_unresolved(operation_id, &failure);
+            return failure;
         }
+        self.unretire_all(handle, operation_id, &retired);
+        let _aborted = self.propose_resize(ResizeCommand::Abort { operation_id });
+        self.resize_write_fence.store(false, Ordering::Release);
         failure
+    }
+
+    /// Lift `operation_id`'s retirement of every node in `endpoints`, reporting each failure.
+    fn unretire_all(
+        &self,
+        handle: &tokio::runtime::Handle,
+        operation_id: u64,
+        endpoints: &[String],
+    ) {
+        let Some(coordinator_id) = self.coordinator_id else {
+            return;
+        };
+        for endpoint in endpoints {
+            if let Err(error) = unretire_node(
+                endpoint,
+                handle,
+                &self.client_security,
+                coordinator_id,
+                operation_id,
+            ) {
+                self.emit(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::ReplicaDesync,
+                    detail: format!(
+                        "remote resize {operation_id} could not unretire {endpoint}; it refuses \
+                         requests until coordinator startup lifts the retirement"
+                    ),
+                    error: error.to_string(),
+                });
+            }
+        }
+    }
+
+    fn report_unresolved(&self, operation_id: u64, failure: &ShardError) {
+        self.emit(crate::events::EngineEvent::DurabilityFailure {
+            op: crate::events::DurabilityOp::ReplicaDesync,
+            detail: format!(
+                "remote resize {operation_id} failed with an unresolved outcome; writes stay \
+                 paused and the retired old nodes refuse requests until a coordinator restart \
+                 resolves the recorded intent"
+            ),
+            error: failure.to_string(),
+        });
     }
 
     fn expect_resize_outcome(&self, command: ResizeCommand) -> Result<(), ShardError> {
@@ -574,28 +544,5 @@ impl ClusterEngine {
                 "remote resize transition was refused ({outcome:?})"
             ))),
         }
-    }
-
-    fn fence_retired_slot(
-        &self,
-        endpoint: &str,
-        shard_id: u32,
-        generation: u64,
-    ) -> Result<(), ShardError> {
-        let handle = self
-            .handle
-            .clone()
-            .ok_or_else(|| ShardError::Config("no runtime handle".into()))?;
-        RemoteShard::connect_for_coordinator_with_security(
-            endpoint,
-            handle,
-            self.dict.fingerprint(),
-            self.tag_dict.fingerprint(),
-            shard_id,
-            self.coordinator_id,
-            &self.client_security,
-        )?
-        .fence(generation)
-        .map(|_| ())
     }
 }

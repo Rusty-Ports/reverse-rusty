@@ -11,7 +11,7 @@ use crate::cluster::remote::RemoteShard;
 use crate::cluster::shard::Shard;
 use crate::segment::PlacedQuery;
 
-use super::{ClusterConfig, ClusterEngine, RemoteResizeRequest, ShardError};
+use super::{ClusterConfig, ClusterEngine, RemoteResizeRequest, ResizeProgress, ShardError};
 
 /// Queries buffered before each staged-layout placement pass.
 const EXPORT_BATCH: usize = 4096;
@@ -23,20 +23,29 @@ pub(super) struct StagedBuild {
     pub(super) logical_ids: Vec<u64>,
     /// Physical rows loaded (replicated rows count once per position).
     pub(super) loaded: u64,
+    /// Old-layout slots retired before the commit.
+    pub(super) retired_slots: usize,
+}
+
+/// The node endpoints of both layouts, in position order.
+pub(super) struct Layouts<'a> {
+    pub(super) expected: &'a [String],
+    pub(super) targets: &'a [String],
 }
 
 impl ClusterEngine {
     /// Build the staged layout on the empty targets, stream the live corpus into it, prove each
-    /// position, record `Ready`, and commit.
+    /// position, retire the old layout's nodes, record `Ready`, and commit.
     pub(super) fn build_and_commit(
         &self,
         handle: &tokio::runtime::Handle,
         request: &RemoteResizeRequest,
         intent: &ResizeIntent,
-        target_endpoints: &[String],
+        layouts: &Layouts<'_>,
         source_durable: bool,
-        commit_proposed: &std::cell::Cell<bool>,
+        progress: &ResizeProgress,
     ) -> Result<StagedBuild, ShardError> {
+        let target_endpoints = layouts.targets;
         if self.pending_repairs() != 0 {
             return Err(ShardError::ControlPlane(
                 "a partial write was queued before the resize fence; run resync and retry".into(),
@@ -71,6 +80,9 @@ impl ClusterEngine {
             .enumerate()
             .map(|(position, endpoint)| self.slot_client(handle, endpoint, position))
             .collect::<Result<_, _>>()?;
+        // Writes are fenced and drained, so these are the fingerprints the export must reproduce;
+        // retirement re-checks them to prove nothing landed on a source in between.
+        let before = self.source_fingerprints(handle, layouts.expected)?;
         let (logical_ids, loaded) = self.load_staged_layout(&staged, &targets)?;
 
         let mut evidence = Vec::with_capacity(targets.len());
@@ -95,24 +107,29 @@ impl ClusterEngine {
                 live_count,
             });
         }
+        // From the moment `Commit` may apply, the old layout may no longer be the layout of record.
+        // Retire its nodes first, at the storage layer, so no coordinator (this one after a crash,
+        // cancellation, or lost reply, or any other) can answer from it afterwards. Reads fail loud
+        // from here until installation.
+        let retired_slots = self.retire_old_layout(
+            handle,
+            request.operation_id,
+            intent.desired.placement_generation,
+            layouts.expected,
+            &before,
+            progress,
+        )?;
         self.expect_resize_outcome(ResizeCommand::MarkReady {
             operation_id: request.operation_id,
             evidence,
         })?;
-        // From the moment `Commit` may apply, the old layout may stop being the layout of record,
-        // and nothing keeps this coordinator's claim on the targets alive until installation. Stop
-        // serving it first, so no read can answer from it after another coordinator could serve
-        // the committed layout; installation serves the new one, and a failure that proves the
-        // commit did not apply serves the old one again.
-        for handoff in &self.handoffs {
-            handoff.refuse_serving();
-        }
-        commit_proposed.set(true);
+        progress.commit_proposed.set(true);
         self.commit_resize(request.operation_id, &intent.desired)?;
         Ok(StagedBuild {
             staged,
             logical_ids,
             loaded: loaded.iter().sum(),
+            retired_slots,
         })
     }
 
@@ -224,7 +241,7 @@ impl ClusterEngine {
     }
 
     /// A direct client for one slot, stamped with this coordinator's identity.
-    fn slot_client(
+    pub(super) fn slot_client(
         &self,
         handle: &tokio::runtime::Handle,
         endpoint: &str,

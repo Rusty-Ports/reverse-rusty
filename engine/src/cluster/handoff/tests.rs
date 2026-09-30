@@ -323,24 +323,3 @@ fn forwards_writes_to_backing() {
         .0
         .contains(&2));
 }
-
-/// A refused position (ADR-180: an unresolved remote-resize commit) fails every read and write
-/// loud rather than answering from a possibly retired layout.
-#[test]
-fn refused_serving_fails_reads_and_writes_loud() {
-    let (norm, dict, corpus) = compile_corpus(&[(1, "alpha bravo"), (2, "charlie delta")]);
-    let a = local(&norm, &dict);
-    seed(&a, &corpus[0..1]);
-    let h = Arc::new(HandoffShard::new(Box::new(a) as Box<dyn Shard>, 0));
-    h.refuse_serving();
-    assert!(matches!(
-        h.percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty()),
-        Err(ShardError::ControlPlane(_))
-    ));
-    assert!(matches!(h.num_queries(), Err(ShardError::ControlPlane(_))));
-    let (_id, ex2, dsl2) = &corpus[1];
-    assert!(matches!(
-        h.insert_extracted_with_tags(ex2, 2, 1, dsl2, &[]),
-        Err(ShardError::ControlPlane(_))
-    ));
-}

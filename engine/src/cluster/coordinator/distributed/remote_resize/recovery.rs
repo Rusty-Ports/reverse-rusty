@@ -1,39 +1,21 @@
-//! Coordinator-startup resolution of a recorded remote-resize intent (ADR-180).
+//! Coordinator-startup resolution of remote resize (ADR-180). Runs before the coordinator
+//! assembles its routes, like durable-move recovery, because it decides which nodes may serve.
 
 use crate::cluster::control::{
     normalized_move_endpoint, ClusterState, ControlPlane, MoveCommandOutcome, ResizeCommand,
-    ResizeIntentPhase,
+    ResizeIntentPhase, ShardAssignment,
 };
+use crate::cluster::remote::{claim_retirement, unretire_node};
+use crate::cluster::security::ClientSecurity;
 
 use super::{ClusterEngine, ShardError};
 
 impl ClusterEngine {
-    /// Resolve a recorded remote-resize intent through this coordinator's control plane. Call it
-    /// only after the coordinator has claimed its shards exclusively: a live coordinator that is
-    /// still running the resize then holds those claims, so this coordinator fails to connect
-    /// instead of aborting the resize underneath it.
-    ///
-    /// Resolution makes the committed layout authoritative, so it first attests that this
-    /// coordinator serves exactly that layout. A coordinator assembled from an older read (for
-    /// example, one that connected just before another coordinator committed) fails here instead
-    /// of finishing the intent and serving the retired layout.
-    pub fn recover_resize_intent(&self) -> Result<Option<ResizeRecovery>, ShardError> {
-        let state = self.control_state()?;
-        if state.moves.resize.is_none() {
-            return Ok(None);
-        }
-        self.attest_serving_layout(&state)?;
-        resolve_resize_intent(self.control.as_ref(), &state)
-    }
-
     /// Fail unless this coordinator serves exactly the committed layout: its shard count,
     /// placement generation, and every position's primary endpoint. An assignment-routed
     /// coordinator checks this before serving, because its topology was read before it connected.
     pub fn attest_committed_layout(&self) -> Result<(), ShardError> {
-        self.attest_serving_layout(&self.control_state()?)
-    }
-
-    fn attest_serving_layout(&self, state: &ClusterState) -> Result<(), ShardError> {
+        let state = self.control_state()?;
         let generation = self.placement_generation().0;
         if state.num_shards as usize != self.shards.len()
             || state.placement_generation != generation
@@ -86,69 +68,234 @@ pub enum ResizeRecovery {
     Finished { operation_id: u64 },
 }
 
-/// Resolve a recorded remote-resize intent before routes are assembled (ADR-180). An uncommitted
-/// intent is aborted: its staged layout was never routed, and the previous layout is still the
-/// committed one. A committed intent is finished: consensus already names the new layout. The
-/// retired slots cannot be fenced here without their data-node handles, so a finished recovery
-/// reports them for operator decommissioning. Returns `None` when no intent is recorded; any
-/// refused or failed transition fails startup rather than serving an ambiguous layout. A caller
-/// that already serves a layout should use [`ClusterEngine::recover_resize_intent`], which first
-/// attests that layout against the committed one.
-pub fn recover_durable_resize(
-    control: &dyn ControlPlane,
-) -> Result<Option<ResizeRecovery>, ShardError> {
-    let state = control
-        .cluster_state()
-        .map_err(|error| ShardError::ControlPlane(error.to_string()))?;
-    resolve_resize_intent(control, &state)
+/// The node operations startup resolution needs.
+trait RetirementNodes {
+    /// Claim `endpoint` for this coordinator, failing while another coordinator's lease is live,
+    /// and report which resize retired it: `None` for a node that has adopted nothing, `Some(0)`
+    /// for one that is not retired.
+    fn claim(&self, endpoint: &str) -> Result<Option<u64>, ShardError>;
+    fn unretire(&self, endpoint: &str, operation_id: u64) -> Result<(), ShardError>;
 }
 
-fn resolve_resize_intent(
+struct MeshNodes<'a> {
+    handle: &'a tokio::runtime::Handle,
+    coordinator_id: u64,
+    security: &'a ClientSecurity,
+}
+
+impl RetirementNodes for MeshNodes<'_> {
+    fn claim(&self, endpoint: &str) -> Result<Option<u64>, ShardError> {
+        claim_retirement(endpoint, self.handle, self.security, self.coordinator_id)
+    }
+
+    fn unretire(&self, endpoint: &str, operation_id: u64) -> Result<(), ShardError> {
+        unretire_node(
+            endpoint,
+            self.handle,
+            self.security,
+            self.coordinator_id,
+            operation_id,
+        )
+        .map(|_| ())
+    }
+}
+
+/// Resolve remote resize before the coordinator assembles its routes (ADR-180).
+///
+/// 1. An uncommitted intent is aborted, after this coordinator has claimed every node of the
+///    layout it would have retired. A coordinator still running that resize holds those claims,
+///    so startup fails instead of aborting the resize underneath it.
+/// 2. A committed intent is finished: consensus already names its layout, whose old nodes were
+///    retired before the commit.
+/// 3. Every node of the committed layout must serve. A committed resize retires only nodes
+///    outside its layout, so a retired node inside it was retired by a resize that never
+///    committed (aborted in step 1, or by an attempt whose unretire failed): its retirement is
+///    lifted.
+///
+/// Returns `None` when no intent was recorded. Any refused transition or unreachable node fails
+/// startup rather than serving an ambiguous layout.
+pub fn recover_durable_resize(
     control: &dyn ControlPlane,
-    state: &ClusterState,
+    handle: &tokio::runtime::Handle,
+    coordinator_id: u64,
+    security: &ClientSecurity,
 ) -> Result<Option<ResizeRecovery>, ShardError> {
-    let Some(intent) = state.moves.resize.as_ref() else {
-        return Ok(None);
+    resolve(
+        control,
+        &MeshNodes {
+            handle,
+            coordinator_id,
+            security,
+        },
+    )
+}
+
+fn resolve(
+    control: &dyn ControlPlane,
+    nodes: &dyn RetirementNodes,
+) -> Result<Option<ResizeRecovery>, ShardError> {
+    let state = read_state(control)?;
+    let recovery = match state.moves.resize.clone() {
+        None => None,
+        Some(intent) if matches!(intent.phase, ResizeIntentPhase::Committed(_)) => {
+            transition(
+                control,
+                ResizeCommand::Finish {
+                    operation_id: intent.operation_id,
+                },
+            )?;
+            Some(ResizeRecovery::Finished {
+                operation_id: intent.operation_id,
+            })
+        }
+        Some(intent) => {
+            for endpoint in layout_endpoints(&state, &intent.expected.assignments)? {
+                nodes.claim(&endpoint)?;
+            }
+            transition(
+                control,
+                ResizeCommand::Abort {
+                    operation_id: intent.operation_id,
+                },
+            )?;
+            Some(ResizeRecovery::Aborted {
+                operation_id: intent.operation_id,
+            })
+        }
     };
-    let operation_id = intent.operation_id;
-    let (command, recovery) = match intent.phase {
-        ResizeIntentPhase::Preparing | ResizeIntentPhase::Ready(_) => (
-            ResizeCommand::Abort { operation_id },
-            ResizeRecovery::Aborted { operation_id },
-        ),
-        ResizeIntentPhase::Committed(_) => (
-            ResizeCommand::Finish { operation_id },
-            ResizeRecovery::Finished { operation_id },
-        ),
-    };
-    let outcome = control
+    let state = read_state(control)?;
+    for endpoint in layout_endpoints(&state, &state.assignments)? {
+        if let Some(operation_id) = nodes.claim(&endpoint)?.filter(|&op| op != 0) {
+            nodes.unretire(&endpoint, operation_id)?;
+        }
+    }
+    Ok(recovery)
+}
+
+fn read_state(control: &dyn ControlPlane) -> Result<std::sync::Arc<ClusterState>, ShardError> {
+    control
+        .cluster_state()
+        .map_err(|error| ShardError::ControlPlane(error.to_string()))
+}
+
+fn transition(control: &dyn ControlPlane, command: ResizeCommand) -> Result<(), ShardError> {
+    let described = format!("{command:?}");
+    match control
         .propose_resize(command)
         .map_err(|error| ShardError::ControlPlane(error.to_string()))?
-        .outcome;
-    match outcome {
-        MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => Ok(Some(recovery)),
+        .outcome
+    {
+        MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => Ok(()),
         outcome => Err(ShardError::ControlPlane(format!(
-            "could not resolve remote-resize intent {operation_id} at startup ({outcome:?}); \
+            "could not resolve remote resize at startup: {described} was refused ({outcome:?}); \
              inspect the control-plane state before serving"
         ))),
     }
 }
 
+/// Every distinct node endpoint (primaries and replicas) of `assignments`.
+fn layout_endpoints(
+    state: &ClusterState,
+    assignments: &[ShardAssignment],
+) -> Result<Vec<String>, ShardError> {
+    let mut seen = Vec::<String>::new();
+    let mut endpoints = Vec::new();
+    for assignment in assignments {
+        for node_id in
+            std::iter::once(assignment.primary).chain(assignment.replicas.iter().copied())
+        {
+            let endpoint = state
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .and_then(|node| node.addr.clone())
+                .ok_or_else(|| {
+                    ShardError::ControlPlane(format!(
+                        "position {} is assigned to node {} with no registered endpoint",
+                        assignment.position, node_id.0
+                    ))
+                })?;
+            let normalized = normalized_move_endpoint(&endpoint);
+            if !seen.contains(&normalized) {
+                seen.push(normalized);
+                endpoints.push(endpoint);
+            }
+        }
+    }
+    Ok(endpoints)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{recover_durable_resize, ResizeRecovery};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use super::{resolve, ResizeRecovery, RetirementNodes};
     use crate::cluster::control::{
         ClusterStateChange, ControlPlane, InMemoryControlPlane, MoveMemberIdentity, NodeDescriptor,
         NodeId, NodeRole, ResizeCommand, ResizeIntent, ResizeIntentPhase, ResizeLayout,
         ResizePositionEvidence, ShardAssignment, RESIZE_INTENT_VERSION,
     };
+    use crate::cluster::shard::ShardError;
+
+    const OLD: &str = "http://127.0.0.1:1";
+    const NEW: &str = "http://127.0.0.1:2";
+
+    /// Nodes keyed by endpoint: `Some(op)` is adopted (0 = not retired); `claimable` false models
+    /// another coordinator's live lease.
+    struct FakeNodes {
+        retired: RefCell<HashMap<String, u64>>,
+        claimable: bool,
+        claims: RefCell<Vec<String>>,
+    }
+
+    impl FakeNodes {
+        fn new(retired: &[(&str, u64)], claimable: bool) -> Self {
+            Self {
+                retired: RefCell::new(
+                    retired
+                        .iter()
+                        .map(|(endpoint, op)| ((*endpoint).to_string(), *op))
+                        .collect(),
+                ),
+                claimable,
+                claims: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn retired_by(&self, endpoint: &str) -> u64 {
+            self.retired.borrow().get(endpoint).copied().unwrap_or(0)
+        }
+    }
+
+    impl RetirementNodes for FakeNodes {
+        fn claim(&self, endpoint: &str) -> Result<Option<u64>, ShardError> {
+            if !self.claimable {
+                return Err(ShardError::Remote(
+                    "another coordinator holds the lease".into(),
+                ));
+            }
+            self.claims.borrow_mut().push(endpoint.to_string());
+            Ok(Some(self.retired_by(endpoint)))
+        }
+
+        fn unretire(&self, endpoint: &str, operation_id: u64) -> Result<(), ShardError> {
+            assert_eq!(
+                self.retired_by(endpoint),
+                operation_id,
+                "unretire by its own op"
+            );
+            self.retired.borrow_mut().insert(endpoint.to_string(), 0);
+            Ok(())
+        }
+    }
 
     fn plane_with_intent(operation_id: u64) -> InMemoryControlPlane {
         let cp = InMemoryControlPlane::single_node(1, 64, 1);
-        for (id, port) in [(1u64, 1u16), (2, 2)] {
+        for (id, endpoint) in [(1u64, OLD), (2, NEW)] {
             cp.propose(ClusterStateChange::AddNode(NodeDescriptor {
                 id: NodeId(id),
-                addr: Some(format!("http://127.0.0.1:{port}")),
+                addr: Some(endpoint.to_string()),
                 role: NodeRole::Data,
             }))
             .expect("node");
@@ -179,7 +326,7 @@ mod tests {
             },
             members: vec![MoveMemberIdentity {
                 node: NodeId(2),
-                endpoint: "http://127.0.0.1:2".into(),
+                endpoint: NEW.into(),
             }],
             phase: ResizeIntentPhase::Preparing,
         };
@@ -188,41 +335,76 @@ mod tests {
         cp
     }
 
-    #[test]
-    fn startup_aborts_an_uncommitted_intent_and_finishes_a_committed_one() {
-        let empty = InMemoryControlPlane::single_node(1, 64, 1);
-        assert_eq!(recover_durable_resize(&empty).expect("none"), None);
+    fn commit(cp: &InMemoryControlPlane, operation_id: u64) {
+        cp.propose_resize(ResizeCommand::MarkReady {
+            operation_id,
+            evidence: vec![ResizePositionEvidence {
+                position: 0,
+                fingerprint_lo: 1,
+                fingerprint_hi: 2,
+                live_count: 3,
+            }],
+        })
+        .expect("ready");
+        cp.propose_resize(ResizeCommand::Commit { operation_id })
+            .expect("commit");
+    }
 
-        let preparing = plane_with_intent(3);
+    #[test]
+    fn an_uncommitted_intent_is_aborted_and_its_retired_nodes_serve_again() {
+        let cp = plane_with_intent(3);
+        let nodes = FakeNodes::new(&[(OLD, 3)], true);
         assert_eq!(
-            recover_durable_resize(&preparing).expect("abort"),
+            resolve(&cp, &nodes).expect("abort"),
             Some(ResizeRecovery::Aborted { operation_id: 3 })
         );
-        let state = preparing.cluster_state().expect("state");
+        let state = cp.cluster_state().expect("state");
         assert!(state.moves.resize.is_none());
         assert_eq!(state.assignments[0].primary, NodeId(1), "old layout kept");
+        assert_eq!(nodes.retired_by(OLD), 0, "the old node serves again");
+    }
 
-        let committed = plane_with_intent(4);
-        committed
-            .propose_resize(ResizeCommand::MarkReady {
-                operation_id: 4,
-                evidence: vec![ResizePositionEvidence {
-                    position: 0,
-                    fingerprint_lo: 1,
-                    fingerprint_hi: 2,
-                    live_count: 3,
-                }],
-            })
-            .expect("ready");
-        committed
-            .propose_resize(ResizeCommand::Commit { operation_id: 4 })
-            .expect("commit");
-        assert_eq!(
-            recover_durable_resize(&committed).expect("finish"),
-            Some(ResizeRecovery::Finished { operation_id: 4 })
+    #[test]
+    fn a_live_coordinator_keeps_its_uncommitted_resize() {
+        let cp = plane_with_intent(4);
+        let nodes = FakeNodes::new(&[(OLD, 4)], false);
+        assert!(resolve(&cp, &nodes).is_err());
+        assert!(
+            cp.cluster_state().expect("state").moves.resize.is_some(),
+            "nothing is aborted without the old layout's claims"
         );
-        let state = committed.cluster_state().expect("state");
+        assert_eq!(nodes.retired_by(OLD), 4);
+    }
+
+    #[test]
+    fn a_committed_intent_is_finished_and_its_old_nodes_stay_retired() {
+        let cp = plane_with_intent(5);
+        commit(&cp, 5);
+        let nodes = FakeNodes::new(&[(OLD, 5), (NEW, 0)], true);
+        assert_eq!(
+            resolve(&cp, &nodes).expect("finish"),
+            Some(ResizeRecovery::Finished { operation_id: 5 })
+        );
+        let state = cp.cluster_state().expect("state");
         assert!(state.moves.resize.is_none());
         assert_eq!(state.assignments[0].primary, NodeId(2), "new layout kept");
+        assert_eq!(
+            nodes.retired_by(OLD),
+            5,
+            "the retired layout never serves again"
+        );
+        assert_eq!(*nodes.claims.borrow(), vec![NEW.to_string()]);
+    }
+
+    #[test]
+    fn a_leftover_retirement_inside_the_committed_layout_is_lifted() {
+        // No intent is recorded, yet a committed-layout node is still retired: an attempt aborted
+        // its intent but could not unretire it.
+        let cp = plane_with_intent(6);
+        cp.propose_resize(ResizeCommand::Abort { operation_id: 6 })
+            .expect("abort");
+        let nodes = FakeNodes::new(&[(OLD, 6)], true);
+        assert_eq!(resolve(&cp, &nodes).expect("resolve"), None);
+        assert_eq!(nodes.retired_by(OLD), 0);
     }
 }

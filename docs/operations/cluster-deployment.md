@@ -209,9 +209,10 @@ curl -fsS -XPOST http://127.0.0.1:9200/_cluster/resize -H "authorization: Bearer
         {"id": 21, "endpoint": "https://shard-21:50051"}, {"id": 22, "endpoint": "https://shard-22:50051"}]}'
 ```
 
-Writes pause for the copy while reads keep serving; the control plane commits the new layout
-atomically, and restarts adopt the committed shard count, so `--shards` need not be edited. When
-the call succeeds, decommission the old shard nodes.
+Writes pause for the copy while reads keep serving; reads pause briefly around the commit, when
+the old nodes are retired. The control plane commits the new layout atomically, and restarts adopt
+the committed shard count, so `--shards` need not be edited. When the call succeeds, the old shard
+nodes stay retired (they refuse every request); wipe or decommission them.
 
 A failed response does not by itself prove the resize did not commit. Before wiping or
 decommissioning **either** set of nodes, read `GET /_cluster/state`:
@@ -223,6 +224,7 @@ decommissioning **either** set of nodes, read `GET /_cluster/state`:
   refuses writes, so startup finishes the intent and routes to the new layout, then decommission
   the old nodes.
 - If an intent is recorded, restart the coordinator to resolve it, then read the state again.
+  Startup also returns to service any old node that a resize which never committed left retired.
 
 Details are in the [`/_cluster/resize` reference](../reference/api/cluster/resize.md).
 

@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 use tracing::{info, warn};
 
 use reverse_rusty::cluster::{
-    recover_durable_moves, ClientSecurity, ClusterConfig, ClusterEngine, ControlPlane,
-    RemoteControlPlane, RemoteShard, ShardEndpoints, ShardError, ShardGroup,
+    recover_durable_moves, recover_durable_resize, ClientSecurity, ClusterConfig, ClusterEngine,
+    ControlPlane, RemoteControlPlane, RemoteShard, ShardEndpoints, ShardError, ShardGroup,
 };
 use reverse_rusty::normalize::Normalizer;
 
@@ -217,6 +217,22 @@ pub(crate) fn connect_remote_cluster(
                 "resolved durable shard-move intents before coordinator assembly"
             );
         }
+        // Remote resize decides which nodes may serve (ADR-180), so it too is resolved before any
+        // route is chosen. It claims the old layout's nodes first, so a coordinator still running
+        // that resize makes this startup fail instead of being aborted underneath.
+        match recover_durable_resize(rcp, handle, coordinator_id, &security)? {
+            Some(reverse_rusty::cluster::ResizeRecovery::Aborted { operation_id }) => warn!(
+                operation_id,
+                "aborted an uncommitted remote resize and returned its old nodes to service; its \
+                 target nodes hold an unrouted staged layout and must be wiped before reuse"
+            ),
+            Some(reverse_rusty::cluster::ResizeRecovery::Finished { operation_id }) => warn!(
+                operation_id,
+                "finished a committed remote resize; its old nodes are retired and must be \
+                 wiped or decommissioned"
+            ),
+            None => {}
+        }
     }
     let groups = build_groups(route_by_assignments, cli_groups, control.as_ref(), cfg)?;
 
@@ -251,21 +267,6 @@ pub(crate) fn connect_remote_cluster(
         None => cluster,
     };
 
-    // Resolve a recorded remote resize only now that this coordinator holds exclusive shard claims
-    // (ADR-180): a committed intent already routes to its layout and is finished; an uncommitted
-    // one is aborted, leaving the previous layout, which this coordinator now serves.
-    match cluster.recover_resize_intent()? {
-        Some(reverse_rusty::cluster::ResizeRecovery::Aborted { operation_id }) => warn!(
-            operation_id,
-            "aborted an uncommitted remote resize; its target nodes hold an unrouted staged \
-             layout and must be wiped before reuse"
-        ),
-        Some(reverse_rusty::cluster::ResizeRecovery::Finished { operation_id }) => warn!(
-            operation_id,
-            "finished a committed remote resize; decommission the previous layout's nodes"
-        ),
-        None => {}
-    }
     // The topology was read before connecting; another coordinator could have committed a new
     // layout since. An assignment-routed coordinator serves only the committed layout.
     if route_by_assignments {

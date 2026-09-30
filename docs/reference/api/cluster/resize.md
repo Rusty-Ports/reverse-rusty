@@ -144,33 +144,40 @@ operation then runs these steps:
    `503` while reads keep serving the old layout. A write request is refused immediately rather
    than queued behind the copy.
 3. Copy the live corpus onto the targets under the new ring. Each target receives one stream, seals
-   segments of the memtable flush size, and writes its source store once at the end. A stored query
-   that no longer parses or places fails the resize instead of being left out.
+   segments of the memtable flush size, compacts them to its segment policy, and writes its source
+   store once at the end. A stored query that no longer parses or places fails the resize instead
+   of being left out.
 4. Prove each new position's content fingerprint and count.
-5. Stop answering reads from the old layout (they fail loud with `503` for this brief window),
-   then commit the new shard count, placement generation, and assignments in one control-plane
+5. Retire the old layout's nodes. A retired node durably refuses every read and write from any
+   coordinator, and its retirement also proves nothing changed on it since the copy. Reads fail
+   with `503` from here until step 7.
+6. Commit the new shard count, placement generation, and assignments in one control-plane
    transition.
-6. Swap routing.
-7. Fence the old slots so a stale writer fails loud.
+7. Swap routing and reopen writes.
 
 When the current layout persists to disk, each target must too: every target position commits a
 durable `Seal` before its evidence is recorded, and a target started without `--data-dir` is
 refused. Every copy of a query stored on several positions must agree; disagreeing
 copies (for example, an unrepaired partial upsert) fail the export, so repair or upsert them first.
 
-A failure before the commit is proposed aborts and reopens writes; retrying the same `operation_id`
-clears any intent it left behind. If the commit was proposed and the control plane cannot prove it
-did not apply, the coordinator refuses reads, writes, and new resizes until a restart resolves the
-recorded intent, since another coordinator may already serve the new layout. Otherwise `/_health`
-keeps answering throughout, since reads keep serving. A failed response is therefore not proof that
-nothing committed: before wiping the targets or decommissioning the old nodes, confirm in [`GET
-/_cluster/state`](../observability/cluster-state.md) which layout `num_shards`,
-`placement_generation`, and the assignments name. Startup resolves a recorded intent only after the
-coordinator has exclusively claimed its shards, so it cannot abort a resize that another live
-coordinator is still running. It also checks that the layout it connected to (shard count, placement
-generation, and each position's node) is the committed one, and fails to start otherwise, so a
-coordinator that read the topology just before another coordinator's commit never serves the retired
-layout. Replication factor above 1 is refused. Decommission the old nodes once the resize succeeds.
+A failure before the commit is proposed returns the old nodes to service, aborts, and reopens
+writes; retrying the same `operation_id` clears any intent it left behind. If the commit was
+proposed and the control plane cannot prove it did not apply, writes stay paused, every new resize
+is refused, and the retired old nodes keep refusing reads until a coordinator restart resolves the
+recorded intent. A failed response is therefore not proof that nothing committed: before wiping the
+targets or the old nodes, confirm in [`GET /_cluster/state`](../observability/cluster-state.md)
+which layout `num_shards`, `placement_generation`, and the assignments name.
+
+Startup resolves a recorded resize before it chooses any route. It aborts an uncommitted intent only
+after claiming the old layout's nodes, so it cannot abort a resize that another live coordinator is
+still running; it finishes a committed one; and it returns to service any node of the committed
+layout that a resize which never committed left retired. After connecting, it checks that its
+layout (shard count, placement generation, and each position's node) is the committed one, and
+fails to start otherwise. Replication factor above 1 is refused.
+
+After a successful resize the old nodes stay retired: they refuse every request, including from a
+coordinator pointed at them by mistake, until an operator wipes their data directories or
+decommissions them.
 
 A static or CLI-seeded remote coordinator returns `501 not_supported_in_cluster_mode` before
 admission: its routing follows the CLI endpoint list, so changing the ring there would make routing

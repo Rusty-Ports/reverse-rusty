@@ -212,12 +212,12 @@ fn grpc_remote_resize_pauses_writes_until_the_new_layout_is_installed() {
     // and so is the exclusive lock a vocabulary rebuild would queue for.
     assert_eq!(cluster.control_state().expect("state").num_shards, 2);
     assert!(cluster.ensure_resize_write_fence_open().is_err());
-    // Between `Commit` and installation the old layout may no longer be the layout of record, so
-    // reads fail loud rather than answer from it.
+    // Between `Commit` and installation the old layout may no longer be the layout of record: its
+    // nodes are retired and refuse reads themselves.
     let read = cluster.percolate("1994 acme");
     assert!(
-        matches!(read, Err(ShardError::ControlPlane(_))),
-        "reads must not answer from the retired layout after the commit: {read:?}"
+        matches!(&read, Err(error) if error.to_string().contains("retired by remote resize")),
+        "the retired old nodes must refuse reads after the commit: {read:?}"
     );
     for write in [
         cluster.add_query(9_800_001, "zzfenced widget").map(|_| ()),

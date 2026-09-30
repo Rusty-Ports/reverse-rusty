@@ -72,6 +72,7 @@ impl ShardService for LegacyOwnershipServer {
             num_shards: self.num_shards,
             coordinator_id: 0,
             compiler_semantics_version: current_compiler_semantics_version(),
+            retired_operation: 0,
         }))
     }
 
@@ -182,6 +183,18 @@ impl ShardService for LegacyOwnershipServer {
         _req: Request<tonic::Streaming<raw::IngestRequest>>,
     ) -> Result<Response<raw::IngestReply>, Status> {
         Err(Status::unimplemented("legacy peer has no staged load"))
+    }
+    async fn retire(
+        &self,
+        _req: Request<raw::RetireRequest>,
+    ) -> Result<Response<raw::RetireReply>, Status> {
+        Err(Status::unimplemented("legacy peer cannot be retired"))
+    }
+    async fn unretire(
+        &self,
+        _req: Request<raw::UnretireRequest>,
+    ) -> Result<Response<raw::UnretireReply>, Status> {
+        Err(Status::unimplemented("legacy peer cannot be retired"))
     }
     async fn insert_extracted(
         &self,

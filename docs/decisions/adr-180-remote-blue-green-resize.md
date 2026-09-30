@@ -26,7 +26,7 @@ surface.
 
 Resize a remote cluster by building the complete new layout on **fresh, empty target nodes**, then
 committing it and swapping routing. Blue and green never share a node, so the node format and slot
-addressing stay unchanged.
+addressing stay unchanged, and retiring the old layout means retiring whole nodes.
 
 ### Corpus export
 
@@ -46,7 +46,35 @@ equal to everything delivered. It never retries a partially consumed stream. It 
 single snapshot permit with `LiveLogicalIds`. Every send waits for channel capacity no later than
 the deadline and failure delivery never waits, so a stalled reader cannot pin the producer or the
 permit; the client bounds consumption with the same absolute deadline.
-`ClusterEngine::export_live_corpus` dedups replicated rows across positions.
+`ClusterEngine::export_live_corpus` dedups replicated rows across positions, and copies that
+disagree fail the export.
+
+### Staged load
+
+Each target position receives one client-streaming `StageIngest` call. The target seals segments
+of its memtable flush threshold as rows arrive and, when the stream closes, compacts them to its
+`max_segments` policy and writes its source store and checkpoint sidecar once, failing if either
+write fails. A dropped, unfinished load cancels the call rather than closing it, so a target never
+persists a partial load as complete, and each segment and finish job holds the node's installation
+barrier, so a cancelled call's detached worker can never write over a replaced slot. Placement
+force-accepts, as log replay does, so a stored class-D query survives even when the current
+admission knob is off; a stored query that no longer parses or places fails the resize.
+
+### Layout authority: durable node retirement
+
+Which layout may serve is enforced by the data nodes, not by any coordinator's memory. `Retire`
+durably marks a whole node as superseded by a successor placement generation, keyed by the resize
+operation id; the record is written before it takes effect and survives restarts. A retired node:
+
+- refuses every slot RPC, reads included, as a superseded placement;
+- refuses adoption and any new slot, so it can never be re-adopted empty and answer with silently
+  empty results;
+- still answers the fingerprint handshake, reporting which operation retired it, so startup
+  resolution can claim it.
+
+Only `Unretire` by the same operation lifts it, and only when the control plane proves that
+resize did not commit. A finished resize leaves its old nodes retired until an operator wipes or
+decommissions them. Both RPCs are ordinary lease-checked owner RPCs.
 
 ### Replicated resize intent
 
@@ -76,91 +104,71 @@ most format 4 and `RRL4`, reject both instead of silently dropping the intent.
 
 ### Orchestration
 
-`prepare_remote_resize` runs under a shared reference, so reads keep serving the old layout:
+`prepare_remote_resize` runs under a shared reference, so reads keep serving the old layout during
+the copy:
 
 1. It validates the request and the cluster: remote, assignment-routed, exclusively owned by this
-   coordinator, replication factor 1, no queued partial writes. Exclusive shard claims keep every
-   other coordinator off the source slots, which the local write fence alone cannot.
-2. Before any control-plane or mesh call, it raises a **resize write fence** and briefly takes the
-   mutation barrier exclusively. Every mutation checks the fence under that barrier, so each
-   accepted write lands before the export, and every later add, upsert, remove, bulk load, or
-   resync is refused. The HTTP route holds the REST write serializer only until the fence is up.
-   Request threads blocked on that serializer could otherwise starve the runtime these calls
-   need, and queued writers are then refused at once instead of waiting out the copy. Vocabulary
-   and alias rebuilds check the fence before asking for exclusive access; queueing for it behind
-   the copy would stall every read. The route also returns the single administrative admission
-   slot, which health probes share, once it holds the exclusive topology guard that keeps other
-   resizes out, so `/_health` keeps answering while reads continue. It first takes a dedicated
-   remote-resize permit and holds it through the terminal result, so shutdown still joins the copy
-   and cutover before its cleanup.
-3. It registers the targets, reserves every participating endpoint in the move ledger, and
-   records `Begin`. A committed intent left behind by a failed `Finish` is finished first, after
-   its retired slots are fenced again, when the served layout is exactly the one it committed; an
-   uncommitted intent left by an earlier attempt of the same operation is aborted first.
-4. It builds the staged layout with the ordinary remote builder at generation `N + 1`, refusing
-   targets that already hold data.
-5. It streams the corpus into the staged layout, placing byte-bounded, versioned batches under the
-   new ring. Each target position receives one client-streaming `StageIngest` call: the target seals
-   segments of its memtable flush threshold as rows arrive and, when the stream closes, compacts
-   them to its `max_segments` policy and writes its source store and checkpoint sidecar once. A
-   dropped, unfinished load cancels the call rather than closing it, so a target never persists a
-   partial load as complete. Each segment and finish job holds the node's installation barrier, so a
-   cancelled call's detached worker can never write over a slot that adoption, recovery, or removal
-   replaced. Placement force-accepts, as log replay does, so a stored class-D query survives even
-   when the current admission knob is off; a stored query that no longer parses or places fails the
-   resize.
-6. When the current layout is durable (each slot reports it through the additive `durable`
-   field on `Flush`), every target position must commit an ADR-181 `Seal`, which a volatile
-   target refuses. Only then are its content fingerprint and count checked against what was
-   loaded and recorded as `MarkReady`, so evidence never names rows a target restart could lose.
-7. It stops serving the old layout, then commits. From the moment `Commit` may apply, the old
-   layout may no longer be the layout of record, and nothing keeps this coordinator's claim on the
-   targets alive until installation, so reads fail loud for that brief window rather than answer
-   from it. An ambiguous commit is resolved by reading the committed layout back.
+   coordinator, replication factor 1, no queued partial writes.
+2. Before any network call, it raises a **resize write fence** and briefly takes the mutation
+   barrier exclusively, so every accepted write lands before the export and every later add,
+   upsert, remove, bulk load, or resync is refused. A resize that finds the fence already raised
+   refuses to start. It then registers the targets, reserves every participating endpoint in the
+   move ledger, and records `Begin`. A committed intent left by a failed `Finish` is finished
+   first; an uncommitted intent left by an earlier attempt of the same operation is aborted first.
+3. It fingerprints every source position, builds the staged layout at generation `N + 1` on the
+   empty targets, and streams the corpus into it.
+4. When the current layout is durable (each slot reports it through the additive `durable` field
+   on `Flush`), every target position must commit an ADR-181 `Seal`, which a volatile target
+   refuses. Each target's content fingerprint and count are checked against what was loaded.
+5. It **retires every node of the current layout**. Each retirement reports its slots'
+   fingerprints, which must equal those taken in step 3, so a write that reached a source by any
+   path after the export (for example after a node restart dropped this coordinator's lease) fails
+   the resize instead of being lost. From here until installation, reads of the old layout fail
+   loud at the nodes.
+6. It records `Ready` with the target evidence and commits. An ambiguous commit is resolved by
+   reading the committed layout back.
 
 `install_remote_resize` then takes `&mut self` briefly and makes no network call, since request
 threads may be waiting on that exclusive lock; preparation already confirmed the commit. It installs
-the exported logical ids as an authoritative, converged directory (the new layout was loaded
-coherently from a fixed snapshot, so exhaustive delivery and create-only admission work even when
-this coordinator had attached to populated shards), swaps the ring, shards, handoff handles,
-metrics, and generation, clears PITs, and lowers the fence. `finish_remote_resize` fences every
-retired slot, so a stale writer fails loud, and records `Finish`. If installation fails, the resize
-has already committed, so the retired layout is no longer the layout of record: every position
-refuses reads and writes until a restart routes to the committed layout, exactly as after an
-unproven commit. A committed preparation dropped without installation (for example by a cancelled
-caller) stops serving the same way.
+the exported logical ids as an authoritative, converged directory, swaps the ring, shards, handoff
+handles, metrics, and generation, clears PITs, and lowers the fence. `finish_remote_resize` records
+`Finish`. If installation fails, or a committed preparation is dropped (for example by a cancelled
+caller), the retired old nodes keep refusing requests, so nothing answers from the superseded
+layout; a restart routes to the committed one.
 
-A failure aborts the intent. Only this coordinator's `Commit` can make the new layout the layout of
-record, since startup aborts every uncommitted intent, so a failure before `Commit` is proposed
-always reopens writes, even when the abort itself is lost; retrying the same operation clears the
-leftover intent. After `Commit` was proposed, reads and writes reopen only when the control plane
-proves it did not apply: the abort was accepted and the served layout is still the committed one.
-The old layout then keeps serving and is writable, and the targets keep an unrouted staged layout
-that must be wiped before reuse. An unproven outcome keeps writes paused, because consensus may
-already name the new layout, and stops reads too: once this coordinator's target leases lapse,
-another coordinator can serve the new layout and accept writes the old one never sees. A coordinator
-restart resolves the recorded intent and routes to the committed layout. Until then every new resize
-is refused before it touches the fence: it did not raise that fence and cannot know the earlier
-outcome, so it must never lower it.
+Only this coordinator's `Commit` can make the new layout the layout of record, because startup
+aborts every uncommitted intent. So a failure before `Commit` is proposed always unretires the old
+nodes, aborts the intent, and reopens writes; a node whose unretire fails keeps refusing (failing
+loud, never answering wrongly) until startup lifts it. After `Commit` was proposed, the old nodes
+are unretired and writes reopen only when the control plane proves the commit did not apply: the
+abort was accepted and the served layout is still the committed one. Otherwise writes stay fenced
+and the old nodes stay retired until a coordinator restart routes to the committed layout. In
+every case the targets keep an unrouted staged layout that must be wiped before reuse.
+
+The HTTP route holds the REST write serializer only until the fence is up, returns the single
+administrative admission slot (which health probes share) once it holds the exclusive topology
+guard, and holds a dedicated remote-resize permit that shutdown joins.
 
 ### Startup
 
-A resolve-only coordinator treats the committed document as the layout of record:
+A resolve-only coordinator treats the committed document as the layout of record: it connects
+every node at the committed placement generation (threaded through a new
+`ClusterConfig::remote_placement_generation`) and adopts the committed shard count, even when
+`--shards` differs. CLI-seeded and static modes still require their CLI topology to match.
 
-- It connects every node at the committed placement generation. A new
-  `ClusterConfig::remote_placement_generation` threads it into the plain and replicated builders
-  that previously hard-coded the initial generation.
-- It adopts the committed shard count, even when `--shards` differs.
-- Once it holds exclusive claims on the shards it routes to, it aborts an uncommitted intent and
-  finishes a committed one, then logs which nodes to wipe or decommission. Claiming first means a
-  live coordinator still running the resize makes this startup fail to connect instead of having
-  its resize aborted.
-- Before resolving an intent, and before serving at all, it attests that the layout it connected
-  to matches the committed shard count, placement generation, and each position's primary node.
-  A coordinator that read the topology just before another coordinator committed fails to start
-  instead of finishing the intent and serving the retired layout.
+Before choosing any route, `recover_durable_resize` runs, like durable-move recovery:
 
-CLI-seeded and static modes still require their CLI topology to match.
+1. An uncommitted intent is aborted, but only after this coordinator has claimed every node of the
+   layout it would have retired. A coordinator still running that resize holds those claims, so
+   this startup fails instead of aborting the resize underneath it.
+2. A committed intent is finished.
+3. Every node of the committed layout must serve. A committed resize retires only nodes outside
+   its layout, so a retired node inside it was retired by a resize that never committed; its
+   retirement is lifted.
+
+After assembly, the coordinator attests that the layout it connected to matches the committed
+shard count, placement generation, and each position's primary node, and fails to start
+otherwise.
 
 ### API
 
@@ -169,107 +177,22 @@ and requires it there. An in-process coordinator rejects `targets`, and other re
 keep the `501`. The operation ID, precondition, records, and status reads are ADR-179's. `targets`
 is part of the request identity, and the ID's FNV-1a hash is the control-plane intent key.
 
-## Codex review
+## Review history
 
-The first review found seven real issues, all fixed with regression tests; the class-D,
-ambiguous-commit, and stalled-reader fixes were mutation-checked:
+Eleven Codex rounds found about 33 real issues. Most were ordinary hardening of new code (the
+export stream, the staged load path, the durability proof) and converged. One class kept
+regenerating: every round from the eighth on found another way the old layout could keep
+answering after the commit (an unproven commit, a failed installation, a dropped preparation, the
+commit-to-install window). Each fix had added another flag in the resizing coordinator's memory,
+because the old nodes themselves never learned they were superseded; the protection across
+processes rested on a volatile 30-second lease.
 
-- an ambiguous commit reopened writes on the old layout;
-- target durability was unproven before the commit;
-- the staged load re-applied the class-D admission knob;
-- the replicated builder ignored the committed generation;
-- a failed `Finish` blocked every later resize and move;
-- a stalled export reader could pin the server producer and snapshot permit, and the client did not
-  bound stream consumption by its deadline.
-
-The second review found six more, all fixed:
-
-- a volatile target could attest a checkpoint; targets must now persist to disk whenever the
-  source layout does, proved by an ADR-181 `Seal` and detected through the additive `durable`
-  field on `Flush`;
-- the export silently kept the first of several disagreeing copies; copies must now match
-  exactly, or the export fails;
-- the operator docs implied a failed response meant nothing committed; they now require checking
-  the committed state before wiping either layout;
-- startup could abort another live coordinator's in-flight resize; resolution now runs only after
-  this coordinator holds exclusive shard claims;
-- the load batcher could overshoot its byte budget; a document that would overflow now starts the
-  next batch;
-- the export did not reclaim a restarted source's coordinator lease; opening the stream (never
-  consuming it) is now retried once after a reclaim.
-
-The third review found five more, all fixed with regression tests; the attestation, exclusivity,
-fence-ordering, and staged-load fixes were mutation-checked:
-
-- startup could finish a committed intent while serving the layout it retired; it now attests
-  the served layout first;
-- a shared (non-exclusive) coordinator could resize while another coordinator still wrote to the
-  source slots; resize now requires exclusive ownership;
-- the HTTP route held the REST write serializer for the whole copy, pinning runtime workers of
-  every queued writer; it is released once the fence is up;
-- every load batch rewrote the target's whole source store and added a small segment; the load is
-  now one `StageIngest` stream per target with full-size segments and a single store write;
-- the export's id snapshot and page reads waited on the engine lock without a deadline; every lock
-  wait and the snapshot sort now observe it.
-
-The fourth review found two more, both fixed with mutation-checked regression tests:
-
-- a staged load ignored a failed checkpoint-sidecar write, so a durable target loaded from a
-  volatile layout (which skips `Seal`) could reopen empty; the load now fails instead;
-- a malformed target endpoint was registered as a data node before the connect failed, leaving
-  membership that later rebalances would target; targets are now validated as mesh origins, like
-  node registration.
-
-The fifth review found one more, fixed with a mutation-checked regression test: a cancelled
-`StageIngest` detached its blocking segment and finish workers without the node's installation
-barrier, so an adoption, recovery, or removal could replace the slot while the old engine still
-wrote the same files. Each worker now confirms the slot is unchanged and unfenced under the barrier
-and holds it until the job finishes, as `Seal` does.
-
-The sixth review found three more, all fixed with mutation-checked regression tests:
-
-- the route held the single administrative admission slot for the whole copy, so health probes
-  timed out and a readiness or liveness probe could pull or restart the coordinator mid-resize;
-  it is returned once the exclusive topology guard is held;
-- the REST write serializer stayed held through target registration, the durability probe, and
-  `Begin`, so request threads waiting on it could starve the runtime those calls needed; the fence
-  is now raised, and the serializer released, before any network call;
-- a lost `Begin` reply returned without aborting, stranding a `Preparing` intent that refused even
-  a retry of the same operation; any failure before `Commit` now reopens writes, and a retry of
-  the same operation aborts its own leftover intent.
-
-The seventh review found that this reopen rule let a retry lower a fence left by an earlier attempt
-whose `Commit` outcome was unproven, accepting writes the committed layout would never receive. A
-resize now refuses to start while any fence is raised, leaving it untouched; the mutation-checked
-regression test retries after an ambiguous commit and shows writes stay paused.
-
-The eighth review found three more, all fixed with mutation-checked regression tests:
-
-- after an unproven `Commit`, the coordinator kept answering reads from the old layout, which
-  could silently miss writes another coordinator accepted on the new one; every position now
-  refuses reads and writes until a restart;
-- returning the administrative slot and the write serializer early removed shutdown's only way
-  to join a detached copy; a dedicated remote-resize permit now covers it;
-- installation kept the old logical-id directory, so a coordinator that had attached to populated
-  shards still refused exhaustive delivery after a complete rebuild; the exported ids are now
-  installed as a converged directory.
-
-The ninth review found that a failed installation (for example a lost control-plane read) returned
-after the commit while the old layout kept serving; installation failures now refuse serving too,
-with a mutation-checked regression test.
-
-The tenth review found two more, both fixed with mutation-checked regression tests: dropping a
-committed `PreparedRemoteResize` without installing it left the old layout serving, so an
-abandonment guard now stops serving unless installation disarms it; and a staged load bypassed the
-compaction policy, which only runs on memtable flushes, so a large resize left far more segments
-than `max_segments`; the staged finish now compacts to the policy before the load is proven.
-
-The eleventh review found two more, both fixed with mutation-checked regression tests: installation
-read the control plane under the exclusive cluster lock, which request threads waiting on that lock
-could starve, so installation is now network-free; and between `Commit` and installation the old
-layout kept answering reads although another coordinator could already serve the committed one
-once this coordinator's target leases lapsed, so reads now stop just before `Commit` is proposed and
-resume only through installation or a proven non-commit.
+The design was therefore revised to the durable node retirement above. It replaces the in-memory
+serving refusal, the abandonment guard, and the post-cutover volatile fencing of retired slots,
+and it adds the fingerprint check that makes the copy's completeness independent of lease
+exclusivity. A separate cluster of findings (locks held across network calls) traced to a
+pre-existing server-wide hazard, request threads blocking the async runtime on synchronous locks,
+which is tracked outside this ADR.
 
 ## Alternatives
 
@@ -279,15 +202,19 @@ resume only through installation or a proven non-commit.
   would need a second fan-out and a green-divergence repair. Refusing writes for the copy window
   matches the in-process resize, which also excludes writes for its rebuild.
 - **Hold `&mut self` for the whole resize.** Rejected: reads would stop for an `O(corpus)` network
-  copy. The write fence gives the same consistency while reads continue.
-- **Delete retired slots automatically.** Rejected: fencing makes stale writes fail loud without
-  destroying the previous layout, which remains a manual rollback source until an operator
-  decommissions it.
+  copy, and it would not resolve an ambiguous commit.
+- **Enforce layout authority in the resizing coordinator's memory.** Rejected after review: every
+  crash, cancellation, lost reply, or lease lapse between the commit and installation needed its
+  own patch, and no patch could protect against another process.
+- **Delete retired nodes' data automatically.** Rejected: retirement already makes them refuse
+  everything, and the previous layout remains a manual rollback source until an operator wipes it.
 
 ## Consequences
 
 A remote cluster changes shard count online with one API call. Writes are unavailable for the copy
-window, and the resize needs as many spare nodes as the new layout uses.
+window; reads continue during the copy and fail loud (`503`) only from the retirement until
+installation. The resize needs as many spare nodes as the new layout uses, and its old nodes stay
+retired until wiped.
 
 Replication factor above 1, same-node staging, a catch-up copy that keeps writes open, and a
 targeted online split remain [roadmap](../roadmap.md#remote-cluster-resize) work. The ADR-179
@@ -295,51 +222,43 @@ governor stays in-process, because provisioning target nodes is an external deci
 
 ## Proof
 
-- **Wire tests** cover the export collector: completion, ordering, count, limit, identity, and
-  visitor refusal. Shard tests show the export snapshot collapses duplicate rows and gives up at
-  its deadline while the engine lock is held, for both the id snapshot and page reads.
-- **Staged-load tests** show a stream seals threshold-sized segments (not one per request), loads
-  nothing from an empty stream, refuses a second shard id, writes a durable slot's source store
-  only when the stream closes, compacts to the segment policy without losing rows, fails when its
-  checkpoint sidecar cannot be written, and runs each job under the installation barrier,
-  refusing a slot replaced since the stream began.
-- **Resize-intent state-machine tests** cover:
-  - atomic idempotent commit and generation bumps;
-  - invalid, co-located, unregistered, and unnormalized intents;
-  - an assignment race blocking commit;
-  - a single intent with no concurrent move;
-  - the format fence and its downgrade refusal.
-- **Raft restart test.** A durable control node installs `RRL5` on the first resize command,
-  keeps a `Ready` intent across restart, then commits and finishes it.
-- **gRPC export tests.** Exports are exact, deduplicated, versioned, and tagged; many small frames
-  complete, and an oversized source fails loud.
+- **Retirement tests:** a retired node refuses reads, writes, and adoption; its handshake reports
+  the retiring operation; the record survives restart; only the retiring operation lifts it,
+  durably; a mismatched layout or a missing successor is refused.
+- **Startup resolution tests:** an uncommitted intent is aborted and its nodes serve again; a
+  second coordinator cannot abort a resize whose nodes another coordinator still holds; a committed
+  intent is finished and its old nodes stay retired; a leftover retirement inside the committed
+  layout is lifted. A gRPC test runs the same resolution against real nodes.
+- **Fingerprint check:** a retirement must report every hosted position unchanged since the export.
+- **Wire and export tests** cover the collector (completion, ordering, count, limit, identity,
+  visitor refusal), deadline-bounded snapshots and page reads, and exact, deduplicated, versioned,
+  tagged gRPC exports.
+- **Staged-load tests** show threshold-sized segments, compaction to the policy without losing
+  rows, a single source-store write when the stream closes, a failed sidecar write failing the
+  load, and every job holding the installation barrier.
+- **Resize-intent state-machine and Raft restart tests** cover idempotent transitions, invalid and
+  co-located intents, the move exclusion, the format fence, and an `RRL5` restart.
 - **gRPC resize tests:**
-  - K=3 moves to K=5 on fresh nodes with no false negatives against the brute-force oracle and the
-    pre-resize results;
-  - a versioned upsert and a remove carry over;
-  - writes reopen on the new layout;
-  - the export count is exact after the cutover;
-  - every write kind is refused between prepare and install;
-  - a co-located target, and a retired node that still holds data, are refused cleanly: nothing is
-    committed, the intent is aborted, and writes stay open;
-  - the fenced callback runs only once writes are refused, and the fence check vocabulary rebuilds
-    rely on fails until install;
-  - a shared coordinator is refused;
-  - a coordinator that still serves the retired layout refuses to resolve the committed intent;
-  - the fence goes up before the first control-plane call, and writes reopen after a failure
-    before `Commit`;
-  - a lost `Begin` reply with a failed abort reopens writes, refuses a different operation, and
-    lets a retry of the same operation complete;
-  - reads fail loud from just before `Commit` until installation, and resume after a refused
-    `Commit` that the control plane proves did not apply;
+  - K=3 moves to K=5 with no false negatives against the brute-force oracle and the pre-resize
+    results, carrying versioned upserts and removes;
+  - writes are refused between prepare and install and reopen on the new layout;
+  - the old nodes refuse reads after the commit, and a fresh coordinator pointed at them is
+    refused;
+  - failures before `Commit` (a lost `Begin`, a refused `MarkReady`, an unreachable control plane)
+    return the old nodes to service and reopen writes;
+  - a refused `Commit` that the control plane proves did not apply returns the old layout to
+    service;
+  - after an ambiguous commit or an abandoned committed preparation, the old nodes refuse reads and
+    a retry cannot reopen writes;
   - installation needs no control-plane call;
-  - after an ambiguous commit or an abandoned committed preparation, reads fail loud and a retry
-    cannot reopen writes;
-  - a coordinator attached to populated shards regains exhaustive delivery after the rebuild.
-- **Startup recovery tests.** An uncommitted intent is aborted and the committed one finished.
+  - a coordinator attached to populated shards regains exhaustive delivery after the rebuild;
+  - a shared coordinator, a co-located target, and a dirty target are refused cleanly.
 - **Handler tests** cover `targets` validation by topology and origin, record the failed remote
   operation, and show a remote resize returns the administrative slot health probes share while
   holding the permit shutdown joins.
-- **Handoff tests** show a refused position fails reads and writes loud.
+
+The design-changing mutations were each checked against these tests: ignoring retirement in slot
+lookup, not persisting it, skipping the retirement, skipping the claims before an abort, and never
+unretiring on failure or at startup.
 
 **See also:** ADR-043, ADR-078, ADR-086, ADR-175, ADR-176, ADR-179, ADR-181.

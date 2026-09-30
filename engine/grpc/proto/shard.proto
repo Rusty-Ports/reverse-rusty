@@ -143,6 +143,16 @@ service ShardService {
   // dict/tag-fingerprint mismatch like every guarded RPC; deliberately blind to sources.dat /
   // segment-layout divergence (never on the match path).
   rpc ContentFingerprint (ContentFingerprintRequest) returns (ContentFingerprintReply);
+  // ---- remote-resize retirement (ADR-180) ----
+  // Durably retire this whole node at its placement generation before a resize commits a
+  // successor layout. A retired node refuses every slot RPC (reads included), adoption, and new
+  // slots until the same operation unretires it or the node is wiped, so no coordinator can
+  // serve a superseded layout from it. The reply carries each hosted slot's content fingerprint,
+  // so the caller can prove nothing changed since its export. Idempotent per operation.
+  rpc Retire (RetireRequest) returns (RetireReply);
+  // Lift a retirement recorded by exactly this operation, once the control plane proves its
+  // resize did not commit. Idempotent: an unretired node reports `was_retired = false`.
+  rpc Unretire (UnretireRequest) returns (UnretireReply);
 }
 
 message Empty {}
@@ -563,6 +573,9 @@ message DictFingerprintReply {
   // echo its own non-zero id; zero is an unowned or pre-lease server.
   uint64 coordinator_id = 6;
   uint32 compiler_semantics_version = 7;
+  // ADR-180: non-zero when a remote resize retired this node. Connecting coordinators refuse it;
+  // only startup resize resolution reads it, to lift a retirement whose resize never committed.
+  uint64 retired_operation = 8;
 }
 
 // The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
@@ -810,6 +823,26 @@ message ContentFingerprintReply {
   uint64 placement_generation = 4;
   uint32 num_shards = 5;
 }
+
+message RetireRequest {
+  uint64 operation_id = 1;
+  // The node's current placement configuration and feature space; any mismatch is refused.
+  uint64 placement_generation = 2;
+  uint32 num_shards = 3;
+  uint64 dict_fingerprint = 4;
+  uint64 tag_dict_fingerprint = 5;
+  // The generation of the layout that supersedes this node; must exceed placement_generation.
+  uint64 successor_generation = 6;
+}
+message RetiredSlot {
+  uint32 shard_id = 1;
+  uint64 fp_lo = 2;
+  uint64 fp_hi = 3;
+  uint64 live_count = 4;
+}
+message RetireReply { repeated RetiredSlot slots = 1; }
+message UnretireRequest { uint64 operation_id = 1; }
+message UnretireReply { bool was_retired = 1; }
 
 // ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----
 // The three Raft RPCs between cluster-manager nodes, carried as an OPAQUE serialized envelope:

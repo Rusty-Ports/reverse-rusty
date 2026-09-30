@@ -44,6 +44,7 @@ mod logical_ids;
 mod ranked;
 mod ranked_batch;
 mod recovery;
+mod retire;
 mod stage_ingest;
 
 #[cfg(test)]
@@ -254,6 +255,9 @@ impl ShardService for ShardServer {
             num_shards: space.num_shards,
             coordinator_id: self.coordinator_lease.owner(),
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            // ADR-180: a retired node still answers this handshake, so startup resolution can
+            // claim it and lift a retirement whose resize never committed.
+            retired_operation: self.retired_operation(),
         }))
     }
 
@@ -305,6 +309,20 @@ impl ShardService for ShardServer {
             rejected_parse: rejected_parse + report.rejected_parse as u64,
             rejected_class_d: report.rejected_class_d as u64,
         }))
+    }
+
+    async fn retire(
+        &self,
+        request: Request<proto::RetireRequest>,
+    ) -> Result<Response<proto::RetireReply>, Status> {
+        retire::retire(self, request).await
+    }
+
+    async fn unretire(
+        &self,
+        request: Request<proto::UnretireRequest>,
+    ) -> Result<Response<proto::UnretireReply>, Status> {
+        retire::unretire(self, request).await
     }
 
     async fn stage_ingest(

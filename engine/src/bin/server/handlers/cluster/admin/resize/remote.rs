@@ -1,7 +1,8 @@
-//! Remote blue/green resize worker (ADR-180): prepare under the shared cluster lock so reads keep
-//! serving the old layout, install under a brief exclusive lock, then retire the old slots. The
-//! REST write serializer is released as soon as the engine's write fence is up, so writers are
-//! refused by the fence instead of blocking runtime workers for the whole copy.
+//! Remote blue/green resize worker (ADR-180): prepare (which retires the old nodes before it
+//! commits) under the shared cluster lock so reads keep serving the old layout during the copy,
+//! install under a brief exclusive lock, then finish. The REST write serializer is released as
+//! soon as the engine's write fence is up, so writers are refused by the fence instead of blocking
+//! runtime workers for the whole copy.
 
 use std::time::Instant;
 

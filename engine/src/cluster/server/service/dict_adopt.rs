@@ -28,6 +28,9 @@ pub(super) async fn adopt_dict(
     request: Request<proto::AdoptDictRequest>,
 ) -> Result<Response<proto::AdoptDictReply>, Status> {
     let coordinator_id = crate::cluster::security::request_coordinator_id(&request)?;
+    // A retired node never adopts or gains a slot: an empty slot on it would answer a stale
+    // coordinator with silently empty results (ADR-180).
+    server.ensure_not_retired()?;
     let req = request.into_inner();
     if req.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
         return Err(Status::failed_precondition(format!(
@@ -91,6 +94,8 @@ pub(super) async fn adopt_dict(
     // build or install a slot.
     crate::cluster::security::claim_coordinator(&server.coordinator_lease, coordinator_id).await?;
     let _install = server.coordinator_lease.lock_install().await;
+    // Retirement serializes with installation (ADR-180): re-check under the barrier.
+    server.ensure_not_retired()?;
 
     // The first validation deliberately preceded the claim so malformed or
     // divergent input cannot seize an unowned node. Re-read under the install

@@ -45,6 +45,7 @@ impl ShardServer {
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
+            retired: Arc::new(ArcSwapOption::from(None)),
         }
     }
 
@@ -70,6 +71,7 @@ impl ShardServer {
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
+            retired: Arc::new(ArcSwapOption::from(None)),
         }
     }
 
@@ -125,6 +127,8 @@ impl ShardServer {
             num_shards,
         })));
         let slots = restore_durable_slots(&data_dir, &norm, &dict, &tag_dict, &config)?;
+        // A node retired by a remote resize (ADR-180) stays retired across restarts.
+        let retired = super::retirement::read_retirement(&data_dir)?.map(Arc::new);
         for (&position, slot) in &slots {
             if let Some(state) = slot.state.load_full() {
                 state
@@ -149,6 +153,7 @@ impl ShardServer {
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
+            retired: Arc::new(ArcSwapOption::from(retired)),
         })
     }
 
@@ -174,6 +179,7 @@ impl ShardServer {
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
+            retired: Arc::new(ArcSwapOption::from(None)),
         }
     }
 
@@ -220,6 +226,7 @@ impl ShardServer {
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
+            retired: Arc::new(ArcSwapOption::from(None)),
         })
     }
 }

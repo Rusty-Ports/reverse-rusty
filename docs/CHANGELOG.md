@@ -15,12 +15,14 @@ reverse chronological and describe outcomes, not the current architecture or fut
   layout on fresh shard servers, pauses writes while reads keep serving, streams the deduplicated
   corpus through the new bounded `LiveSources` export RPC into one `StageIngest` load stream per
   target (full-size segments, one source-store write), proves each new position's fingerprint,
-  commits the shard count, placement generation, and assignments in one control-plane transition,
-  swaps routing, and fences the retired slots ([ADR-180](decisions/adr-180-remote-blue-green-resize.md)).
+  durably retires the old nodes (they then refuse every request from any coordinator), commits the
+  shard count, placement generation, and assignments in one control-plane transition, and swaps
+  routing ([ADR-180](decisions/adr-180-remote-blue-green-resize.md)).
 - Record the transition as a replicated, idempotent resize intent behind a one-way control format 5
-  and `RRL5` log header. Resolve-only startup adopts the committed shard count and placement
-  generation, attests that it connected to exactly that layout, then aborts or finishes a recorded
-  intent once it holds exclusive shard claims.
+  and `RRL5` log header. Resolve-only startup resolves a recorded resize before choosing routes
+  (aborting an uncommitted one only after claiming its nodes, and returning never-committed
+  retirements to service), adopts the committed shard count and placement generation, and attests
+  that it connected to exactly that layout.
 
 ## 2026-09-30 — Validated log recovery before append
 
