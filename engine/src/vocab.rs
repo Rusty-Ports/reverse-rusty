@@ -22,6 +22,7 @@ mod alias;
 mod distributional;
 mod learn;
 mod methods;
+mod record;
 mod seed;
 
 #[cfg(test)]

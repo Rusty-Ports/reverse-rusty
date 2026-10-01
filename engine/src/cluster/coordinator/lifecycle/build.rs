@@ -426,10 +426,8 @@ impl ClusterEngine {
             // → `checkpoint` lands it).
             vocab_data: match vocab {
                 Some(v) => v
-                    .to_json()
-                    .map_err(|e| {
-                        ShardError::Log(format!("serializing cluster vocab at build: {e}"))
-                    })?
+                    .recordable_json(norm, dict)
+                    .map_err(|e| ShardError::Log(format!("recording cluster vocab at build: {e}")))?
                     .into_bytes(),
                 None => Vec::new(),
             },

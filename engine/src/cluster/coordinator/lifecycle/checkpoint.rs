@@ -57,13 +57,14 @@ impl ClusterEngine {
         }
 
         // 3. Coordinator manifest = the atomic commit point (new base + new cursor).
-        //    Persist the installed vocab (ADR-046) so a runtime alias survives reopen;
-        //    serialization failure fails the checkpoint loudly rather than silently
-        //    dropping the alias (which would be a false negative on the next open).
+        //    Persist the installed vocab (ADR-046) so a runtime alias survives reopen,
+        //    verified to reopen as the serving normalizer (ADR-184); a vocabulary that
+        //    cannot be recorded fails the checkpoint loudly rather than writing a
+        //    manifest the next open would refuse or mis-serve.
         let vocab_data = match &self.vocab {
             Some(v) => v
-                .to_json()
-                .map_err(|e| ShardError::Log(format!("serializing cluster vocab: {e}")))?
+                .recordable_json(&self.norm, &self.dict)
+                .map_err(|e| ShardError::Log(format!("recording cluster vocab: {e}")))?
                 .into_bytes(),
             None => Vec::new(),
         };

@@ -48,6 +48,12 @@ impl Engine {
             && vocab.effective_equivalence_groups() == current.effective_equivalence_groups()
             && vocab.aliases().active_alias_forms() == current.aliases().active_alias_forms()
         {
+            // A registry-only change leaves the normalizer as is, so the recorded vocabulary
+            // must still reopen as it (ADR-184) — it does not on an engine built from a bare
+            // custom normalizer, or with metadata JSON cannot carry. Refuse before mutating.
+            vocab
+                .recordable_json(&self.norm, &self.dict)
+                .map_err(crate::error::NormalizerError::new)?;
             let previous = self.vocab.replace(Arc::new(vocab));
             if !self.commit_feature_model() {
                 // All-or-nothing: an unrecorded registry change would silently vanish on the
@@ -120,6 +126,11 @@ impl Engine {
         vocab.intern_equivalence_forms(&norm, &mut proposed_dict);
         let equiv = vocab.resolve_equivalences(&norm, &proposed_dict);
         proposed_dict.set_equivalences(equiv);
+        // Every later commit records this vocabulary (ADR-184); one that could not be recorded
+        // would fail those commits after the new normalizer is live. Refuse it up front.
+        vocab
+            .recordable_json(&norm, &proposed_dict)
+            .map_err(crate::error::NormalizerError::new)?;
 
         // `set_vocab` and `recompile_stale_segments` are intentionally separate public
         // operations, but installing a normalizer that cannot represent every acknowledged
@@ -156,6 +167,12 @@ impl Engine {
         self.vocab = Some(Arc::new(vocab));
         self.dict = Arc::new(proposed_dict);
         self.vocab_epoch += 1;
+        // An empty memtable holds nothing compiled under the previous normalizer, so it joins
+        // the new epoch; otherwise rows written after this change would seal into a segment
+        // that looks stale, and ADR-184 refuses to commit a stale corpus.
+        if self.memtable.is_empty() {
+            Arc::make_mut(&mut self.memtable).vocab_epoch = self.vocab_epoch;
+        }
         if self.segments.is_empty() && self.memtable.is_empty() {
             // Nothing is compiled, so the recompile that normally commits the new model is a
             // no-op. A failed write marks persistence unhealthy for the caller to report.
@@ -197,8 +214,16 @@ impl Engine {
         &mut self,
         mut vocab: crate::vocab::Vocab,
     ) -> Result<(), crate::error::NormalizerError> {
+        if self.config.data_dir.is_some() && self.owns_manifest && !self.persistence_healthy {
+            return Err(crate::error::NormalizerError::new(
+                "cannot adopt a vocabulary while persistence is unhealthy; it could not be \
+                 recorded in the manifest",
+            ));
+        }
         // ADR-184: an engine reopened from a manifest that records this vocabulary already
-        // installed it (equivalences included) before its WAL replay and migration.
+        // installed it (equivalences included) before its WAL replay and migration. Checked
+        // after the health gate: an adoption whose commit failed is installed in memory but
+        // not recorded, so an identical retry must not report success.
         if let (Some(current), Ok(adopted)) = (self.vocab.as_deref(), vocab.to_json()) {
             if current.to_json().is_ok_and(|json| json == adopted) {
                 return Ok(());
@@ -234,12 +259,6 @@ impl Engine {
                 )));
             }
             return Ok(());
-        }
-        if self.config.data_dir.is_some() && self.owns_manifest && !self.persistence_healthy {
-            return Err(crate::error::NormalizerError::new(
-                "cannot adopt a vocabulary while persistence is unhealthy; it could not be \
-                 recorded in the manifest",
-            ));
         }
         let mut norm = Arc::new(vocab.to_normalizer()?);
         // Re-install equivalence groups (ADR-054/060) so inserts after this point expand through

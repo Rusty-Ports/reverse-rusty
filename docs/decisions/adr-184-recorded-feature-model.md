@@ -59,11 +59,17 @@ model, and recovery serves exactly that model or refuses.
    memtable state, and advancing the watermark would let recovery skip a logged delete whose
    insert still replays. They are refused while persistence is degraded, because the in-memory
    registry may then be a strict subset of the committed one.
-5. **One model per commit.** While a `set_vocab` awaits its recompile, the corpus spans two models,
-   so a standalone commit in that window fails closed (the old manifest and WAL stay
-   authoritative) without marking persistence unhealthy. A freshly mapped segment now carries its
-   source segment's vocabulary epoch, so a flush or compaction after a vocabulary change is not
-   mistaken for stale.
+5. **One model per commit, and only a model that reopens.** While a `set_vocab` awaits its
+   recompile, the corpus spans two models, so a standalone commit in that window fails closed
+   (the old manifest and WAL stay authoritative) without marking persistence unhealthy. An empty
+   memtable joins the new epoch at `set_vocab`, and a freshly mapped segment carries its source
+   segment's epoch, so writes, flushes and compactions after a vocabulary change are not mistaken
+   for stale. Every standalone commit and cluster checkpoint records a vocabulary only after
+   repeating recovery's steps on it — read the JSON back, rebuild the normalizer, demote against
+   the recorded dict, compare fingerprints — so a manifest that would not reopen (registry
+   metadata on a bare-custom-normalizer engine; a non-finite float that serializes as `null`) is
+   never written. `set_vocab` and the metadata-only seam run the same check before mutating, so
+   such a vocabulary is refused instead of degrading persistence.
 6. **Startup seed policy.** `Engine::open_seeded` and `ClusterEngine::open_seeded` implement the
    server's `--vocab-file` rule and return a `VocabSeedOutcome` the server logs. The file seeds a
    fresh store. A store that recorded a vocabulary keeps it and warns when the file differs. A store
@@ -96,7 +102,10 @@ model, and recovery serves exactly that model or refuses.
 - A library caller that relied on `open_with_vocab` to *change* a store's vocabulary at reopen now
   gets the recorded vocabulary instead (or a mismatch error for a bare-normalizer store); changes
   go through `set_vocab`. `adopt_vocab` refuses a vocabulary whose normalizer differs from the
-  compiled corpus's.
+  compiled corpus's, and refuses while persistence is unhealthy (so a retry of a failed adoption
+  cannot report success). An engine built from a bare custom normalizer cannot record alias
+  metadata, because no vocabulary describes its model.
+- Each commit that records a vocabulary rebuilds its normalizer once to verify it.
 - Remote shard servers are unchanged: they run the stock normalizer and already refuse custom
   vocabularies (ADR-076).
 

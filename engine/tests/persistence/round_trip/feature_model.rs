@@ -235,3 +235,120 @@ fn no_commit_records_a_corpus_compiled_under_two_models() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Codex R1: `set_vocab` on an empty engine must move the (empty) memtable to the new epoch.
+/// Otherwise the rows written next seal into a segment that looks stale, and every later
+/// commit is refused — the manifest registry stays empty and the WAL is never checkpointed.
+#[test]
+fn writes_after_a_vocab_change_on_an_empty_engine_commit_normally() {
+    let dir = test_dir("rr003_empty_engine_epoch");
+    {
+        let mut engine = Engine::open(make_norm(), durable(&dir)).expect("fresh durable engine");
+        engine
+            .set_vocab(ny_alias())
+            .expect("vocabulary on an empty engine");
+        engine.recompile_stale_segments();
+        engine.try_insert_live("ny catalog", 1, 1).expect("insert");
+        engine.flush();
+        assert!(
+            !engine.has_stale_segments(),
+            "the flushed segment is current"
+        );
+        engine.try_insert_live("ny parts", 2, 1).expect("insert");
+    }
+    let manifest = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("read");
+    assert!(
+        !manifest.segment_files.is_empty(),
+        "the flush after the vocabulary change committed its segment"
+    );
+    let engine = Engine::open(make_norm(), durable(&dir)).expect("reopen");
+    assert!(match_ids(&engine, "new york catalog").contains(&1));
+    assert!(match_ids(&engine, "new york parts").contains(&2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex R1: an engine built from a bare custom normalizer has no vocabulary that describes
+/// its model. Recording alias metadata on it would pair a stock vocabulary with the custom
+/// fingerprint — a manifest no normalizer can reopen — so it is refused before mutating.
+#[test]
+fn alias_metadata_is_refused_on_a_bare_custom_normalizer() {
+    let dir = test_dir("rr003_bare_metadata");
+    {
+        let mut engine = Engine::open(tee_normalizer(), durable(&dir)).expect("fresh engine");
+        engine.build_from_queries(&[(1, "black tee".into())]);
+        assert!(engine.record_discovered_aliases(&[]).is_err());
+        assert!(engine.vocab().is_none(), "nothing was installed");
+        assert!(engine.persistence_healthy());
+    }
+    let engine = Engine::open(tee_normalizer(), durable(&dir)).expect("the store still reopens");
+    assert!(match_ids(&engine, "black tee").contains(&1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex R1: a non-finite feedback overlap serializes as `null`, which no binary can read
+/// back. Recording it would make the next open fail, so it is refused before mutating.
+#[test]
+fn unrecordable_alias_metadata_is_refused_before_mutation() {
+    let dir = test_dir("rr003_nan_feedback");
+    let vocab: Vocab = serde_json::from_value(serde_json::json!({
+        "aliases": { "entries": [{
+            "forms": ["aleph", "alpha"],
+            "provenance": "learned_distributional",
+            "kind": "single_token_distinct",
+            "status": "candidate",
+            "confidence": 0.8
+        }]}
+    }))
+    .expect("candidate fixture");
+    {
+        let mut engine = Engine::open_with_vocab(vocab, durable(&dir)).expect("fresh engine");
+        engine.build_from_queries(&[(1, "alpha widget".into())]);
+        let evidence = reverse_rusty::vocab::FeedbackEvidence {
+            overlap: f64::NAN,
+            titles_a: 3,
+            titles_b: 4,
+            queries_sampled: 12,
+        };
+        let forms = vec!["aleph".to_string(), "alpha".to_string()];
+        assert!(engine
+            .apply_alias_feedback(&[(forms, evidence)], false)
+            .is_err());
+        assert!(engine.persistence_healthy());
+        assert!(engine.vocab().is_some_and(|v| v
+            .aliases()
+            .entries()
+            .iter()
+            .all(|e| e.feedback.is_none())));
+        engine.flush();
+    }
+    let engine = Engine::open(make_norm(), durable(&dir)).expect("the store still reopens");
+    assert!(match_ids(&engine, "alpha widget").contains(&1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex R1: an adoption whose manifest commit failed is installed in memory but not recorded,
+/// so an identical retry must fail too instead of reporting success.
+#[test]
+fn an_identical_adoption_retry_after_a_failed_commit_is_refused() {
+    let dir = test_dir("rr003_adopt_retry");
+    let mut engine = Engine::open(make_norm(), durable(&dir)).expect("fresh durable engine");
+    engine.build_from_queries(&[(1, "usb hub silver".into())]);
+    let blocker = dir.join("manifest.manifest.tmp");
+    std::fs::create_dir(&blocker).expect("block the manifest temp path");
+    assert!(
+        engine.adopt_vocab(Vocab::new()).is_err(),
+        "the commit fails"
+    );
+    assert!(
+        engine.adopt_vocab(Vocab::new()).is_err(),
+        "a retry must not report an unrecorded adoption as success"
+    );
+    drop(engine);
+    std::fs::remove_dir(&blocker).expect("unblock");
+    let engine = Engine::open(make_norm(), durable(&dir)).expect("reopen");
+    assert!(
+        engine.vocab().is_none(),
+        "the failed adoption was never recorded"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -279,46 +279,11 @@ impl Engine {
         self.write_manifest_capturing(source_file_name, watermark)
     }
 
-    /// Durably record a vocabulary change that needs no segment rewrite (ADR-184): an empty
-    /// corpus, or a registry change outside the matching-relevant projections. The manifest is
-    /// rewritten with the same segment registry and source selection but **the previously
-    /// committed WAL watermark** — this commit captures no memtable state, so advancing the
-    /// watermark would let recovery skip a delete whose insert still replays from the WAL.
-    /// Refused (returns `false`) while persistence is degraded: the in-memory registry may
-    /// then be a strict subset of the committed one, and rewriting the manifest from it would
-    /// silently drop the unreadable segment. A no-op `true` for in-memory engines and cluster
-    /// shards, whose coordinator manifest records the vocabulary.
-    pub(in crate::segment) fn commit_feature_model(&mut self) -> bool {
-        if !self.owns_manifest || self.config.data_dir.is_none() {
-            return true;
-        }
-        if !self.persistence_healthy {
-            return false;
-        }
-        // Keeping the old watermark is sound only for the registry that watermark was
-        // committed with: rows sealed into a segment since then would also replay from the
-        // WAL tail. Every registry change commits (or rolls back) on its own, so this holds
-        // whenever persistence is healthy; refuse rather than assume it.
-        let current: Vec<_> = self
-            .segments
-            .iter()
-            .zip(&self.segment_generations)
-            .filter(|(segment, _)| matches!(segment.as_ref(), BaseSegment::Mmap(_)))
-            .map(|(_, generation)| generation)
-            .collect();
-        let registry_committed = current.len() == self.committed_segment_generations.len()
-            && current
-                .iter()
-                .zip(&self.committed_segment_generations)
-                .all(|(live, committed)| Arc::ptr_eq(live, committed));
-        if !registry_committed {
-            return false;
-        }
-        let selected_source = self.source_file_name.clone();
-        self.write_manifest_capturing(&selected_source, self.committed_wal_watermark)
-    }
-
-    fn write_manifest_capturing(&mut self, source_file_name: &str, watermark: u64) -> bool {
+    pub(super) fn write_manifest_capturing(
+        &mut self,
+        source_file_name: &str,
+        watermark: u64,
+    ) -> bool {
         // Cluster shards (ADR-032) do not own a manifest: the coordinator's
         // `cluster_manifest.bin` is the sole segment registry + dict store. Segment
         // `.seg` files are still written (by `make_base_segment`); only the per-shard
@@ -414,18 +379,17 @@ impl Engine {
                 BaseSegment::Mmap(m) => m.carries_source_generation_fence(),
                 BaseSegment::Memory(seg) => seg.max_source_generation() != 0,
             });
-            // ADR-184: record the feature model with every commit. Serializing an in-memory
-            // vocabulary cannot fail in practice; if it ever did, dropping it would make the
-            // next restart serve the corpus under a different model, so fail closed.
-            let vocab_data = match self.vocab.as_deref().map(crate::vocab::Vocab::to_json) {
-                None => Vec::new(),
-                Some(Ok(json)) => json.into_bytes(),
-                Some(Err(e)) => {
+            // ADR-184: record the feature model with every commit, verified to reopen as the
+            // normalizer serving this corpus. A vocabulary that would not would make the next
+            // restart refuse (or mis-serve) the store, so fail closed instead.
+            let vocab_data = match self.recordable_vocab() {
+                Ok(data) => data,
+                Err(error) => {
                     self.persistence_healthy = false;
                     self.emit(crate::events::EngineEvent::DurabilityFailure {
                         op: crate::events::DurabilityOp::ManifestWrite,
-                        detail: "vocabulary could not be serialized into the manifest".to_string(),
-                        error: e.to_string(),
+                        detail: "the vocabulary cannot be recorded in the manifest".to_string(),
+                        error,
                     });
                     return false;
                 }
@@ -575,6 +539,7 @@ impl Engine {
     }
 }
 
+mod feature_model;
 mod sources;
 
 #[cfg(test)]
