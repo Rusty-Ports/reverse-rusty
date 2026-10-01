@@ -62,8 +62,8 @@ Standalone verifies that every canonical live source was recompiled and no stale
 A successful durable cluster checkpoint is included before acknowledgement. If a coherent
 standalone rebuild becomes live but its durable commit fails, the new snapshot is published but the
 response is `503 persistence_unavailable`, never `acknowledged: true`; a cluster checkpoint failure
-is likewise not acknowledged. A single-node operator must save `GET /_vocab` to the configured
-`--vocab-file` before restart, while a durable cluster stores it in the coordinator manifest.
+is likewise not acknowledged. The committed manifest records the learned vocabulary on single-node
+and cluster alike (ADR-184), so a restart restores it without updating `--vocab-file`.
 Closed admission is 503, invalid controls/vocabulary or a non-local coordinator are 400, and a
 blocking-worker or impossible incomplete rebuild is 500.
 

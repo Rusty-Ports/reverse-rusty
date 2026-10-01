@@ -103,3 +103,10 @@
   is the tag-dict handshake, criterion 10 owns the redeploy runbook),
   [`research/dynamic-vocabulary.md`](../research/dynamic-vocabulary.md) §6 (the spike that
   scoped the shipping design this ADR declines for v1).
+
+**Outcome update (2026-10-01).** The populated no-vocabulary reopen described here used to receive
+the `--vocab-file` normalizer while only warning that the file was not applied, so its title-side
+rules silently diverged from the stock-compiled queries. [ADR-184](adr-184-recorded-feature-model.md)
+makes the manifest's recorded feature model authoritative: the server reopens through
+`ClusterEngine::open_seeded` under the stock normalizer such a cluster was built with, and a
+normalizer whose fingerprint differs from the manifest's refuses to open.

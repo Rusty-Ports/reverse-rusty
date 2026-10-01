@@ -26,6 +26,8 @@ fn empty_manifest(files: Vec<String>) -> Manifest {
         wal_seq_watermark: 0,
         segment_tombstones: Vec::new(),
         source_file_name: SOURCES.to_string(),
+        feature_model_fingerprint: None,
+        vocab_data: Vec::new(),
     }
 }
 
@@ -247,6 +249,7 @@ fn cluster_backup_round_trips_and_verifies() {
         dict_data: Vec::new(),
         vocab_data: Vec::new(),
         tag_dict_data: Vec::new(),
+        feature_model_fingerprint: Some(0xFEED),
     };
     write_cluster_manifest(&manifest, &src.join(CLUSTER_MANIFEST)).unwrap();
 
@@ -311,6 +314,7 @@ fn cluster_verify_rejects_corrupt_shard_sources() {
         dict_data: Vec::new(),
         vocab_data: Vec::new(),
         tag_dict_data: Vec::new(),
+        feature_model_fingerprint: Some(0xFEED),
     };
     write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST)).unwrap();
     assert!(

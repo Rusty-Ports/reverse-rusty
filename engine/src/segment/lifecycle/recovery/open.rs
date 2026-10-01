@@ -1,3 +1,4 @@
+use super::feature_model::{self, RecoveredModel};
 use super::{
     fresh_segment_generations, invalid_input, replay_wal_tail, seed_next_source_generation, Arc,
     BaseSegment, Engine, EngineConfig, MmapSegment, Normalizer, Segment, SourceCommitState, Wal,
@@ -35,39 +36,40 @@ impl Engine {
     }
 
     /// Open an engine from an existing data directory, recovering state from
-    /// the manifest and WAL. The normalizer must be the same one used when the
-    /// engine was originally built (feature spaces must align).
+    /// the manifest and WAL.
     ///
-    /// **If the engine was built with a [`Vocab`](crate::vocab::Vocab), prefer
-    /// [`open_with_vocab`](Self::open_with_vocab)**: the equivalence map (ADR-054) is
-    /// transient — never persisted in the dict — and the WAL tail is recompiled HERE,
-    /// so opening with the bare normalizer and adopting the vocab afterwards would
-    /// compile those recovered queries without alias expansion (`adopt_vocab` detects
-    /// that hazard and escalates to a full recompile, codex R13).
+    /// The committed manifest is authoritative for the feature model (ADR-184): when it
+    /// records a vocabulary, the normalizer is rebuilt from it and `norm` is ignored; when it
+    /// records a bare-normalizer model, `norm` must be that normalizer, or the open fails with
+    /// [`FeatureModelMismatch`](crate::error::FeatureModelMismatch) (inside an `InvalidData`
+    /// error) instead of silently serving the corpus under a different model. `norm` builds a
+    /// fresh directory, and is trusted unverified for a pre-ADR-184 manifest.
     pub fn open(norm: Normalizer, config: EngineConfig) -> std::io::Result<Self> {
-        Self::open_inner(norm, config, None)
+        Ok(Self::open_inner(norm, config, None)?.0)
     }
 
-    /// [`open`](Self::open) for a vocab-built engine: rebuilds the normalizer FROM the
-    /// vocab and installs its equivalence groups (ADR-054) on the recovered dict **before**
-    /// the WAL tail is replayed — the same order the cluster's `ClusterEngine::open` uses —
-    /// so queries written after the last flush recover with their alias expansion intact
-    /// (codex R13). Resolution is read-only against the recovered dict (no interning), the
-    /// recovered-engine ID-stability rule of [`adopt_vocab`](Self::adopt_vocab); a missing
-    /// manifest falls back to a fresh [`with_vocab`](Self::with_vocab) build (which interns).
+    /// [`open`](Self::open) with a vocabulary for a directory whose manifest does not record
+    /// one: a fresh directory is built with [`with_vocab`](Self::with_vocab) (which interns),
+    /// and a pre-ADR-184 manifest trusts `vocab` as before. Either way the normalizer is
+    /// rebuilt FROM the vocab and its equivalence groups (ADR-054) are installed on the
+    /// recovered dict **before** the WAL tail is replayed — the order `ClusterEngine::open`
+    /// uses — so queries written after the last flush recover with their alias expansion
+    /// intact (codex R13). A manifest that records its feature model is authoritative, exactly
+    /// as for [`open`](Self::open): its own vocabulary is restored and `vocab` is ignored. See
+    /// [`open_seeded`](Self::open_seeded) for the server's startup-vocabulary policy.
     pub fn open_with_vocab(
         vocab: crate::vocab::Vocab,
         config: EngineConfig,
     ) -> std::io::Result<Self> {
         let norm = vocab.to_normalizer().map_err(|e| invalid_input(&e))?;
-        Self::open_inner(norm, config, Some(vocab))
+        Ok(Self::open_inner(norm, config, Some(vocab))?.0)
     }
 
-    fn open_inner(
+    pub(super) fn open_inner(
         norm: Normalizer,
         config: EngineConfig,
         vocab: Option<crate::vocab::Vocab>,
-    ) -> std::io::Result<Self> {
+    ) -> std::io::Result<(Self, RecoveredModel)> {
         let dir = config.data_dir.as_ref().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -100,10 +102,12 @@ impl Engine {
                 // Watermark 0: with no manifest, nothing is baked anywhere.
                 replay_wal_tail(&mut engine, &fresh_wal_path, 0)?;
             }
-            return Ok(engine);
+            return Ok((engine, RecoveredModel::Fresh));
         }
 
         let manifest = crate::storage::read_manifest(&manifest_path)?;
+        // ADR-184: decide the feature model before anything is compiled from this directory.
+        let (norm, vocab, model) = feature_model::resolve(&manifest, norm, vocab)?;
         let dict = crate::storage::deserialize_dict(&manifest.dict_data)?;
         // The frozen tag space (ADR-049); empty for a v1 manifest (no tags).
         let tag_dict = crate::storage::deserialize_tagdict(&manifest.tag_dict_data)?;
@@ -267,6 +271,7 @@ impl Engine {
                 SourceCommitState::IncompleteRecovery
             },
             vocab_epoch: 0,
+            committed_wal_watermark: manifest.wal_seq_watermark,
             owns_manifest: true,
         };
 
@@ -286,6 +291,15 @@ impl Engine {
             engine.vocab = Some(Arc::new(v));
         }
 
+        // ADR-184: the committed segments, and the WAL tail about to be recompiled, must be
+        // served under the normalizer they were written under. Checked after the demotion
+        // above, so the normalizer verified is exactly the one that will serve.
+        feature_model::verify(
+            manifest.feature_model_fingerprint,
+            &engine.norm,
+            engine.needs_compiler_semantics_migration(),
+        )?;
+
         // Replay WAL entries after last checkpoint
         replay_wal_tail(&mut engine, &wal_path, manifest.wal_seq_watermark)?;
 
@@ -301,6 +315,6 @@ impl Engine {
         // startup rather than retaining a silent false negative.
         engine.migrate_legacy_compiler_semantics()?;
 
-        Ok(engine)
+        Ok((engine, model))
     }
 }

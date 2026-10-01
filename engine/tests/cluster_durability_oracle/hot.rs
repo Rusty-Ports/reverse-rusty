@@ -115,13 +115,14 @@ fn reopen_with_flipped_theta_is_result_identical_and_fences_hold() {
         )
     };
 
-    // ADR-118 makes every durable cluster manifest v7; the per-shard v7
-    // `.seg` files carry ownership in addition to the hot fence.
+    // ADR-184 makes every durable cluster manifest v8 (which keeps the ADR-118
+    // compiler-semantics fence); the per-shard v7 `.seg` files carry ownership in
+    // addition to the hot fence.
     let mbytes = std::fs::read(dir.join(MANIFEST)).expect("manifest bytes");
     let version = u32::from_le_bytes(mbytes[4..8].try_into().expect("version word"));
     assert_eq!(
-        version, 7,
-        "the ClusterManifest must carry the ADR-118 v7 compiler-semantics fence"
+        version, 8,
+        "the ClusterManifest must carry the ADR-184 v8 feature-model fence"
     );
 
     // Reopen θ=0: identical results, sealed H intact; a new θ-hot-shaped add

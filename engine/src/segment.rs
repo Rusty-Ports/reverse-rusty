@@ -575,6 +575,11 @@ pub struct Engine {
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,
+    /// The WAL watermark of the last manifest this engine committed (or recovered). A
+    /// vocabulary-only commit (ADR-184) rewrites the manifest without capturing the memtable,
+    /// so it must keep this watermark: advancing it would let recovery skip a delete whose
+    /// insert still replays from the WAL.
+    committed_wal_watermark: u64,
     /// Whether this engine writes its own `manifest.bin`. True for a standalone
     /// engine. False for a **cluster shard** (ADR-032): the coordinator's
     /// `cluster_manifest.bin` is the sole metadata authority (it records the

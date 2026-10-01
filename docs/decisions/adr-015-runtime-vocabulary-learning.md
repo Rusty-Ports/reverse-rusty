@@ -21,3 +21,7 @@
   library dependency for vocabulary serialization.
 - **See also:** ADR-010 (NormalizerBuilder), [normalization.md](../design/normalization.md),
   [corpus-feature-learning.md](../research/corpus-feature-learning.md)
+
+**Outcome update (2026-10-01).** A durable store now records its vocabulary in its manifest
+([ADR-184](adr-184-recorded-feature-model.md)); `--vocab-file` seeds a new store rather than being
+the restart source.

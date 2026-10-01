@@ -87,3 +87,7 @@ vendor JSON, no-store responses, timing and telemetry, asynchronous admission, o
 locking, closed admission, exact recompile count, snapshot publication, alias matching, and an
 injected source-sidecar failure that returns 503 without leaving stale live plans. Coordinator
 tests pin the shared transport/admission behavior and the mode-consistent `recompiled` response.
+
+**Outcome update (2026-10-01).** [ADR-184](adr-184-recorded-feature-model.md) records the replaced
+vocabulary in the single-node manifest with the recompile commit, so operators no longer update
+`--vocab-file` after a REST replacement; the file only seeds a new store.

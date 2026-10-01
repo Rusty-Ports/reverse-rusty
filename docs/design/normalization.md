@@ -190,9 +190,9 @@ exists. The deterministic proposals are never recorded or activated by that rout
 The separate standalone discover-and-record mutation accepts only bounded discovery controls. Its
 blocking worker clones stored sources briefly, runs discovery without the engine guard, then
 reacquires the guard only to install never-active candidates through the metadata-only seam and
-publish a snapshot. Matching and the vocabulary epoch remain unchanged. The response states that
-the live vocabulary document was not written back to the operator's startup vocabulary file;
-coordinator mode returns the dry-run, review, and `PUT /_vocab` alternative instead of performing a
+publish a snapshot. Matching and the vocabulary epoch remain unchanged. The seam commits the updated
+registry to the manifest (keeping the previous WAL watermark) or, if it cannot, leaves the registry
+unchanged and reports the failure; coordinator mode returns the dry-run, review, and `PUT /_vocab` alternative instead of performing a
 full blue/green rebuild for review metadata.
 Feedback evidence review shares the administrative slot and accepts strict positive thresholds plus
 bounded `from`/`size` paging. A blocking worker clones only the requested evidence page under the
@@ -203,11 +203,24 @@ single-node capture alternative.
 Evidence validation and application use that same one-slot, off-runtime boundary. The default
 operation stamps changed evidence metadata only and treats an identical retry as a no-op.
 `activate=true` remains explicit and promotes only eligible candidates through a complete,
-durability-checked recompile before publication. Runtime metadata and activations are not written
-back to the standalone startup vocabulary file.
+durability-checked recompile before publication. Both are committed to the manifest like every other
+vocabulary change.
 Embedded callers use the deliberately split `set_vocab()` then `recompile_stale_segments()` sequence
-and must not publish a snapshot between those calls. Single-node durable deployments must persist
-the same vocabulary file used on reopen; clusters checkpoint the vocabulary in coordinator state. See
+and must not publish a snapshot between those calls; a durable standalone engine refuses to commit
+in between, because no single recorded model describes that corpus.
+
+### The recorded feature model
+
+Every manifest commit records the feature model the committed corpus was compiled under
+([ADR-184](../decisions/adr-184-recorded-feature-model.md)): the `Vocab` document (single-node
+manifest v8; the cluster manifest since v3) and `Normalizer::fingerprint()`, a stable hash of every
+phrase, synonym, punctuation rule, and number-context word. On reopen a recorded vocabulary is
+authoritative — the normalizer is rebuilt from it and its equivalences are installed before the WAL
+or log tail replays — and a normalizer whose fingerprint differs from the recorded one fails the
+open with `FeatureModelMismatch`, unless a compiler-semantics migration is about to rebuild every row
+from source. `--vocab-file` therefore only seeds a new store (`Engine::open_seeded`,
+`ClusterEngine::open_seeded`); a store that recorded no vocabulary reopens under the stock
+normalizer and takes a file only while it holds no queries. See
 [`../reference/api/vocab.md`](../reference/api/vocab.md).
 
 Compiler semantics version 5 removed earlier special-purpose feature categories; version 6 also

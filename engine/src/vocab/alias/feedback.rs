@@ -19,6 +19,7 @@ use crate::vocab::{AliasRegistry, AliasStatus};
 /// `serde(default)` optional field on `AliasEntry` — old vocab JSON deserializes to `None`
 /// (the `number_context` field-addition precedent).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedbackEvidence {
     /// Estimated Jaccard overlap of the two forms' matched-query populations.
     pub overlap: f64,

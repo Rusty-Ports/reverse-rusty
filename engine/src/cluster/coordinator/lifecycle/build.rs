@@ -308,6 +308,7 @@ impl ClusterEngine {
                     &ring,
                     config,
                     &primaries,
+                    &norm,
                     vocab.as_ref(),
                 )?
             }
@@ -369,6 +370,7 @@ impl ClusterEngine {
     /// snapshot_pos 0 — the atomic commit point), and open an empty log. The per-shard
     /// `.seg` files were already written by pass-B ingest; this records which ones are
     /// committed. Returns the durability bundle for [`from_parts`].
+    #[allow(clippy::too_many_arguments)]
     fn commit_durable_base(
         dir: &Path,
         dict: &Dict,
@@ -376,6 +378,7 @@ impl ClusterEngine {
         ring: &HashRing,
         config: &ClusterConfig,
         primaries: &[&LocalShard],
+        norm: &Normalizer,
         vocab: Option<&crate::vocab::Vocab>,
     ) -> Result<ClusterDurable, ShardError> {
         std::fs::create_dir_all(dir)
@@ -423,10 +426,8 @@ impl ClusterEngine {
             // → `checkpoint` lands it).
             vocab_data: match vocab {
                 Some(v) => v
-                    .to_json()
-                    .map_err(|e| {
-                        ShardError::Log(format!("serializing cluster vocab at build: {e}"))
-                    })?
+                    .recordable_json(norm, dict)
+                    .map_err(|e| ShardError::Log(format!("recording cluster vocab at build: {e}")))?
                     .into_bytes(),
                 None => Vec::new(),
             },
@@ -434,6 +435,8 @@ impl ClusterEngine {
             // request filter to the SAME `TagId`s the stored segments carry. Empty + finalized for
             // an untagged cluster ⇒ a byte-identical empty blob (manifest v4 round-trips it).
             tag_dict_data: crate::storage::serialize_tagdict(tag_dict),
+            // ADR-184: the feature model the base was compiled under, checked on every reopen.
+            feature_model_fingerprint: Some(norm.fingerprint()),
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;

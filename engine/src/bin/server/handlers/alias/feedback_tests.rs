@@ -550,3 +550,48 @@ async fn durable_activation_failure_is_live_published_and_not_acknowledged() {
     drop(state);
     std::fs::remove_dir_all(root).expect("remove temp root");
 }
+
+/// ADR-184: on a durable engine a stamp is committed to the manifest, so the response says
+/// `persisted: true` and a restart without any vocabulary file still carries the evidence.
+#[tokio::test]
+async fn durable_stamp_is_recorded_in_the_manifest() {
+    let root = temp_dir("durable-stamp");
+    let data_dir = root.join("data");
+    let config = EngineConfig {
+        alias_feedback_capture: true,
+        data_dir: Some(data_dir.clone()),
+        ..EngineConfig::default()
+    };
+    let (engine, feedback) = fixture_engine(config.clone());
+    let state = state_with_engine(engine, feedback);
+    let (status, _, bytes) = send(
+        &state,
+        Method::POST,
+        "/_vocab/aliases/validate_and_apply?min_overlap=1&min_titles=1&min_queries=1",
+        Body::empty(),
+        ALIAS_FEEDBACK_APPLY_BODY_LIMIT,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
+    assert_eq!(body["stamped"], 1, "{body}");
+    assert_eq!(body["persisted"], true, "{body}");
+    drop(state);
+
+    let reopened = Engine::open(
+        reverse_rusty::Normalizer::default_vocab().expect("stock normalizer"),
+        config,
+    )
+    .expect("reopen without a vocabulary file");
+    let stamped = reopened
+        .vocab()
+        .expect("recorded vocabulary")
+        .aliases()
+        .entries()
+        .iter()
+        .filter(|entry| entry.feedback.is_some())
+        .count();
+    assert_eq!(stamped, 1, "the feedback evidence survives the restart");
+    drop(reopened);
+    std::fs::remove_dir_all(root).expect("remove temp root");
+}

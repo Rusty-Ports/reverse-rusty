@@ -225,6 +225,13 @@ impl NormalizerBuilder {
         // consults it only when `has_multiword_aliases`; ADR-120 consults it for
         // every phrase-aware title graph.
         let phrase_overlap = build_phrase_overlap(&self.phrase_patterns, &self.phrase_entries)?;
+        let fingerprint = super::fingerprint::feature_model_fingerprint(
+            &self.phrase_patterns,
+            &self.phrase_entries,
+            &self.synonyms,
+            &self.punct,
+            &self.number_context,
+        );
 
         Ok(Normalizer {
             automaton,
@@ -235,6 +242,7 @@ impl NormalizerBuilder {
             syn_index: self.syn_index,
             punct: self.punct,
             number_context: self.number_context,
+            fingerprint,
         })
     }
 }

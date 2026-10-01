@@ -54,9 +54,17 @@ const MANIFEST_VERSION_SOURCE_GENERATION: u32 = 6;
 // exact segment registry and its complete canonical-source corpus together.
 // Pre-v7 manifests keep selecting the legacy mutable `sources.dat`.
 const MANIFEST_VERSION_SOURCE_COMMIT: u32 = 7;
+// v8 (ADR-184): appends the feature-model fingerprint and the serialized `Vocab` behind the
+// normalizer the committed corpus was compiled under, so a restart restores the vocabulary
+// instead of trusting whatever the caller supplies, and a mismatched bare normalizer fails
+// loud. Every engine commit writes v8 — it is also the rollback fence, because an older binary
+// would ignore the recorded model. The layout always carries the v5 θ and the v7 source
+// sidecar name. v1..=v7 read back with no recorded model (`feature_model_fingerprint: None`).
+const MANIFEST_VERSION_FEATURE_MODEL: u32 = 8;
 
 /// Engine manifest — records the list of active segment files, dict state,
 /// and counters. Written atomically (tmp + rename) alongside segment files.
+#[derive(Clone)]
 pub struct Manifest {
     pub segment_files: Vec<String>,
     /// `true` ⇔ some registered segment holds class-D always-candidates (ADR-068).
@@ -101,16 +109,32 @@ pub struct Manifest {
     /// Immutable source-sidecar basename selected by this commit (ADR-121).
     /// Pre-v7 manifests read back as the legacy `sources.dat`.
     pub source_file_name: String,
+    /// [`Normalizer::fingerprint`](crate::normalize::Normalizer::fingerprint) of the feature
+    /// model the committed corpus was compiled under (ADR-184). `Some` selects the v8 layout;
+    /// `None` reads back from a v1..=v7 manifest, which recorded no model.
+    pub feature_model_fingerprint: Option<u64>,
+    /// `Vocab::to_json` of the vocabulary behind that normalizer, or empty when the engine was
+    /// built from a bare normalizer (ADR-184). Requires a v8 manifest.
+    pub vocab_data: Vec<u8>,
 }
 
 pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
     super::validate_sidecar_basename(&manifest.source_file_name)?;
+    if manifest.feature_model_fingerprint.is_none() && !manifest.vocab_data.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a manifest vocabulary requires a recorded feature-model fingerprint",
+        ));
+    }
+    let feature_model = manifest.feature_model_fingerprint.is_some();
     let tmp = path.with_extension("manifest.tmp");
     publish_with_crc(path, &tmp, |f| {
         f.write_all(&MANIFEST_MAGIC)?;
         write_u32(
             f,
-            if manifest.source_file_name != "sources.dat" {
+            if feature_model {
+                MANIFEST_VERSION_FEATURE_MODEL
+            } else if manifest.source_file_name != "sources.dat" {
                 MANIFEST_VERSION_SOURCE_COMMIT
             } else if manifest.source_generation_fence {
                 MANIFEST_VERSION_SOURCE_GENERATION
@@ -150,7 +174,8 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
         }
         // v5 (ADR-105): the recorded θ — appended ONLY under the hot fence, so hot-free
         // manifests stay byte-identical v3/v4.
-        if manifest.hot_fence
+        if feature_model
+            || manifest.hot_fence
             || manifest.source_generation_fence
             || manifest.source_file_name != "sources.dat"
         {
@@ -158,13 +183,25 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
         }
         // v7 (ADR-121): select the already-durable immutable source corpus in the
         // same atomic document as the segment registry.
-        if manifest.source_file_name != "sources.dat" {
+        if feature_model || manifest.source_file_name != "sources.dat" {
             let bytes = manifest.source_file_name.as_bytes();
             let len = u32::try_from(bytes.len()).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "source filename is too long")
             })?;
             write_u32(f, len)?;
             f.write_all(bytes)?;
+        }
+        // v8 (ADR-184): the feature model the committed corpus was compiled under.
+        if let Some(fingerprint) = manifest.feature_model_fingerprint {
+            write_u64(f, fingerprint)?;
+            let len = u32::try_from(manifest.vocab_data.len()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "manifest vocabulary is too large",
+                )
+            })?;
+            write_u32(f, len)?;
+            f.write_all(&manifest.vocab_data)?;
         }
         Ok(())
     })
@@ -202,12 +239,13 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     // watermark + per-segment dead-locals bitmaps (ADR-066), v4 is the class-D fence
     // (ADR-068), v5 appends the recorded θ under the hot fence (ADR-105), v6 is the
     // source-generation rollback fence, and v7 appends the selected immutable source
-    // sidecar (ADR-121) — each absent in earlier versions.
-    if !(1..=MANIFEST_VERSION_SOURCE_COMMIT).contains(&version) {
+    // sidecar (ADR-121), and v8 appends the recorded feature model (ADR-184) — each absent in
+    // earlier versions.
+    if !(1..=MANIFEST_VERSION_FEATURE_MODEL).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "unsupported manifest version {version} (expected 1..={MANIFEST_VERSION_SOURCE_COMMIT})"
+                "unsupported manifest version {version} (expected 1..={MANIFEST_VERSION_FEATURE_MODEL})"
             ),
         ));
     }
@@ -315,6 +353,23 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     } else {
         "sources.dat".to_string()
     };
+    let (feature_model_fingerprint, vocab_data) = if version >= MANIFEST_VERSION_FEATURE_MODEL {
+        let fingerprint = read_u64_at(content, cursor)?;
+        cursor += 8;
+        let len = read_u32_at(content, cursor)? as usize;
+        cursor += 4;
+        let end = cursor.checked_add(len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid vocabulary length")
+        })?;
+        let vocab = content
+            .get(cursor..end)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated vocab blob"))?
+            .to_vec();
+        cursor = end;
+        (Some(fingerprint), vocab)
+    } else {
+        (None, Vec::new())
+    };
     if cursor != content.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -337,5 +392,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         wal_seq_watermark,
         segment_tombstones,
         source_file_name,
+        feature_model_fingerprint,
+        vocab_data,
     })
 }

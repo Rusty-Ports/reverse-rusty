@@ -158,13 +158,13 @@ fn open_refuses_a_pre_adr109_v5_cluster_loudly() {
         cluster.checkpoint().expect("checkpoint");
     }
 
-    // Downgrade v7 -> v5 and re-seal so the migration fence, not CRC, fires.
+    // Downgrade v8 -> v5 and re-seal so the migration fence, not CRC, fires.
     let mpath = dir.join(MANIFEST);
     let mut bytes = std::fs::read(&mpath).expect("read manifest");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        7,
-        "a fresh ADR-118 cluster commits manifest v7"
+        8,
+        "a fresh ADR-184 cluster commits manifest v8"
     );
     bytes[4..8].copy_from_slice(&5u32.to_le_bytes());
     let body = bytes.len() - 4;

@@ -68,7 +68,7 @@ without changing matching:
   "took_ms": 4.31,
   "acknowledged": true,
   "result": "updated",
-  "persisted": false,
+  "persisted": true,
   "min_overlap": 0.5,
   "min_titles": 50,
   "min_queries": 20,
@@ -85,8 +85,10 @@ An identical retry is `result: "noop"` with `stamped: 0`. Add `activate=true` to
 eligible validated candidates through a complete query recompile. Rejected or mixed-kind entries
 are never resurrected by automation. Activation refuses unhealthy durable state, verifies that
 every live source was recompiled with no stale segment left, and returns 503 if a coherent live
-rebuild could not be committed. `persisted: false` means the live standalone vocabulary document
-was not written back to the startup vocabulary file; save `GET /_vocab` there before restart.
+rebuild could not be committed. `persisted: true` means the registry change is committed to the
+durable manifest and survives a restart (ADR-184); it is `false` only for an in-memory engine. A
+stamp the manifest cannot record (degraded persistence) leaves the registry unchanged and returns
+`503 persistence_unavailable`.
 
 The bodyless request is capped at 64 KiB and 250 ms. It waits asynchronously for the shared
 administrative slot, then evidence snapshotting/reporting, source lookup, engine-lock waiting,
