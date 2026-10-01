@@ -82,19 +82,6 @@ mod rpc_runtime;
 pub(crate) use rpc_runtime::cluster_rpc_handle;
 pub(crate) mod resize_loop;
 
-/// Hold one single-slot worker admission boundary through durability cleanup.
-///
-/// Rebalance and corpus-administration workers own their respective permits for
-/// their complete synchronous workflows, including after an HTTP disconnect.
-/// Waiting here therefore joins the safety-sensitive portion of any detached
-/// worker before process exit, while retaining the returned guard prevents a
-/// late draining request from starting more work during shutdown.
-async fn quiesce_worker_admission_for_shutdown(
-    permits: &Arc<tokio::sync::Semaphore>,
-) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
-    Arc::clone(permits).acquire_owned().await
-}
-
 /// Run the server in coordinator mode. Mirrors `main`'s single-node flow: build
 /// the cluster, wire observability, serve, shut down cleanly.
 pub(crate) async fn run(
@@ -759,68 +746,11 @@ pub(crate) async fn run(
         task.abort();
     }
 
-    // Rebalance, reconcile/GC, raw handoff, move-and-commit reassignment, and corpus-wide
-    // administrative workers may outlive their HTTP requests by design. Acquire
-    // and retain their single-slot
-    // admission boundaries before durability cleanup. In particular, a detached resize
-    // may be waiting for `write_serial`; quiescing only that lock would let the
-    // shutdown checkpoint win it first and the resize start after cleanup.
-    info!("connection drain complete, waiting for active cluster administration");
-    let _rebalance_shutdown_guard =
-        match quiesce_worker_admission_for_shutdown(&state.rebalance_permits).await {
-            Ok(guard) => Some(guard),
-            Err(source) => {
-                error!(error = %source, "rebalance admission closed during cluster shutdown");
-                None
-            }
-        };
-    let _reconcile_shutdown_guard =
-        match quiesce_worker_admission_for_shutdown(&state.reconcile_permits).await {
-            Ok(guard) => Some(guard),
-            Err(source) => {
-                error!(error = %source, "reconcile admission closed during cluster shutdown");
-                None
-            }
-        };
-    let _handoff_shutdown_guard =
-        match quiesce_worker_admission_for_shutdown(&state.handoff_permits).await {
-            Ok(guard) => Some(guard),
-            Err(source) => {
-                error!(error = %source, "handoff admission closed during cluster shutdown");
-                None
-            }
-        };
-    let _reassign_shutdown_guard =
-        match quiesce_worker_admission_for_shutdown(&state.reassign_permits).await {
-            Ok(guard) => Some(guard),
-            Err(source) => {
-                error!(error = %source, "reassign admission closed during cluster shutdown");
-                None
-            }
-        };
-    let _corpus_admin_shutdown_guard =
-        match quiesce_worker_admission_for_shutdown(&state.stats_permits).await {
-            Ok(guard) => Some(guard),
-            Err(source) => {
-                error!(
-                    error = %source,
-                    "corpus-administration admission closed during cluster shutdown"
-                );
-                None
-            }
-        };
-    // A remote resize returns the corpus-administration slot for health probes once it holds
-    // the topology guard, and releases `write_serial` once its write fence is up; its own
-    // permit covers the copy and cutover through their terminal result.
-    let _remote_resize_shutdown_guard =
-        match quiesce_worker_admission_for_shutdown(&state.remote_resize_permits).await {
-            Ok(guard) => Some(guard),
-            Err(source) => {
-                error!(error = %source, "remote resize admission closed during cluster shutdown");
-                None
-            }
-        };
-    info!("cluster administration quiesced, running cluster shutdown sequence");
+    // Workers and cluster writes may outlive their HTTP requests by design; join them and hold
+    // their admission through durability cleanup (see `shutdown::quiesce_detached_work`).
+    info!("connection drain complete, waiting for detached cluster work");
+    let _detached_work_guards = shutdown::quiesce_detached_work(&state).await;
+    info!("detached cluster work quiesced, running cluster shutdown sequence");
 
     // Durability shutdown: flush + checkpoint (the manifest commit), so reopen
     // attaches segments instead of replaying a long log tail. In-memory clusters
@@ -842,41 +772,6 @@ pub(crate) async fn run(
 }
 
 mod assemble;
+pub(crate) mod shutdown;
 
 use assemble::{assemble_cluster, MeshClientParts};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn shutdown_quiescence_waits_for_and_then_retains_worker_admission() {
-        let permits = Arc::new(tokio::sync::Semaphore::new(1));
-        let active = Arc::clone(&permits)
-            .acquire_owned()
-            .await
-            .expect("active worker permit");
-        let wait_permits = Arc::clone(&permits);
-        let mut shutdown = Box::pin(quiesce_worker_admission_for_shutdown(&wait_permits));
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), &mut shutdown)
-                .await
-                .is_err(),
-            "shutdown must wait while a detached worker owns admission"
-        );
-
-        drop(active);
-        let guard = tokio::time::timeout(std::time::Duration::from_secs(1), &mut shutdown)
-            .await
-            .expect("shutdown quiescence completed")
-            .expect("worker admission remained open");
-        assert_eq!(
-            permits.available_permits(),
-            0,
-            "shutdown must retain admission through durability cleanup"
-        );
-        drop(guard);
-        assert_eq!(permits.available_permits(), 1);
-    }
-}

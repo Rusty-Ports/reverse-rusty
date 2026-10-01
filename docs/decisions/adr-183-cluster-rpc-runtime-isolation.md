@@ -38,6 +38,13 @@ for the write lock) made the window larger.
    from a dedicated semaphore (`MAX_QUEUED_CLUSTER_WRITES`, 32) and moves it into the worker, which
    releases it only when the write finishes. At most 32 writers can hold blocking threads, however
    many clients disconnect. A request cancelled while waiting for a permit never starts its write.
+   Two consumers account for this:
+   - **Shutdown** takes every write permit, alongside the full capacity of each administrative
+     worker semaphore, before its flush and checkpoint. A detached write therefore lands before the
+     durability boundary, and none is admitted after it.
+   - **`/_flush?wait_if_ongoing=false`** checks for a flush in progress before awaiting admission,
+     so it still returns `409 flush_in_progress_exception` when that flush and queued writes hold
+     every permit. The worker re-checks under the lock.
 
 ## Alternatives
 
@@ -68,5 +75,9 @@ still completes, exactly as it would have if the client had stayed.
   every request, and requires the permits to stay held until the admitted workers finish, and
   exactly the admitted writes to apply. It fails if the permit is dropped with the handler future,
   released before the worker's write completes, or not taken at all.
+- Shutdown quiescence waits while one write permit is held and then retains all of them; it fails
+  if the write semaphore is left out of shutdown or only one of its permits is taken.
+- A non-waiting flush returns 409 within its timeout while a flush and 31 queued writes hold every
+  permit; it fails without the pre-admission check.
 
 **See also:** ADR-029, ADR-047, ADR-085, ADR-180.

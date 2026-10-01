@@ -259,6 +259,13 @@ pub(crate) async fn cluster_flush_route(
     let force = params.force_requested();
     // Flush admission, `write_serial`, and the remote flush RPCs all wait, so they run on a
     // blocking thread, never on an async worker (see `run_cluster_write`).
+    if !params.wait_if_ongoing() {
+        // Report a flush already in progress instead of queueing for write admission behind it.
+        // The worker re-checks under the lock, so a flush that starts meanwhile is still refused.
+        if let Err(response) = acquire_flush(&state.flush_serial, params, &state.prom) {
+            return *response;
+        }
+    }
     let flushed = match super::admit_cluster_write(&state).await {
         Ok(permit) => {
             let worker_state = Arc::clone(&state);
