@@ -295,6 +295,25 @@ impl Engine {
         if !self.persistence_healthy {
             return false;
         }
+        // Keeping the old watermark is sound only for the registry that watermark was
+        // committed with: rows sealed into a segment since then would also replay from the
+        // WAL tail. Every registry change commits (or rolls back) on its own, so this holds
+        // whenever persistence is healthy; refuse rather than assume it.
+        let current: Vec<_> = self
+            .segments
+            .iter()
+            .zip(&self.segment_generations)
+            .filter(|(segment, _)| matches!(segment.as_ref(), BaseSegment::Mmap(_)))
+            .map(|(_, generation)| generation)
+            .collect();
+        let registry_committed = current.len() == self.committed_segment_generations.len()
+            && current
+                .iter()
+                .zip(&self.committed_segment_generations)
+                .all(|(live, committed)| Arc::ptr_eq(live, committed));
+        if !registry_committed {
+            return false;
+        }
         let selected_source = self.source_file_name.clone();
         self.write_manifest_capturing(&selected_source, self.committed_wal_watermark)
     }
