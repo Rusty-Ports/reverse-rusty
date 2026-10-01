@@ -37,7 +37,7 @@ impl FlushParams {
     }
 
     #[must_use]
-    fn wait_if_ongoing(self) -> bool {
+    pub(crate) fn wait_if_ongoing(self) -> bool {
         self.wait_if_ongoing.unwrap_or(true)
     }
 }

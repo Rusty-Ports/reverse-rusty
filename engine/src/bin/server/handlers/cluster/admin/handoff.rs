@@ -212,7 +212,7 @@ async fn cluster_handoff_distributed(
     let _cancel_queued_on_drop = CancelQueuedClusterHandoff(Arc::clone(&gate));
     let worker_gate = Arc::clone(&gate);
     let (started_sender, mut started_receiver) = tokio::sync::oneshot::channel();
-    let handle = tokio::runtime::Handle::current();
+    let handle = crate::cluster_mode::cluster_rpc_handle();
     let completion = match supervise_cluster_handoff_worker(move || {
         let _permit = permit;
         let topology = if no_wait {

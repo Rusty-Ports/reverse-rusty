@@ -76,17 +76,18 @@ pub(crate) async fn cluster_put_doc(
             return ApiError::response(StatusCode::BAD_REQUEST, error_type, msg).into_response();
         }
     };
-    let result = {
-        let _w = state.write_serial.lock();
-        let cluster = state.cluster.read();
-        if params.create_only() {
+    let create_only = params.create_only();
+    let (query, version) = (body.query.clone(), body.version);
+    let result = super::super::run_cluster_write(&state, move |cluster| {
+        if create_only {
             cluster
-                .create_query_with_tags(id, &body.query, body.version, &tags)
+                .create_query_with_tags(id, &query, version, &tags)
                 .map(|outcome| (0, outcome))
         } else {
-            cluster.upsert_query_with_tags(id, &body.query, body.version, &tags)
+            cluster.upsert_query_with_tags(id, &query, version, &tags)
         }
-    };
+    })
+    .await;
     let response = match result {
         Ok((removed, outcome)) => {
             let (status, result, error) = upsert_status(removed, &outcome);

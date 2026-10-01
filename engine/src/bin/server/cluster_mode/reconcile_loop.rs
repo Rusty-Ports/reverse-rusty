@@ -87,7 +87,7 @@ pub(crate) fn spawn_reconcile_loop(
             // (excludes a concurrent vocab rebuild / resize `&mut self`, exactly like the manual
             // `/_cluster/reassign` handler); each move's own fence + the engine reassign guard provide
             // the rest of the concurrency safety.
-            let handle = tokio::runtime::Handle::current();
+            let handle = crate::cluster_mode::cluster_rpc_handle();
             let st = Arc::clone(&state);
             let worker_admission = Arc::clone(&admission);
             let result = tokio::task::spawn_blocking(move || {
@@ -119,7 +119,7 @@ pub(crate) fn spawn_reconcile_loop(
                     // failure was never retried until an unrelated commit bumped the epoch).
                     let mut fully_done = report.is_converged();
                     if gc_orphans && report.is_converged() {
-                        let handle = tokio::runtime::Handle::current();
+                        let handle = crate::cluster_mode::cluster_rpc_handle();
                         let st = Arc::clone(&state);
                         let worker_admission = Arc::clone(&admission);
                         match tokio::task::spawn_blocking(move || {

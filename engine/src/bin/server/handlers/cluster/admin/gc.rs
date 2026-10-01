@@ -247,7 +247,7 @@ pub(crate) async fn cluster_gc(
     let _cancel_queued_on_drop = CancelQueuedClusterGc(Arc::clone(&gate));
     let worker_gate = Arc::clone(&gate);
     let (started_sender, mut started_receiver) = tokio::sync::oneshot::channel();
-    let handle = tokio::runtime::Handle::current();
+    let handle = crate::cluster_mode::cluster_rpc_handle();
     let completion = match supervise_cluster_gc_worker(move || {
         let _permit = permit;
         let topology = if no_wait {
