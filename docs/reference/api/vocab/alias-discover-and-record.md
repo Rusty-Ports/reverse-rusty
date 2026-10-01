@@ -11,7 +11,7 @@ is always zero:
   "took": 12,
   "took_ms": 12.34,
   "acknowledged": true,
-  "persisted": false,
+  "persisted": true,
   "proposed": 12,
   "new_candidates": 8,
   "rediscovered": 3,
@@ -22,9 +22,10 @@ is always zero:
 ```
 
 `acknowledged` means the live engine and published snapshot contain the registry update.
-`persisted: false` is deliberate: like other standalone runtime vocabulary changes, this endpoint
-does not write the operator's startup vocabulary file. Save the resulting `GET /_vocab` document to
-that file before restart if the candidates must survive.
+`persisted: true` means the updated registry is committed to the durable manifest and survives a
+restart (ADR-184); it is `false` only for an in-memory engine. If the manifest cannot record the
+change because persistence is degraded, the registry is left unchanged and the response is
+`503 persistence_unavailable`.
 
 The controls are the same bounded knobs documented for
 [alias discovery](alias-discover.md), but `queries` is never accepted:

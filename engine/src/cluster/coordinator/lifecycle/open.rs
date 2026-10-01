@@ -191,6 +191,11 @@ impl ClusterEngine {
     /// parity) and the ring re-derived deterministically, so placement is byte-identical
     /// to the original → zero false negatives across the restart. `config` supplies the
     /// per-shard engine config + fsync policy (defaults if `None`).
+    ///
+    /// The manifest is authoritative for the feature model (ADR-184): a persisted vocabulary
+    /// rebuilds the normalizer and `norm` is ignored; otherwise `norm` must match the recorded
+    /// fingerprint, or `open` returns [`ShardError::FeatureModelMismatch`]. See
+    /// [`open_seeded`](Self::open_seeded) for the server's startup-vocabulary policy.
     pub fn open(
         data_dir: impl Into<PathBuf>,
         norm: Normalizer,
@@ -358,6 +363,21 @@ impl ClusterEngine {
             copies.push(primary);
             copies.extend(recovered);
             shards.push(into_shard(copies)?);
+        }
+        // ADR-184: the committed base and the log tail replayed below were compiled under the
+        // recorded feature model. A restored vocabulary rebuilt `norm` above; a cluster built
+        // from a bare normalizer must be reopened with that normalizer, or it fails loud here.
+        // A pending compiler-semantics migration rebuilds every row from source under `norm`
+        // before serving, so it is exempt.
+        if let Some(recorded) = manifest.feature_model_fingerprint {
+            if recorded != norm.fingerprint() && !needs_compiler_semantics_migration {
+                return Err(ShardError::FeatureModelMismatch(
+                    crate::error::FeatureModelMismatch {
+                        recorded,
+                        supplied: norm.fingerprint(),
+                    },
+                ));
+            }
         }
 
         let log = FileClusterLog::open(

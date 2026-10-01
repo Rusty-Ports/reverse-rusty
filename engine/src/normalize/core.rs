@@ -73,6 +73,8 @@ pub struct Normalizer {
     /// demoted to a generic term instead of typed as a year. Empty by default.
     /// Lowercased at build, so entries compare directly against cleaned tokens.
     pub(super) number_context: Vec<String>,
+    /// Feature-model fingerprint (ADR-184), frozen at build — see [`Self::fingerprint`].
+    pub(super) fingerprint: u64,
 }
 
 impl std::fmt::Debug for Normalizer {
@@ -86,6 +88,15 @@ impl std::fmt::Debug for Normalizer {
 }
 
 impl Normalizer {
+    /// The feature-model fingerprint (ADR-184): a stable hash of every phrase, synonym,
+    /// punctuation rule, and number-context word that decides which features a text emits.
+    /// Two normalizers with equal fingerprints normalize every text identically, so the
+    /// manifests record it and recovery refuses a committed corpus under a different value.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
     /// Create a [`NormalizerBuilder`](super::NormalizerBuilder) for assembling a custom vocabulary.
     pub fn builder() -> super::NormalizerBuilder {
         super::NormalizerBuilder::new()

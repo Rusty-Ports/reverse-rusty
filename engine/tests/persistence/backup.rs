@@ -69,6 +69,54 @@ fn backup_then_open_matches_source() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// ADR-184 (RR-003): the documented single-node restore (`server --data-dir <copy>`, no
+/// `--vocab-file`) of an engine carrying a runtime alias gives identical matches — the
+/// vocabulary travels inside the copied manifest, including for the WAL tail.
+#[test]
+fn backup_of_a_vocab_engine_restores_without_the_vocab_file() {
+    let root = test_dir("backup_vocab_engine");
+    let src = root.join("data");
+    let backup = root.join("backup");
+    std::fs::create_dir_all(&src).unwrap();
+
+    let mut alias = reverse_rusty::vocab::Vocab::new();
+    alias
+        .import_solr_aliases(
+            "ny => new york",
+            &make_norm(),
+            &reverse_rusty::dict::Dict::new(),
+        )
+        .expect("alias fixture");
+    let mut engine = Engine::open(make_norm(), cfg(&src)).expect("fresh durable engine");
+    engine.build_from_queries(&[(1, "new york inventory".into())]);
+    engine.set_vocab(alias).expect("runtime alias");
+    engine.recompile_stale_segments();
+    engine.try_insert_live("ny catalog", 2, 1).unwrap(); // WAL tail
+
+    let titles = [
+        "new york inventory",
+        "ny inventory",
+        "new york catalog",
+        "ny catalog",
+    ];
+    let expected: Vec<Vec<u64>> = titles.iter().map(|t| match_ids(&engine, t)).collect();
+    assert!(
+        expected.iter().all(|ids| !ids.is_empty()),
+        "fixture matches"
+    );
+    engine.backup_to(&backup).expect("backup");
+
+    let restored = Engine::open(make_norm(), cfg(&backup)).expect("documented restore");
+    for (title, exp) in titles.iter().zip(&expected) {
+        assert_eq!(
+            &match_ids(&restored, title),
+            exp,
+            "restore diverged for {title:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The backup is a point-in-time snapshot: mutating the ORIGINAL after the backup
 /// must not change what the backup restores to.
 #[test]

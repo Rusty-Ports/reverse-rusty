@@ -22,6 +22,8 @@ fn engine_manifest_v3_round_trips_watermark_and_tombstones() {
         wal_seq_watermark: 42,
         segment_tombstones: vec![("seg_000001.seg".to_string(), vec![10, 20, 30])],
         source_file_name: "sources.dat".to_string(),
+        feature_model_fingerprint: None,
+        vocab_data: Vec::new(),
     };
     write_manifest(&manifest, &path).expect("write");
     let got = read_manifest(&path).expect("read");
@@ -55,6 +57,8 @@ fn engine_manifest_v6_fences_source_generation_segments() {
         wal_seq_watermark: 0,
         segment_tombstones: Vec::new(),
         source_file_name: "sources.dat".to_string(),
+        feature_model_fingerprint: None,
+        vocab_data: Vec::new(),
     };
     write_manifest(&manifest, &path).expect("write v6");
     let bytes = std::fs::read(&path).expect("read manifest");
@@ -88,6 +92,8 @@ fn engine_manifest_v7_selects_immutable_source_sidecar() {
         wal_seq_watermark: 11,
         segment_tombstones: Vec::new(),
         source_file_name: source_file_name.clone(),
+        feature_model_fingerprint: None,
+        vocab_data: Vec::new(),
     };
     write_manifest(&manifest, &path).expect("write v7");
     let bytes = std::fs::read(&path).expect("read manifest");
@@ -97,6 +103,11 @@ fn engine_manifest_v7_selects_immutable_source_sidecar() {
     );
     let got = read_manifest(&path).expect("read v7");
     assert_eq!(got.source_file_name, source_file_name);
+    assert_eq!(
+        got.feature_model_fingerprint, None,
+        "a pre-v8 manifest records no feature model"
+    );
+    assert!(got.vocab_data.is_empty());
 
     let mut unsafe_manifest = manifest;
     unsafe_manifest.source_file_name = "../outside.dat".to_string();
@@ -105,6 +116,78 @@ fn engine_manifest_v7_selects_immutable_source_sidecar() {
             .expect_err("source path traversal must fail")
             .kind(),
         io::ErrorKind::InvalidData
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-184: v8 records the feature model — fingerprint plus vocabulary blob — after the v7
+/// fields, even for a legacy `sources.dat` selection with no other fence; a vocabulary without
+/// a fingerprint is refused on write, and an unknown future version is refused on read.
+#[test]
+fn engine_manifest_v8_records_the_feature_model() {
+    let dir = std::env::temp_dir().join(format!("rr_manifest_v8_model_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("manifest.bin");
+    let manifest = Manifest {
+        segment_files: vec!["seg_000001.seg".to_string()],
+        class_d_fence: false,
+        hot_fence: false,
+        source_generation_fence: false,
+        hot_anchor_theta: 0,
+        next_seg_id: 2,
+        dict_data: vec![1, 2],
+        tag_dict_data: vec![3],
+        rejected_parse: 4,
+        rejected_class_d: 5,
+        wal_seq_watermark: 6,
+        segment_tombstones: vec![("seg_000001.seg".to_string(), vec![7, 8])],
+        source_file_name: "sources.dat".to_string(),
+        feature_model_fingerprint: Some(0x0123_4567_89AB_CDEF),
+        vocab_data: br#"{"synonyms":[]}"#.to_vec(),
+    };
+    write_manifest(&manifest, &path).expect("write v8");
+    let bytes = std::fs::read(&path).expect("read manifest");
+    assert_eq!(
+        read_u32_at(&bytes, 4).expect("version"),
+        MANIFEST_VERSION_FEATURE_MODEL
+    );
+    let got = read_manifest(&path).expect("read v8");
+    assert_eq!(
+        got.feature_model_fingerprint,
+        manifest.feature_model_fingerprint
+    );
+    assert_eq!(got.vocab_data, manifest.vocab_data);
+    assert_eq!(got.source_file_name, "sources.dat");
+    assert_eq!(got.segment_tombstones, manifest.segment_tombstones);
+    assert_eq!(got.wal_seq_watermark, 6);
+    assert_eq!(got.dict_data, manifest.dict_data);
+
+    let mut bare = manifest.clone();
+    bare.vocab_data.clear();
+    write_manifest(&bare, &path).expect("a bare-normalizer model has no vocabulary");
+    assert!(read_manifest(&path).expect("read").vocab_data.is_empty());
+
+    let mut unstamped = manifest.clone();
+    unstamped.feature_model_fingerprint = None;
+    assert_eq!(
+        write_manifest(&unstamped, &path)
+            .expect_err("a vocabulary without a fingerprint must fail")
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    let mut future = bytes;
+    future[4..8].copy_from_slice(&(MANIFEST_VERSION_FEATURE_MODEL + 1).to_le_bytes());
+    let body = future.len() - 4;
+    let crc = crc32(&future[..body]);
+    future[body..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, &future).expect("forge future version");
+    let Err(error) = read_manifest(&path) else {
+        panic!("a future manifest version must fail loud");
+    };
+    assert!(
+        error.to_string().contains("unsupported manifest version"),
+        "{error}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -178,12 +261,12 @@ fn manifest_segment_filename_length_overrun_fails_loud() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The v7 cluster manifest's nested per-shard columns + compiler semantics + the
+/// The v8 cluster manifest's nested per-shard columns + compiler semantics + the
 /// appended vocab and tag-dict blobs must round-trip byte-exactly (varied per-shard
 /// file counts, including an empty shard). The hand-rolled length-prefixed encoding is
 /// easy to get cursor-wrong, so pin it.
 #[test]
-fn cluster_manifest_v7_round_trips_registry_vocab_tagdict_and_generation() {
+fn cluster_manifest_v8_round_trips_registry_vocab_tagdict_and_generation() {
     let dir = std::env::temp_dir().join(format!("rr_cmanifest_rt_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("cluster_manifest.bin");
@@ -212,6 +295,7 @@ fn cluster_manifest_v7_round_trips_registry_vocab_tagdict_and_generation() {
         dict_data: vec![1, 2, 3, 4, 5],
         vocab_data: vec![9, 8, 7, 6], // a non-empty (opaque) vocab blob — the v3 field
         tag_dict_data: vec![11, 22, 33], // a non-empty (opaque) tag-dict blob — the v4 field
+        feature_model_fingerprint: Some(0xFEED),
     };
     write_cluster_manifest(&manifest, &path).expect("write");
     let got = read_cluster_manifest(&path).expect("read");
@@ -227,9 +311,10 @@ fn cluster_manifest_v7_round_trips_registry_vocab_tagdict_and_generation() {
     let raw = std::fs::read(&path).expect("read raw for version");
     assert_eq!(
         read_u32_at(&raw, 4).unwrap(),
-        7,
-        "ADR-118 durable clusters always write manifest v7"
+        8,
+        "ADR-184 durable clusters always write manifest v8"
     );
+    assert_eq!(got.feature_model_fingerprint, Some(0xFEED));
     assert_eq!(got.segment_registry, manifest.segment_registry);
     assert_eq!(got.next_seg_ids, manifest.next_seg_ids);
     assert_eq!(
@@ -277,6 +362,7 @@ fn cluster_manifest_rejects_mismatched_per_shard_columns() {
         dict_data: Vec::new(),
         vocab_data: Vec::new(),
         tag_dict_data: Vec::new(),
+        feature_model_fingerprint: Some(0xFEED),
     };
     write_cluster_manifest(&manifest, &path).expect("write valid manifest");
 
@@ -313,10 +399,10 @@ fn cluster_manifest_rejects_mismatched_per_shard_columns() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The ADR-109 migration fence: v7 round-trips ownership generation, v5 is
+/// The ADR-109 migration fence: v8 round-trips ownership generation, v5 is
 /// rejected with an actionable rebuild error, and a future version is refused.
 #[test]
-fn cluster_manifest_v7_ownership_fences_v5_and_future_versions() {
+fn cluster_manifest_v8_ownership_fences_v5_and_future_versions() {
     let dir = std::env::temp_dir().join(format!("rr_cmanifest_v5_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("cluster_manifest_v5.bin");
@@ -337,17 +423,18 @@ fn cluster_manifest_v7_ownership_fences_v5_and_future_versions() {
         dict_data: vec![1, 2, 3],
         vocab_data: Vec::new(),
         tag_dict_data: Vec::new(),
+        feature_model_fingerprint: Some(0xFEED),
     };
     write_cluster_manifest(&manifest, &path).expect("write");
 
     let raw = std::fs::read(&path).expect("read raw");
     assert_eq!(
         read_u32_at(&raw, 4).unwrap(),
-        7,
-        "compiler semantics metadata ⇒ cluster manifest v7"
+        8,
+        "feature-model metadata ⇒ cluster manifest v8"
     );
     let got = read_cluster_manifest(&path).expect("read");
-    assert!(got.broad_replicate_all, "v7 retains replicate-to-all");
+    assert!(got.broad_replicate_all, "v8 retains replicate-to-all");
     assert_eq!(
         got.placement_generation,
         crate::ownership::PlacementGeneration::INITIAL
@@ -369,7 +456,7 @@ fn cluster_manifest_v7_ownership_fences_v5_and_future_versions() {
         Ok(_) => panic!("legacy v5 cluster manifest must fail loud"),
     }
 
-    bytes[4..8].copy_from_slice(&8u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
     let crc = crc32(&bytes[..body]);
     bytes[body..].copy_from_slice(&crc.to_le_bytes());
     std::fs::write(&path, &bytes).expect("rewrite future");

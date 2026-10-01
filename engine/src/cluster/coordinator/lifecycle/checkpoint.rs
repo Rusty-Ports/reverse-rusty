@@ -88,6 +88,8 @@ impl ClusterEngine {
             // The frozen per-query tag space (ADR-049/055) — re-persisted so the filter resolves to
             // the same `TagId`s on the next reopen. Empty + finalized for an untagged cluster.
             tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
+            // ADR-184: the feature model of the committed base and log tail, checked on reopen.
+            feature_model_fingerprint: Some(self.norm.fingerprint()),
         };
         // An alias import retains the exact manifest it is attempting before
         // publication. `write_cluster_manifest` can report an error after the

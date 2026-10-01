@@ -27,15 +27,17 @@ fn stamp_cluster_segments_as_legacy(
     }
 }
 
-/// Convert this binary's v7 cluster manifest to the exact v6 prefix: v6 ends
+/// Convert this binary's v8 cluster manifest to the exact v6 prefix: v6 ends
 /// immediately after `placement_generation`; v7 appends compiler semantics +
-/// the source-file column before the trailing CRC.
+/// the source-file column, and v8 the 8-byte feature-model fingerprint (ADR-184),
+/// before the trailing CRC.
 fn downgrade_cluster_manifest_to_v6(
     path: &std::path::Path,
     manifest: &reverse_rusty::storage::ClusterManifest,
 ) {
-    let mut bytes = std::fs::read(path).expect("read v7 manifest");
-    let v7_suffix = 4
+    let mut bytes = std::fs::read(path).expect("read v8 manifest");
+    let v7_suffix = 8
+        + 4
         + 4
         + manifest
             .source_files
@@ -239,24 +241,17 @@ fn vocab_file_activates_on_an_empty_durable_reopen() {
         cluster.checkpoint().expect("commit the bare manifest");
     }
     {
-        let file_vocab = vocab_with_multiword_alias();
-        let norm = file_vocab.to_normalizer().expect("file vocab → normalizer");
-        let mut cluster =
-            ClusterEngine::open(&dir, norm, Some(&cfg)).expect("reopen the bare manifest");
-        // Precondition pinned: a bare manifest restores no vocabulary (if a future change
-        // persists one here, this test stops exercising the activation path — fail loud).
-        assert!(
-            cluster.vocab().is_none(),
-            "precondition: a bare manifest must restore no vocabulary"
-        );
+        // ADR-184: the server reopens through `open_seeded`, which opens the bare manifest
+        // under the stock normalizer it records and activates the file because the corpus
+        // is empty (a `set_vocab` rebuild that persists it).
+        let (cluster, outcome) =
+            ClusterEngine::open_seeded(&dir, Some(vocab_with_multiword_alias()), Some(&cfg))
+                .expect("reopen the bare manifest with a vocab file");
         assert_eq!(
-            cluster.num_queries().unwrap(),
-            0,
-            "precondition: empty corpus"
+            outcome,
+            reverse_rusty::vocab::VocabSeedOutcome::SeedActivated,
+            "an empty bare manifest activates the file"
         );
-        cluster
-            .set_vocab(file_vocab)
-            .expect("activate the file vocab on the empty reopened cluster");
         cluster
             .ingest(&[(1, "ny".into())])
             .expect("ingest under the activated vocabulary");

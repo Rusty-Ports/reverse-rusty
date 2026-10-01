@@ -130,11 +130,14 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   remote shard servers support only the stock vocabulary (ADR-076). A
   **tagged** cluster is not refused (tags carry through by stored `TagId`, ADR-074), and a
   **multi-word alias activates** (P(T)-aware routing, ADR-076). At startup, `--vocab-file` on a fresh
-  in-process cluster fully activates (`build_with_vocab`); on an **empty** durable reopen whose
-  manifest carries no vocabulary it activates through the rebuild funnel (a **populated** reopen
-  keeps the committed state authoritative and warns — apply explicitly via `PUT /_vocab`); a
-  REMOTE assembly refuses any `--vocab-file` at startup (shard servers run the stock normalizer, so
-  even normalizer-level rules would silently diverge the feature space).
+  in-process cluster fully activates (`build_with_vocab`). A durable reopen keeps the manifest's
+  feature model authoritative (ADR-184): a persisted vocabulary is restored and a differing file
+  only warns; a manifest without a vocabulary reopens under the stock normalizer its queries were
+  compiled with, activating the file through the rebuild funnel only when the cluster is **empty**
+  (a **populated** reopen warns that the file was not applied — apply it via `PUT /_vocab`). A
+  normalizer whose fingerprint differs from the manifest's refuses to open. A REMOTE assembly
+  refuses any `--vocab-file` at startup (shard servers run the stock normalizer, so even
+  normalizer-level rules would silently diverge the feature space).
 
 Cluster-only routes are cataloged by responsibility:
 
