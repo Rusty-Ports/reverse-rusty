@@ -75,7 +75,10 @@ model, and recovery serves exactly that model or refuses.
    fresh store. A store that recorded a vocabulary keeps it and warns when the file differs. A store
    recorded without a vocabulary opens under the stock normalizer it was built with and activates
    the file only while it holds no queries; a populated store warns that the file was not applied.
-   A legacy single-node manifest trusts the file and warns.
+   A legacy single-node manifest trusts the file and warns. A legacy cluster manifest without a
+   vocabulary cannot be told apart from a library build with a custom bare normalizer: without a
+   file the stock normalizer is trusted with a warning, and a file whose normalizer is not the
+   stock one fails the open before anything is attached, since neither choice can be verified.
 7. **Strict vocabulary JSON.** Every nested entry type rejects unknown fields, and an optional
    top-level `format_version` accepts only `1` (absent means `1`; this binary never writes it).
 

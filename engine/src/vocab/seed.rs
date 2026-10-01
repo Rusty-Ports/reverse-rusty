@@ -22,7 +22,9 @@ pub enum VocabSeedOutcome {
     /// The store recorded no vocabulary but holds queries compiled under the stock
     /// normalizer: the seed was **not** applied, and the stock model is served.
     SeedNotApplied,
-    /// A pre-ADR-184 single-node manifest records no feature model: the seed (or the stock
-    /// normalizer) was trusted unverified, as before. The next commit records it.
+    /// A pre-ADR-184 manifest records no feature model — a single-node manifest, or a cluster
+    /// manifest without a vocabulary — so the model was trusted unverified, as before: the seed
+    /// (or the stock normalizer) for single-node, the stock normalizer for a cluster. The next
+    /// commit records it.
     LegacyUnverified,
 }

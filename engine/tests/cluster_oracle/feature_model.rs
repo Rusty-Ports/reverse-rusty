@@ -130,3 +130,50 @@ fn a_recorded_cluster_vocabulary_wins_over_a_different_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Strip the ADR-184 fingerprint from a v8 cluster manifest, leaving the v7 document an older
+/// binary wrote.
+fn downgrade_cluster_manifest_to_v7(dir: &std::path::Path) {
+    let path = dir.join("cluster_manifest.bin");
+    let mut bytes = std::fs::read(&path).expect("read v8 manifest");
+    let content = bytes.len() - 4 - 8;
+    bytes.truncate(content);
+    bytes[4..8].copy_from_slice(&7u32.to_le_bytes());
+    let crc = reverse_rusty::storage::crc32(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, bytes).expect("write v7 manifest");
+}
+
+/// Codex R2: a pre-ADR-184 cluster without a vocabulary may have been built from a custom bare
+/// normalizer, which its manifest cannot distinguish from the stock one. With a seed whose
+/// normalizer is not the stock one, neither choice can be verified, so the server path fails
+/// loud instead of guessing (guessing stock silently missed every `tee` query).
+#[test]
+fn a_legacy_bare_cluster_with_a_non_stock_seed_fails_loud() {
+    let dir = durable_dir("legacy-bare");
+    let tee = tee_vocab().to_normalizer().expect("synonym normalizer");
+    drop(ClusterEngine::build(tee, &cfg(&dir), &corpus()).expect("custom bare build"));
+    downgrade_cluster_manifest_to_v7(&dir);
+
+    match ClusterEngine::open_seeded(&dir, Some(tee_vocab()), Some(&cfg(&dir))) {
+        Err(ShardError::Config(message)) => assert!(message.contains("ADR-184"), "{message}"),
+        Err(other) => panic!("expected a loud configuration error, got {other}"),
+        Ok(_) => panic!("an unverifiable legacy model must not be guessed"),
+    }
+    // The library path still trusts the caller for a legacy manifest, and its first
+    // checkpoint records the model, after which the stock seed policy fails loud on it.
+    let cluster = ClusterEngine::open(
+        &dir,
+        tee_vocab().to_normalizer().expect("synonym normalizer"),
+        Some(&cfg(&dir)),
+    )
+    .expect("legacy reopen with the original normalizer");
+    assert!(cluster.percolate("black tee").expect("match").contains(&1));
+    cluster.checkpoint().expect("record the model");
+    drop(cluster);
+    assert!(matches!(
+        ClusterEngine::open_seeded(&dir, None, Some(&cfg(&dir))),
+        Err(ShardError::FeatureModelMismatch(_))
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -135,7 +135,9 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   only warns; a manifest without a vocabulary reopens under the stock normalizer its queries were
   compiled with, activating the file through the rebuild funnel only when the cluster is **empty**
   (a **populated** reopen warns that the file was not applied — apply it via `PUT /_vocab`). A
-  normalizer whose fingerprint differs from the manifest's refuses to open. A REMOTE assembly
+  normalizer whose fingerprint differs from the manifest's refuses to open, as does a pre-ADR-184
+  manifest without a vocabulary given a `--vocab-file` that changes normalization (its model
+  cannot be verified; restart without the file, then `PUT /_vocab`). A REMOTE assembly
   refuses any `--vocab-file` at startup (shard servers run the stock normalizer, so even
   normalizer-level rules would silently diverge the feature space).
 
