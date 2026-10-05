@@ -25,6 +25,7 @@ mod class_d;
 mod core;
 mod corpus;
 mod dedup;
+mod dedup_visibility;
 mod degenerate;
 mod equivalence;
 mod filtered;

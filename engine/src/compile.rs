@@ -56,6 +56,17 @@ pub enum CostClass {
     H,
 }
 
+impl CostClass {
+    /// Whether a query of this class is returned only to a read that asks for the
+    /// broad lane (`include_broad`). The always-visible classes are A, B and H.
+    ///
+    /// This is the one definition of the opt-in boundary: the read-side gate and
+    /// every dedup join use it, because a join must never move a query across it.
+    pub fn is_opt_in(self) -> bool {
+        matches!(self, CostClass::C | CostClass::D)
+    }
+}
+
 /// One semantic member of a positive any-of group.
 ///
 /// A member is an AND of `requirements`; each requirement is an OR of equivalent
