@@ -243,6 +243,17 @@ impl Engine {
         }
     }
 
+    /// Whether a base segment of this durable engine exists only in memory: a flush whose
+    /// segment write failed fell back to it (ADR-051). No manifest lists such a segment, so
+    /// its rows are durable only as WAL frames.
+    pub(in crate::segment) fn has_unpersisted_base_segment(&self) -> bool {
+        self.config.data_dir.is_some()
+            && self
+                .segments
+                .iter()
+                .any(|segment| matches!(segment.as_ref(), BaseSegment::Memory(_)))
+    }
+
     /// Reset the WAL after a successful flush + manifest write. Only call when
     /// both the checkpoint and manifest have been persisted, so no data is lost.
     pub(in crate::segment) fn reset_wal_if_safe(&mut self) {
@@ -540,6 +551,7 @@ impl Engine {
 }
 
 mod feature_model;
+mod seal;
 mod sources;
 
 #[cfg(test)]

@@ -9,6 +9,21 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-05 — The top-64 mask is assigned once
+
+- Fix silent false negatives after a second initial build: `Dict::finalize_mask` re-ranked the
+  top-64 mask on every call, and the initial-build path called it on engines that already held
+  queries. Stored rows keep their required top-64 features as mask bits, so after a re-rank they
+  stopped matching in both `include_broad` modes. The mask is now assigned once
+  ([ADR-188](decisions/adr-188-mask-assigned-once.md)).
+- The single-node server no longer applies `--load-file` to a populated data directory. It did so
+  on every restart, which re-ranked the mask and stored every query in the file again.
+- Fix a query disappearing from default reads after a restart: a live insert made before the
+  first mask assignment was re-planned by WAL replay under the finalized mask. The memtable is now
+  sealed before the first assignment.
+- A store that was restarted with `--load-file` before this fix may hold rows with stale mask
+  bits. They are repaired by the next rebuild from source (a vocabulary change, or a
+  compiler-semantics migration on open).
 ## 2026-10-05 — Memtable deletes survive a commit and a restart
 
 - Fix an acknowledged delete coming back after a restart: deleting a query that was still in the
