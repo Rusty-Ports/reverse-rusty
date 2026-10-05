@@ -39,6 +39,11 @@ impl Engine {
             // old segments intact and fail closed.
             return 0;
         };
+        // A rebuild re-plans every query against today's dict, and a plan can come out
+        // opt-in for a query that default reads return now: its anchor became top-64 after
+        // it was compiled, or the new vocabulary moved its anchor into an any-of group
+        // with a top-64 member. Such a query keeps an always-probed cover (ADR-187).
+        let opt_in_only = self.opt_in_only_logical_ids();
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut lc = String::new();
@@ -58,6 +63,7 @@ impl Engine {
             // under the new vocab is retained in the always-candidate lane.
             let knobs = crate::segment::CompileKnobs {
                 accept_class_d: true,
+                keep_visible: !opt_in_only.contains(logical),
                 ..self.config.compile_knobs()
             };
             let Some(added) = seg.add_compiled_ranked_placed_with_source_generation(

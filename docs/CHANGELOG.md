@@ -9,6 +9,22 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-05 — Any-of cover and visibility-preserving rebuilds
+
+- Fix default-read false negatives for queries shaped `<top-64 term> (<variants>)`: a query whose
+  only required feature is top-64 now anchors on an any-of group that has no top-64 member, instead
+  of going to the opt-in broad lane. Activating an alias on a rare term (`acme mouse` with
+  `acme ≡ acm`) therefore no longer removes the query from `include_broad=false` reads
+  ([ADR-187](decisions/adr-187-anyof-cover-and-visible-rebuilds.md)).
+- Choose the any-of cover from the frozen top-64 mask, not from frequency order, so two compiles of
+  one query agree on visibility.
+- Keep a default-visible query visible through every single-node rebuild (vocabulary change,
+  compiler-semantics migration), including a query whose only term turned top-64 after it was
+  compiled and an alias that leaves only top-64 anchors.
+- **Upgrade:** compiler semantics version 7. Single-node stores rebuild from retained source on
+  open; cluster data follows the existing compiler-semantics procedure (rebuild through the
+  coordinator, or reseed remote shard volumes).
+
 ## 2026-10-05 — Visibility-partitioned dedup
 
 - Fix a default-read false negative on the single-node engine: a query with no required feature

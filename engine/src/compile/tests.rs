@@ -3,6 +3,8 @@
 //! `#[cfg(test)]` gate and pull the module surface in via `use super::super::*`.
 
 #[cfg(test)]
+mod anyof_cover;
+#[cfg(test)]
 mod class_d_universal_cover;
 #[cfg(test)]
 mod equiv_tests;

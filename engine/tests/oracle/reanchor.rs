@@ -213,6 +213,7 @@ fn reanchoring_is_a_noop_under_a_frozen_dict() {
         accept_class_d: false,
         hot_anchor_threshold: 0,
         dedup_bodies: false,
+        keep_visible: false,
     };
     for (i, ex) in exes.iter().enumerate() {
         let seg = if i < half { &mut a } else { &mut b };

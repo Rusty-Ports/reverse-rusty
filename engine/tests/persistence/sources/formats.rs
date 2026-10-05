@@ -178,6 +178,7 @@ fn legacy_source_recovers_live_version_and_dense_tags() {
                 accept_class_d: true,
                 hot_anchor_threshold: 0,
                 dedup_bodies: true,
+                keep_visible: false,
             },
         )
         .expect("legacy segment row");

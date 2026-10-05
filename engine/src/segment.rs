@@ -160,6 +160,11 @@ pub struct CompileKnobs {
     /// Share identical canonical bodies within the segment (dedup Stage A):
     /// duplicates skip posting insertion and ride their leader's evaluation.
     pub dedup_bodies: bool,
+    /// This row is being REBUILT from a query that default reads returned, so it
+    /// must stay on an always-probed lane even if its fresh plan is the opt-in
+    /// broad lane (ADR-187). False for every new write: a fresh query takes the
+    /// lane its plan gives it.
+    pub keep_visible: bool,
 }
 
 /// What [`Segment::add_compiled`] accepted — the per-compile telemetry the
