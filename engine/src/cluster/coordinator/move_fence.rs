@@ -93,13 +93,13 @@ impl MoveFence {
     /// `deadline`. `None` when the deadline passed first.
     fn quiescent_stamp(&self, deadline: Option<Instant>) -> Option<u64> {
         let mut stamp = self.seq.load(Ordering::SeqCst);
-        if stamp % 2 == 0 {
+        if stamp.is_multiple_of(2) {
             return Some(stamp);
         }
         let mut guard = lock(&self.idle_lock);
         loop {
             stamp = self.seq.load(Ordering::SeqCst);
-            if stamp % 2 == 0 {
+            if stamp.is_multiple_of(2) {
                 return Some(stamp);
             }
             guard = match deadline {

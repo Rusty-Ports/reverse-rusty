@@ -369,8 +369,7 @@ fn a_deadline_bounded_read_is_not_held_past_its_deadline_by_a_move() {
             out
         });
         let mut timed = None;
-        while let Ok(Event::Step(_, call)) = stepper.events.recv_timeout(Duration::from_secs(20))
-        {
+        while let Ok(Event::Step(_, call)) = stepper.events.recv_timeout(Duration::from_secs(20)) {
             // The first step inside the fence: the conditional replace declined before it.
             let fenced = matches!(
                 call,
@@ -398,7 +397,10 @@ fn a_deadline_bounded_read_is_not_held_past_its_deadline_by_a_move() {
     });
     result.expect("moving upsert accepted");
     let (deadline_exceeded, waited) = timed.expect("the move reached a fenced step");
-    assert!(deadline_exceeded, "the read must fail with its own deadline");
+    assert!(
+        deadline_exceeded,
+        "the read must fail with its own deadline"
+    );
     assert!(
         waited < Duration::from_secs(5),
         "the read returned at its deadline, not when the move ended: {waited:?}"

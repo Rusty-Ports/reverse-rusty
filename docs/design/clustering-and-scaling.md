@@ -287,8 +287,8 @@ query exactly once: never neither version, never both.
   none is taken.
 - An upsert that moves the query to other shards or another lane rewrites several shards inside an
   optimistic move fence, a sequence counter. A read samples it, fans out, and repeats if a move
-  started or finished meanwhile; a read that begins during a move waits for it. Readers pay two
-  atomic loads and never block a writer.
+  started or finished meanwhile; a read that begins during a move waits for it, up to its own
+  deadline. Readers pay two atomic loads and never block a writer.
 - A partial failure is the documented exception (§5.1): until `resync`, a shard whose replace
   failed serves the old version, and a failed tombstone can leave a stale copy that exact ranked
   reads refuse as a duplicate id.

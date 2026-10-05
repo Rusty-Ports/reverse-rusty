@@ -40,7 +40,9 @@ and for some mode changes every fixed order of per-shard steps leaves a title wi
    fence is a sequence counter: the mover makes it odd before its first shard call and even after
    its last; a reader samples an even value, fans out, and re-checks, repeating the read when the
    value changed. Readers pay two atomic loads and never block a writer; a read that overlaps
-   four moves excludes movers for one pass rather than spin. Inside the fence the new placement
+   four moves excludes movers for one pass rather than spin. A read that starts during a move
+   waits for it, but only until its own deadline: a bounded top-K read then fails with its
+   deadline error rather than being held by the mover. Inside the fence the new placement
    is written before stale copies are tombstoned, so an unfenced point read (`GET /_doc`) always
    finds a version.
 4. **Strays are swept.** When a repair is queued for the id or the directory is not converged, a
@@ -74,7 +76,8 @@ and for some mode changes every fixed order of per-shard steps leaves a title wi
 - An unfenced read during an upsert returns the query exactly once: never neither, never both.
   Ordinary reads still take no lock and never wait on a placement-preserving write.
 - A read that overlaps a moving upsert is repeated, and one that starts during a move waits for
-  it. On remote shards a move spans several RPCs, so those reads wait for them.
+  it, up to its deadline if it has one. On remote shards a move spans several RPCs, so reads
+  without a deadline wait for them.
 - An upsert of an existing id costs one conditional RPC per placement shard instead of one delete
   per shard plus the inserts; a move adds its rewrite.
 - **Upgrade order: shard servers before the coordinator.** A new coordinator refuses an old shard
