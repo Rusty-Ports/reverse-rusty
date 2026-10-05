@@ -42,13 +42,13 @@ finalize. Nothing enforced it on the single-node engine.
    write or the commit fails, the engine is exactly as it was, the batch fails with the mask
    unassigned, and a retry seals again. It deliberately does not reuse `flush`, which hands the
    memtable over before it knows whether the write succeeds.
-4. **The log is not retired over rows no manifest holds.** A flush whose segment write fails
-   leaves its rows in an in-memory segment (ADR-051), and they are durable only as WAL frames.
-   Nothing remembered that: the next successful flush wrote a flush checkpoint and reset the WAL,
-   and those rows were gone after a restart. `checkpoint_wal` and `reset_wal_if_safe`, the only
-   two places a frame is retired, now refuse while such a segment exists, so a restart replays
-   the rows. For the same reason the first batch is refused while one exists: those rows were
-   compiled without a mask too, and the seal cannot make them durable.
+4. **The first batch is refused while a failed flush's rows exist only in memory.** A flush
+   whose segment write fails leaves its rows in an in-memory segment (ADR-051), durable only as
+   WAL frames. Before the mask exists those rows are in the same position as memtable rows, but
+   the seal cannot make them durable, and it must not retire their frames. So the batch fails
+   with the mask unassigned; a restart replays the rows into the memtable, where the next batch
+   seals them. (What a later *successful* flush does to such rows is a separate, older defect in
+   `flush` itself and is not changed here.)
 5. **`--load-file` seeds an empty engine.** The single-node server skips the file, with a warning,
    when the reopened data directory already holds queries (`preload_queries`), as cluster mode
    does.
@@ -66,9 +66,6 @@ finalize. Nothing enforced it on the single-node engine.
 - A stored query's mask bits and class are stable for the life of the store. Live compile and WAL
   replay agree on the mask for every row.
 - The first bulk ingest on a durable engine with live rows pays one flush.
-- After a failed flush the WAL keeps growing until a restart recovers the stranded rows; the
-  engine already reports `persistence_healthy = false` in that state. Persisting such a segment
-  again without a restart is not done here.
 - Restarting with `--load-file` no longer changes the store. To load a changed file into a
   populated store, send it through `_bulk`.
 - **A store that already went through a re-rank is not repaired by this change**, and cannot be
@@ -89,8 +86,6 @@ finalize. Nothing enforced it on the single-node engine.
   the segment write or at the commit changes nothing, a retry succeeds, and no acknowledged
   query is lost by a later flush; the first batch is refused while a failed flush has
   unpersisted rows, and a restart recovers them; an in-memory engine is not sealed.
-- `tests/persistence/durability.rs`: a flush that succeeds after a failed one leaves the
-  failed flush's rows recoverable.
 - `server::preload::tests`: two restarts with the same load file leave the query count and a
   match result unchanged.
 
