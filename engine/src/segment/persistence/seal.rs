@@ -23,19 +23,23 @@ impl Engine {
     ///
     /// Rows a failed `flush` already left in such an in-memory segment are in the same
     /// position as memtable rows: compiled without a mask, durable only as WAL text. The
-    /// mask is not assigned while one exists; a restart replays those rows into the
-    /// memtable, where the next batch seals them.
+    /// commit below writes that segment to disk too (ADR-190), or fails, so the mask is
+    /// never assigned while one exists.
     pub(in crate::segment) fn seal_before_first_mask(&mut self) -> std::io::Result<()> {
         if self.dict.is_finalized() || self.wal.is_none() || !self.owns_manifest {
             return Ok(());
         }
-        if self.has_unpersisted_base_segment() {
-            return Err(std::io::Error::other(
-                "an earlier flush left queries that are not on disk yet; the first batch \
-                 cannot be ingested until a restart recovers them from the WAL",
-            ));
-        }
         if self.memtable.is_empty() {
+            if self.has_unpersisted_base_segment() {
+                if !self.commit_sources_and_manifest() {
+                    return Err(std::io::Error::other(
+                        "an earlier flush left queries that are not on disk yet and they \
+                         still cannot be written; the batch was not ingested",
+                    ));
+                }
+                self.checkpoint_wal();
+                self.reset_wal_if_safe();
+            }
             return Ok(());
         }
         let started = std::time::Instant::now();

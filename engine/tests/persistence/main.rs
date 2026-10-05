@@ -11,6 +11,8 @@ mod harness;
 mod backup;
 mod compaction;
 mod durability;
+#[cfg(unix)]
+mod fallback_commit;
 mod mask_stability;
 mod round_trip;
 mod sources;

@@ -92,3 +92,8 @@ finalize. Nothing enforced it on the single-node engine.
 **See also:** ADR-017 (bulk ingest bypasses the WAL), ADR-051 (fail-closed flush), ADR-056 and
 ADR-187 (a stored query never leaves default reads on its own), ADR-184 (the manifest records the
 feature model).
+
+**Later outcome — 2026-10-05 ([ADR-190](adr-190-no-commit-around-in-memory-segments.md)):**
+decision 4 no longer refuses the batch outright. A commit now writes a segment that a failed flush
+left in memory to disk, so the seal commits it before the mask is assigned and the batch
+proceeds. The batch is still refused while that segment cannot be written.

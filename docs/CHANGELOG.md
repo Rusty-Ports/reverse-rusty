@@ -9,6 +9,19 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-05 — No commit around an in-memory segment
+
+- Fix loss of acknowledged writes on the single-node engine after a transient storage error: a
+  flush that could not write its segment kept the rows in memory and in the WAL, but the next
+  successful flush, bulk batch or compaction committed a manifest without them and reset the WAL,
+  so a restart came back without those rows. After a failed vocabulary rebuild the same sequence
+  lost every query in the store except the ones written since. Every commit now writes such a
+  segment to disk first, or does not happen
+  ([ADR-190](decisions/adr-190-no-commit-around-in-memory-segments.md)).
+- An explicit flush commits a segment left in memory even when there is nothing new to seal.
+- The first bulk batch on an engine with such a segment is no longer refused once the segment can
+  be written. `persistence_healthy` still stays false until the engine is reopened.
+
 ## 2026-10-05 — The top-64 mask is assigned once
 
 - Fix silent false negatives after a second initial build: `Dict::finalize_mask` re-ranked the

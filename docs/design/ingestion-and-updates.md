@@ -226,6 +226,10 @@ but a general multi-generation feature model with blue/green serving is still pr
   maintenance boundary across cluster shard positions and publishes the resulting snapshots
   (ADR-137). It does not replace the cluster checkpoint: `POST /_checkpoint` remains the operation
   that reseals tombstones, commits the coordinator manifest, and advances cluster mutation tails.
+- **A failed flush:** when the segment file cannot be written, the rows are served from an
+  in-memory segment and stay in the WAL (ADR-051). Every later standalone commit writes that
+  segment to disk before it commits, or does not commit (ADR-190), so the WAL is never reset
+  past rows that no manifest lists. An explicit flush retries it even with an empty memtable.
 - **Primary-authoritative replication:** `ReplicatedShard` applies to the primary, then fans the
   mutation to replicas. Replica failures mark those copies out of sync but do not turn the successful
   primary write into a quorum failure. There is no optional quorum-ack read-your-writes mode.
