@@ -74,7 +74,7 @@ services:
       - ${RR_CERT_DIR}:/certs:ro
       - ${RR_CORPUS_DIR}:/corpus:ro
     ports:
-      - "127.0.0.1:19200:9200"
+      - "127.0.0.1:${RR_HARNESS_PORT:-19200}:9200"
     depends_on:
       shard0: { condition: service_healthy }
       shard1: { condition: service_healthy }
