@@ -139,3 +139,18 @@ complete CRC failures and unknown or malformed payloads now refuse recovery with
 Current readers fence unsupported WAL headers and upgrade known legacy headers before append; only
 incomplete final writes or zero padding are repaired. Older binaries that ignored the header still
 require the documented backup/clean-flush rollback precautions.
+
+## Later outcome — 2026-10-05
+
+The rule above skipped a whole `DeleteByLogical` frame at or below the watermark, on the grounds
+that the commit covering the frame had baked its tombstones. That holds for base-segment copies
+only. A commit that does not seal the memtable (a compaction, a bulk ingest) still advances the
+watermark, and a memtable row exists only as an earlier WAL frame, which recovery replays. The
+delete was skipped, the insert was not, and an acknowledged delete came back after a restart.
+
+Replay now splits the frame by state domain, as ADR-067 already does for an upsert. The
+**segment** half follows the watermark (baked below it, and a same-id bulk ingest after the frame
+must survive). The **memtable** half always replays, because the memtable is rebuilt from the WAL
+tail alone. The source text is dropped with the last live copy, so a newer segment copy of the
+same id keeps its own.
+
