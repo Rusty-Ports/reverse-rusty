@@ -16,6 +16,7 @@ The multi-shard correctness core, remote shard seam, shared feature space, and d
 | [176](../adr-176-remote-logical-id-directory.md) | Remote logical-ID directory | Reconstructs create-only admission from bounded shard snapshots while keeping convergence evidence separate. | Accepted |
 | [177](../adr-177-per-id-cluster-write-locks.md) | Per-ID cluster write locks | Removes stripe collisions while bounding lock storage to active callers and preserving log/apply and bulk exclusion. | Accepted |
 | [183](../adr-183-cluster-rpc-runtime-isolation.md) | Cluster RPC runtime isolation | Drives cluster RPCs on a dedicated runtime and moves write-handler lock waits to blocking threads, so concurrent writes can no longer deadlock a remote coordinator. | Accepted |
+| [185](../adr-185-reader-atomic-cluster-upsert.md) | Reader-atomic cluster upsert | Replaces a query atomically on each shard and fences only placement-moving upserts, so an unfenced reader never sees neither version or both. | Accepted |
 
 ---
 

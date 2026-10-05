@@ -161,6 +161,14 @@ impl Shard for FailingShard {
     ) -> Result<Option<u32>, ShardError> {
         self.write_err().map(|()| Some(0))
     }
+    fn replace_placed(
+        &self,
+        _write: &crate::cluster::shard::PlacedWrite<'_>,
+        _mode: crate::cluster::shard::ReplaceMode,
+    ) -> Result<crate::cluster::shard::ReplaceStatus, ShardError> {
+        self.write_err()
+            .map(|()| crate::cluster::shard::ReplaceStatus::Inserted)
+    }
     fn delete_by_logical_id(&self, _l: u64) -> Result<usize, ShardError> {
         self.write_err().map(|()| 0)
     }

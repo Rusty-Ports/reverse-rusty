@@ -40,6 +40,42 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - A store that was restarted with `--load-file` before this fix may hold rows with stale mask
   bits. They are repaired by the next rebuild from source (a vocabulary change, or a
   compiler-semantics migration on open).
+## 2026-10-05 — Memtable deletes survive a commit and a restart
+
+- Fix an acknowledged delete coming back after a restart: deleting a query that was still in the
+  memtable, followed by a compaction or a bulk ingest and then a restart, replayed the insert from
+  the WAL but skipped the delete, because the commit had advanced the WAL watermark past it without
+  sealing the memtable. Recovery now always applies a delete to memtable copies and leaves only the
+  segment copies to the watermark rule (ADR-066, later outcome).
+## 2026-10-05 — Reader-atomic cluster upsert
+
+- Fix silent false negatives during cluster upserts: `PUT /_doc` and every `_bulk` index item
+  tombstoned the query on every shard and then inserted it, so a title matched in between saw
+  neither version. A shard now replaces a query in one step, and an upsert that keeps its placement
+  (a re-put, a tag or version edit, a bulk re-index) needs no reader coordination
+  ([ADR-185](decisions/adr-185-reader-atomic-cluster-upsert.md)).
+- Fence upserts that move a query between shards or lanes with an optimistic sequence counter:
+  overlapping reads repeat instead of seeing the move half-done, and ordinary reads still take no
+  lock.
+- Install before removing, also under failure: when a shard write of an upsert fails, the old
+  copies on other shards keep serving and are queued for removal with the repair, which installs
+  the new version first. A queued repair re-drives as the same atomic replace, and the next
+  upsert sweeps a stale copy a failed tombstone left behind.
+- Wire: add the `ReplaceExtracted` RPC, an `upsert` translog entry for peer recovery, and an
+  `atomic_replace` attestation on every handshake. Upgrade shard servers before the coordinator.
+
+## 2026-10-05 — Visibility-partitioned dedup
+
+- Fix a default-read false negative on the single-node engine: a query with no required feature
+  could be hidden from `include_broad=false` reads when it shared a dedup group with an identical
+  query that had planned class C (after frequency drift, or because one copy was compiled before
+  the first mask finalize). A dedup member now joins only a leader on its own side of the opt-in
+  boundary, at the memtable write and in both compaction merges
+  ([ADR-186](decisions/adr-186-visibility-partitioned-dedup.md)). The reverse case, a class-C query
+  exposed on default reads by a visible leader, is closed by the same rule.
+- Rows hidden before this change stay class C on disk. With `compaction_reanchor = true` they
+  return to the main lane at the next merge when their body currently plans visible; otherwise
+  recompile from retained source. `include_broad=true` reads and cluster shards were not affected.
 
 ## 2026-10-05 — Multi-machine harness: converge handoff-window repairs
 

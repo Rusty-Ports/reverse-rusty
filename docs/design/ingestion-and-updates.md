@@ -92,6 +92,11 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   checkpoints similarly select per-shard segments in the cluster manifest, with coordinator and
   per-shard log tails for post-checkpoint recovery. Logs may be truncated after commit, so segments
   and retained source are part of the authoritative corpus.
+- **Two state domains on replay.** Base segments are manifest-truth: a WAL frame at or below the
+  manifest's watermark does not touch them again. The memtable is WAL-truth: it is rebuilt from the
+  replayed frames alone, so every frame's memtable effect is applied whatever the watermark, because
+  a compaction or bulk commit advances the watermark without sealing the memtable (ADR-066,
+  ADR-067).
 - **Log reopen validates before append** ([ADR-182](../decisions/adr-182-validated-log-recovery.md)).
   WAL, coordinator/translog, and Raft readers reject complete CRC failures and incompatible payloads.
   Only an incomplete final write or zero padding is removable; open truncates that suffix and syncs

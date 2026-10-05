@@ -49,6 +49,11 @@ service ShardService {
   // source store and checkpoint sidecar once, when the client closes the stream.
   rpc StageIngest (stream IngestRequest) returns (IngestReply);
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
+  // ADR-185: atomically replace this slot's copy of one logical id — tombstone the prior
+  // copies and insert the new version as one visibility step (one engine critical section,
+  // one translog frame, one published snapshot). A pre-ADR-185 peer fails UNIMPLEMENTED; it
+  // is refused at connect because it does not attest `atomic_replace`.
+  rpc ReplaceExtracted (ReplaceRequest) returns (ReplaceReply);
   rpc Delete          (DeleteRequest) returns (DeleteReply);
   rpc Flush           (FlushRequest)  returns (FlushReply);
   // Durable slot commit: seal segments and tombstones, publish shard.ckpt, then trim only the
@@ -515,6 +520,27 @@ message InsertReply {
   uint32 local_id = 2;
 }
 
+// ADR-185. `only_if_same_placement`: replace only when every live copy in the slot already
+// carries `item.placement`; otherwise change nothing and report ABSENT / PLACEMENT_MISMATCH.
+message ReplaceRequest {
+  AddItem item = 1;
+  uint32 shard_id = 2;
+  bool only_if_same_placement = 3;
+}
+enum ReplaceStatus {
+  // Never sent by a conforming server; a client fails loud on it.
+  REPLACE_STATUS_UNSPECIFIED = 0;
+  REPLACE_STATUS_REPLACED = 1;           // `removed` prior copies tombstoned, new version inserted
+  REPLACE_STATUS_INSERTED = 2;           // no prior copy; new version inserted
+  REPLACE_STATUS_ABSENT = 3;             // conditional only: no live copy; unchanged
+  REPLACE_STATUS_PLACEMENT_MISMATCH = 4; // conditional only: held under another placement; unchanged
+  REPLACE_STATUS_REJECTED = 5;           // new version rejected (class D); prior copies untouched
+}
+message ReplaceReply {
+  ReplaceStatus status = 1;
+  uint64 removed = 2;
+}
+
 message DeleteRequest {
   uint64 logical_id = 1;
   uint32 shard_id = 2; // ADR-093
@@ -576,6 +602,10 @@ message DictFingerprintReply {
   // ADR-180: non-zero when a remote resize retired this node. Connecting coordinators refuse it;
   // only startup resize resolution reads it, to lift a retirement whose resize never committed.
   uint64 retired_operation = 8;
+  // ADR-185: the server implements `ReplaceExtracted` and ships whole-Upsert translog frames.
+  // A pre-ADR-185 server omits this (proto3 false) and is refused at connect, because a
+  // cluster upsert against it could only fall back to the reader-visible delete-then-insert.
+  bool atomic_replace = 9;
 }
 
 // The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
@@ -612,6 +642,9 @@ message AdoptDictReply {
   // Attests that this server enforced the caller's exclusive coordinator lease.
   uint64 coordinator_id = 6;
   uint32 compiler_semantics_version = 7;
+  // ADR-185 capability attestation — see `DictFingerprintReply.atomic_replace`. Carried on every
+  // handshake reply, because a coordinator normally connects through this one and never probes.
+  bool atomic_replace = 8;
 }
 
 // Create a co-located slot on a node that has ALREADY adopted the dict (ADR-093 Stage 2). No dict
@@ -635,6 +668,8 @@ message AddShardReply {
   uint32 num_shards = 5;
   uint64 coordinator_id = 6;
   uint32 compiler_semantics_version = 7;
+  // ADR-185 capability attestation, as on `AdoptDictReply`.
+  bool atomic_replace = 8;
 }
 
 // ---- peer recovery (ADR-035/036) ----
@@ -713,12 +748,15 @@ message FetchTranslogRequest {
 }
 // One un-sealed translog entry: its position + the logical mutation. Mirrors engine
 // `clog::ClusterMutation` 1:1 — the Add arm REUSES `AddItem {logical_id, dsl, version}` (the
-// DSL-on-wire form the data node re-compiles read-only), and Remove carries just the logical id.
+// DSL-on-wire form the data node re-compiles read-only), Remove carries just the logical id,
+// and Upsert (ADR-185: one atomic per-shard replace) reuses `AddItem` too. A pre-ADR-185
+// receiver decodes an Upsert entry as an unset oneof and fails its recovery loud.
 message TranslogEntry {
   uint64 seqno = 1;
   oneof op {
     AddItem add = 2;
     uint64 remove_logical = 3;
+    AddItem upsert = 4;
   }
 }
 

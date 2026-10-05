@@ -20,6 +20,38 @@ pub struct ReanchorStats {
     pub hot_demoted: usize,
 }
 
+/// The re-anchoring merge's visibility guard (ADR-056, extended by ADR-105): whether a
+/// query stored as `old` must keep its cover instead of taking the re-derived `plan`
+/// class, because the move would change which reads return it.
+///
+/// - **Always-visible → opt-in** ({A,B,H}→C): the broad lane is probed only with
+///   `include_broad`, so the move would hide the query from the default read — a false
+///   negative. Reachable: a required anchor compiled before the first mask finalize can
+///   be top-64 now, and a body with no required feature anchors on whichever any-of
+///   group is most selective by current frequency.
+/// - **C→H**: findability-adding (the hot tier is probed on every request), but it would
+///   silently change which requests see the query. Reachable for a body with no required
+///   feature, whose re-plan can pick a different any-of group.
+///
+/// The reverse of the first, broad→main (C→A/B), only adds findability and is allowed.
+fn refuses_visibility_move(old: CostClass, plan: CostClass) -> bool {
+    let hides = !old.is_opt_in() && plan.is_opt_in();
+    let c_to_hot = old == CostClass::C && plan == CostClass::H;
+    hides || c_to_hot
+}
+
+/// Whether a query stored as `old` is opt-in after a re-anchoring merge that re-derived
+/// `replanned` for its body (`None`: the cover is carried forward). This is the query's
+/// OWN visibility, whichever group it ends up in. The lane moves the merge may still
+/// decline (main↔hot, margin- and cap-gated) stay on the always-visible side, so they
+/// do not enter into it.
+fn opt_in_after_reanchor(old: CostClass, replanned: Option<CostClass>) -> bool {
+    match replanned {
+        Some(plan) if !refuses_visibility_move(old, plan) => plan.is_opt_in(),
+        _ => old.is_opt_in(),
+    }
+}
+
 impl Segment {
     /// Merge multiple source segments into one fresh segment, dropping tombstoned
     /// entries and renumbering local IDs to be dense/contiguous. This is the core
@@ -119,7 +151,9 @@ impl Segment {
     ///   sharing survives the merge — and identical bodies from DIFFERENT
     ///   source segments regroup here (compaction is the cross-segment dedup
     ///   mechanism). A member adopts its dest leader's class (the lane whose
-    ///   postings it rides).
+    ///   postings it rides), so it joins only a leader on its own side of the
+    ///   opt-in boundary: copies of one body that were stored on opposite sides
+    ///   stay in two groups.
     ///
     /// Entries are processed in ascending (source, old-id) order and a dest
     /// leader inserts its keys at its (ascending) new id immediately, so every
@@ -152,11 +186,12 @@ impl Segment {
                 }
                 let logical = dest.exact.logical(new_id);
                 let body_hash = dest.exact.body_signature(new_id);
+                let opt_in = src.class[old].is_opt_in();
                 let joined = dest.body_index.get(&body_hash).and_then(|leaders| {
-                    leaders
-                        .iter()
-                        .copied()
-                        .find(|&l| dest.exact.bodies_equal(l, new_id))
+                    leaders.iter().copied().find(|&l| {
+                        dest.class[l as usize].is_opt_in() == opt_in
+                            && dest.exact.bodies_equal(l, new_id)
+                    })
                 });
                 if let Some(leader) = joined {
                     dest.dup_of.push(leader);
@@ -165,10 +200,9 @@ impl Segment {
                 } else {
                     dest.dup_of.push(new_id);
                     dest.body_index.entry(body_hash).or_default().push(new_id);
-                    // The source LEADER's keys (this entry's own for a singleton).
-                    // Read at most once: an alive source leader becomes the dest
-                    // leader before its members arrive, and once a body has a dest
-                    // leader every later same-body entry joins above.
+                    // The source LEADER's keys (this entry's own for a singleton):
+                    // a source member has its leader's class, so those keys are in
+                    // this entry's own lane.
                     let src_leader = src.dup_leader_of(old as u32) as usize;
                     for &k in &old_main[src_leader] {
                         dest.main.insert(k, new_id);
@@ -231,31 +265,31 @@ impl Segment {
     ///   state, so repeated compactions converge without any single merge paying an
     ///   unbounded reorganization bill.
     ///
-    /// Two transitions are **refused** outright:
-    /// - **{A,B,H}→C** (the ADR-056 demote guard, extended to H): the broad lane is opt-in
-    ///   (`include_broad = false` by default), so moving an always-visible query there
-    ///   would hide it — a false negative. Such an entry keeps its original cover.
-    /// - **C→H**: findability-*adding* (the hot tier is probed on every request), but it
-    ///   would silently change which requests see the query — a documented-semantics
-    ///   change, refused conservatively (a C query's top-64 anchor cannot lose its mask
-    ///   bit under the frozen mask, so this arm is defensive; see ADR-105).
+    /// Two transitions are **refused** outright (`refuses_visibility_move`): an
+    /// always-visible query never moves into the opt-in broad lane, and a class-C query
+    /// never moves into the hot tier. Such an entry keeps its original cover.
     ///
     /// Invariant preserved: entries are processed in ascending old-local-id order and each
     /// entry's fresh sigs are inserted at its (ascending) new id immediately, so every posting
     /// stays sorted by construction (no per-insert sort/dedup needed — same contract as
     /// `add_compiled`).
     ///
-    /// **Body groups (dedup Stage A)** are re-derived on the dest side exactly as in
+    /// **Body groups (dedup Stage A)** are re-derived on the dest side as in
     /// [`compact_from`](Self::compact_from): the first alive entry of each canonical body
-    /// becomes the dest leader and carries the group's cover; every later same-body entry
-    /// joins its group, inserts no postings, and ADOPTS the leader's (possibly migrated,
-    /// possibly kept-old) class. An adoption that crosses the main↔hot boundary still counts
-    /// in `hot_promoted`/`hot_demoted` — the class split moved — but is exempt from
-    /// `max_moves` (the cap bounds posting-rebuild work; an adoption does none). A source
-    /// member's re-anchor inputs are its own (identical) body columns, so the shared-body
-    /// invariant "one dest leader per body" holds without consulting source groups; a DEAD
-    /// source leader's alive members re-derive a fresh cover rather than inheriting keys
-    /// (this is the re-anchoring merge — every leader's cover is rebuilt anyway).
+    /// becomes a dest leader and carries the group's cover; a later same-body entry joins
+    /// it, inserts no postings, and ADOPTS the leader's (possibly migrated, possibly
+    /// kept-old) class — **provided the leader is on the side of the opt-in boundary this
+    /// entry would land on by itself** (`opt_in_after_reanchor`, the same guard applied to
+    /// its own stored class). Otherwise it leads a second group for the body and goes
+    /// through the guard like any leader. So a group whose body re-plans broad→main moves
+    /// together under one leader, while a visible copy never rides an opt-in leader (and
+    /// an opt-in copy is never exposed by a visible one). An adoption that crosses the
+    /// main↔hot boundary still counts in `hot_promoted`/`hot_demoted` — the class split
+    /// moved — but is exempt from `max_moves` (the cap bounds posting-rebuild work; an
+    /// adoption does none). A source member's re-anchor inputs are its own (identical)
+    /// body columns, so source groups need not be consulted; a DEAD source leader's alive
+    /// members re-derive a fresh cover rather than inheriting keys (this is the
+    /// re-anchoring merge — every leader's cover is rebuilt anyway).
     pub fn compact_from_reanchored(
         sources: &[&Segment],
         dict: &Dict,
@@ -266,6 +300,10 @@ impl Segment {
         let mask_inverse = dict.mask_inverse();
         let mut stats = ReanchorStats::default();
         let mut moves = 0usize;
+        // Per dest entry: the class its body re-derived to, for a leader that
+        // re-planned. A candidate member reads its leader's to learn where the
+        // guard would put the member itself.
+        let mut replanned: Vec<Option<CostClass>> = Vec::new();
 
         for &src in sources {
             // Invert the indexes once, lane-separated (old_id -> the main / broad / hot sig
@@ -299,13 +337,15 @@ impl Segment {
                 let old_class = src.class[old];
 
                 // Body regroup (dedup Stage A) — join an existing dest group and adopt
-                // its leader's class; only a dest LEADER re-derives a cover below.
+                // its leader's class; only a dest LEADER re-derives a cover below. The
+                // leader must sit where this entry's own stored class would land.
                 let body_hash = dest.exact.body_signature(new_id);
                 let joined = dest.body_index.get(&body_hash).and_then(|leaders| {
-                    leaders
-                        .iter()
-                        .copied()
-                        .find(|&l| dest.exact.bodies_equal(l, new_id))
+                    leaders.iter().copied().find(|&l| {
+                        dest.class[l as usize].is_opt_in()
+                            == opt_in_after_reanchor(old_class, replanned[l as usize])
+                            && dest.exact.bodies_equal(l, new_id)
+                    })
                 });
                 if let Some(leader) = joined {
                     let adopted = dest.class[leader as usize];
@@ -319,6 +359,7 @@ impl Segment {
                     dest.dup_of.push(leader);
                     dest.dup_members.entry(leader).or_default().push(new_id);
                     dest.class.push(adopted);
+                    replanned.push(None);
                     dest.alive.push(true);
                     dest.alive_counter += 1;
                     dest.logical_index.entry(logical).or_default().push(new_id);
@@ -329,12 +370,13 @@ impl Segment {
 
                 // A source member carries no postings of its own — its keep-old cover
                 // (and the did-it-move comparison) is its source LEADER's key set,
-                // a valid lossless cover for the shared body. Identity for
-                // singletons. Read at most once (see `compact_from_grouped`).
+                // a valid lossless cover for the shared body, in the lane of the
+                // class the member was stored with. Identity for singletons.
+                // Borrowed, not taken: a body can lead two dest groups.
                 let src_leader = src.dup_leader_of(old as u32) as usize;
-                let prev_main = std::mem::take(&mut old_main[src_leader]);
-                let prev_broad = std::mem::take(&mut old_broad[src_leader]);
-                let prev_hot = std::mem::take(&mut old_hot[src_leader]);
+                let prev_main: &[u64] = &old_main[src_leader];
+                let prev_broad: &[u64] = &old_broad[src_leader];
+                let prev_hot: &[u64] = &old_hot[src_leader];
 
                 // Phrase proxies are candidate-only and therefore absent from
                 // the flat SoA anchoring columns. Preserve their already-proven
@@ -342,16 +384,17 @@ impl Segment {
                 // predicate bytes were copied verbatim above. A later source
                 // recompile may choose a fresh phrase cover from the DSL.
                 if dest.exact.row_has_phrase_predicates(new_id) {
-                    for &key in &prev_main {
+                    for &key in prev_main {
                         dest.main.insert(key, new_id);
                     }
-                    for &key in &prev_broad {
+                    for &key in prev_broad {
                         dest.broad.insert(key, new_id);
                     }
-                    for &key in &prev_hot {
+                    for &key in prev_hot {
                         dest.hot.insert(key, new_id);
                     }
                     dest.class.push(old_class);
+                    replanned.push(None);
                     dest.alive.push(true);
                     dest.alive_counter += 1;
                     dest.logical_index.entry(logical).or_default().push(new_id);
@@ -391,13 +434,8 @@ impl Segment {
                 // broad because its anchor went top-64-hot is a *hotness reclassification*,
                 // which is a major-version blue/green concern (matching.md §8), NOT a silent
                 // compaction change — so keep the original cover. (The reverse, broad→main,
-                // only adds findability and is kept.)
-                let demotes_to_broad =
-                    matches!(old_class, CostClass::A | CostClass::B | CostClass::H)
-                        && plan.class == CostClass::C;
-                // C→H refused: findability-adding but a silent visibility-semantics change
-                // (see the doc comment). Defensive under the frozen mask.
-                let c_to_hot = old_class == CostClass::C && plan.class == CostClass::H;
+                // only adds findability and is kept.) C→H is refused with it.
+                let keeps_visibility = refuses_visibility_move(old_class, plan.class);
 
                 // The hot-tier lane moves (main↔hot), margin- and work-cap-gated (ADR-105).
                 let promotes_to_hot =
@@ -424,10 +462,10 @@ impl Segment {
                 let lane_move = promotes_to_hot || demotes_from_hot;
                 let move_allowed = !lane_move || (demote_margin_ok && moves < max_moves);
 
-                let keep_old = demotes_to_broad || c_to_hot || !move_allowed;
+                let keep_old = keeps_visibility || !move_allowed;
                 let (main_keys, broad_keys, hot_keys, class): (&[u64], &[u64], &[u64], CostClass) =
                     if keep_old {
-                        (&prev_main, &prev_broad, &prev_hot, old_class)
+                        (prev_main, prev_broad, prev_hot, old_class)
                     } else {
                         if promotes_to_hot {
                             stats.hot_promoted += 1;
@@ -448,7 +486,13 @@ impl Segment {
                 for &s in hot_keys {
                     dest.hot.insert(s, new_id);
                 }
+                debug_assert_eq!(
+                    class.is_opt_in(),
+                    opt_in_after_reanchor(old_class, Some(plan.class)),
+                    "a leader lands where a member with its stored class is told it would"
+                );
                 dest.class.push(class);
+                replanned.push(Some(plan.class));
                 dest.alive.push(true);
                 dest.alive_counter += 1;
                 dest.logical_index.entry(logical).or_default().push(new_id);
@@ -466,7 +510,7 @@ impl Segment {
                     v
                 };
                 if lane_tagged(main_keys, broad_keys, hot_keys)
-                    != lane_tagged(&prev_main, &prev_broad, &prev_hot)
+                    != lane_tagged(prev_main, prev_broad, prev_hot)
                 {
                     stats.reanchored += 1;
                 }

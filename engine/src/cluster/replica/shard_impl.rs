@@ -7,6 +7,7 @@ use std::sync::{Arc, PoisonError};
 
 use crate::cluster::clog::{ClusterMutation, LogPos};
 use crate::cluster::shard::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
+use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus};
 use crate::compile::Extracted;
 use crate::config::EngineConfig;
 use crate::dict::Dict;
@@ -351,6 +352,25 @@ impl Shard for ReplicatedShard {
                 .map(|_| ())
         });
         Ok(out)
+    }
+
+    fn replace_placed(
+        &self,
+        write: &PlacedWrite<'_>,
+        mode: ReplaceMode,
+    ) -> Result<ReplaceStatus, ShardError> {
+        let _g = self.lock();
+        let status = self.primary.replace_placed(write, mode)?;
+        // The primary decided; a replica mirrors what the primary did rather than
+        // re-evaluating the condition against its own copy.
+        if status.applied() {
+            self.fan_to_replicas(|shard| {
+                shard
+                    .replace_placed(write, ReplaceMode::Unconditional)
+                    .map(|_| ())
+            });
+        }
+        Ok(status)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {

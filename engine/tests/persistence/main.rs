@@ -14,6 +14,7 @@ mod durability;
 #[cfg(unix)]
 mod fallback_commit;
 mod mask_stability;
+mod memtable_delete_replay;
 mod round_trip;
 mod sources;
 mod tombstone_durability;

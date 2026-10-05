@@ -26,12 +26,14 @@ fn current_compiler_semantics_version() -> u32 {
 
 /// A minimal mock `ShardService` with matching feature-space fingerprints and a configurable
 /// ownership attestation. Every other RPC is unimplemented: the connect guard rejects first.
-struct LegacyOwnershipServer {
-    dict_fp: u64,
-    tag_fp: u64,
-    placement_generation: u64,
-    num_shards: u32,
-    top_k_delay: Option<Duration>,
+pub(crate) struct LegacyOwnershipServer {
+    pub(crate) dict_fp: u64,
+    pub(crate) tag_fp: u64,
+    pub(crate) placement_generation: u64,
+    pub(crate) num_shards: u32,
+    pub(crate) top_k_delay: Option<Duration>,
+    /// ADR-185 attestation; `false` models a pre-ADR-185 shard server.
+    pub(crate) atomic_replace: bool,
 }
 
 #[tonic::async_trait]
@@ -73,6 +75,7 @@ impl ShardService for LegacyOwnershipServer {
             coordinator_id: 0,
             compiler_semantics_version: current_compiler_semantics_version(),
             retired_operation: 0,
+            atomic_replace: self.atomic_replace,
         }))
     }
 
@@ -96,15 +99,32 @@ impl ShardService for LegacyOwnershipServer {
             num_shards: self.num_shards,
             coordinator_id,
             compiler_semantics_version: current_compiler_semantics_version(),
+            atomic_replace: self.atomic_replace,
         }))
     }
 
-    // ---- never reached on the connect path: stub everything else out. ----
     async fn add_shard(
         &self,
-        _req: Request<raw::AddShardRequest>,
+        req: Request<raw::AddShardRequest>,
     ) -> Result<Response<raw::AddShardReply>, Status> {
-        Err(Status::unimplemented("legacy mock"))
+        // Echo the attested fingerprints, as `adopt_dict` does.
+        let coordinator_id = req
+            .metadata()
+            .get("x-reverse-rusty-coordinator-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default();
+        let r = req.into_inner();
+        Ok(Response::new(raw::AddShardReply {
+            dict_fingerprint: r.dict_fingerprint,
+            tag_dict_fingerprint: r.tag_dict_fingerprint,
+            broad_replicate_all: true,
+            placement_generation: self.placement_generation,
+            num_shards: self.num_shards,
+            coordinator_id,
+            compiler_semantics_version: current_compiler_semantics_version(),
+            atomic_replace: self.atomic_replace,
+        }))
     }
     async fn percolate(
         &self,
@@ -200,6 +220,12 @@ impl ShardService for LegacyOwnershipServer {
         &self,
         _req: Request<raw::InsertRequest>,
     ) -> Result<Response<raw::InsertReply>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
+    async fn replace_extracted(
+        &self,
+        _req: Request<raw::ReplaceRequest>,
+    ) -> Result<Response<raw::ReplaceReply>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
     async fn delete(
@@ -298,6 +324,7 @@ fn grpc_logical_ids_unsupported_peer_keeps_create_only_admission_closed() {
             placement_generation: 1,
             num_shards: 1,
             top_k_delay: None,
+            atomic_replace: true,
         };
         rt.spawn(
             tonic::transport::Server::builder()
@@ -353,6 +380,7 @@ fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
             placement_generation,
             num_shards,
             top_k_delay: None,
+            atomic_replace: true,
         });
         rt.spawn(
             tonic::transport::Server::builder()
@@ -446,6 +474,7 @@ fn distributed_top_k_refuses_pre_adr_110_peer() {
             placement_generation: 1,
             num_shards: 1,
             top_k_delay: None,
+            atomic_replace: true,
         });
         rt.spawn(
             tonic::transport::Server::builder()
@@ -508,6 +537,7 @@ fn distributed_top_k_refuses_pre_adr_163_profile_echo() {
             placement_generation: 1,
             num_shards: 1,
             top_k_delay: Some(Duration::ZERO),
+            atomic_replace: true,
         });
         rt.spawn(
             tonic::transport::Server::builder()
@@ -564,6 +594,7 @@ fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
             placement_generation: 1,
             num_shards: 1,
             top_k_delay: Some(Duration::from_millis(100)),
+            atomic_replace: true,
         });
         rt.spawn(
             tonic::transport::Server::builder()

@@ -250,18 +250,24 @@ impl Segment {
         let mut is_duplicate = false;
         if knobs.dedup_bodies {
             if let Some(leaders) = self.body_index.get(&body_hash) {
-                if let Some(&leader) = leaders.iter().find(|&&l| self.exact.bodies_equal(l, local))
-                {
+                // A member rides its leader's postings, so it can only join a
+                // leader on its own side of the opt-in boundary. Identical bodies
+                // CAN plan on opposite sides: a body with no required feature
+                // anchors on the any-of group that is most selective by LIVE
+                // frequency, and one compiled before the first mask finalize saw
+                // no top-64 feature at all. Such a copy leads a second group.
+                let opt_in = plan.class.is_opt_in();
+                if let Some(&leader) = leaders.iter().find(|&&l| {
+                    self.class[l as usize].is_opt_in() == opt_in
+                        && self.exact.bodies_equal(l, local)
+                }) {
                     self.dup_of.push(leader);
                     self.dup_members.entry(leader).or_default().push(local);
                     is_duplicate = true;
-                    // ADOPT the leader's class: the member rides the leader's
-                    // postings, so its class byte must describe the lane it
-                    // actually lives in. (Identical bodies CAN plan different
-                    // classes — a θ-crossing frequency bump between two adds
-                    // flips A→H — and A/B/H are all always-visible, so the
-                    // adoption is lossless. The structural classes C/D cannot
-                    // diverge between identical bodies under the frozen mask.)
+                    // ADOPT the leader's class: the class byte must describe the
+                    // lane the member actually lives in. Within one side of the
+                    // boundary that is lossless (a θ-crossing frequency bump
+                    // between two adds flips A→H; both are always visible).
                     self.class.push(self.class[leader as usize]);
                 }
             }

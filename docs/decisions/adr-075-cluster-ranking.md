@@ -66,3 +66,9 @@
 - **See also:** ADR-059 (the single-node mechanism + the deferral this closes), ADR-049
   §5.4 (ranking is presentation), ADR-055 (compile-once-fan + the shared frozen tag
   space), ADR-065 (the program), ADR-074 (criterion 4 — tags through the vocab rebuild).
+
+**Outcome update (2026-10-05).** "An upsert tombstones everywhere atomically" overstated the
+write path of the time: the tombstones and the insert were separate reader-visible steps.
+[ADR-185](adr-185-reader-atomic-cluster-upsert.md) makes the version switch one step per shard and
+fences upserts that move a query, so the dedup argument above now rests on a guarantee the code
+provides.

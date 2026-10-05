@@ -182,7 +182,7 @@ impl Engine {
                 return Err(e);
             }
         }
-        Ok(self.apply_delete_by_logical(logical_id))
+        Ok(self.apply_delete_by_logical(logical_id, true))
     }
 
     /// The shared apply funnel behind [`delete_by_logical_id`](Self::delete_by_logical_id)
@@ -192,18 +192,38 @@ impl Engine {
     /// and replay running the same funnel is what makes replay deterministic:
     /// at the frame's position in the log, the recovered live set is exactly the
     /// live set the original call saw.
-    pub(in crate::segment) fn apply_delete_by_logical(&mut self, logical_id: u64) -> usize {
+    ///
+    /// The two halves live in two state domains, as in [`apply_upsert`](Self::apply_upsert):
+    ///
+    /// - **Base segments** are manifest-truth. A replayed frame at or below the WAL
+    ///   watermark passes `tombstone_in_segments = false`: its segment tombstones are
+    ///   already baked into the commit's bitmaps, and a same-id query bulk-ingested AFTER
+    ///   the frame (bulk bypasses the WAL, ADR-017) lives in those segments and must not
+    ///   be erased.
+    /// - **The memtable** is WAL-truth: it is rebuilt from the replayed frames alone, so
+    ///   its copies are tombstoned whatever the watermark says. A commit that does not
+    ///   seal the memtable (a compaction, a bulk ingest) advances the watermark past
+    ///   frames whose rows exist nowhere else.
+    ///
+    /// The live path always passes `true`.
+    pub(in crate::segment) fn apply_delete_by_logical(
+        &mut self,
+        logical_id: u64,
+        tombstone_in_segments: bool,
+    ) -> usize {
         let mut count = 0usize;
-        for seg in &mut self.segments {
-            let locals: Vec<u32> = seg
-                .locals_for_logical(logical_id)
-                .iter()
-                .copied()
-                .filter(|&local| seg.is_alive(local))
-                .collect();
-            for local in locals {
-                Arc::make_mut(seg).tombstone(local);
-                count += 1;
+        if tombstone_in_segments {
+            for seg in &mut self.segments {
+                let locals: Vec<u32> = seg
+                    .locals_for_logical(logical_id)
+                    .iter()
+                    .copied()
+                    .filter(|&local| seg.is_alive(local))
+                    .collect();
+                for local in locals {
+                    Arc::make_mut(seg).tombstone(local);
+                    count += 1;
+                }
             }
         }
 
@@ -226,9 +246,21 @@ impl Engine {
         }
 
         if count > 0 {
-            self.query_store.remove(logical_id);
+            // The source text goes with the last live copy. When the segment half was
+            // skipped, a segment may hold a newer version of this id, whose source it is.
+            if tombstone_in_segments || !self.has_live_segment_copy(logical_id) {
+                self.query_store.remove(logical_id);
+            }
             self.refresh_phrase_capability();
         }
         count
+    }
+
+    fn has_live_segment_copy(&self, logical_id: u64) -> bool {
+        self.segments.iter().any(|seg| {
+            seg.locals_for_logical(logical_id)
+                .iter()
+                .any(|&local| seg.is_alive(local))
+        })
     }
 }

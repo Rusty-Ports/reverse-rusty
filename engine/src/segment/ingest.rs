@@ -331,6 +331,7 @@ mod bulk;
 mod delete;
 mod extracted;
 mod live;
+mod replace;
 
 #[cfg(test)]
 mod tests;

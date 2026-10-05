@@ -126,3 +126,13 @@ expanded mmap postings, so Stage A's candidate-volume win is in-memory-only by d
 - **Stage B** (increment 3): persisted body→member indirection, gated on the sketch's measured
   global duplication rate on the real corpus.
 - Member-aware ranking short-circuits (rank reads per-member tags today, unchanged).
+
+## Outcome update (2026-10-05)
+
+The Decision and safety argument above say class C cannot differ between identical bodies. That is
+true only for a body with a required feature. A body with no required feature anchors on an any-of
+group chosen by live frequency, and one compiled before the first mask finalize saw no top-64
+feature, so two copies can plan C and B; a visible copy that adopted a class-C leader was hidden
+from default reads. [ADR-186](adr-186-visibility-partitioned-dedup.md) makes "same side of the
+opt-in boundary" a condition of every join. Adoption among A, B and H is unchanged. The "Proven"
+count above also predates the grouped-migration leg: `tests/oracle/dedup.rs` has ten.
