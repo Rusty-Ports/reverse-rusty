@@ -56,3 +56,4 @@ mod routing;
 mod security;
 mod top_k;
 mod transport;
+mod upsert_visibility;

@@ -32,6 +32,8 @@ struct LegacyOwnershipServer {
     placement_generation: u64,
     num_shards: u32,
     top_k_delay: Option<Duration>,
+    /// ADR-185 attestation; `false` models a pre-ADR-185 shard server.
+    atomic_replace: bool,
 }
 
 #[tonic::async_trait]
@@ -73,7 +75,7 @@ impl ShardService for LegacyOwnershipServer {
             coordinator_id: 0,
             compiler_semantics_version: current_compiler_semantics_version(),
             retired_operation: 0,
-            atomic_replace: true,
+            atomic_replace: self.atomic_replace,
         }))
     }
 
@@ -305,6 +307,7 @@ fn grpc_logical_ids_unsupported_peer_keeps_create_only_admission_closed() {
             placement_generation: 1,
             num_shards: 1,
             top_k_delay: None,
+            atomic_replace: true,
         };
         rt.spawn(
             tonic::transport::Server::builder()
@@ -360,6 +363,7 @@ fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
             placement_generation,
             num_shards,
             top_k_delay: None,
+            atomic_replace: true,
         });
         rt.spawn(
             tonic::transport::Server::builder()
@@ -453,6 +457,7 @@ fn distributed_top_k_refuses_pre_adr_110_peer() {
             placement_generation: 1,
             num_shards: 1,
             top_k_delay: None,
+            atomic_replace: true,
         });
         rt.spawn(
             tonic::transport::Server::builder()
@@ -515,6 +520,7 @@ fn distributed_top_k_refuses_pre_adr_163_profile_echo() {
             placement_generation: 1,
             num_shards: 1,
             top_k_delay: Some(Duration::ZERO),
+            atomic_replace: true,
         });
         rt.spawn(
             tonic::transport::Server::builder()
@@ -571,6 +577,7 @@ fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
             placement_generation: 1,
             num_shards: 1,
             top_k_delay: Some(Duration::from_millis(100)),
+            atomic_replace: true,
         });
         rt.spawn(
             tonic::transport::Server::builder()
@@ -613,4 +620,47 @@ fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
         started.elapsed() < Duration::from_millis(90),
         "transport did not honor the original absolute deadline"
     );
+}
+
+/// ADR-185: a shard server that does not attest the atomic per-shard replace is refused at
+/// connect. Against it a cluster upsert could only be the reader-visible delete-then-insert,
+/// so the coordinator fails loud at startup instead of at the first re-put.
+#[test]
+fn grpc_connect_refuses_a_peer_without_atomic_replace() {
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_with(&[], &norm);
+    let dict_fp = dict.fingerprint();
+    let tag_fp = empty_tag_dict().fingerprint();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let start_mock = |atomic_replace| {
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let addr = incoming.local_addr().expect("addr");
+        let svc = ShardServiceServer::new(LegacyOwnershipServer {
+            dict_fp,
+            tag_fp,
+            placement_generation: 1,
+            num_shards: 1,
+            top_k_delay: None,
+            atomic_replace,
+        });
+        rt.spawn(
+            tonic::transport::Server::builder()
+                .add_service(svc)
+                .serve_with_incoming(incoming),
+        );
+        wait_until_listening(addr);
+        format!("http://{addr}")
+    };
+
+    match RemoteShard::connect(&start_mock(false), rt.handle().clone(), dict_fp, tag_fp, 0) {
+        Err(ShardError::Remote(message)) => {
+            assert!(message.contains("ADR-185"), "{message}");
+        }
+        Err(e) => panic!("expected the ADR-185 refusal, got {e}"),
+        Ok(_) => panic!("connect SUCCEEDED against a pre-ADR-185 peer"),
+    }
+    // Control: the same mock attesting the capability connects.
+    RemoteShard::connect(&start_mock(true), rt.handle().clone(), dict_fp, tag_fp, 0)
+        .expect("a peer that attests the atomic replace connects");
 }

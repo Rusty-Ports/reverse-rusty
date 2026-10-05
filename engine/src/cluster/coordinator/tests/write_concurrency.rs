@@ -2,6 +2,8 @@ use super::*;
 
 mod bench;
 mod harness;
+mod upsert_repair;
+mod visibility;
 use harness::{instrument, pause, WriteCall};
 
 #[test]

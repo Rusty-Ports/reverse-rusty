@@ -577,4 +577,45 @@ mod tests {
             }
         }
     }
+
+    // ADR-185: every translog mutation round-trips over FetchTranslog, including the whole
+    // `Upsert` frame an atomic per-shard replace logs. Shipping it as an `Add` would leave the
+    // receiver holding both versions; dropping it would lose the replace.
+    #[test]
+    fn every_translog_mutation_round_trips_including_a_whole_upsert() {
+        use super::{translog_entry_from_mutation, translog_entry_to_mutation};
+        use crate::cluster::clog::{ClusterMutation, LogPos};
+        let placement = crate::ownership::QueryPlacement::selective(
+            crate::ownership::PlacementGeneration::INITIAL,
+            4,
+            vec![1, 3],
+        )
+        .expect("placement");
+        let tags = vec![("tier".to_string(), "gold".to_string())];
+        let frames = [
+            ClusterMutation::Add {
+                logical: 7,
+                version: 0,
+                dsl: "alpha bravo".into(),
+                tags: tags.clone(),
+                placement: placement.clone(),
+            },
+            ClusterMutation::Remove { logical: 7 },
+            ClusterMutation::Upsert {
+                logical: 7,
+                version: 3,
+                dsl: "alpha charlie".into(),
+                tags,
+                placement,
+            },
+        ];
+        for (seqno, frame) in frames.iter().enumerate() {
+            let pos = LogPos(seqno as u64 + 1);
+            let (got_pos, got) =
+                translog_entry_to_mutation(translog_entry_from_mutation(pos, frame))
+                    .expect("every frame decodes");
+            assert_eq!(got_pos, pos);
+            assert_eq!(&got, frame);
+        }
+    }
 }
