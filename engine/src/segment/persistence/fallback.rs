@@ -17,6 +17,18 @@ impl Engine {
                 .any(|segment| matches!(segment.as_ref(), BaseSegment::Memory(_)))
     }
 
+    /// Whether the base segments are exactly the ones the last committed manifest lists.
+    /// False while a flush or its commit has failed: a segment sealed since then is not in
+    /// that manifest, so the WAL still holds its rows.
+    pub(in crate::segment) fn base_segments_are_committed(&self) -> bool {
+        self.segment_generations.len() == self.committed_segment_generations.len()
+            && self
+                .segment_generations
+                .iter()
+                .zip(&self.committed_segment_generations)
+                .all(|(live, committed)| Arc::ptr_eq(live, committed))
+    }
+
     /// Write every base segment that exists only in memory to disk and put the mapped file
     /// in its place. Returns whether none is left in memory.
     ///

@@ -45,6 +45,15 @@ in-memory segment.
 5. **The first-mask seal (ADR-188) commits a stranded segment instead of refusing the batch.**
    It refused because it could not make those rows durable. Now the commit does; the batch is
    refused only while the segment still cannot be written.
+6. **A positional memtable tombstone is refused while a flush is uncommitted.**
+   `Engine::tombstone(local_id)` logs a row by its position in the memtable, and replay
+   rebuilds one memtable from the whole WAL tail. While a segment sealed from an earlier memtable
+   is not in the committed manifest (its write or its commit failed), the tail also holds that
+   segment's rows, ahead of the current memtable's, so the logged position names a different row
+   after a restart: a query nobody deleted disappears and the deleted one returns. The call now
+   fails in that state, as ADR-122 already does for base-segment positions that the manifest does
+   not list. Deletes and upserts by logical id carry no position and are unaffected; they are
+   what the server and the cluster use.
 
 ## Alternatives considered
 
@@ -71,6 +80,8 @@ in-memory segment.
   keeps them recoverable.
 - A stranded segment written late gets a higher-numbered file than segments that follow it in
   the manifest. File numbers were never ordered by position (compaction already breaks that).
+- A library caller that uses `Engine::tombstone` gets an error between a failed flush and the
+  next commit and should delete by logical id there. The server never calls it.
 
 ## Proven
 
@@ -79,10 +90,14 @@ in-memory segment.
   segments are both written; a delete of a stranded row is not undone; while the segment still
   cannot be written nothing is committed and a restart recovers the rows from the WAL; a failed
   vocabulary rebuild followed by a flush keeps the corpus and its vocabulary, and the engine
-  keeps committing afterwards.
+  keeps committing afterwards; a positional memtable tombstone is refused after a failed flush
+  and after a failed rebuild (where the segment count alone would not show it), a logical
+  delete in the same state replays correctly, and positional tombstones work again once every
+  segment is committed.
 - `tests/persistence/mask_stability.rs`: the first batch is refused while a stranded segment
   cannot be written, and otherwise commits it before the mask is assigned, so its rows stay
   default-visible across a restart.
 
 **See also:** ADR-051 (fail-closed flush, compaction and rebuild), ADR-017 (the manifest as
-commit point), ADR-066 (tombstones at the commit point), ADR-188 (first-mask seal).
+commit point), ADR-066 (tombstones at the commit point), ADR-122 (fail-closed positional
+tombstones), ADR-188 (first-mask seal).

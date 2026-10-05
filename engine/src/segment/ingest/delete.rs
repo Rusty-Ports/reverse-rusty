@@ -8,7 +8,19 @@ impl Engine {
     /// Returns `Err` if the tombstone could not be durably logged; in that case
     /// the in-memory tombstone is not applied (the entry stays alive) so the
     /// memtable never diverges from the WAL.
+    ///
+    /// Also returns `Err` on a durable engine while a flush is uncommitted (ADR-190). This
+    /// frame names a row by its position in the memtable that replay rebuilds from the WAL
+    /// tail. That tail then also holds the rows of the segment whose flush or commit failed,
+    /// ahead of this memtable's, so after a restart the position would name a different row.
+    /// [`delete_by_logical_id`](Self::delete_by_logical_id) is replay-safe in that state.
     pub fn tombstone(&mut self, local_id: u32) -> std::io::Result<()> {
+        if self.wal.is_some() && self.owns_manifest && !self.base_segments_are_committed() {
+            return Err(std::io::Error::other(
+                "an earlier flush is not committed, so a memtable position is not a \
+                 replay-safe address; delete by logical id instead",
+            ));
+        }
         // WAL: memtable tombstones use seg_idx = u32::MAX as sentinel
         if let Some(ref mut wal) = self.wal {
             if let Err(e) = wal.append_tombstone(u32::MAX, local_id) {

@@ -259,3 +259,74 @@ fn a_later_flush_commits_a_corpus_a_failed_rebuild_left_in_memory() {
     drop(engine);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A positional memtable tombstone names a row by its position in the memtable
+/// that the WAL tail rebuilds. After a failed flush that tail holds the stranded
+/// rows first, so the same position names a different row at replay: the
+/// restart used to delete query 2, which nobody deleted, and bring back
+/// query 3. The positional delete is refused in that state; the logical one
+/// replays correctly.
+#[test]
+fn a_positional_memtable_tombstone_is_refused_while_a_flush_is_uncommitted() {
+    let dir = test_dir("fallback_positional");
+    let config = manual_config(&dir);
+    {
+        let mut engine = engine_with_a_failed_flush(&config, &dir);
+        let third = engine
+            .insert_live("desk lamp chrome", 3, 1)
+            .expect("local id");
+        engine.insert_live("air purifier white", 4, 1);
+        assert!(
+            engine.tombstone(third).is_err(),
+            "position {third} names query 2 once the WAL tail is replayed"
+        );
+        assert_eq!(match_ids(&engine, "desk lamp chrome"), vec![3]);
+        assert_eq!(engine.delete_by_logical_id(3).expect("delete"), 1);
+    }
+    {
+        let mut engine = Engine::open(make_norm(), config.clone()).expect("reopen");
+        assert_eq!(match_ids(&engine, "mechanical keyboard blue"), vec![2]);
+        assert!(match_ids(&engine, "desk lamp chrome").is_empty());
+        assert_eq!(match_ids(&engine, "air purifier white"), vec![4]);
+
+        // With every segment committed a memtable position is a safe address again.
+        engine.flush();
+        let fifth = engine
+            .insert_live("smart speaker black", 5, 1)
+            .expect("local id");
+        engine.tombstone(fifth).expect("positional tombstone");
+    }
+    let engine = Engine::open(make_norm(), config).expect("second reopen");
+    assert!(match_ids(&engine, "smart speaker black").is_empty());
+    assert_eq!(match_ids(&engine, "mechanical keyboard blue"), vec![2]);
+    assert_eq!(match_ids(&engine, "air purifier white"), vec![4]);
+    drop(engine);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same refusal after a failed vocabulary rebuild. There the engine holds
+/// as many segments as its manifest lists, one, but not the same one: the
+/// rebuilt segment absorbed the memtable, whose rows are still in the WAL tail.
+#[test]
+fn a_positional_memtable_tombstone_is_refused_after_a_failed_rebuild() {
+    let dir = test_dir("fallback_positional_rebuild");
+    let config = manual_config(&dir);
+    let mut engine = Engine::open(make_norm(), config).expect("fresh engine");
+    engine.build_from_queries(&[(1, "new york inventory".into())]);
+    engine.insert_live("mechanical keyboard blue", 2, 1);
+    engine.set_vocab(ny_alias()).expect("runtime alias");
+    let original = StorageFailure::SegmentWrite.block(&dir);
+    engine.recompile_stale_segments();
+    StorageFailure::SegmentWrite.unblock(&dir, original);
+    assert_eq!(base_segments(&engine), (1, 0), "one segment, as before");
+
+    let third = engine
+        .insert_live("desk lamp chrome", 3, 1)
+        .expect("local id");
+    assert!(
+        engine.tombstone(third).is_err(),
+        "position {third} names query 2 once the WAL tail is replayed"
+    );
+    drop(engine);
+    let _ = std::fs::remove_dir_all(&dir);
+}
