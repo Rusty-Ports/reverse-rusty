@@ -40,8 +40,10 @@ in-memory segment.
    the liveness they have now, and it takes the segment's position and generation. Addresses
    handed out earlier stay valid, a delete already applied to the segment is part of the file,
    and the order the manifest records is the order readers already see.
-4. **A flush with an empty memtable still commits a stranded segment.** Otherwise an idle engine
-   would keep the rows in memory until its next write.
+4. **A flush with an empty memtable still commits a segment the manifest does not list.**
+   That covers a segment still in memory and one that reached disk before its commit failed
+   (the test is "the base segments are the committed ones", not "a segment is in memory").
+   Otherwise an idle engine would leave those rows uncommitted until its next write.
 5. **The first-mask seal (ADR-188) commits a stranded segment instead of refusing the batch.**
    It refused because it could not make those rows durable. Now the commit does; the batch is
    refused only while the segment still cannot be written.
@@ -87,7 +89,8 @@ in-memory segment.
 
 - `tests/persistence/fallback_commit.rs`: a failed flush followed by a successful flush, an
   empty flush or a bulk batch leaves every row on disk and present after a restart; two stranded
-  segments are both written; a delete of a stranded row is not undone; while the segment still
+  segments are both written; an empty flush retries a commit that failed after the segment was
+  written, with or without an in-memory segment involved; a delete of a stranded row is not undone; while the segment still
   cannot be written nothing is committed and a restart recovers the rows from the WAL; a failed
   vocabulary rebuild followed by a flush keeps the corpus and its vocabulary, and the engine
   keeps committing afterwards; a positional memtable tombstone is refused after a failed flush

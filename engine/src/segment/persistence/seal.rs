@@ -21,16 +21,16 @@ impl Engine {
     /// the engine is exactly as it was, the batch fails with the mask still unassigned,
     /// and a retry seals again.
     ///
-    /// Rows a failed `flush` already left in such an in-memory segment are in the same
-    /// position as memtable rows: compiled without a mask, durable only as WAL text. The
-    /// commit below writes that segment to disk too (ADR-190), or fails, so the mask is
-    /// never assigned while one exists.
+    /// Rows a failed `flush` already left in a segment the manifest does not list are in the
+    /// same position as memtable rows: compiled without a mask, durable only as WAL text.
+    /// The commit below covers that segment too, writing it to disk first if it is still in
+    /// memory (ADR-190), or fails, so the mask is never assigned while one exists.
     pub(in crate::segment) fn seal_before_first_mask(&mut self) -> std::io::Result<()> {
         if self.dict.is_finalized() || self.wal.is_none() || !self.owns_manifest {
             return Ok(());
         }
         if self.memtable.is_empty() {
-            if self.has_unpersisted_base_segment() {
+            if !self.base_segments_are_committed() {
                 if !self.commit_sources_and_manifest() {
                     return Err(std::io::Error::other(
                         "an earlier flush left queries that are not on disk yet and they \

@@ -86,3 +86,17 @@ impl StorageFailure {
         std::fs::set_permissions(self.blocked_dir(dir), original).unwrap();
     }
 }
+
+/// Make only the manifest write fail: a directory sits where the manifest's
+/// temporary file is created. The segment file and the source sidecar are
+/// still written, so this is the failure "everything is on disk and nothing
+/// lists it". Returns the path to pass to [`unblock_manifest_write`].
+pub(crate) fn block_manifest_write(dir: &std::path::Path) -> PathBuf {
+    let in_the_way = dir.join("manifest.manifest.tmp");
+    std::fs::create_dir_all(&in_the_way).expect("block the manifest write");
+    in_the_way
+}
+
+pub(crate) fn unblock_manifest_write(in_the_way: &std::path::Path) {
+    std::fs::remove_dir_all(in_the_way).expect("unblock the manifest write");
+}

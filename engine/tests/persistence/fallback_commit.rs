@@ -126,6 +126,59 @@ fn an_empty_flush_commits_a_stranded_segment() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The stranded segment reaches disk but the commit that would list it fails.
+/// It is no longer in memory, and still in no manifest, so the next flush must
+/// try the commit again.
+#[test]
+fn an_empty_flush_retries_a_commit_that_failed_after_the_segment_was_written() {
+    let dir = test_dir("fallback_commit_retry");
+    let config = manual_config(&dir);
+    {
+        let mut engine = engine_with_a_failed_flush(&config, &dir);
+        let in_the_way = block_manifest_write(&dir);
+        engine.flush(); // the segment file is written; the manifest cannot be
+        unblock_manifest_write(&in_the_way);
+        assert_eq!(
+            base_segments(&engine),
+            (0, 2),
+            "precondition: on disk, but the manifest still lists one segment"
+        );
+        engine.flush();
+    }
+    let engine = Engine::open(make_norm(), config).expect("reopen");
+    assert_eq!(match_ids(&engine, "mechanical keyboard blue"), vec![2]);
+    assert_eq!(
+        base_segments(&engine),
+        (0, 2),
+        "query 2 came back from its committed segment, not from a WAL replay"
+    );
+    drop(engine);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same retry with no in-memory segment involved: an ordinary flush writes
+/// its segment and then fails to commit it.
+#[test]
+fn an_empty_flush_retries_an_ordinary_flush_whose_commit_failed() {
+    let dir = test_dir("flush_commit_retry");
+    let config = manual_config(&dir);
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&[(1, "usb hub silver".into())]);
+        engine.insert_live("mechanical keyboard blue", 2, 1);
+        let in_the_way = block_manifest_write(&dir);
+        engine.flush();
+        unblock_manifest_write(&in_the_way);
+        assert_eq!(base_segments(&engine), (0, 2));
+        engine.flush();
+    }
+    let engine = Engine::open(make_norm(), config).expect("reopen");
+    assert_eq!(match_ids(&engine, "mechanical keyboard blue"), vec![2]);
+    assert_eq!(base_segments(&engine), (0, 2));
+    drop(engine);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// While the stranded segment still cannot be written, nothing is committed
 /// and the WAL keeps its rows: a restart recovers them.
 #[test]

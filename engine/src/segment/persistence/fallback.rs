@@ -6,17 +6,6 @@ use crate::storage::MmapSegment;
 use std::sync::Arc;
 
 impl Engine {
-    /// Whether a base segment of this durable engine exists only in memory: a flush or
-    /// vocabulary rebuild whose segment write failed fell back to it (ADR-051). No manifest
-    /// lists such a segment, so its rows are durable only as WAL frames.
-    pub(in crate::segment) fn has_unpersisted_base_segment(&self) -> bool {
-        self.config.data_dir.is_some()
-            && self
-                .segments
-                .iter()
-                .any(|segment| matches!(segment.as_ref(), BaseSegment::Memory(_)))
-    }
-
     /// Whether the base segments are exactly the ones the last committed manifest lists.
     /// False while a flush or its commit has failed: a segment sealed since then is not in
     /// that manifest, so the WAL still holds its rows.
