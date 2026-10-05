@@ -24,6 +24,29 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **Upgrade:** compiler semantics version 7. Single-node stores rebuild from retained source on
   open; cluster data follows the existing compiler-semantics procedure (rebuild through the
   coordinator, or reseed remote shard volumes).
+## 2026-10-05 — Memtable deletes survive a commit and a restart
+
+- Fix an acknowledged delete coming back after a restart: deleting a query that was still in the
+  memtable, followed by a compaction or a bulk ingest and then a restart, replayed the insert from
+  the WAL but skipped the delete, because the commit had advanced the WAL watermark past it without
+  sealing the memtable. Recovery now always applies a delete to memtable copies and leaves only the
+  segment copies to the watermark rule (ADR-066, later outcome).
+## 2026-10-05 — Reader-atomic cluster upsert
+
+- Fix silent false negatives during cluster upserts: `PUT /_doc` and every `_bulk` index item
+  tombstoned the query on every shard and then inserted it, so a title matched in between saw
+  neither version. A shard now replaces a query in one step, and an upsert that keeps its placement
+  (a re-put, a tag or version edit, a bulk re-index) needs no reader coordination
+  ([ADR-185](decisions/adr-185-reader-atomic-cluster-upsert.md)).
+- Fence upserts that move a query between shards or lanes with an optimistic sequence counter:
+  overlapping reads repeat instead of seeing the move half-done, and ordinary reads still take no
+  lock.
+- Install before removing, also under failure: when a shard write of an upsert fails, the old
+  copies on other shards keep serving and are queued for removal with the repair, which installs
+  the new version first. A queued repair re-drives as the same atomic replace, and the next
+  upsert sweeps a stale copy a failed tombstone left behind.
+- Wire: add the `ReplaceExtracted` RPC, an `upsert` translog entry for peer recovery, and an
+  `atomic_replace` attestation on every handshake. Upgrade shard servers before the coordinator.
 
 ## 2026-10-05 — Visibility-partitioned dedup
 

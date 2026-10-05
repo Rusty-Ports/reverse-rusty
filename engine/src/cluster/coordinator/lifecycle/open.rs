@@ -135,6 +135,7 @@ impl ClusterEngine {
             // cluster serves no prior generation, so old cursors fail closed).
             pits: Mutex::new(crate::pit::PitRegistry::new()),
             pit_open_barrier: std::sync::RwLock::new(()),
+            move_fence: crate::cluster::coordinator::move_fence::MoveFence::default(),
             // No position is handoff-wrapped by default; the gRPC builders install handles via
             // `with_handoffs`. Empty here ⇒ the in-process/default path is byte-identical (ADR-043).
             #[cfg(feature = "distributed")]

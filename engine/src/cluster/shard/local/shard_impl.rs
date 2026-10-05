@@ -3,6 +3,8 @@ use super::{
     LogPos, MatchScratch, MatchStats, PlacedQuery, PoisonError, Shard, ShardError,
     ShardRankedMatch, TagPredicate,
 };
+use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus};
+use crate::segment::{HeldPlacement, ReplaceOutcome};
 
 impl Shard for LocalShard {
     /// Verbatim the body of the coordinator's old `query_shard`: allocate scratch,
@@ -418,6 +420,46 @@ impl Shard for LocalShard {
         let out = eng.insert_extracted_with_placement(ex, logical, version, text, tags, placement);
         Self::publish(&eng, &self.snapshot);
         Ok(out)
+    }
+
+    fn replace_placed(
+        &self,
+        write: &PlacedWrite<'_>,
+        mode: ReplaceMode,
+    ) -> Result<ReplaceStatus, ShardError> {
+        write.placement.validate()?;
+        let mut eng = self.lock();
+        if mode == ReplaceMode::IfSamePlacement {
+            match eng.held_placement(write.logical, write.placement) {
+                HeldPlacement::Absent => return Ok(ReplaceStatus::Absent),
+                HeldPlacement::Different => return Ok(ReplaceStatus::PlacementMismatch),
+                HeldPlacement::Same => {}
+            }
+        }
+        // Log-first (ADR-039), as ONE frame (ADR-185): the shard's durable history can no
+        // longer hold a Remove whose Add was lost, and replay re-runs the same atomic step.
+        self.translog.append(&ClusterMutation::Upsert {
+            logical: write.logical,
+            version: write.version,
+            dsl: write.text.to_string(),
+            tags: write.tags.to_vec(),
+            placement: write.placement.clone(),
+        })?;
+        let outcome = eng.replace_extracted_with_placement(
+            write.ex,
+            write.logical,
+            write.version,
+            write.text,
+            write.tags,
+            write.placement,
+        );
+        // One publish: readers go from the old version straight to the new one.
+        Self::publish(&eng, &self.snapshot);
+        Ok(match outcome {
+            ReplaceOutcome::Replaced { removed } => ReplaceStatus::Replaced { removed },
+            ReplaceOutcome::Inserted => ReplaceStatus::Inserted,
+            ReplaceOutcome::Rejected => ReplaceStatus::Rejected,
+        })
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {

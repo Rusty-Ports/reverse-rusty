@@ -317,6 +317,10 @@ ranked paths use the identical context. The coordinator retains sort/dedup defen
 `duplicate_emissions` asserts the shard replies are already disjoint. See the placement/persistence
 contract in [`clustering-and-scaling.md`](clustering-and-scaling.md) §7 and ADR-109.
 
+A healthy upsert never produces that overlap for a reader: the version switch is one step per
+shard, and an upsert that moves a query between shards is fenced so overlapping reads repeat
+([ADR-185](../decisions/adr-185-reader-atomic-cluster-upsert.md)).
+
 Exhaustive delivery additionally requires `pending_repairs=0`. During an ADR-047 partial upsert, an
 old body can remain live under its old placement while the replacement is already live under a new
 placement; both positions can then be valid emitters for the same logical id. The bounded

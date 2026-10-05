@@ -163,6 +163,14 @@ pre-upgrade backup:
   pending transition when no same-coordinator retry remains. An existing exclusive client
   reconnecting to a restarted durable shard uses the read-only fingerprint claim and does not
   create a replacement slot.
+- **ADR-185 reader-atomic upsert:** upgrade every shard server before the coordinator. The
+  coordinator now replaces a query with the additive `ReplaceExtracted` RPC and refuses to connect
+  to a shard server that does not attest it (`DictFingerprintReply.atomic_replace`), because
+  against an older server an upsert could only be the reader-visible delete-then-insert. A replace
+  is logged as one whole `Upsert` translog frame, which `FetchTranslog` ships as a new entry kind:
+  an older shard server recovering from a newer one fails that recovery loud once such a frame is
+  in the tail, so finish the shard roll before relying on peer recovery or handoff. No durable
+  format changes: the shard translog codec already carried the frame.
 - **ADR-176 remote ID enumeration:** no durable format changes. Upgrade shard servers before the
   coordinator to restore create-only admission on populated reattach. `LiveLogicalIds` is additive;
   an old peer's `UNIMPLEMENTED`, a failed transfer, or an enumeration limit leaves creates disabled

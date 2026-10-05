@@ -44,6 +44,7 @@ mod logical_ids;
 mod ranked;
 mod ranked_batch;
 mod recovery;
+mod replace;
 mod retire;
 mod stage_ingest;
 
@@ -258,6 +259,8 @@ impl ShardService for ShardServer {
             // ADR-180: a retired node still answers this handshake, so startup resolution can
             // claim it and lift a retirement whose resize never committed.
             retired_operation: self.retired_operation(),
+            // ADR-185: this binary serves the atomic per-shard replace.
+            atomic_replace: true,
         }))
     }
 
@@ -376,6 +379,13 @@ impl ShardService for ShardServer {
             present: out.is_some(),
             local_id: out.unwrap_or(0),
         }))
+    }
+
+    async fn replace_extracted(
+        &self,
+        request: Request<proto::ReplaceRequest>,
+    ) -> Result<Response<proto::ReplaceReply>, Status> {
+        replace::replace_extracted(self, request)
     }
 
     async fn delete(

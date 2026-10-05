@@ -11,6 +11,7 @@ mod harness;
 mod backup;
 mod compaction;
 mod durability;
+mod memtable_delete_replay;
 mod round_trip;
 mod sources;
 mod tombstone_durability;
