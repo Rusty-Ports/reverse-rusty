@@ -159,11 +159,38 @@ pub(crate) async fn bulk_route(
         Ok(body) => body,
         Err(error) => return bulk_body_rejection(&state.prom, &error),
     };
-    let items = match parse_bulk_request(&headers, &body, params) {
-        Ok(items) => items,
-        Err(error) => return request_rejection(&state.prom, error),
+    // Parsing a body of up to 100 MB, waiting for the engine mutex and sealing a segment all
+    // happen on a blocking thread under write admission, never on an async worker (ADR-191).
+    let permit = match crate::state::admit_write(&state).await {
+        Ok(permit) => permit,
+        Err(worker) => return worker_rejection(&state.prom, &worker),
     };
-    bulk_ingest_inner(&state, items)
+    let worker_state = Arc::clone(&state);
+    let outcome = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        match parse_bulk_request(&headers, &body, params) {
+            Ok(items) => bulk_ingest_inner(&worker_state, items),
+            Err(error) => request_rejection(&worker_state.prom, error),
+        }
+    })
+    .await;
+    match outcome {
+        Ok(response) => response,
+        Err(error) => worker_rejection(&state.prom, &crate::state::WriteWorkerError::Worker(error)),
+    }
+}
+
+fn worker_rejection(
+    prom: &crate::metrics::PrometheusMetrics,
+    worker: &crate::state::WriteWorkerError,
+) -> Response {
+    error!(error = %worker, "bulk worker failed");
+    bulk_rejection(
+        prom,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "write_worker_failed",
+        format!("bulk request did not complete: {worker}"),
+    )
 }
 
 fn classify_items(items: Vec<ParsedBulkItem>) -> (Vec<BulkItem>, Vec<PreparedItem>) {
@@ -327,9 +354,11 @@ fn bulk_ingest_inner(state: &Arc<AppState>, items: Vec<ParsedBulkItem>) -> Respo
     let (mut responses, prepared) = classify_items(items);
     let mut published = false;
     if !prepared.is_empty() {
+        // Runs on the bulk worker thread (see `bulk_route`). The snapshot is published under
+        // the same lock as the batch, so the two are one commit.
         let result = {
             let mut engine = state.engine.lock();
-            if can_use_fresh_batch(&engine, &prepared) {
+            let result = if can_use_fresh_batch(&engine, &prepared) {
                 apply_fresh_batch(&mut engine, &mut responses, &prepared)
             } else {
                 for (slot, action, id, source) in &prepared {
@@ -339,14 +368,15 @@ fn bulk_ingest_inner(state: &Arc<AppState>, items: Vec<ParsedBulkItem>) -> Respo
                 // diagnostic/dictionary health in the engine. Publish once
                 // after every completed ordered pass, matching PUT /_doc.
                 Ok(true)
+            };
+            if matches!(result, Ok(true)) {
+                state.publish_snapshot_from_locked_engine(&engine);
             }
+            result
         };
         match result {
             Ok(changed) => {
-                if changed {
-                    state.publish_snapshot();
-                    published = true;
-                }
+                published = changed;
             }
             Err(error) => {
                 error!(error = %error, "bulk ingest persistence failed, batch rolled back");
