@@ -358,7 +358,15 @@ load, all on the fully secured ADR-071 mesh):
 ```bash
 ./deploy/harness.sh                                 # builds the image from source (slow first time)
 ./deploy/harness.sh --prebuilt engine/target/release  # wrap prebuilt LINUX bins (the CI path)
+RR_HARNESS_PORT=19333 ./deploy/harness.sh           # publish the coordinator on another host port
+RR_HARNESS_WRITERS=8 RR_HARNESS_WRITE_GAP=0.002 ./deploy/harness.sh  # stress leg 4's handoff fence
 ```
+
+A write that reaches a handoff source just as it is fenced is acknowledged as a partial apply and
+queued for repair (ADR-047), which keeps `/_health` yellow. Leg 4 therefore converges repairs with
+`POST /_cluster/resync` before its green gate, exactly as leg 3b does after a mid-write kill. The
+fence window is microseconds wide, so the default single paced writer rarely lands in it; the stress
+settings above keep several upserts in flight across the fence to reproduce it.
 
 Requires Docker (compose v2), `curl`, `jq`, `openssl`. Generates an ephemeral CA + corpus per run
 (nothing committed), brings up `deploy/compose.harness.yml` (3 durable shard nodes + a handoff
