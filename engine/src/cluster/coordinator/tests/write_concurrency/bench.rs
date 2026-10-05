@@ -26,7 +26,10 @@ fn write_concurrency_capture() {
                 instrument(
                     &mut cluster,
                     Arc::new(move |position, call| {
-                        if delay_us != 0 && position == 2 && matches!(call, WriteCall::Delete(_)) {
+                        let _ = position;
+                        if delay_us != 0
+                            && matches!(call, WriteCall::Delete(_) | WriteCall::Replace(..))
+                        {
                             std::thread::sleep(Duration::from_micros(delay_us));
                         }
                         Ok(())

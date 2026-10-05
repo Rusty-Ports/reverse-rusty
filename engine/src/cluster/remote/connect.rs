@@ -1,7 +1,7 @@
 use super::{
-    block_on_in_context, connect_channel, coordinator_attestation_error, legacy_broad_layout_err,
-    no_live_coordinator_lease_status, proto, rpc_err, Arc, ClientSecurity, Handle, RemoteShard,
-    ShardError, TransportMetrics,
+    block_on_in_context, connect_channel, coordinator_attestation_error,
+    no_live_coordinator_lease_status, proto, require_shard_capabilities, rpc_err, Arc,
+    ClientSecurity, Handle, RemoteShard, ShardError, TransportMetrics,
 };
 
 impl RemoteShard {
@@ -135,9 +135,7 @@ impl RemoteShard {
                 reply.tag_dict_fingerprint
             )));
         }
-        if !reply.broad_replicate_all {
-            return Err(legacy_broad_layout_err(endpoint));
-        }
+        require_shard_capabilities(endpoint, reply.broad_replicate_all, reply.atomic_replace)?;
         if reply.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
             return Err(ShardError::Remote(format!(
                 "compiler semantics mismatch at connect: coordinator {} != server {}",

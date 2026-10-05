@@ -288,20 +288,29 @@ pub(crate) fn translog_entry_to_mutation(e: TranslogEntry) -> Option<(LogPos, Cl
             placement: placement_from_proto(item.placement).ok()?,
         },
         translog_entry::Op::RemoveLogical(logical) => ClusterMutation::Remove { logical },
+        translog_entry::Op::Upsert(item) => ClusterMutation::Upsert {
+            logical: item.logical_id,
+            version: item.version,
+            dsl: item.dsl,
+            tags: tags_from_proto(item.tags),
+            placement: placement_from_proto(item.placement).ok()?,
+        },
     };
     Some((LogPos(e.seqno), m))
 }
 
 /// Engine `(LogPos, &ClusterMutation)` → proto `TranslogEntry` — the source side of
-/// `FetchTranslog` (ADR-039). `None` for a frame the wire cannot represent: a
-/// per-shard translog never holds a whole `Upsert` (the coordinator decomposes a
-/// cluster upsert into per-shard delete + insert seam calls, each re-logged as its own
-/// Remove/Add record — ADR-070), so shipping one would mean silently dropping half its
-/// semantics; the caller fails the recovery stream loud instead.
-pub(crate) fn translog_entry_from_mutation(
-    pos: LogPos,
-    m: &ClusterMutation,
-) -> Option<TranslogEntry> {
+/// `FetchTranslog` (ADR-039). Every mutation is representable: an atomic per-shard replace
+/// logs one whole `Upsert` frame (ADR-185), which ships as the `upsert` arm so the receiver
+/// replays it as the same single visibility step.
+pub(crate) fn translog_entry_from_mutation(pos: LogPos, m: &ClusterMutation) -> TranslogEntry {
+    let item = |logical: &u64, version: &u32, dsl: &String, tags, placement| AddItem {
+        logical_id: *logical,
+        dsl: dsl.clone(),
+        version: *version,
+        tags: tags_to_proto(tags),
+        placement: Some(placement_to_proto(placement)),
+    };
     let op = match m {
         ClusterMutation::Add {
             logical,
@@ -309,20 +318,20 @@ pub(crate) fn translog_entry_from_mutation(
             dsl,
             tags,
             placement,
-        } => translog_entry::Op::Add(AddItem {
-            logical_id: *logical,
-            dsl: dsl.clone(),
-            version: *version,
-            tags: tags_to_proto(tags),
-            placement: Some(placement_to_proto(placement)),
-        }),
+        } => translog_entry::Op::Add(item(logical, version, dsl, tags, placement)),
         ClusterMutation::Remove { logical } => translog_entry::Op::RemoveLogical(*logical),
-        ClusterMutation::Upsert { .. } => return None,
+        ClusterMutation::Upsert {
+            logical,
+            version,
+            dsl,
+            tags,
+            placement,
+        } => translog_entry::Op::Upsert(item(logical, version, dsl, tags, placement)),
     };
-    Some(TranslogEntry {
+    TranslogEntry {
         seqno: pos.0,
         op: Some(op),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -566,6 +575,47 @@ mod tests {
                 ),
                 other => panic!("expected Add, got {other:?}"),
             }
+        }
+    }
+
+    // ADR-185: every translog mutation round-trips over FetchTranslog, including the whole
+    // `Upsert` frame an atomic per-shard replace logs. Shipping it as an `Add` would leave the
+    // receiver holding both versions; dropping it would lose the replace.
+    #[test]
+    fn every_translog_mutation_round_trips_including_a_whole_upsert() {
+        use super::{translog_entry_from_mutation, translog_entry_to_mutation};
+        use crate::cluster::clog::{ClusterMutation, LogPos};
+        let placement = crate::ownership::QueryPlacement::selective(
+            crate::ownership::PlacementGeneration::INITIAL,
+            4,
+            vec![1, 3],
+        )
+        .expect("placement");
+        let tags = vec![("tier".to_string(), "gold".to_string())];
+        let frames = [
+            ClusterMutation::Add {
+                logical: 7,
+                version: 0,
+                dsl: "alpha bravo".into(),
+                tags: tags.clone(),
+                placement: placement.clone(),
+            },
+            ClusterMutation::Remove { logical: 7 },
+            ClusterMutation::Upsert {
+                logical: 7,
+                version: 3,
+                dsl: "alpha charlie".into(),
+                tags,
+                placement,
+            },
+        ];
+        for (seqno, frame) in frames.iter().enumerate() {
+            let pos = LogPos(seqno as u64 + 1);
+            let (got_pos, got) =
+                translog_entry_to_mutation(translog_entry_from_mutation(pos, frame))
+                    .expect("every frame decodes");
+            assert_eq!(got_pos, pos);
+            assert_eq!(&got, frame);
         }
     }
 }

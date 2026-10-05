@@ -260,5 +260,6 @@ fn adopt_reply(
         num_shards,
         coordinator_id,
         compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+        atomic_replace: true,
     })
 }

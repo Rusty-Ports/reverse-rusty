@@ -251,6 +251,15 @@ pub struct QueryPlacementRef<'a> {
 }
 
 impl QueryPlacementRef<'_> {
+    /// Whether this stored row carries exactly `placement` (generation, shard space, mode
+    /// and positions), without allocating.
+    pub fn matches(self, placement: &QueryPlacement) -> bool {
+        self.generation == placement.generation
+            && self.num_shards == placement.num_shards
+            && self.mode == placement.mode
+            && self.positions == placement.positions.as_slice()
+    }
+
     pub fn to_owned(self) -> QueryPlacement {
         QueryPlacement {
             generation: self.generation,

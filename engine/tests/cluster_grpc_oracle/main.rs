@@ -22,6 +22,7 @@ mod harness;
 
 mod block_on;
 mod broad_cost;
+mod capability_handshake;
 mod class_d;
 mod colocation;
 mod core;
@@ -56,3 +57,4 @@ mod routing;
 mod security;
 mod top_k;
 mod transport;
+mod upsert_visibility;
