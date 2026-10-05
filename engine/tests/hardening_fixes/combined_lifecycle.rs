@@ -65,16 +65,16 @@ fn full_lifecycle_vocab_delete_persist_compact() {
         "not all segments+memtable should be stale — new ones are fresh"
     );
 
-    // Phase 6: compact everything. Assert the result rather than discarding it:
-    // with ≥2 base segments this merge is guaranteed to run, so `None` would mean a
-    // durability write failed (a `DurabilityFailure` event was emitted). Fail loud
-    // with that cause instead of letting the staleness assertion below report a
-    // misleading symptom.
-    engine.compact_all().expect(
-        "compaction must run with ≥2 base segments; None ⇒ a DurabilityFailure during \
-         the segment/manifest write",
+    // Phase 6: compaction would merge segments compiled under two feature models
+    // (the merged segment inherits the min epoch), and no single recorded model
+    // describes that corpus (ADR-184), so its manifest commit is refused and the merge
+    // rolls back. The stale base stays visible.
+    let segments_before = engine.metrics().base_segments;
+    assert!(
+        engine.compact_all().is_none(),
+        "a corpus spanning two feature models must not be committed"
     );
-    // Merged segment inherits min epoch — still stale
+    assert_eq!(engine.metrics().base_segments, segments_before);
     assert!(engine.has_stale_segments());
 
     // Phase 7: verify matching still works correctly
@@ -91,7 +91,11 @@ fn full_lifecycle_vocab_delete_persist_compact() {
     let new_match = match_ids(&engine, "mechanical keyboard new item 2003 acme");
     assert!(new_match.contains(&50), "newly inserted query should match");
 
-    // Phase 8: persist and reopen
+    // Phase 8: the recompile rebuilds every live query under the new vocabulary and
+    // commits it together with the vocabulary; then persist and reopen.
+    engine.recompile_stale_segments();
+    assert!(!engine.has_stale_segments());
+    assert!(engine.persistence_healthy());
     drop(engine);
     let norm2 = make_norm();
     let reopened = Engine::open(norm2, config).expect("reopen should succeed");
@@ -107,6 +111,10 @@ fn full_lifecycle_vocab_delete_persist_compact() {
     assert!(
         !post_del.contains(&1),
         "deleted query should stay deleted after reopen"
+    );
+    assert!(
+        reopened.vocab().is_some_and(|v| !v.synonyms().is_empty()),
+        "the reopen restores the recorded vocabulary"
     );
 }
 

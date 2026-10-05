@@ -22,7 +22,11 @@ mod alias;
 mod distributional;
 mod learn;
 mod methods;
+mod record;
+mod seed;
 
+#[cfg(test)]
+mod format_tests;
 #[cfg(test)]
 mod tests;
 
@@ -36,6 +40,7 @@ pub use learn::{
     learn_anyof_groups, learn_equivalences_from_queries, learn_from_queries,
     learn_vocab_from_corpus, CorpusLearnConfig,
 };
+pub use seed::VocabSeedOutcome;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -75,9 +80,38 @@ pub struct Vocab {
     /// effective groups are exactly `equivalences` ⇒ byte-identical to before the registry.
     #[serde(default)]
     aliases: AliasRegistry,
+    /// Vocabulary document format (ADR-184). The vocabulary is durable — every manifest commit
+    /// records it — so a document from a newer binary must be refused, not reinterpreted.
+    /// Only format 1 exists: an absent field means 1, an explicit `1` is accepted and
+    /// normalized away, and any other value fails to parse. Never written by this binary.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_format_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    format_version: Option<u32>,
+}
+
+/// The only vocabulary document format this binary reads (ADR-184).
+pub const VOCAB_FORMAT_VERSION: u32 = 1;
+
+fn deserialize_format_version<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version == VOCAB_FORMAT_VERSION {
+        Ok(None)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "unsupported vocabulary format_version {version} (this binary reads \
+             {VOCAB_FORMAT_VERSION})"
+        )))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SynonymEntry {
     pub token: String,
     pub canonical: String,
@@ -86,6 +120,7 @@ pub struct SynonymEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PhraseEntry {
     pub tokens: Vec<String>,
     pub canonical: String,
@@ -177,6 +212,7 @@ impl From<PunctClass> for PunctClassSer {
 /// One byte-cleaning punctuation rule (ADR-058): reclassify a single character `ch` to
 /// `class` in the shared normalizer. JSON shape: `{ "ch": "'", "class": "fold" }`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PunctRule {
     pub ch: char,
     pub class: PunctClassSer,

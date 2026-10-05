@@ -135,3 +135,8 @@
 - **Deferred follow-ons.** The explicit stage-two `POST /_feedback`; n-form group validation;
   evidence-driven *de*-activation suggestions for underperforming active aliases; cluster-mode
   capture (needs a coordinator-side aggregation story).
+
+**Outcome update (2026-10-01).** Evidence stamped onto registry entries is now committed with the
+vocabulary in the single-node manifest ([ADR-184](adr-184-recorded-feature-model.md)), so the
+feedback-apply response reports `persisted: true` on a durable engine. The process-local capture
+counters remain unpersisted, as described above.

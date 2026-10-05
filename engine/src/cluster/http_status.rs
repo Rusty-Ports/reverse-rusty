@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `OwnershipMismatch` | 409 `placement_generation_mismatch` | 503 `placement_generation_mismatch` |
 //! | `Config` | 400 `validation_error` | 503 `cluster_unavailable` |
-//! | `DictMismatch` | 500 `feature_space_mismatch` | 503 `cluster_unavailable` |
+//! | `DictMismatch` / `FeatureModelMismatch` | 500 `feature_space_mismatch` | 503 `cluster_unavailable` |
 //! | `DuplicateLogicalId` | 409 `logical_id_conflict` | 503 `cluster_unavailable` |
 //! | `PitNotFound` / `StalePit` | 409 `stale_cursor` | **409** `stale_cursor` |
 //! | `PitUnsupported` | 400 `validation_error` | 501 `pit_unsupported` |
@@ -50,7 +50,9 @@ impl ShardError {
             }
             ShardError::Log(_) => (503, "durability_unavailable"),
             ShardError::Remote(_) => (502, "shard_unreachable"),
-            ShardError::DictMismatch { .. } => (500, "feature_space_mismatch"),
+            ShardError::DictMismatch { .. } | ShardError::FeatureModelMismatch(_) => {
+                (500, "feature_space_mismatch")
+            }
             ShardError::OwnershipMismatch(_) => (409, "placement_generation_mismatch"),
             ShardError::ControlPlane(_) => (503, "control_plane_error"),
             ShardError::DeadlineExceeded => (408, "deadline_exceeded"),
@@ -113,6 +115,7 @@ impl ClusterRankedError {
             ClusterRankedError::Shard(
                 ShardError::Config(_)
                 | ShardError::DictMismatch { .. }
+                | ShardError::FeatureModelMismatch(_)
                 | ShardError::Log(_)
                 | ShardError::ControlPlane(_)
                 | ShardError::DuplicateLogicalId(_)

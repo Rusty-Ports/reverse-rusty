@@ -67,7 +67,14 @@ impl Engine {
             let path = seg_dir.join(&name);
             match crate::storage::write_segment(&seg, &path) {
                 Ok(()) => match MmapSegment::open(&path) {
-                    Ok(mmap_seg) => return (BaseSegment::Mmap(mmap_seg), true),
+                    Ok(mut mmap_seg) => {
+                        // `vocab_epoch` is process-local (not in the file), so a fresh mmap
+                        // reads zero. Carry the sealed segment's epoch: after a vocabulary
+                        // change, a flushed or compacted current-model segment must not look
+                        // stale (ADR-184 refuses to commit a corpus with stale segments).
+                        mmap_seg.vocab_epoch = seg.vocab_epoch;
+                        return (BaseSegment::Mmap(mmap_seg), true);
+                    }
                     Err(e) => {
                         self.persistence_healthy = false;
                         self.emit(crate::events::EngineEvent::DurabilityFailure {
@@ -121,7 +128,10 @@ impl Engine {
             return Err(e);
         }
         match MmapSegment::open(&path) {
-            Ok(mmap_seg) => Ok((BaseSegment::Mmap(mmap_seg), Some(path))),
+            Ok(mut mmap_seg) => {
+                mmap_seg.vocab_epoch = seg.vocab_epoch;
+                Ok((BaseSegment::Mmap(mmap_seg), Some(path)))
+            }
             Err(e) => {
                 self.persistence_healthy = false;
                 self.best_effort_remove_segment(&path);
@@ -263,6 +273,17 @@ impl Engine {
         &mut self,
         source_file_name: &str,
     ) -> bool {
+        // Everything appended through this seq is captured by this commit
+        // (single-writer: every frame already appended is already applied).
+        let watermark = self.wal.as_ref().map_or(0, crate::wal::Wal::last_seq);
+        self.write_manifest_capturing(source_file_name, watermark)
+    }
+
+    pub(super) fn write_manifest_capturing(
+        &mut self,
+        source_file_name: &str,
+        watermark: u64,
+    ) -> bool {
         // Cluster shards (ADR-032) do not own a manifest: the coordinator's
         // `cluster_manifest.bin` is the sole segment registry + dict store. Segment
         // `.seg` files are still written (by `make_base_segment`); only the per-shard
@@ -270,6 +291,22 @@ impl Engine {
         // (which gate WAL reset on this) proceed normally.
         if !self.owns_manifest {
             return true;
+        }
+        // ADR-184: a manifest records ONE feature model for the whole corpus. While a
+        // `set_vocab` awaits its `recompile_stale_segments`, some rows were compiled under
+        // the previous normalizer, and no single recorded model describes them — committing
+        // would make a restart serve those rows under the new one. Fail this commit closed
+        // (the old manifest + WAL stay authoritative) without marking persistence unhealthy,
+        // so the pending recompile can still commit the coherent state.
+        if self.config.data_dir.is_some() && self.has_stale_segments() {
+            self.emit(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::ManifestWrite,
+                detail: "refusing to commit a corpus compiled under two feature models; \
+                         call recompile_stale_segments after set_vocab"
+                    .to_string(),
+                error: format!("{} stale segment(s)", self.stale_segment_count()),
+            });
+            return false;
         }
         if let Some(ref dir) = self.config.data_dir {
             let segment_files: Vec<String> = self
@@ -342,6 +379,21 @@ impl Engine {
                 BaseSegment::Mmap(m) => m.carries_source_generation_fence(),
                 BaseSegment::Memory(seg) => seg.max_source_generation() != 0,
             });
+            // ADR-184: record the feature model with every commit, verified to reopen as the
+            // normalizer serving this corpus. A vocabulary that would not would make the next
+            // restart refuse (or mis-serve) the store, so fail closed instead.
+            let vocab_data = match self.recordable_vocab() {
+                Ok(data) => data,
+                Err(error) => {
+                    self.persistence_healthy = false;
+                    self.emit(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::ManifestWrite,
+                        detail: "the vocabulary cannot be recorded in the manifest".to_string(),
+                        error,
+                    });
+                    return false;
+                }
+            };
             let manifest = crate::storage::Manifest {
                 segment_files,
                 class_d_fence,
@@ -353,11 +405,11 @@ impl Engine {
                 tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
                 rejected_parse: self.rejected_parse,
                 rejected_class_d: self.rejected_class_d,
-                // Everything appended through this seq is captured by this commit
-                // (single-writer: every frame already appended is already applied).
-                wal_seq_watermark: self.wal.as_ref().map_or(0, crate::wal::Wal::last_seq),
+                wal_seq_watermark: watermark,
                 segment_tombstones,
                 source_file_name: source_file_name.to_string(),
+                feature_model_fingerprint: Some(self.norm.fingerprint()),
+                vocab_data,
             };
             let dir = dir.clone();
             if let Err(e) = crate::storage::write_manifest(&manifest, &dir.join("manifest.bin")) {
@@ -370,6 +422,7 @@ impl Engine {
                 });
                 return false;
             }
+            self.committed_wal_watermark = watermark;
         }
         // Publish the exact generation order the manifest reader will reconstruct.
         // Memory fallbacks are deliberately absent from `segment_files`; filtering
@@ -486,6 +539,7 @@ impl Engine {
     }
 }
 
+mod feature_model;
 mod sources;
 
 #[cfg(test)]

@@ -17,7 +17,10 @@ impl Engine {
     ///    `effective_equivalence_groups` + `active_alias_forms` (candidate/rejected entries are
     ///    invisible to both).
     ///
-    /// Equal ⇒ swap the Arc (no epoch bump, no normalizer rebuild, no recompile). Anything else
+    /// Equal ⇒ swap the Arc (no epoch bump, no normalizer rebuild, no recompile) and record the
+    /// new registry with a vocabulary-only manifest commit (ADR-184), so the change survives a
+    /// restart on a durable engine; if that commit is refused the previous vocabulary is kept
+    /// and an error returned. Anything else
     /// ⇒ fall back to the full `set_vocab` + `recompile_stale_segments`, so the fast path can
     /// never leave the advertised vocab out of sync with the live normalizer. `pub(crate)`
     /// deliberately: callers outside the crate go through `set_vocab` (the general contract) or
@@ -45,7 +48,22 @@ impl Engine {
             && vocab.effective_equivalence_groups() == current.effective_equivalence_groups()
             && vocab.aliases().active_alias_forms() == current.aliases().active_alias_forms()
         {
-            self.vocab = Some(Arc::new(vocab));
+            // A registry-only change leaves the normalizer as is, so the recorded vocabulary
+            // must still reopen as it (ADR-184) — it does not on an engine built from a bare
+            // custom normalizer, or with metadata JSON cannot carry. Refuse before mutating.
+            vocab
+                .recordable_json(&self.norm, &self.dict)
+                .map_err(crate::error::NormalizerError::new)?;
+            let previous = self.vocab.replace(Arc::new(vocab));
+            if !self.commit_feature_model() {
+                // All-or-nothing: an unrecorded registry change would silently vanish on the
+                // next restart, so keep the committed vocabulary and report the failure.
+                self.vocab = previous;
+                return Err(crate::error::NormalizerError::new(
+                    "the vocabulary change could not be recorded in the manifest \
+                     (persistence is degraded)",
+                ));
+            }
             Ok(true)
         } else {
             self.set_vocab(vocab)?;
@@ -55,8 +73,11 @@ impl Engine {
     }
 
     /// Replace the engine's vocabulary and normalizer. Existing compiled
-    /// queries become stale — the caller must reingest for consistent matching.
-    /// Returns the number of stale segments that need reingestion.
+    /// queries become stale — call [`recompile_stale_segments`](Self::recompile_stale_segments)
+    /// next, which rebuilds them and commits the new feature model (ADR-184); until then a
+    /// durable engine refuses to commit, because no single recorded model would describe the
+    /// corpus. An engine with no compiled rows has nothing to rebuild, so the new model is
+    /// committed here. Returns the number of stale segments that need reingestion.
     pub fn set_vocab(
         &mut self,
         mut vocab: crate::vocab::Vocab,
@@ -105,6 +126,11 @@ impl Engine {
         vocab.intern_equivalence_forms(&norm, &mut proposed_dict);
         let equiv = vocab.resolve_equivalences(&norm, &proposed_dict);
         proposed_dict.set_equivalences(equiv);
+        // Every later commit records this vocabulary (ADR-184); one that could not be recorded
+        // would fail those commits after the new normalizer is live. Refuse it up front.
+        vocab
+            .recordable_json(&norm, &proposed_dict)
+            .map_err(crate::error::NormalizerError::new)?;
 
         // `set_vocab` and `recompile_stale_segments` are intentionally separate public
         // operations, but installing a normalizer that cannot represent every acknowledged
@@ -141,6 +167,17 @@ impl Engine {
         self.vocab = Some(Arc::new(vocab));
         self.dict = Arc::new(proposed_dict);
         self.vocab_epoch += 1;
+        // An empty memtable holds nothing compiled under the previous normalizer, so it joins
+        // the new epoch; otherwise rows written after this change would seal into a segment
+        // that looks stale, and ADR-184 refuses to commit a stale corpus.
+        if self.memtable.is_empty() {
+            Arc::make_mut(&mut self.memtable).vocab_epoch = self.vocab_epoch;
+        }
+        if self.segments.is_empty() && self.memtable.is_empty() {
+            // Nothing is compiled, so the recompile that normally commits the new model is a
+            // no-op. A failed write marks persistence unhealthy for the caller to report.
+            self.commit_feature_model();
+        }
         Ok(self.stale_segment_count())
     }
 
@@ -177,6 +214,21 @@ impl Engine {
         &mut self,
         mut vocab: crate::vocab::Vocab,
     ) -> Result<(), crate::error::NormalizerError> {
+        if self.config.data_dir.is_some() && self.owns_manifest && !self.persistence_healthy {
+            return Err(crate::error::NormalizerError::new(
+                "cannot adopt a vocabulary while persistence is unhealthy; it could not be \
+                 recorded in the manifest",
+            ));
+        }
+        // ADR-184: an engine reopened from a manifest that records this vocabulary already
+        // installed it (equivalences included) before its WAL replay and migration. Checked
+        // after the health gate: an adoption whose commit failed is installed in memory but
+        // not recorded, so an identical retry must not report success.
+        if let (Some(current), Ok(adopted)) = (self.vocab.as_deref(), vocab.to_json()) {
+            if current.to_json().is_ok_and(|json| json == adopted) {
+                return Ok(());
+            }
+        }
         // Recovery hazard (codex R13 + ADR-118): `Engine::open` replays the WAL and may migrate
         // legacy segments BEFORE any vocab is installed. The `EquivMap` is transient, so either
         // materialization can omit required-to-any-of expansion. There is deliberately no
@@ -230,6 +282,17 @@ impl Engine {
         if vocab.aliases_mut().demote_unexpressible(&norm, dict) > 0 {
             norm = Arc::new(vocab.to_normalizer()?);
         }
+        // ADR-184: adoption records metadata only — it never recompiles — so the compiled rows
+        // must already be in this vocabulary's feature model. A different normalizer is a
+        // vocabulary change, which only `set_vocab` + `recompile_stale_segments` may make.
+        if !fresh && norm.fingerprint() != self.norm.fingerprint() {
+            return Err(crate::error::NormalizerError::new(format!(
+                "adopted vocabulary builds normalizer {:#018x}, but the compiled corpus uses \
+                 {:#018x}; apply a different vocabulary with set_vocab",
+                norm.fingerprint(),
+                self.norm.fingerprint()
+            )));
+        }
         if fresh {
             vocab.intern_equivalence_forms(&norm, dict);
         }
@@ -237,6 +300,12 @@ impl Engine {
         dict.set_equivalences(equiv);
         self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
+        // Record the adopted vocabulary (ADR-184) so a restart restores it.
+        if !self.commit_feature_model() && self.config.data_dir.is_some() {
+            return Err(crate::error::NormalizerError::new(
+                "the adopted vocabulary could not be committed to the manifest",
+            ));
+        }
         Ok(())
     }
 }

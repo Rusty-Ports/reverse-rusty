@@ -48,6 +48,11 @@ const CLUSTER_MANIFEST_VERSION_OWNERSHIP: u32 = 6;
 /// empty; the source names make a blue/green rebuild's source corpus atomic
 /// with the segment registry.
 const CLUSTER_MANIFEST_VERSION_COMPILER_SEMANTICS: u32 = 7;
+/// v8 (ADR-184): appends the feature-model fingerprint of the normalizer the committed base
+/// and log tail were compiled under. v3 already persists the vocabulary; the fingerprint also
+/// covers clusters built from a bare normalizer, whose model no blob can restore, so a reopen
+/// under a different normalizer fails loud. A v6/v7 manifest reads back with `None`.
+const CLUSTER_MANIFEST_VERSION_FEATURE_MODEL: u32 = 8;
 
 /// The coordinator's cluster-state document (the analogue of what a Raft quorum will
 /// later hold). Written atomically (tmp + CRC + rename) — the SINGLE commit point that
@@ -101,6 +106,10 @@ pub struct ClusterManifest {
     /// filtered percolation (ADR-049), so reopened shards resolve `(key,value)` tags to
     /// the SAME `TagId`s. Written by v4; a v2/v3 manifest reads back as empty (no tags).
     pub tag_dict_data: Vec<u8>,
+    /// [`Normalizer::fingerprint`](crate::normalize::Normalizer::fingerprint) of the
+    /// coordinator's feature model (ADR-184). Required on write (every commit records it);
+    /// `None` only when read back from a pre-v8 manifest.
+    pub feature_model_fingerprint: Option<u64>,
 }
 
 pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Result<()> {
@@ -125,10 +134,16 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
     for name in &manifest.source_files {
         validate_sidecar_basename(name)?;
     }
+    let Some(feature_model_fingerprint) = manifest.feature_model_fingerprint else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cluster manifest must record its feature-model fingerprint",
+        ));
+    };
     let tmp = path.with_extension("cmanifest.tmp");
     publish_with_crc(path, &tmp, |f| {
         f.write_all(&CLUSTER_MANIFEST_MAGIC)?;
-        write_u32(f, CLUSTER_MANIFEST_VERSION_COMPILER_SEMANTICS)?;
+        write_u32(f, CLUSTER_MANIFEST_VERSION_FEATURE_MODEL)?;
         write_u64(f, manifest.epoch)?;
         write_u64(f, manifest.snapshot_pos)?;
         write_u64(f, manifest.dict_fingerprint)?;
@@ -166,6 +181,7 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
             write_u32(f, bytes.len() as u32)?;
             f.write_all(bytes)?;
         }
+        write_u64(f, feature_model_fingerprint)?;
         Ok(())
     })
 }
@@ -195,7 +211,7 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
     let version = read_u32_at(content, 4)?;
     // ADR-109 is a rebuild-only cluster migration: v1-v5 have no durable emission-owner
     // generation, while a future version must never be guessed at.
-    if !(CLUSTER_MANIFEST_VERSION_OWNERSHIP..=CLUSTER_MANIFEST_VERSION_COMPILER_SEMANTICS)
+    if !(CLUSTER_MANIFEST_VERSION_OWNERSHIP..=CLUSTER_MANIFEST_VERSION_FEATURE_MODEL)
         .contains(&version)
     {
         return Err(io::Error::new(
@@ -326,6 +342,13 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         } else {
             (0, vec!["sources.dat".to_string(); num_shards as usize])
         };
+    let feature_model_fingerprint = if version >= CLUSTER_MANIFEST_VERSION_FEATURE_MODEL {
+        let fingerprint = read_u64_at(content, cursor)?;
+        cursor += 8;
+        Some(fingerprint)
+    } else {
+        None
+    };
     let expected_shards = num_shards as usize;
     if segment_registry.len() != expected_shards
         || next_seg_ids.len() != expected_shards
@@ -365,5 +388,6 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         dict_data,
         vocab_data,
         tag_dict_data,
+        feature_model_fingerprint,
     })
 }

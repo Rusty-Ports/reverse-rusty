@@ -53,6 +53,7 @@ mod metrics;
 mod pit;
 mod resize_ops;
 mod state;
+mod vocab_seed;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -259,34 +260,22 @@ async fn main() {
         None
     };
 
-    let build_normalizer = |v: &Option<reverse_rusty::vocab::Vocab>| -> Normalizer {
-        match v {
-            Some(vocab) => vocab
-                .to_normalizer()
-                .expect("failed to build normalizer from vocab"),
-            None => Normalizer::default_vocab().expect("failed to build normalizer"),
-        }
-    };
-
     let mut engine = if let Some(data_dir) = cli.data_dir.as_ref() {
-        // A vocab-built engine opens via open_with_vocab so the vocab's equivalence groups are
-        // installed BEFORE the WAL tail is replayed — the equivalence map is transient, so an
-        // open + adopt_vocab sequence would recompile the recovered tail without alias
-        // expansion, a recovery false negative (codex R13).
-        let opened = match vocab {
-            Some(v) => Engine::open_with_vocab(v, config.clone()),
-            None => Engine::open(build_normalizer(&None), config.clone()),
-        };
-        match opened {
-            Ok(e) => {
+        // ADR-184: the manifest records the feature model, so --vocab-file only seeds a store.
+        // A committed vocabulary is authoritative; `open_seeded` restores it (installing its
+        // equivalences before the WAL tail replays), and a mismatched model fails loud.
+        let seed_supplied = vocab.is_some();
+        match Engine::open_seeded(vocab, config.clone()) {
+            Ok((e, outcome)) => {
                 info!(data_dir = ?data_dir, "recovered engine from persistence");
+                vocab_seed::log_outcome(outcome, seed_supplied);
                 e
             }
             Err(e) => {
                 // Engine::open returns Ok for a genuinely empty/new data dir, so an
-                // error here is real corruption or an I/O failure — never "no data".
-                // Refuse to start rather than silently overwriting recoverable data
-                // with a fresh (empty) engine.
+                // error here is real corruption, an I/O failure, or a feature-model
+                // mismatch — never "no data". Refuse to start rather than silently
+                // overwriting recoverable data with a fresh (empty) engine.
                 error!(
                     data_dir = ?data_dir,
                     error = %e,

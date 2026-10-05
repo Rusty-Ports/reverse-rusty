@@ -372,7 +372,10 @@ To run — or change — a **custom** vocabulary, use the **in-process `--data-d
 (`server --cluster --data-dir … --vocab-file vocab.json --shards K`, no `--shard-endpoint`), where the
 coordinator owns the in-process shards' normalizer. Change it **blue/green**: stand up a parallel
 in-process cluster built with the new `--vocab-file`, validate (percolate your golden titles), cut traffic
-over (swap the published port / proxy upstream), decommission the old one.
+over (swap the published port / proxy upstream), decommission the old one. Restarting an existing
+`--data-dir` with an added or edited `--vocab-file` does **not** change its vocabulary: the manifest's
+recorded feature model is authoritative, so the coordinator logs that the file was not applied
+([ADR-184](../decisions/adr-184-recorded-feature-model.md)); use `PUT /_vocab` or a blue/green rebuild.
 
 This is the shipped boundary behind ADR-076's decision-time wording: the current remote topology is
 stock-vocabulary-only; custom vocabulary requires an in-process blue/green deployment. Background:

@@ -181,6 +181,7 @@ fn replay_wal_tail(
     Ok(())
 }
 
+mod feature_model;
 mod migration;
 mod open;
 mod shared;

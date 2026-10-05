@@ -46,7 +46,7 @@ type LiveTaggedMetadata = (
 
 enum AliasImportManifestState {
     Committed,
-    PublishedCurrent(crate::storage::ClusterManifest),
+    PublishedCurrent(Box<crate::storage::ClusterManifest>),
     ImmediatePredecessor,
 }
 
@@ -350,7 +350,7 @@ impl ClusterEngine {
                         ))
                     })?;
                 self.epoch.store(manifest.epoch, Ordering::Relaxed);
-                self.record_committed_manifest(manifest);
+                self.record_committed_manifest(*manifest);
             }
             AliasImportManifestState::ImmediatePredecessor => self.checkpoint()?,
         }
@@ -441,7 +441,9 @@ impl ClusterEngine {
                 && (pending_manifest.as_ref() == Some(&manifest)
                     || committed_manifest.as_ref() == Some(&manifest))
             {
-                return Ok(AliasImportManifestState::PublishedCurrent(manifest));
+                return Ok(AliasImportManifestState::PublishedCurrent(Box::new(
+                    manifest,
+                )));
             }
             if manifest.epoch == self.epoch() && committed_manifest.as_ref() == Some(&manifest) {
                 return Ok(AliasImportManifestState::Committed);

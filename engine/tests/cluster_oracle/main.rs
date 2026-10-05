@@ -19,6 +19,7 @@ mod harness;
 mod class_d;
 mod differential;
 mod dynamic_vocab;
+mod feature_model;
 mod filtered;
 mod hot;
 mod pit;

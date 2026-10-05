@@ -17,6 +17,21 @@ reverse chronological and describe outcomes, not the current architecture or fut
   Leg 4 now converges repairs before its green gate and checks every acknowledged write.
 - Add `RR_HARNESS_PORT`, `RR_HARNESS_WRITERS` and `RR_HARNESS_WRITE_GAP` to run the harness beside a
   local server and to stress the handoff fence.
+## 2026-10-01 — Recorded feature model
+
+- Fix silent false negatives after a restart under a different vocabulary: the single-node manifest
+  (v8) now records the vocabulary and a normalizer fingerprint with every commit, and the cluster
+  manifest (v8) records the fingerprint. A reopen restores the recorded vocabulary — so a runtime
+  alias, `PUT /_vocab`, or the documented backup restore survives without `--vocab-file` — and a
+  normalizer that differs from the recorded one fails with `FeatureModelMismatch`
+  ([ADR-184](decisions/adr-184-recorded-feature-model.md)).
+- Treat `--vocab-file` as a seed for both modes: a store that recorded a vocabulary keeps it and
+  warns when the file differs, and a populated in-process cluster built without a vocabulary
+  reopens under the stock normalizer its queries were compiled with instead of the file's.
+- Commit every vocabulary change before acknowledging it, including on an empty engine and for
+  alias candidates and feedback evidence; those responses now report `persisted: true` on durable
+  engines. A commit while a vocabulary change awaits its recompile is refused.
+- Reject unknown fields in nested vocabulary entries and any `format_version` other than `1`.
 
 ## 2026-09-30 — Cluster RPC runtime isolation
 

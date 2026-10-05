@@ -17,7 +17,7 @@ Options:
 | `--auth-protect-reads` | false | Extend bearer-token auth to read endpoints too (everything except `GET`/`HEAD /_health`). Requires an auth token |
 | `--data-dir` | *(in-memory)* | Persistence directory for segments and WAL |
 | `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
-| `--vocab-file` | — | Load vocabulary from a JSON file at startup |
+| `--vocab-file` | — | Seed a new store's vocabulary from a JSON file; a durable store that recorded its vocabulary keeps it ([ADR-184](../../../decisions/adr-184-recorded-feature-model.md)) |
 | `--ranking-profiles-file` | — | Load strict, fingerprintable CPU ranking profiles from JSON; `RR_RANKING_PROFILES_FILE` is the environment alternative and `static_v1` remains built in ([ranking reference](../../ranking.md)) |
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
 | `--max-concurrent-searches` | 0 *(unbounded)* | Max `/_search`+`/_mpercolate` requests occupying the match pool at once; excess queue within their own timeout (`timeout` or `timeout_ms`, ADR-099) |

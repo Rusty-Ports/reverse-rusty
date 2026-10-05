@@ -24,13 +24,17 @@ fn scratch_dir(tag: &str) -> PathBuf {
 }
 
 fn downgrade_cluster_manifest_to_v6(path: &std::path::Path) {
-    let manifest = crate::storage::read_cluster_manifest(path).expect("read v7 manifest");
+    let manifest = crate::storage::read_cluster_manifest(path).expect("read v8 manifest");
     let mut bytes = std::fs::read(path).expect("read manifest bytes");
-    let suffix = 8 + manifest
-        .source_files
-        .iter()
-        .map(|name| 4 + name.len())
-        .sum::<usize>();
+    // v7 appended compiler semantics + the source-file column; v8 appends the 8-byte
+    // feature-model fingerprint (ADR-184).
+    let suffix = 8
+        + 8
+        + manifest
+            .source_files
+            .iter()
+            .map(|name| 4 + name.len())
+            .sum::<usize>();
     let content_len = bytes.len().checked_sub(4 + suffix).expect("v7 suffix fits");
     bytes.truncate(content_len);
     bytes[4..8].copy_from_slice(&6u32.to_le_bytes());

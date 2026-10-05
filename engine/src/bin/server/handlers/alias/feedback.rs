@@ -192,7 +192,8 @@ struct AliasFeedbackApplyResponse {
     took_ms: f64,
     acknowledged: bool,
     result: &'static str,
-    /// Standalone runtime vocabulary changes are not written to the startup vocab file.
+    /// Whether the registry change is committed to the durable manifest (ADR-184): true on a
+    /// durable engine, false on an in-memory one.
     persisted: bool,
     min_overlap: f64,
     min_titles: u64,
@@ -209,10 +210,12 @@ enum StandaloneAliasFeedbackApply {
     Applied {
         validated: usize,
         report: AliasFeedbackApplyReport,
+        persisted: bool,
     },
     Noop {
         validated: usize,
         report: AliasFeedbackApplyReport,
+        persisted: bool,
     },
     Invalid(String),
     PersistenceUnavailable(String),
@@ -243,6 +246,10 @@ fn apply_standalone_alias_feedback(
     let expected = engine.live_sources().len();
     let report = match engine.apply_alias_feedback(validated, activate) {
         Ok(report) => report,
+        // A registry change that cannot be recorded in the manifest is refused (ADR-184).
+        Err(source) if durable && !engine.persistence_healthy() => {
+            return StandaloneAliasFeedbackApply::PersistenceUnavailable(source.to_string())
+        }
         Err(source) => return StandaloneAliasFeedbackApply::Invalid(source.to_string()),
     };
     if report.activated > 0 && (report.recompiled != expected || engine.has_stale_segments()) {
@@ -257,15 +264,18 @@ fn apply_standalone_alias_feedback(
             report,
         };
     }
+    let persisted = durable && engine.persistence_healthy();
     if report.stamped > 0 || report.activated > 0 {
         StandaloneAliasFeedbackApply::Applied {
             validated: validated.len(),
             report,
+            persisted,
         }
     } else {
         StandaloneAliasFeedbackApply::Noop {
             validated: validated.len(),
             report,
+            persisted,
         }
     }
 }
@@ -333,7 +343,11 @@ pub(crate) async fn validate_and_apply_feedback(
     });
 
     let response = match worker.await {
-        Ok(StandaloneAliasFeedbackApply::Applied { validated, report }) => {
+        Ok(StandaloneAliasFeedbackApply::Applied {
+            validated,
+            report,
+            persisted,
+        }) => {
             info!(
                 validated,
                 stamped = report.stamped,
@@ -341,11 +355,13 @@ pub(crate) async fn validate_and_apply_feedback(
                 recompiled = report.recompiled,
                 "alias feedback validated and applied"
             );
-            alias_feedback_apply_success(started, controls, validated, report, "updated")
+            alias_feedback_apply_success(started, controls, validated, report, "updated", persisted)
         }
-        Ok(StandaloneAliasFeedbackApply::Noop { validated, report }) => {
-            alias_feedback_apply_success(started, controls, validated, report, "noop")
-        }
+        Ok(StandaloneAliasFeedbackApply::Noop {
+            validated,
+            report,
+            persisted,
+        }) => alias_feedback_apply_success(started, controls, validated, report, "noop", persisted),
         Ok(StandaloneAliasFeedbackApply::Invalid(reason)) => {
             alias_feedback_apply_error_response(StatusCode::BAD_REQUEST, "vocab_error", reason)
         }
@@ -405,6 +421,7 @@ fn alias_feedback_apply_success(
     validated: usize,
     report: AliasFeedbackApplyReport,
     result: &'static str,
+    persisted: bool,
 ) -> Response {
     let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let response = AliasFeedbackApplyResponse {
@@ -412,7 +429,7 @@ fn alias_feedback_apply_success(
         took_ms,
         acknowledged: true,
         result,
-        persisted: false,
+        persisted,
         min_overlap: controls.min_overlap,
         min_titles: controls.min_titles,
         min_queries: controls.min_queries,

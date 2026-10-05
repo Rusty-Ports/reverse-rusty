@@ -140,8 +140,9 @@ come from three sources:
    context through `Vocab` or
    [`PUT /_vocab`](api/vocab/replace-vocab.md).
 
-3. **File-based** — load a vocabulary JSON file at startup with `--vocab-file`, or save/load at
-   runtime. Vocabularies are composable via `merge()`.
+3. **File-based** — seed a new store from a vocabulary JSON file with `--vocab-file`, or
+   save/load at runtime. Vocabularies are composable via `merge()`. A nested entry with an unknown
+   field, or a `format_version` other than `1`, is rejected (ADR-184).
 
 ```json
 {
@@ -177,7 +178,6 @@ omit the array to use that behavior. The same table applies
 to **both** queries and titles, so a query and a title that differ only in punctuation match.
 
 The `NormalizerBuilder` API remains available for programmatic vocabulary construction when you need
-fine-grained control (`fold_punctuation` / `set_punct_class`). In a single-node server, a REST
-vocabulary change remains process-local metadata until the resulting `GET /_vocab` document is saved
-to the configured `--vocab-file`; a durable cluster checkpoints its vocabulary in the coordinator
-manifest.
+fine-grained control (`fold_punctuation` / `set_punct_class`). A durable store records its
+vocabulary in its manifest with every commit (ADR-184), so a REST vocabulary change survives a
+restart without editing `--vocab-file`; the file only seeds a new store.

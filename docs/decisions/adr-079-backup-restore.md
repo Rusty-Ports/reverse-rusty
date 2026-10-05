@@ -98,3 +98,11 @@ endpoint.
 **Outcome update (2026-07-27).** [ADR-139](adr-139-backup-api-contract.md) retains this snapshot
 selection and verification design while hardening its REST boundary and replacing the deterministic
 staging name/ordinary final rename with uniquely owned staging and no-clobber promotion.
+
+**Erratum and outcome update (2026-10-01).** As accepted, the "embedded dict / vocab / tag-dict
+blobs" claim held only for the cluster manifest: the single-node manifest carried no vocabulary, so
+a vocab-bearing single-node backup restored with the documented `--data-dir`-only command opened
+silently under the stock normalizer. [ADR-184](adr-184-recorded-feature-model.md) adds the
+vocabulary and a feature-model fingerprint to the single-node manifest (v8), so a backup taken by
+this release carries its vocabulary like the cluster's; a pre-v8 single-node backup still needs the
+`--vocab-file` it ran with.

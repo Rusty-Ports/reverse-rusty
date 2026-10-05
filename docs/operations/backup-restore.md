@@ -20,8 +20,11 @@ references, nothing else:
 | **Single-node** | `manifest.bin` + the manifest's `segments/*.seg` + selected `sources_g*.dat` (legacy: `sources.dat`) + `wal.log` |
 | **In-process cluster** | `cluster_manifest.bin` + `cluster.log` + per-shard `shard_<i>/segments/*.seg` + each manifest-selected source sidecar |
 
-The frozen dict, vocabulary, and tag space are embedded **inside** the manifests, so they travel
-with the copy automatically. **Replica directories are not copied** — a cluster rebuilds replicas
+The frozen dict, vocabulary, tag space, and feature-model fingerprint are embedded **inside** the
+manifests, so they travel with the copy automatically and the restore needs no `--vocab-file`
+(ADR-184). One exception: a single-node backup written by a binary that predates ADR-184 (manifest
+v7 or older) records no vocabulary — restore it with the `--vocab-file` that engine ran with; the
+server warns that it trusts that file unverified, and the first commit records it. **Replica directories are not copied** — a cluster rebuilds replicas
 from the primaries on open. Orphan segment or source-generation files left by an interrupted
 pre-commit attempt are skipped.
 

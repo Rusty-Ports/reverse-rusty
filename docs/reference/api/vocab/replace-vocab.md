@@ -24,12 +24,12 @@ occupy a Tokio request worker. The operation has no cancellable execution timeou
 it runs to a terminal result and publishes a coherent snapshot even if the client disconnects.
 Concurrent stats and vocabulary read/write operations serialize through the same bounded slot.
 
-> **Durability:** on a successful response, the recompiled queries have committed like a flush.
-> The single-node vocabulary **object** itself still lives in memory: `--vocab-file` is the restart
-> source (ADR-015). Save the same JSON there (for example, capture `GET /_vocab`) after a successful
-> REST replacement; reopening with a stale or absent file would desynchronize title normalization
-> from the persisted queries. A cluster persists its vocabulary in the coordinator manifest and
-> does not have this file caveat. If a standalone recompile becomes live but its durable commit
+> **Durability:** on a successful response, the recompiled queries have committed like a flush,
+> and the same manifest commit records the new vocabulary and its feature-model fingerprint
+> (ADR-184). A restart restores it from the manifest on single-node and cluster alike, with or
+> without `--vocab-file`: the file only seeds a new store, and a restart with a file that differs
+> from the recorded vocabulary keeps the recorded one and logs a warning. If a standalone recompile
+> becomes live but its durable commit
 > fails, the process publishes that coherent live state but returns
 > `503 persistence_unavailable` instead of `acknowledged: true`; the old manifest remains
 > authoritative for restart. A durable coordinator checkpoint failure is likewise not

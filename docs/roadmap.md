@@ -226,16 +226,18 @@ rank metadata, fully sorts already-sorted shard runs, and clones request groups 
 
 ### Versioned feature models with blue/green re-materialization
 
-**Problem.** Minor runtime vocabulary changes are supported, but a major tokenizer, feature-kind,
-or common-mask change cannot safely reinterpret rows compiled under an older model.
+**Problem.** Minor runtime vocabulary changes are supported, and both manifests now record the
+feature model's vocabulary and fingerprint so a reopen under a different normalizer fails loudly
+([ADR-184](decisions/adr-184-recorded-feature-model.md)). A major tokenizer, feature-kind, or
+common-mask change, however, still rebuilds in place: it cannot validate a candidate index before
+serving it or roll back to the previous one.
 
-**Direction.** Give the complete feature model a durable version and fingerprint. Keep compatible
-minor changes within the existing epoch machinery; rebuild major changes into a parallel index from
-canonical sources, validate it against the independent oracle, then atomically swap the serving
-epoch.
+**Direction.** Keep compatible minor changes within the existing epoch machinery; rebuild major
+changes into a parallel index from canonical sources, validate it against the independent oracle,
+then atomically swap the serving epoch.
 
-**Completion.** Mixed model versions fail loudly, rollback retains the previous complete index, and
-the blue/green swap is result-equivalent across crash and reopen.
+**Completion.** Rollback retains the previous complete index, and the blue/green swap is
+result-equivalent across crash and reopen.
 
 ### Self-tuning cost and placement recommendations
 
