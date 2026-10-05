@@ -1,5 +1,15 @@
 use super::{extract_readonly, ClusterMutation, Dict, Normalizer, Shard, ShardError};
 
+/// Whether an upsert with `placement` STORES its row at `position` (as opposed to only
+/// tombstoning the id there). Replicated modes cover every position; only Selective restricts.
+pub(crate) fn upsert_stores_at(
+    placement: &crate::ownership::QueryPlacement,
+    position: u32,
+) -> bool {
+    placement.mode() != crate::ownership::PlacementMode::Selective
+        || placement.positions().binary_search(&position).is_ok()
+}
+
 /// Apply one logged mutation to a shard through its normal write path — so the op is itself
 /// re-logged into that shard's translog (a recovered replica's tail stays consistent) and
 /// applied to its engine. Re-derives features from the raw DSL against the frozen `dict`
@@ -59,12 +69,8 @@ pub(crate) fn apply_mutation(
             // a delete-only position; ADR-109 made shard-side writes validate placement
             // coverage, so re-driving the new version there is refused
             // (`LocalPositionMissing`) and would wedge `resync` on that mutation forever
-            // (distributed recovery regression catch). Replicated modes cover every
-            // position; only Selective restricts.
-            let covered = position.is_none_or(|p| {
-                placement.mode() != crate::ownership::PlacementMode::Selective
-                    || placement.positions().binary_search(&p).is_ok()
-            });
+            // (distributed recovery regression catch).
+            let covered = position.is_none_or(|p| upsert_stores_at(placement, p));
             if covered {
                 let mut lc = String::new();
                 let ex = extract_readonly(&ast, norm, dict, &mut lc);

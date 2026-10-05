@@ -17,7 +17,26 @@ impl ClusterEngine {
         failed: Vec<usize>,
         first_err: Option<ShardError>,
     ) -> ShardError {
+        self.note_partial_deferring(mutation, logical, applied, failed, &[], first_err)
+    }
+
+    /// [`note_partial`](Self::note_partial) for an upsert that also left `deferred` shards
+    /// untouched on purpose: they hold (or may hold) a copy the upsert must tombstone, and
+    /// that waits until the failed shards hold the new version (ADR-185). They are queued
+    /// with the failed shards and reported separately, since nothing failed on them.
+    pub(super) fn note_partial_deferring(
+        &self,
+        mutation: ClusterMutation,
+        logical: u64,
+        applied: Vec<usize>,
+        failed: Vec<usize>,
+        deferred: &[usize],
+        first_err: Option<ShardError>,
+    ) -> ShardError {
         let detail = first_err.map_or_else(|| "unknown shard error".to_string(), |e| e.to_string());
+        let mut targets = failed.clone();
+        targets.extend(deferred.iter().copied().filter(|s| !failed.contains(s)));
+        targets.sort_unstable();
         self.pending_repair
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -25,12 +44,19 @@ impl ClusterEngine {
                 logical,
                 PendingRepair {
                     mutation,
-                    failed_shards: failed.clone(),
+                    failed_shards: targets,
                 },
             );
+        let cleanup = if deferred.is_empty() {
+            String::new()
+        } else {
+            format!(", cleanup deferred on {deferred:?}")
+        };
         self.emit(EngineEvent::DurabilityFailure {
             op: DurabilityOp::ClusterPartialApply,
-            detail: format!("logical {logical}: applied on {applied:?}, failed on {failed:?}"),
+            detail: format!(
+                "logical {logical}: applied on {applied:?}, failed on {failed:?}{cleanup}"
+            ),
             error: detail.clone(),
         });
         ShardError::PartiallyApplied {
@@ -99,16 +125,30 @@ impl ClusterEngine {
             let Some(pr) = repair else { continue };
             let mut still_failed = Vec::new();
             let mut first_err: Option<ShardError> = None;
-            for &s in &pr.failed_shards {
-                match crate::cluster::shard::apply_mutation(
-                    self.shards[s].as_ref(),
-                    &self.norm,
-                    &self.dict,
-                    &pr.mutation,
-                    Some(s as u32),
-                ) {
-                    Ok(()) => {}
-                    Err(e) => {
+            // An upsert installs before it removes (ADR-185): the shards that store the
+            // new version are re-driven first, and a shard that only tombstones the id
+            // waits until all of them succeeded. Its old copy may be the only one a title
+            // can still reach.
+            let (stores, clears): (Vec<usize>, Vec<usize>) = match &pr.mutation {
+                ClusterMutation::Upsert { placement, .. } => pr
+                    .failed_shards
+                    .iter()
+                    .partition(|&&s| crate::cluster::shard::upsert_stores_at(placement, s as u32)),
+                _ => (pr.failed_shards.clone(), Vec::new()),
+            };
+            for (targets, is_install) in [(&stores, true), (&clears, false)] {
+                if !is_install && !still_failed.is_empty() {
+                    still_failed.extend(targets.iter().copied());
+                    break;
+                }
+                for &s in targets {
+                    if let Err(e) = crate::cluster::shard::apply_mutation(
+                        self.shards[s].as_ref(),
+                        &self.norm,
+                        &self.dict,
+                        &pr.mutation,
+                        Some(s as u32),
+                    ) {
                         still_failed.push(s);
                         first_err.get_or_insert(e);
                     }

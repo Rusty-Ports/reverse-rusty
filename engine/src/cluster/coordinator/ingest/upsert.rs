@@ -17,6 +17,11 @@
 //!   written before stale copies are tombstoned, so even an unfenced point read finds a
 //!   version.
 //!
+//! Either way the order is fixed: **install the new version on every placement shard, and
+//! only then remove copies elsewhere.** When an install fails, nothing else is removed. The
+//! old copies keep serving, and the shards that still need a tombstone are queued for
+//! repair together with the failed ones, so `resync` finishes the upsert in the same order.
+//!
 //! Live writes and log replay run this same funnel, so live and replayed application agree.
 
 use super::{
@@ -71,10 +76,15 @@ impl Fanout {
     }
 
     /// Tombstone any copy on every shard outside `placement_shards` (idempotent on a
-    /// shard that holds none).
+    /// shard that holds none). Only called once every placement shard holds the new
+    /// version: until then a copy elsewhere may be the only one a title can still reach.
     fn sweep(&mut self, shards: &[Box<dyn Shard>], placement_shards: &[usize], logical: u64) {
+        debug_assert!(
+            self.failed.is_empty(),
+            "sweeping before the install finished"
+        );
         for (s, shard) in shards.iter().enumerate() {
-            if placement_shards.contains(&s) || self.failed.contains(&s) {
+            if placement_shards.contains(&s) {
                 continue;
             }
             match shard.delete_by_logical_id(logical) {
@@ -83,6 +93,17 @@ impl Fanout {
             }
         }
     }
+}
+
+/// What must happen to copies outside the new placement once it is installed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cleanup {
+    /// No copy can exist elsewhere.
+    None,
+    /// A copy may exist elsewhere; removing it only takes a duplicate away.
+    Strays,
+    /// The placement is moving: the removal is the second half of a fenced rewrite.
+    Move,
 }
 
 impl ClusterEngine {
@@ -162,18 +183,18 @@ impl ClusterEngine {
         let strays_possible = repair_pending || !self.logical_ids_converged();
         let known_absent = fresh && !repair_pending && self.logical_ids_authoritative();
 
+        // Install the new version on every placement shard.
         let mut fan = Fanout::default();
+        let mut moving = None;
+        let mut cleanup = Cleanup::None;
         if known_absent {
             // No copy exists, so no reader can lose a version: place the new one. A shard
-            // that nevertheless replaced a copy contradicts the directory — sweep.
-            let mut contradicted = false;
+            // that nevertheless replaced a copy contradicts the directory.
             for &s in &placement_shards {
                 let status = fan.replace(&self.shards, s, &write, ReplaceMode::Unconditional);
-                contradicted |= matches!(status, Some(ReplaceStatus::Replaced { .. }));
-            }
-            if contradicted {
-                let _move = self.move_fence.begin_move();
-                fan.sweep(&self.shards, &placement_shards, id);
+                if matches!(status, Some(ReplaceStatus::Replaced { .. })) {
+                    cleanup = Cleanup::Move;
+                }
             }
         } else {
             let mut declined: Vec<usize> = Vec::new();
@@ -184,28 +205,59 @@ impl ClusterEngine {
                     declined.push(s);
                 }
             }
-            if !declined.is_empty() {
+            if declined.is_empty() {
+                // Every placement shard that answered switched versions atomically.
+                if strays_possible {
+                    cleanup = Cleanup::Strays;
+                }
+            } else {
                 // The placement is moving (or the copies disagree). The declining shards
                 // changed nothing, so the whole rewrite still fits inside the fence.
-                let _move = self.move_fence.begin_move();
+                moving = Some(self.move_fence.begin_move());
                 for &s in &declined {
                     fan.replace(&self.shards, s, &write, ReplaceMode::Unconditional);
                 }
-                fan.sweep(&self.shards, &placement_shards, id);
-            } else if strays_possible {
-                // Every placement shard already switched versions atomically; removing a
-                // stale extra copy can only take a duplicate away, so it needs no fence.
-                fan.sweep(&self.shards, &placement_shards, id);
+                cleanup = Cleanup::Move;
+            }
+            if !fan.failed.is_empty() {
+                // A placement shard that failed proved nothing about where the old copies
+                // are: this may be a move whose first step never landed.
+                cleanup = Cleanup::Move;
             }
         }
 
+        // Then remove copies elsewhere — unless an install failed. A shard without the
+        // new version means a copy elsewhere may be the only one some title still
+        // reaches, so the removal waits for the repair that completes the install.
+        let installed = fan.failed.is_empty();
+        if installed {
+            match cleanup {
+                Cleanup::None => {}
+                // Removing a stale extra copy can only take a duplicate away: no fence.
+                Cleanup::Strays => fan.sweep(&self.shards, &placement_shards, id),
+                Cleanup::Move => {
+                    let _move = moving
+                        .take()
+                        .unwrap_or_else(|| self.move_fence.begin_move());
+                    fan.sweep(&self.shards, &placement_shards, id);
+                }
+            }
+        }
+        drop(moving);
+
         if !fan.failed.is_empty() {
+            let deferred: Vec<usize> = if installed || cleanup == Cleanup::None {
+                Vec::new()
+            } else {
+                (0..self.shards.len())
+                    .filter(|s| !placement_shards.contains(s))
+                    .collect()
+            };
             fan.failed.sort_unstable();
             fan.failed.dedup();
             // `applied` reports the shards that now HOLD the new version, not every shard
-            // that merely completed a tombstone (review finding). Repair targets only
-            // `failed`, so this is diagnostic.
-            return Err(self.note_partial(
+            // that merely completed a tombstone (review finding).
+            return Err(self.note_partial_deferring(
                 ClusterMutation::Upsert {
                     logical: id,
                     version,
@@ -216,6 +268,7 @@ impl ClusterEngine {
                 id,
                 fan.applied,
                 fan.failed,
+                &deferred,
                 fan.first_err,
             ));
         }

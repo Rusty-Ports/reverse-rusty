@@ -61,5 +61,5 @@ pub(crate) use api::{
     ShardRankedMatch, ShardRankedTitle,
 };
 pub use error::ShardError;
-pub(crate) use mutation::apply_mutation;
+pub(crate) use mutation::{apply_mutation, upsert_stores_at};
 pub(crate) use replace::{PlacedWrite, ReplaceMode, ReplaceStatus};

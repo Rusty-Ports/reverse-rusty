@@ -26,14 +26,14 @@ fn current_compiler_semantics_version() -> u32 {
 
 /// A minimal mock `ShardService` with matching feature-space fingerprints and a configurable
 /// ownership attestation. Every other RPC is unimplemented: the connect guard rejects first.
-struct LegacyOwnershipServer {
-    dict_fp: u64,
-    tag_fp: u64,
-    placement_generation: u64,
-    num_shards: u32,
-    top_k_delay: Option<Duration>,
+pub(crate) struct LegacyOwnershipServer {
+    pub(crate) dict_fp: u64,
+    pub(crate) tag_fp: u64,
+    pub(crate) placement_generation: u64,
+    pub(crate) num_shards: u32,
+    pub(crate) top_k_delay: Option<Duration>,
     /// ADR-185 attestation; `false` models a pre-ADR-185 shard server.
-    atomic_replace: bool,
+    pub(crate) atomic_replace: bool,
 }
 
 #[tonic::async_trait]
@@ -99,15 +99,32 @@ impl ShardService for LegacyOwnershipServer {
             num_shards: self.num_shards,
             coordinator_id,
             compiler_semantics_version: current_compiler_semantics_version(),
+            atomic_replace: self.atomic_replace,
         }))
     }
 
-    // ---- never reached on the connect path: stub everything else out. ----
     async fn add_shard(
         &self,
-        _req: Request<raw::AddShardRequest>,
+        req: Request<raw::AddShardRequest>,
     ) -> Result<Response<raw::AddShardReply>, Status> {
-        Err(Status::unimplemented("legacy mock"))
+        // Echo the attested fingerprints, as `adopt_dict` does.
+        let coordinator_id = req
+            .metadata()
+            .get("x-reverse-rusty-coordinator-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default();
+        let r = req.into_inner();
+        Ok(Response::new(raw::AddShardReply {
+            dict_fingerprint: r.dict_fingerprint,
+            tag_dict_fingerprint: r.tag_dict_fingerprint,
+            broad_replicate_all: true,
+            placement_generation: self.placement_generation,
+            num_shards: self.num_shards,
+            coordinator_id,
+            compiler_semantics_version: current_compiler_semantics_version(),
+            atomic_replace: self.atomic_replace,
+        }))
     }
     async fn percolate(
         &self,
@@ -620,47 +637,4 @@ fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
         started.elapsed() < Duration::from_millis(90),
         "transport did not honor the original absolute deadline"
     );
-}
-
-/// ADR-185: a shard server that does not attest the atomic per-shard replace is refused at
-/// connect. Against it a cluster upsert could only be the reader-visible delete-then-insert,
-/// so the coordinator fails loud at startup instead of at the first re-put.
-#[test]
-fn grpc_connect_refuses_a_peer_without_atomic_replace() {
-    let norm = Arc::new(vocab());
-    let dict = frozen_dict_with(&[], &norm);
-    let dict_fp = dict.fingerprint();
-    let tag_fp = empty_tag_dict().fingerprint();
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let start_mock = |atomic_replace| {
-        let _enter = rt.enter();
-        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
-        let addr = incoming.local_addr().expect("addr");
-        let svc = ShardServiceServer::new(LegacyOwnershipServer {
-            dict_fp,
-            tag_fp,
-            placement_generation: 1,
-            num_shards: 1,
-            top_k_delay: None,
-            atomic_replace,
-        });
-        rt.spawn(
-            tonic::transport::Server::builder()
-                .add_service(svc)
-                .serve_with_incoming(incoming),
-        );
-        wait_until_listening(addr);
-        format!("http://{addr}")
-    };
-
-    match RemoteShard::connect(&start_mock(false), rt.handle().clone(), dict_fp, tag_fp, 0) {
-        Err(ShardError::Remote(message)) => {
-            assert!(message.contains("ADR-185"), "{message}");
-        }
-        Err(e) => panic!("expected the ADR-185 refusal, got {e}"),
-        Ok(_) => panic!("connect SUCCEEDED against a pre-ADR-185 peer"),
-    }
-    // Control: the same mock attesting the capability connects.
-    RemoteShard::connect(&start_mock(true), rt.handle().clone(), dict_fp, tag_fp, 0)
-        .expect("a peer that attests the atomic replace connects");
 }

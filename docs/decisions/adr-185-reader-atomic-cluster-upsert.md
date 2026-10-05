@@ -49,14 +49,22 @@ and for some mode changes every fixed order of per-shard steps leaves a title wi
    shard outside the new placement may hold a stale copy. After a placement-preserving replace the
    coordinator tombstones the id on the other shards without the fence: removing an extra copy can
    only take a duplicate away.
-5. **Repair and recovery use the same step.** `resync` and replica catch-up re-drive an `Upsert`
-   as an unconditional replace on a position the placement covers and as a tombstone elsewhere.
-   Self-restart replays the single translog frame through the same engine funnel (live ≡ replay).
-6. **Wire.** `ReplaceExtracted` is additive. `FetchTranslog` gains an `upsert` entry so peer
+5. **Install before remove, also under failure.** Copies outside the new placement are tombstoned
+   only after every placement shard holds the new version. If a placement write fails, nothing
+   else is removed: the old copies keep serving, and the shards that still need a tombstone are
+   queued for repair together with the failed ones. A failed conditional write counts as a
+   possible move, since the shard never said whether it held the placement.
+6. **Repair and recovery use the same step, in the same order.** `resync` and replica catch-up
+   re-drive an `Upsert` as an unconditional replace on a position the placement covers and as a
+   tombstone elsewhere. `resync` re-drives the covered positions first and sends the tombstones
+   only once all of them succeeded. Self-restart replays the single translog frame through the
+   same engine funnel (live ≡ replay).
+7. **Wire.** `ReplaceExtracted` is additive. `FetchTranslog` gains an `upsert` entry so peer
    recovery ships the whole frame; a receiver that predates it decodes an unset entry and fails
-   its recovery loud. `DictFingerprintReply.atomic_replace` attests the capability, and a
-   coordinator refuses to connect to a shard server that does not, because against it an upsert
-   could only be the reader-visible two-step.
+   its recovery loud. Every handshake reply (`DictFingerprintReply`, `AdoptDictReply`,
+   `AddShardReply`) attests `atomic_replace`, and one shared check refuses a shard server that
+   does not, because against it an upsert could only be the reader-visible two-step. A normal
+   startup adopts and never probes, so the check cannot live on the probe alone.
 
 ## Alternatives considered
 
@@ -85,7 +93,10 @@ and for some mode changes every fixed order of per-shard steps leaves a title wi
   first atomic replace is logged; an old target then fails that recovery loud.
 - A partial failure still leaves a documented window (ADR-047): a shard whose replace failed keeps
   serving the old version, and a failed tombstone leaves a stale copy until `resync`, during
-  which exact ranked reads fail closed on the duplicate id.
+  which exact ranked reads fail closed on the duplicate id. While the install of a moving upsert
+  is failing, the old copies stay as well, so a title that matches both versions is never left
+  with neither. The repair of a failed conditional write also sends an idempotent tombstone to
+  every shard outside the placement.
 
 **See also:** ADR-067 (single-node atomic upsert), ADR-070 (cluster REST surface and the upsert
 frame), ADR-047 (partial apply and resync), ADR-109 (ownership), ADR-113 (the PIT barrier, which

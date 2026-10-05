@@ -19,10 +19,12 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Fence upserts that move a query between shards or lanes with an optimistic sequence counter:
   overlapping reads repeat instead of seeing the move half-done, and ordinary reads still take no
   lock.
-- Re-drive a queued upsert repair as the same atomic replace, and sweep a stale copy a failed move
-  left behind on the next upsert.
+- Install before removing, also under failure: when a shard write of an upsert fails, the old
+  copies on other shards keep serving and are queued for removal with the repair, which installs
+  the new version first. A queued repair re-drives as the same atomic replace, and the next
+  upsert sweeps a stale copy a failed tombstone left behind.
 - Wire: add the `ReplaceExtracted` RPC, an `upsert` translog entry for peer recovery, and an
-  `atomic_replace` handshake attestation. Upgrade shard servers before the coordinator.
+  `atomic_replace` attestation on every handshake. Upgrade shard servers before the coordinator.
 
 ## 2026-10-01 — Recorded feature model
 

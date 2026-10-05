@@ -642,6 +642,9 @@ message AdoptDictReply {
   // Attests that this server enforced the caller's exclusive coordinator lease.
   uint64 coordinator_id = 6;
   uint32 compiler_semantics_version = 7;
+  // ADR-185 capability attestation — see `DictFingerprintReply.atomic_replace`. Carried on every
+  // handshake reply, because a coordinator normally connects through this one and never probes.
+  bool atomic_replace = 8;
 }
 
 // Create a co-located slot on a node that has ALREADY adopted the dict (ADR-093 Stage 2). No dict
@@ -665,6 +668,8 @@ message AddShardReply {
   uint32 num_shards = 5;
   uint64 coordinator_id = 6;
   uint32 compiler_semantics_version = 7;
+  // ADR-185 capability attestation, as on `AdoptDictReply`.
+  bool atomic_replace = 8;
 }
 
 // ---- peer recovery (ADR-035/036) ----
