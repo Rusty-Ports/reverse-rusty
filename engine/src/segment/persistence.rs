@@ -223,8 +223,14 @@ impl Engine {
         Ok(report)
     }
 
-    /// Write a WAL flush checkpoint (all prior WAL entries are in segments).
+    /// Write a WAL flush checkpoint (all prior WAL entries are in segments). Recovery
+    /// replays nothing before the last checkpoint, so writing one retires every earlier
+    /// frame just as a reset does — and is refused under the same condition (see
+    /// [`reset_wal_if_safe`](Self::reset_wal_if_safe)).
     pub(in crate::segment) fn checkpoint_wal(&mut self) {
+        if self.has_unpersisted_base_segment() {
+            return;
+        }
         // Capture the error and release the `&mut self.wal` borrow before `emit`
         // (which needs `&self`); `.err()` drops the borrowed Result.
         let err = if let Some(ref mut wal) = self.wal {
@@ -243,9 +249,30 @@ impl Engine {
         }
     }
 
+    /// Whether a base segment of this durable engine exists only in memory: a flush whose
+    /// segment write failed fell back to it (ADR-051). No manifest lists such a segment, so
+    /// its rows are durable only as WAL frames.
+    pub(in crate::segment) fn has_unpersisted_base_segment(&self) -> bool {
+        self.config.data_dir.is_some()
+            && self
+                .segments
+                .iter()
+                .any(|segment| matches!(segment.as_ref(), BaseSegment::Memory(_)))
+    }
+
     /// Reset the WAL after a successful flush + manifest write. Only call when
     /// both the checkpoint and manifest have been persisted, so no data is lost.
+    ///
+    /// Every WAL reset goes through here (and every flush checkpoint through
+    /// [`checkpoint_wal`](Self::checkpoint_wal)), and both are refused while a base segment
+    /// exists only in memory: the commit that just succeeded did not list that segment, and
+    /// retiring the log would discard the only durable copy of its rows. They replay on
+    /// the next restart (their insert frames are in no segment, so they replay even at or
+    /// below the watermark), after which the log can be retired again.
     pub(in crate::segment) fn reset_wal_if_safe(&mut self) {
+        if self.has_unpersisted_base_segment() {
+            return;
+        }
         let err = if let Some(ref mut wal) = self.wal {
             wal.reset().err()
         } else {

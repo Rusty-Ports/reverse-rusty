@@ -282,3 +282,44 @@ fn an_engine_without_a_wal_is_not_sealed() {
     assert_eq!(engine.num_segments(), 2);
     assert_eq!(reads(&engine, "rareword title").0, vec![1]);
 }
+
+/// A failed ordinary flush leaves its rows in an in-memory segment that no
+/// manifest lists. Before the mask exists those rows are in the same position
+/// as memtable rows, so the first batch must not assign the mask over them: it
+/// is refused, and a restart brings every acknowledged query back, visible.
+#[test]
+fn the_first_batch_is_refused_while_a_failed_flush_has_unpersisted_rows() {
+    let dir = test_dir("mask_after_failed_flush");
+    let config = manual_config(&dir);
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.insert_live("rareword", 1, 1);
+        let original = SealFailure::SegmentWrite.block(&dir);
+        engine.flush(); // fails: row 1 falls back to an in-memory segment
+        SealFailure::SegmentWrite.unblock(&dir, original);
+        engine.insert_live("otherword", 2, 1);
+
+        assert!(
+            engine.try_bulk_ingest(&first_batch()).is_err(),
+            "the mask must not be assigned over rows that are only in the WAL"
+        );
+        assert!(!engine.dict().is_finalized());
+        assert_eq!(reads(&engine, "rareword title").0, vec![1]);
+        assert_eq!(reads(&engine, "otherword title").0, vec![2]);
+    }
+    let mut engine = Engine::open(make_norm(), config.clone()).expect("reopen");
+    assert_eq!(reads(&engine, "rareword title").0, vec![1], "recovered");
+    assert_eq!(reads(&engine, "otherword title").0, vec![2], "recovered");
+    // After the restart the rows are memtable rows again, and the batch seals them.
+    assert_eq!(engine.bulk_ingest(&first_batch()).ingested, 200);
+    drop(engine);
+    let engine = Engine::open(make_norm(), config).expect("second reopen");
+    assert_eq!(
+        reads(&engine, "rareword title").0,
+        vec![1],
+        "still default-visible after the mask was assigned and another restart"
+    );
+    assert_eq!(reads(&engine, "otherword title").0, vec![2]);
+    drop(engine);
+    let _ = std::fs::remove_dir_all(&dir);
+}

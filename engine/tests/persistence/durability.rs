@@ -135,6 +135,54 @@ fn failed_flush_retains_data_in_wal_and_recovers_on_reopen() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A flush that succeeds AFTER a failed one must not retire the WAL: the failed
+/// flush's rows sit in an in-memory segment that the new manifest does not list,
+/// so the log is still their only durable copy.
+#[test]
+fn a_flush_after_a_failed_flush_keeps_the_stranded_rows_recoverable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = test_dir("flush_after_failed_flush");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        memtable_flush_threshold: usize::MAX,
+        auto_compact_on_flush: false,
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&[(1, "wireless mouse 1986 vertex".into())]);
+        engine.insert_live("mechanical keyboard 1988 vertex", 2, 1);
+
+        let seg_dir = dir.join("segments");
+        let orig = std::fs::metadata(&seg_dir).unwrap().permissions();
+        std::fs::set_permissions(&seg_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        engine.flush(); // fails: query 2 falls back to an in-memory segment
+        std::fs::set_permissions(&seg_dir, orig).unwrap();
+
+        engine.insert_live("desk lamp 1990 vertex", 3, 1);
+        engine.flush(); // succeeds, and commits a manifest without query 2's segment
+        assert_eq!(
+            match_ids(&engine, "Mechanical Keyboard 1988 Vertex"),
+            vec![2]
+        );
+    }
+    let engine = Engine::open(make_norm(), config).expect("reopen");
+    assert_eq!(
+        match_ids(&engine, "Mechanical Keyboard 1988 Vertex"),
+        vec![2],
+        "the acknowledged insert was lost: its WAL frame was retired with no segment holding it"
+    );
+    assert_eq!(match_ids(&engine, "Desk Lamp 1990 Vertex"), vec![3]);
+    assert_eq!(
+        match_ids(&engine, "Wireless Mouse 1986 Vertex New"),
+        vec![1]
+    );
+    assert_eq!(engine.num_live_queries(), 3, "and nothing was duplicated");
+    drop(engine);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn failed_compaction_rolls_back_and_keeps_segments_on_disk() {
     // ADR-051 (fail-closed compaction): a compaction that cannot durably write its

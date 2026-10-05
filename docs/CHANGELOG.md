@@ -21,6 +21,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Fix a query disappearing from default reads after a restart: a live insert made before the
   first mask assignment was re-planned by WAL replay under the finalized mask. The memtable is now
   sealed before the first assignment.
+- Fix acknowledged writes being lost after a failed flush: the next successful flush retired the
+  WAL although the failed flush's rows were in no committed segment. The WAL is now kept until a
+  restart has recovered them.
 - A store that was restarted with `--load-file` before this fix may hold rows with stale mask
   bits. They are repaired by the next rebuild from source (a vocabulary change, or a
   compiler-semantics migration on open).
