@@ -200,11 +200,76 @@ impl ShardServer {
         Ok(())
     }
 
-    /// Forget every dropped shard: the node is adopting a different layout. The caller has
-    /// already installed (and persisted) the new space, which the record is written under.
-    pub(super) fn forget_dropped(&self) -> Result<(), Status> {
-        let mut current = self.dropped_set()?;
-        self.store_dropped(&mut current, BTreeSet::new())
+    /// The node has adopted `space` (first adoption, or a different layout): take up the
+    /// record that belongs to it and bring every hosted slot in line.
+    ///
+    /// A different layout is a fresh start, so its record is empty and any slot still
+    /// flagged from the old one is released: such a slot is empty (a layout can change only
+    /// while no slot holds data) and an idempotent re-adoption would never replace it. A
+    /// durable node that restarted pending and adopts the layout it had before finds that
+    /// layout's record on disk and keeps honouring it.
+    pub(super) fn adopt_layout(&self, space: &AdoptedSpace) -> Result<(), Status> {
+        let record = match &self.data_dir {
+            Some(dir) => restore(dir, SpaceId::of(space)).map_err(|error| {
+                Status::failed_precondition(format!(
+                    "cannot read this node's dropped-shard record: {error}"
+                ))
+            })?,
+            None => BTreeSet::new(),
+        };
+        // Never hold the record lock across the slot map: `DropShard` takes them in the
+        // other order.
+        self.dropped_set()?.clone_from(&record);
+        let slots = self
+            .shards
+            .read()
+            .map_err(|_| Status::internal("shard map lock poisoned"))?;
+        for (shard_id, slot) in slots.iter() {
+            slot.awaiting_recovery.store(
+                record.contains(shard_id),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The record a durable constructor starts with: the shards dropped under `space`, with every
+/// restored slot among them flagged. Every durable constructor that has a space calls this,
+/// so no restart path forgets a drop.
+pub(super) fn restore_for_slots<'a>(
+    dir: &Path,
+    space: &AdoptedSpace,
+    slots: impl IntoIterator<Item = (&'a u32, &'a std::sync::Arc<ShardSlot>)>,
+) -> Result<std::sync::Mutex<BTreeSet<u32>>, ShardError> {
+    let dropped = restore(dir, SpaceId::of(space))?;
+    for (shard_id, slot) in slots {
+        if dropped.contains(shard_id) {
+            slot.awaiting_recovery
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    Ok(std::sync::Mutex::new(dropped))
+}
+
+#[cfg(test)]
+thread_local! {
+    static BETWEEN_READINESS_AND_STATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: run `action` once, on this thread, at the point where `loaded_slot` has
+/// finished its first step and not yet started its second.
+#[cfg(test)]
+pub(super) fn arm_between_readiness_and_state(action: impl FnOnce() + 'static) {
+    BETWEEN_READINESS_AND_STATE.with(|cell| *cell.borrow_mut() = Some(Box::new(action)));
+}
+
+#[cfg(test)]
+pub(super) fn between_readiness_and_state() {
+    let action = BETWEEN_READINESS_AND_STATE.with(|cell| cell.borrow_mut().take());
+    if let Some(action) = action {
+        action();
     }
 }
 

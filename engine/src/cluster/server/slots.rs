@@ -50,8 +50,15 @@ impl ShardServer {
         &self,
         shard_id: u32,
     ) -> Result<(Arc<ShardSlot>, Arc<ServerState>), Status> {
-        let (slot, st) = self.loaded_slot_awaiting_recovery_ok(shard_id)?;
+        let slot = self.slot(shard_id)?;
+        // Readiness BEFORE the state. `RecoverFrom` publishes the recovered state and only
+        // then releases the slot, so a released slot means the state loaded next is the
+        // recovered one. In the other order a request could load the empty state, find the
+        // slot released a moment later, and answer from the empty state.
         slot.ensure_recovered(shard_id)?;
+        #[cfg(test)]
+        super::dropped::between_readiness_and_state();
+        let st = slot.loaded_state()?;
         Ok((slot, st))
     }
 

@@ -165,15 +165,16 @@ pub(super) async fn adopt_dict(
                 ))
             })?;
         }
-        server.node_dict.store(Some(Arc::new(AdoptedSpace {
+        let space = Arc::new(AdoptedSpace {
             dict: Arc::clone(&space_dict),
             tag_dict: Arc::clone(&space_tag),
             placement_generation,
             num_shards: req.num_shards,
-        })));
-        // A different layout is a fresh start: this node held no data when it was adopted,
-        // and the shard ids it dropped under the old layout mean nothing in the new one.
-        server.forget_dropped()?;
+        });
+        server.node_dict.store(Some(Arc::clone(&space)));
+        // The shards this node dropped are remembered per layout (ADR-189): a different
+        // layout starts over, and the layout a restarted node had before is taken up again.
+        server.adopt_layout(&space)?;
     }
     server.insert_slot(
         shard_id,
