@@ -27,7 +27,11 @@ retired node. GC is a different path: a node that loses one shard keeps serving 
    node resolves its slot through that lock and a synced write must not stall them; then, under
    the map's write lock, quarantine the directory and remove the slot. If the record or the
    quarantine fails, the fence is restored, the record is taken back, and the slot stays hosted
-   for a retry.
+   for a retry. A record write that fails after its rename leaves the file **in doubt**: a
+   restart may read the set from before the write or the one being written. Until a later write
+   succeeds the node treats a shard in either set as dropped, and it rewrites the file on the
+   next change instead of skipping a set that looks unchanged in memory. All changes to the
+   record go through one function, which is where this is enforced.
 2. **A slot created for a remembered shard is born awaiting recovery.** `insert_slot`, which both
    slot-creating RPCs go through, sets the flag. Creation is not refused: a handoff *back* to this
    node begins with exactly the same adoption and then fills the slot with `RecoverFrom`.
@@ -91,7 +95,8 @@ retired node. GC is a different path: a node that loses one shard keeps serving 
   attempt and on the retry, leaving the node pending; a drop is recorded before the slot is
   removed and with the slot-map lock free; and a drop that cannot be recorded, or cannot
   quarantine its directory, leaves the slot hosted at its fence with nothing remembered, also
-  across a restart.
+  across a restart; and a record write that fails after its rename (during a recovery or a
+  drop) is rewritten by the next drop, so a restart still refuses the shard.
 - `cluster/server/dropped.rs` unit tests: the record round-trips, belongs to one layout, and a
   truncated, padded, mis-tagged or future-version file fails loud.
 - `tests/cluster_grpc_oracle/gc_readopt.rs`: over real gRPC, a shard moves away, is dropped,

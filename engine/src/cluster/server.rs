@@ -230,7 +230,7 @@ pub struct ShardServer {
     /// Shard ids this node dropped under its current layout and has not recovered since
     /// (ADR-189). A slot created for one is born awaiting recovery. Persisted under `data_dir`
     /// before a drop takes effect.
-    dropped: std::sync::Mutex<std::collections::BTreeSet<u32>>,
+    dropped: std::sync::Mutex<dropped::DroppedRecord>,
 }
 
 mod construct;

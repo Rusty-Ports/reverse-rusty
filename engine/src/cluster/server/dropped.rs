@@ -66,9 +66,28 @@ impl SpaceId {
     }
 }
 
+/// The dropped-shard record as this process knows it.
+#[derive(Debug, Default)]
+pub(super) struct DroppedRecord {
+    shards: BTreeSet<u32>,
+    /// A write of the record failed after its rename, so a restart may find either the set
+    /// from before that write or the one it was writing. Until a write succeeds, `shards`
+    /// holds both (a shard that may be on record is treated as dropped), and no write is
+    /// skipped as redundant: the file is not known to match.
+    in_doubt: bool,
+}
+
+/// Why a write of the record failed.
+#[derive(Debug)]
+enum PersistFailure {
+    /// Failed before the rename: the file is unchanged.
+    NotWritten(std::io::Error),
+    /// Failed at or after the rename: the file may hold either version.
+    InDoubt(std::io::Error),
+}
+
 /// Persist `dropped` for `space` under `dir` with an atomic, synced rename.
-fn persist(dir: &Path, space: SpaceId, dropped: &BTreeSet<u32>) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+fn persist(dir: &Path, space: SpaceId, dropped: &BTreeSet<u32>) -> Result<(), PersistFailure> {
     let mut blob = Vec::with_capacity(HEADER_LEN + dropped.len() * 4);
     blob.extend_from_slice(DROPPED_MAGIC);
     blob.extend_from_slice(&DROPPED_VERSION.to_le_bytes());
@@ -81,10 +100,17 @@ fn persist(dir: &Path, space: SpaceId, dropped: &BTreeSet<u32>) -> std::io::Resu
         blob.extend_from_slice(&shard_id.to_le_bytes());
     }
     let tmp = dir.join(format!("{DROPPED_FILE}.tmp"));
-    std::fs::write(&tmp, &blob)?;
-    std::fs::File::open(&tmp)?.sync_all()?;
-    std::fs::rename(&tmp, dir.join(DROPPED_FILE))?;
-    std::fs::File::open(dir)?.sync_all()
+    std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&tmp, &blob))
+        .and_then(|()| std::fs::File::open(&tmp)?.sync_all())
+        .map_err(PersistFailure::NotWritten)?;
+    std::fs::rename(&tmp, dir.join(DROPPED_FILE))
+        .and_then(|()| {
+            #[cfg(test)]
+            fail_after_rename()?;
+            std::fs::File::open(dir)?.sync_all()
+        })
+        .map_err(PersistFailure::InDoubt)
 }
 
 /// The shard ids recorded as dropped under `dir` for `space`. An absent record, or one written
@@ -165,7 +191,7 @@ impl ShardSlot {
 }
 
 impl ShardServer {
-    fn dropped_set(&self) -> Result<std::sync::MutexGuard<'_, BTreeSet<u32>>, Status> {
+    fn dropped_record(&self) -> Result<std::sync::MutexGuard<'_, DroppedRecord>, Status> {
         self.dropped
             .lock()
             .map_err(|_| Status::internal("dropped-shard record lock poisoned"))
@@ -173,24 +199,34 @@ impl ShardServer {
 
     /// Whether this node dropped `shard_id` under its current layout and has not recovered it.
     pub(super) fn was_dropped(&self, shard_id: u32) -> Result<bool, Status> {
-        Ok(self.dropped_set()?.contains(&shard_id))
+        Ok(self.dropped_record()?.shards.contains(&shard_id))
     }
 
-    /// Replace the record with `next`, durably first.
-    fn store_dropped(
-        &self,
-        current: &mut BTreeSet<u32>,
-        next: BTreeSet<u32>,
-    ) -> Result<(), Status> {
-        if *current == next {
+    /// Replace the record with `next`, durably first. Every change to the record goes
+    /// through here, so this is where the file and the in-memory set are kept in step.
+    fn store_dropped(&self, record: &mut DroppedRecord, next: BTreeSet<u32>) -> Result<(), Status> {
+        if !record.in_doubt && record.shards == next {
             return Ok(());
         }
         if let (Some(dir), Some(space)) = (&self.data_dir, self.node_dict.load_full()) {
-            persist(dir, SpaceId::of(&space), &next).map_err(|error| {
-                Status::internal(format!("persisting the dropped-shard record: {error}"))
-            })?;
+            let error = match persist(dir, SpaceId::of(&space), &next) {
+                Ok(()) => None,
+                Err(PersistFailure::NotWritten(error)) => Some(error),
+                Err(PersistFailure::InDoubt(error)) => {
+                    // A restart may read either set. Honour both until a write succeeds.
+                    record.in_doubt = true;
+                    record.shards.extend(next.iter().copied());
+                    Some(error)
+                }
+            };
+            if let Some(error) = error {
+                return Err(Status::internal(format!(
+                    "persisting the dropped-shard record: {error}"
+                )));
+            }
         }
-        *current = next;
+        record.shards = next;
+        record.in_doubt = false;
         Ok(())
     }
 
@@ -201,31 +237,30 @@ impl ShardServer {
     pub(super) fn record_dropped(&self, shard_id: u32) -> Result<bool, Status> {
         #[cfg(test)]
         while_recording_a_drop();
-        let mut current = self.dropped_set()?;
-        if current.contains(&shard_id) {
-            return Ok(false);
-        }
-        let mut next = current.clone();
+        let mut record = self.dropped_record()?;
+        let newly_recorded = !record.shards.contains(&shard_id);
+        let mut next = record.shards.clone();
         next.insert(shard_id);
-        self.store_dropped(&mut current, next)?;
-        Ok(true)
+        // Not skipped when the id is already there: a record in doubt is rewritten.
+        self.store_dropped(&mut record, next)?;
+        Ok(newly_recorded)
     }
 
     /// Take back a record made for a drop that did not happen. The slot is still hosted, so
     /// nothing was given up.
     pub(super) fn unrecord_dropped(&self, shard_id: u32) -> Result<(), Status> {
-        let mut current = self.dropped_set()?;
-        let mut next = current.clone();
+        let mut record = self.dropped_record()?;
+        let mut next = record.shards.clone();
         next.remove(&shard_id);
-        self.store_dropped(&mut current, next)
+        self.store_dropped(&mut record, next)
     }
 
     /// Forget `shard_id`: a peer recovery has installed the current owner's data in `slot`.
     pub(super) fn mark_recovered(&self, shard_id: u32, slot: &ShardSlot) -> Result<(), Status> {
-        let mut current = self.dropped_set()?;
-        let mut next = current.clone();
+        let mut record = self.dropped_record()?;
+        let mut next = record.shards.clone();
         next.remove(&shard_id);
-        self.store_dropped(&mut current, next)?;
+        self.store_dropped(&mut record, next)?;
         slot.awaiting_recovery
             .store(false, std::sync::atomic::Ordering::Release);
         Ok(())
@@ -266,7 +301,11 @@ impl ShardServer {
                 );
             }
         }
-        *self.dropped.lock().unwrap_or_else(PoisonError::into_inner) = record;
+        // Just read from the file, so the two agree.
+        *self.dropped.lock().unwrap_or_else(PoisonError::into_inner) = DroppedRecord {
+            shards: record,
+            in_doubt: false,
+        };
     }
 }
 
@@ -277,7 +316,7 @@ pub(super) fn restore_for_slots<'a>(
     dir: &Path,
     space: &AdoptedSpace,
     slots: impl IntoIterator<Item = (&'a u32, &'a std::sync::Arc<ShardSlot>)>,
-) -> Result<std::sync::Mutex<BTreeSet<u32>>, ShardError> {
+) -> Result<std::sync::Mutex<DroppedRecord>, ShardError> {
     let dropped = restore(dir, SpaceId::of(space))?;
     for (shard_id, slot) in slots {
         if dropped.contains(shard_id) {
@@ -285,7 +324,30 @@ pub(super) fn restore_for_slots<'a>(
                 .store(true, std::sync::atomic::Ordering::Release);
         }
     }
-    Ok(std::sync::Mutex::new(dropped))
+    Ok(std::sync::Mutex::new(DroppedRecord {
+        shards: dropped,
+        in_doubt: false,
+    }))
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_AFTER_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: the next record write on this thread renames its file and then fails, as a
+/// failed directory sync would.
+#[cfg(test)]
+pub(super) fn arm_fail_after_rename() {
+    FAIL_AFTER_RENAME.with(|armed| armed.set(true));
+}
+
+#[cfg(test)]
+fn fail_after_rename() -> std::io::Result<()> {
+    if FAIL_AFTER_RENAME.with(|armed| armed.replace(false)) {
+        return Err(std::io::Error::other("injected directory sync failure"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -264,3 +264,98 @@ fn a_record_that_cannot_be_taken_back_is_reported() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// How many shards the record file under `dir` lists.
+fn shards_on_record(dir: &std::path::Path) -> u32 {
+    let blob = std::fs::read(dir.join("dropped_shards.bin")).expect("record file");
+    u32::from_le_bytes(blob[36..40].try_into().expect("count field"))
+}
+
+/// A recovery clears the record, and that write fails after its rename: the
+/// file no longer lists the shard, the recovery fails, and the slot keeps
+/// refusing. Dropping that slot must put the shard back on record. It used to
+/// see the shard still in memory and skip the write, so a restart forgot the
+/// drop and served the shard empty.
+#[test]
+fn a_record_left_in_doubt_is_rewritten_by_the_next_drop() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let d = frozen_dict(&["pro"], &n);
+    let dir = temp_node_dir("in_doubt_recovery");
+    {
+        let srv =
+            ShardServer::pending_durable(Arc::clone(&n), EngineConfig::default(), dir.clone());
+        adopt_fill_and_drop(&rt, &srv, &d, 3);
+        rt.block_on(srv.adopt_dict(adopt_req_shard(&d, 3)))
+            .expect("re-adopt: slot 3 awaits recovery");
+        let slot = srv.slot(3).expect("slot");
+
+        super::super::dropped::arm_fail_after_rename();
+        srv.mark_recovered(3, &slot)
+            .expect_err("the record write failed at the directory sync");
+        assert_eq!(
+            shards_on_record(&dir),
+            0,
+            "precondition: the renamed file no longer lists the shard"
+        );
+        assert!(srv.was_dropped(3).expect("record"));
+        assert_refuses_to_serve(&rt, &srv, 3);
+
+        // Orphan GC removes the abandoned recovery target.
+        rt.block_on(srv.fence(fence_req(3, 8, d.fingerprint())))
+            .expect("fence");
+        let dropped = rt
+            .block_on(srv.drop_shard(drop_req_16(3, 8, d.fingerprint())))
+            .expect("drop")
+            .into_inner();
+        assert!(dropped.dropped);
+        assert_eq!(shards_on_record(&dir), 1, "the drop is on record again");
+    }
+    let srv = ShardServer::open_durable(Arc::clone(&n), EngineConfig::default(), dir.clone())
+        .expect("reopen");
+    rt.block_on(srv.adopt_dict(adopt_req_shard(&d, 3)))
+        .expect("a stale coordinator re-adopts the shard");
+    assert_refuses_to_serve(&rt, &srv, 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A drop whose record write fails after its rename is refused, and the shard
+/// counts as dropped from then on: a restart may find it on record.
+#[test]
+fn a_drop_whose_record_is_left_in_doubt_is_refused_and_remembered() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let d = frozen_dict(&["pro"], &n);
+    let dir = temp_node_dir("in_doubt_drop");
+    let srv = ShardServer::pending_durable(Arc::clone(&n), EngineConfig::default(), dir.clone());
+    adopt_fill_and_fence(&rt, &srv, &d, 3);
+
+    super::super::dropped::arm_fail_after_rename();
+    let refused = rt
+        .block_on(srv.drop_shard(drop_req_16(3, 7, d.fingerprint())))
+        .expect_err("the record write failed at the directory sync");
+    assert_eq!(refused.code(), Code::Internal, "{refused:?}");
+    assert_eq!(fence_of(&srv, 3), 7, "the pre-drop fence is restored");
+    assert_eq!(
+        shards_on_record(&dir),
+        1,
+        "the renamed file lists the shard"
+    );
+    assert!(
+        srv.was_dropped(3).expect("record"),
+        "memory honours what a restart may read"
+    );
+    let hits = rt
+        .block_on(srv.percolate(read_req(3, "pro edition")))
+        .expect("the slot was not dropped, so it still serves")
+        .into_inner();
+    assert_eq!(hits.ids, vec![10]);
+
+    let dropped = rt
+        .block_on(srv.drop_shard(drop_req_16(3, 7, d.fingerprint())))
+        .expect("the retry drops")
+        .into_inner();
+    assert!(dropped.dropped);
+    assert!(srv.was_dropped(3).expect("record"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
