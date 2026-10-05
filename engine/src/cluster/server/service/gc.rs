@@ -158,15 +158,20 @@ pub(super) fn drop_shard(
     let trash = server.remove_slot_if_fenced_at_with(
         req.shard_id,
         req.expected_fence_generation,
-        || match &server.data_dir {
-            None => Ok(None),
-            Some(root) => quarantine_slot_dir(root, req.shard_id).map_err(|source| {
-                Status::internal(format!(
-                    "DropShard: cannot quarantine shard {} in {}: {source}",
-                    req.shard_id,
-                    root.display()
-                ))
-            }),
+        || {
+            // Remember the drop before anything is removed (ADR-189): a slot later created
+            // for this shard is empty and must not serve until a recovery fills it.
+            server.record_dropped(req.shard_id)?;
+            match &server.data_dir {
+                None => Ok(None),
+                Some(root) => quarantine_slot_dir(root, req.shard_id).map_err(|source| {
+                    Status::internal(format!(
+                        "DropShard: cannot quarantine shard {} in {}: {source}",
+                        req.shard_id,
+                        root.display()
+                    ))
+                }),
+            }
         },
     )?;
     let Some(trash) = trash else {

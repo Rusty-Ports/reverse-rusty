@@ -171,6 +171,9 @@ pub(super) async fn adopt_dict(
             placement_generation,
             num_shards: req.num_shards,
         })));
+        // A different layout is a fresh start: this node held no data when it was adopted,
+        // and the shard ids it dropped under the old layout mean nothing in the new one.
+        server.forget_dropped()?;
     }
     server.insert_slot(
         shard_id,

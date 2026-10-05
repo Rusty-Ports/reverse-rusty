@@ -87,6 +87,9 @@ struct ShardSlot {
     broad: super::node_metrics::SlotBroadCost,
     /// Bounded rank-delivery counters (ADR-110), slot-lifetime like latency.
     ranked: super::node_metrics::SlotRankDelivery,
+    /// Set when this slot was created for a shard the node had dropped (ADR-189): it is empty
+    /// by construction, so it serves nothing until `RecoverFrom` installs the owner's data.
+    awaiting_recovery: std::sync::atomic::AtomicBool,
 }
 
 impl ShardSlot {
@@ -98,6 +101,7 @@ impl ShardSlot {
             latency: super::node_metrics::SlotLatency::new(),
             broad: super::node_metrics::SlotBroadCost::new(),
             ranked: super::node_metrics::SlotRankDelivery::new(),
+            awaiting_recovery: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -223,9 +227,14 @@ pub struct ShardServer {
     /// slot is refused until the same operation lifts it. Persisted under `data_dir` first, so a
     /// restarted retired node stays retired.
     retired: Arc<ArcSwapOption<retirement::Retirement>>,
+    /// Shard ids this node dropped under its current layout and has not recovered since
+    /// (ADR-189). A slot created for one is born awaiting recovery. Persisted under `data_dir`
+    /// before a drop takes effect.
+    dropped: std::sync::Mutex<std::collections::BTreeSet<u32>>,
 }
 
 mod construct;
+mod dropped;
 mod retirement;
 mod serve;
 mod slots;

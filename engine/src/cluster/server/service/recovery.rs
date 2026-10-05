@@ -128,8 +128,9 @@ pub(super) async fn recover_from(
         req.num_shards,
     )?;
     // `loaded_slot` returns owned `Arc`s (the map guard is already dropped), so holding `slot` across
-    // the peer dial + stream `.await`s below never holds the std `RwLock`.
-    let (slot, st) = server.loaded_slot(req.shard_id)?;
+    // the peer dial + stream `.await`s below never holds the std `RwLock`. A slot awaiting
+    // recovery (ADR-189) is exactly what this RPC exists to fill.
+    let (slot, st) = server.loaded_slot_awaiting_recovery_ok(req.shard_id)?;
     let Some(root) = server.data_dir.clone() else {
         return Err(Status::failed_precondition(
             "shard is not durable; cannot accept peer recovery",
@@ -225,6 +226,10 @@ pub(super) async fn recover_from(
         tag_dict: Arc::clone(&st.tag_dict),
         shard,
     })));
+    // The slot now holds the current owner's data: it is no longer the empty stand-in for a
+    // shard this node gave up (ADR-189). If the record cannot be updated the recovery fails and
+    // the slot keeps refusing, which a retry repairs.
+    server.mark_recovered(req.shard_id, &slot)?;
     Ok(Response::new(proto::RecoverFromReply {
         segments_attached,
         num_queries,

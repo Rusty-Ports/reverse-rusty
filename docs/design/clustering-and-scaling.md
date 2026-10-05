@@ -474,6 +474,11 @@ fence-probes immediately before a rename-to-trash deletion. The public sweep is 
 with an authoritative assignment-routed node directory; skipped nodes, unassigned slots, failed
 drops, and deferred trash deletion all make its terminal report incomplete (ADR-173).
 
+A node remembers the shards it dropped. A slot later created for one of them (by a handoff back,
+or by a coordinator working from an outdated topology) is empty, so it refuses every read and
+write as an ownership mismatch until a peer recovery fills it; only then does the node forget the
+drop. Adopting a different layout starts over (ADR-189).
+
 ### 9.3 Failure boundaries
 
 - Primary transport failure may read-failover only to an in-sync replica.

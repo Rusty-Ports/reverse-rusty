@@ -138,6 +138,7 @@ fn drop_req(
 
 mod add_shard;
 mod adopt;
+mod dropped;
 mod fence;
 mod gc;
 mod limits;

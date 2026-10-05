@@ -42,7 +42,23 @@ impl ShardServer {
     /// The slot + its adopted [`ServerState`] for `shard_id` — `not_found` if the slot is absent,
     /// `failed_precondition` if present-but-pending. The per-shard handlers' one-line replacement for
     /// the old node-wide `loaded()`.
+    ///
+    /// Every data RPC resolves its slot here, so this is also where a slot awaiting recovery
+    /// (ADR-189) refuses to serve. The few RPCs that must reach such a slot use
+    /// [`loaded_slot_awaiting_recovery_ok`](Self::loaded_slot_awaiting_recovery_ok).
     pub(in crate::cluster::server) fn loaded_slot(
+        &self,
+        shard_id: u32,
+    ) -> Result<(Arc<ShardSlot>, Arc<ServerState>), Status> {
+        let (slot, st) = self.loaded_slot_awaiting_recovery_ok(shard_id)?;
+        slot.ensure_recovered(shard_id)?;
+        Ok((slot, st))
+    }
+
+    /// [`loaded_slot`](Self::loaded_slot) for the RPCs that manage a slot rather than serve
+    /// from it: `RecoverFrom` (which fills it) and `Fence`/`Unfence` (so orphan GC can still
+    /// arm and drop a slot an abandoned handoff left behind).
+    pub(in crate::cluster::server) fn loaded_slot_awaiting_recovery_ok(
         &self,
         shard_id: u32,
     ) -> Result<(Arc<ShardSlot>, Arc<ServerState>), Status> {
@@ -92,6 +108,11 @@ impl ShardServer {
     ) -> Result<(), Status> {
         // No path (adoption, recovery, co-location) may give a retired node a slot (ADR-180).
         self.ensure_not_retired()?;
+        // Both slot-creating RPCs come through here, and a new slot is empty. For a shard
+        // this node gave up, empty must not mean "serves no matches" (ADR-189).
+        if self.was_dropped(shard_id)? {
+            slot.awaiting_recovery.store(true, Ordering::Release);
+        }
         self.shards
             .write()
             .map_err(|_| Status::internal("shard map lock poisoned"))?

@@ -46,6 +46,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(None)),
+            dropped: std::sync::Mutex::default(),
         }
     }
 
@@ -72,6 +73,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(None)),
+            dropped: std::sync::Mutex::default(),
         }
     }
 
@@ -138,6 +140,19 @@ impl ShardServer {
                     .validate_ownership(position, placement_generation, num_shards)?;
             }
         }
+        // A shard this node gave up stays given up across a restart (ADR-189), and a slot
+        // re-created for it that no recovery has filled yet is still awaiting one.
+        let dropped = match node_dict.load_full() {
+            Some(space) => super::dropped::restore(&data_dir, super::dropped::SpaceId::of(&space))?,
+            None => std::collections::BTreeSet::new(),
+        };
+        for shard_id in &dropped {
+            if let Some(slot) = slots.get(shard_id) {
+                slot.awaiting_recovery
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let dropped = std::sync::Mutex::new(dropped);
         Ok(ShardServer {
             norm,
             config,
@@ -156,6 +171,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
+            dropped,
         })
     }
 
@@ -183,6 +199,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
+            dropped: std::sync::Mutex::default(),
         }
     }
 
@@ -231,6 +248,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
+            dropped: std::sync::Mutex::default(),
         })
     }
 }
