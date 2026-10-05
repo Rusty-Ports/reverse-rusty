@@ -73,6 +73,7 @@ impl Engine {
         tags: &[Vec<(String, String)>],
         ranks: &[Option<crate::rank::RankValues>],
     ) -> std::io::Result<(IngestReport, Vec<IngestItemStatus>)> {
+        self.seal_before_first_mask()?;
         let mut report = IngestReport::default();
         let mut lc = String::new();
         let mut extracted: Vec<(usize, u64, Extracted, &str)> = Vec::with_capacity(queries.len());
@@ -95,9 +96,7 @@ impl Engine {
                     }
                 }
             }
-            if !dict.is_finalized() {
-                dict.finalize_mask();
-            }
+            dict.finalize_mask(); // assigns once; a no-op from then on
         }
         // Intern each accepted query's tags (separate pass so `self` is not borrowed
         // mutably while the dict is read in pass B). A query whose tag set exceeds

@@ -198,7 +198,9 @@ not current merge behavior.
 
 The current system has two concrete mechanisms:
 
-- The engine dictionary's name→ID mapping and top-64 common mask are frozen and persisted. New names
+- The engine dictionary's name→ID mapping and top-64 common mask are frozen and persisted. The mask
+  is assigned exactly once, by the first batch build, after any memtable rows are sealed; a later
+  finalize is a no-op (ADR-188). New names
   on frozen/read-only paths use deterministic synthetic IDs. Existing compiled rows therefore remain
   comparable, and compaction never changes their mask interpretation.
 - A vocabulary/normalizer change requires canonical query source. `Engine::set_vocab` preflights the

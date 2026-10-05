@@ -219,9 +219,18 @@ impl Dict {
         self.freq[id as usize] = self.freq[id as usize].saturating_add(1);
     }
 
-    /// After all queries are compiled, assign mask bits to the 64 highest-freq
+    /// After the first corpus is compiled, assign mask bits to the 64 highest-freq
     /// features so the exact matcher can reject most candidates with two u64 ops.
+    ///
+    /// The assignment happens **once**. Every row compiled afterwards stores its
+    /// required top-64 features as these bits, and its class depends on them, so a
+    /// later call must not move a bit: it is a no-op on a finalized dictionary
+    /// (including one restored from disk). A rebuild that wants a different mask
+    /// mints a fresh dictionary and recompiles every row against it.
     pub fn finalize_mask(&mut self) {
+        if self.finalized {
+            return;
+        }
         let mut idx: Vec<FeatureId> = (0..self.names.len() as FeatureId).collect();
         idx.sort_unstable_by_key(|&id| std::cmp::Reverse(self.freq[id as usize]));
         for b in &mut self.mask_bit {
@@ -348,6 +357,42 @@ impl Default for Dict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mask is assigned once: compiled rows keep their required top-64 features as
+    /// these bits, so a later finalize must not move one, however the ranking has drifted.
+    #[test]
+    fn finalize_mask_assigns_once_and_never_reranks() {
+        let mut d = Dict::new();
+        let ids: Vec<FeatureId> = (0..100u32)
+            .map(|i| {
+                let f = d.intern(&format!("f{i}"), FeatureKind::Generic);
+                for _ in 0..(100 - i) {
+                    d.bump_freq(f);
+                }
+                f
+            })
+            .collect();
+        d.finalize_mask();
+        let assigned: Vec<u8> = ids.iter().map(|&f| d.mask_bit(f)).collect();
+        assert_eq!(assigned[0], 0, "the most frequent feature holds bit 0");
+        assert_eq!(assigned[99], NO_MASK_BIT);
+
+        // Invert the ranking completely, then add a new, hugely frequent feature.
+        for (rank, &f) in ids.iter().enumerate() {
+            for _ in 0..(rank * 1_000) {
+                d.bump_freq(f);
+            }
+        }
+        let newcomer = d.intern("newcomer", FeatureKind::Generic);
+        for _ in 0..1_000_000 {
+            d.bump_freq(newcomer);
+        }
+        d.finalize_mask();
+        let after: Vec<u8> = ids.iter().map(|&f| d.mask_bit(f)).collect();
+        assert_eq!(after, assigned, "a second finalize moved a mask bit");
+        assert_eq!(d.mask_bit(newcomer), NO_MASK_BIT);
+        assert!(d.is_finalized());
+    }
 
     #[test]
     fn synthetic_ids_are_stable_in_range_and_disjoint_from_interned() {

@@ -28,6 +28,7 @@ Write paths, segments, WAL and source persistence, compaction, recovery, and dur
 | [161](../adr-161-checkpoint-api-contract.md) | Checkpoint REST API contract | Makes cluster durability commits strict, supervised, and explicit about nondurable coordinator modes. | Accepted |
 | [182](../adr-182-validated-log-recovery.md) | Validated log recovery | Repairs only incomplete final writes before append, refuses complete corruption/incompatibility, and fences failed append handles. | Accepted |
 | [184](../adr-184-recorded-feature-model.md) | Recorded feature model | Records the vocabulary and a normalizer fingerprint in every manifest commit, restores it on reopen, and refuses a corpus under any other normalizer. | Accepted |
+| [188](../adr-188-mask-assigned-once.md) | Mask assigned once | Makes the top-64 mask assignment a one-time event enforced in the dictionary, seals the memtable before it, and stops the server re-running the initial load on a populated store. | Accepted |
 
 ---
 

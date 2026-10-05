@@ -16,7 +16,7 @@ Options:
 | `--auth-token` | *(none — auth off)* | Bearer token required on mutating/admin endpoints (ADR-062). Prefer the `RR_AUTH_TOKEN` env var in production — flag values appear in process listings (see [HTTP security](security.md)) |
 | `--auth-protect-reads` | false | Extend bearer-token auth to read endpoints too (everything except `GET`/`HEAD /_health`). Requires an auth token |
 | `--data-dir` | *(in-memory)* | Persistence directory for segments and WAL |
-| `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
+| `--load-file` | — | Seed an **empty** engine with queries from a CSV or JSONL file at startup. Skipped, with a warning, when the reopened `--data-dir` already holds queries; send later changes through `_bulk` ([ADR-188](../../../decisions/adr-188-mask-assigned-once.md)) |
 | `--vocab-file` | — | Seed a new store's vocabulary from a JSON file; a durable store that recorded its vocabulary keeps it ([ADR-184](../../../decisions/adr-184-recorded-feature-model.md)) |
 | `--ranking-profiles-file` | — | Load strict, fingerprintable CPU ranking profiles from JSON; `RR_RANKING_PROFILES_FILE` is the environment alternative and `static_v1` remains built in ([ranking reference](../../ranking.md)) |
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
