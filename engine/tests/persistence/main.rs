@@ -11,6 +11,7 @@ mod harness;
 mod backup;
 mod compaction;
 mod durability;
+mod mask_stability;
 mod round_trip;
 mod sources;
 mod tombstone_durability;
