@@ -119,3 +119,9 @@
   path) is byte-identical. The remaining §7 "improve" menu (candidate-survival telemetry,
   `recommended_shard_count`/`recommended_arity`, feature-ID re-ranking for locality, re-running the
   corpus learner) and hot-mask re-ranking via blue/green stay deferred, each its own increment.
+- **Outcome update (2026-10-05).** The demote-guard paragraph says a main→broad crossing happens
+  only when a query's sole anchor has become hot. A second cause exists: a query with no required
+  feature anchors on the any-of group that is most selective by current frequency, and that
+  choice can move to a group with a top-64 member. The guard already refuses both. It ran only
+  for the entry that re-derives a cover, though, so a dedup member (ADR-106) could still take a
+  class-C leader's lane; [ADR-186](adr-186-visibility-partitioned-dedup.md) closes that.

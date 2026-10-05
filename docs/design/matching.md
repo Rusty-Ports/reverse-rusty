@@ -270,9 +270,12 @@ in-memory segment. Each member keeps its own ranking metadata, so redundant sour
 share candidate retrieval and exact verification without being forced to share a score. At
 `add_compiled`, a body-hash hit confirmed by exact equality joins the group — the duplicate inserts
 no postings and **adopts
-the leader's class** (identical bodies can plan A vs H across a θ-crossing frequency bump;
-adoption is lossless because A/B/H are all always-visible, and C/D are structural under the
-frozen mask). Every match path — the scalar probe, the columnar kernel's vacuous-accept and
+the leader's class** (identical bodies can plan A vs H across a θ-crossing frequency bump, and
+A/B/H are all always-visible). A join never crosses the opt-in boundary: a body with no required
+feature can plan class C at one time and B at another (its any-of anchor group is chosen by live
+frequency, and nothing is top-64 before the first mask finalize), so an entry joins only a leader
+on its own side, and a body can have two groups per segment
+([ADR-186](../decisions/adr-186-visibility-partitioned-dedup.md)). Every match path — the scalar probe, the columnar kernel's vacuous-accept and
 full-verification arms, the class-D universal probe — verifies the shared body **once** and
 fans emission out per member, each gated on its OWN aliveness and tags (a dead leader never
 drops alive members; grouped `eval_into` runs with the empty predicate so the leader's tags

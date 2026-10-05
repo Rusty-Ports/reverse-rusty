@@ -198,7 +198,7 @@ impl<'a, P: crate::ownership::EmissionPolicy> ExhaustiveDeduper<'a, P> {
     }
 
     fn visible(&self, class: CostClass) -> bool {
-        self.include_broad || !matches!(class, CostClass::C | CostClass::D)
+        self.include_broad || !class.is_opt_in()
     }
 
     fn base_matches(&self, segment: &BaseSegment, local: u32) -> bool {

@@ -59,6 +59,7 @@ that followed the ADR-065 graduation program.
 | [123](../adr-123-bounded-in-segment-cancellation.md) | Bounded in-segment cancellation | Bounds cancellation latency inside long segment scans. | Accepted |
 | [124](../adr-124-variance-tolerant-performance-gate.md) | Variance-tolerant performance gate | Uses variance-aware regression gating with scheduled soak coverage. | Done |
 | [125](../adr-125-delete-document-contract.md) | DELETE document contract | Defines strict refresh parsing, honest metadata, logical counts, and retryable partial repair. | Accepted |
+| [186](../adr-186-visibility-partitioned-dedup.md) | Visibility-partitioned dedup | Lets a dedup member join only a leader on its own side of the opt-in boundary, so a join can never hide or expose a query. | Accepted |
 
 ---
 
