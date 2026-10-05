@@ -153,25 +153,21 @@ pub(super) fn drop_shard(
         }
         None => 0,
     };
-    // Re-check the fence under the map WRITE lock, then atomically quarantine the durable dir
-    // before removing the slot. A rename failure restores the fence and leaves the slot hosted.
+    // Tombstone the fence, remember the drop (ADR-189), then under the map WRITE lock atomically
+    // quarantine the durable dir and remove the slot. A failure restores the fence and leaves
+    // the slot hosted.
     let trash = server.remove_slot_if_fenced_at_with(
         req.shard_id,
         req.expected_fence_generation,
-        || {
-            // Remember the drop before anything is removed (ADR-189): a slot later created
-            // for this shard is empty and must not serve until a recovery fills it.
-            server.record_dropped(req.shard_id)?;
-            match &server.data_dir {
-                None => Ok(None),
-                Some(root) => quarantine_slot_dir(root, req.shard_id).map_err(|source| {
-                    Status::internal(format!(
-                        "DropShard: cannot quarantine shard {} in {}: {source}",
-                        req.shard_id,
-                        root.display()
-                    ))
-                }),
-            }
+        || match &server.data_dir {
+            None => Ok(None),
+            Some(root) => quarantine_slot_dir(root, req.shard_id).map_err(|source| {
+                Status::internal(format!(
+                    "DropShard: cannot quarantine shard {} in {}: {source}",
+                    req.shard_id,
+                    root.display()
+                ))
+            }),
         },
     )?;
     let Some(trash) = trash else {

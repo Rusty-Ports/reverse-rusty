@@ -22,7 +22,12 @@ retired node. GC is a different path: a node that loses one shard keeps serving 
 1. **The node remembers what it dropped.** `DropShard` records the shard id before it removes
    the slot. On a durable node the record is `dropped_shards.bin` at the node root, written with
    an atomic synced rename before the slot directory is quarantined, so no crash leaves a drop
-   forgotten.
+   forgotten. The drop runs in three steps: tombstone the slot's fence, so no fence traffic can
+   bring it back; write the record, with the slot map unlocked, because every other shard on the
+   node resolves its slot through that lock and a synced write must not stall them; then, under
+   the map's write lock, quarantine the directory and remove the slot. If the record or the
+   quarantine fails, the fence is restored, the record is taken back, and the slot stays hosted
+   for a retry.
 2. **A slot created for a remembered shard is born awaiting recovery.** `insert_slot`, which both
    slot-creating RPCs go through, sets the flag. Creation is not refused: a handoff *back* to this
    node begins with exactly the same adoption and then fills the slot with `RecoverFrom`.
@@ -44,7 +49,10 @@ retired node. GC is a different path: a node that loses one shard keeps serving 
    data), in which case slots still awaiting recovery from the old one are released too, since
    they are empty and an idempotent re-adoption would never replace them; and the stored record
    for a durable node that restarted pending and adopts the layout it had before. A damaged
-   record fails loudly rather than being read as "nothing dropped".
+   record fails loudly rather than being read as "nothing dropped". Adoption reads the record
+   before it builds, persists or publishes anything, so an adoption that cannot read it leaves
+   the node unchanged and a retry fails the same way; read after the layout was published, the
+   retry would have found the layout already adopted and created a slot that serves.
 6. **Every durable constructor loads the record.** `open_durable` and the pre-built
    `new_durable` restore it with their slots; `pending_durable` has no layout yet and takes it
    up at adoption.
@@ -77,9 +85,13 @@ retired node. GC is a different path: a node that loses one shard keeps serving 
   refuses reads, writes and counts as an ownership mismatch while a never-dropped slot serves;
   such a slot can still be fenced and dropped; adoption under a new placement generation serves,
   and releases a slot that was still awaiting recovery; a durable restart remembers through all
-  three durable constructors, including for a slot re-created before the restart; and a request
+  three durable constructors, including for a slot re-created before the restart; a request
   interleaved with a recovery at the one point where the order matters is refused or sees the
-  recovered state, never the empty one.
+  recovered state, never the empty one; an adoption over an unreadable record fails on the first
+  attempt and on the retry, leaving the node pending; a drop is recorded before the slot is
+  removed and with the slot-map lock free; and a drop that cannot be recorded, or cannot
+  quarantine its directory, leaves the slot hosted at its fence with nothing remembered, also
+  across a restart.
 - `cluster/server/dropped.rs` unit tests: the record round-trips, belongs to one layout, and a
   truncated, padded, mis-tagged or future-version file fails loud.
 - `tests/cluster_grpc_oracle/gc_readopt.rs`: over real gRPC, a shard moves away, is dropped,

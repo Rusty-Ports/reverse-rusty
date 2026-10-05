@@ -4,7 +4,7 @@ use super::*;
 
 const GEN: u64 = 1;
 
-fn fence_req(shard_id: u32, generation: u64, fp: u64) -> Request<proto::FenceRequest> {
+pub(super) fn fence_req(shard_id: u32, generation: u64, fp: u64) -> Request<proto::FenceRequest> {
     Request::new(proto::FenceRequest {
         generation,
         dict_fingerprint: fp,
@@ -15,7 +15,7 @@ fn fence_req(shard_id: u32, generation: u64, fp: u64) -> Request<proto::FenceReq
     })
 }
 
-fn drop_req_16(shard_id: u32, fence: u64, fp: u64) -> Request<proto::DropShardRequest> {
+pub(super) fn drop_req_16(shard_id: u32, fence: u64, fp: u64) -> Request<proto::DropShardRequest> {
     Request::new(proto::DropShardRequest {
         shard_id,
         expected_fence_generation: fence,
@@ -26,7 +26,7 @@ fn drop_req_16(shard_id: u32, fence: u64, fp: u64) -> Request<proto::DropShardRe
     })
 }
 
-fn read_req(shard_id: u32, title: &str) -> Request<proto::PercolateRequest> {
+pub(super) fn read_req(shard_id: u32, title: &str) -> Request<proto::PercolateRequest> {
     Request::new(proto::PercolateRequest {
         title: title.to_string(),
         include_broad: true,
@@ -47,7 +47,7 @@ fn read_req(shard_id: u32, title: &str) -> Request<proto::PercolateRequest> {
 
 /// Adopt slot `shard_id`, store one query, then fence and drop it: what a
 /// handoff away from this node followed by orphan GC leaves behind.
-fn adopt_fill_and_drop(
+pub(super) fn adopt_fill_and_drop(
     rt: &tokio::runtime::Runtime,
     srv: &ShardServer,
     dict: &Dict,
@@ -77,7 +77,11 @@ fn adopt_fill_and_drop(
 }
 
 /// Every data RPC on `shard_id` fails loud, as an ownership mismatch.
-fn assert_refuses_to_serve(rt: &tokio::runtime::Runtime, srv: &ShardServer, shard_id: u32) {
+pub(super) fn assert_refuses_to_serve(
+    rt: &tokio::runtime::Runtime,
+    srv: &ShardServer,
+    shard_id: u32,
+) {
     let read = rt
         .block_on(srv.percolate(read_req(shard_id, "pro edition")))
         .expect_err("a re-created empty slot must not answer a read");
@@ -405,4 +409,62 @@ fn a_layout_change_releases_slots_awaiting_recovery() {
     ));
     rt.block_on(srv.insert_extracted(write))
         .expect("slot 3 serves in the new layout");
+}
+
+pub(super) fn temp_node_dir(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "rr_dropped_{tag}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ))
+}
+
+/// A record the node cannot read fails the adoption, and keeps failing it. The
+/// adoption used to publish the layout first and read the record second, so the
+/// retry found the layout already adopted, skipped the record, and created an
+/// empty slot that served.
+#[test]
+fn an_unreadable_record_fails_adoption_on_every_attempt() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let d = frozen_dict(&["pro"], &n);
+    let dir = temp_node_dir("unreadable");
+    {
+        let srv =
+            ShardServer::pending_durable(Arc::clone(&n), EngineConfig::default(), dir.clone());
+        adopt_fill_and_drop(&rt, &srv, &d, 3);
+    }
+    // A record from a newer format: this binary cannot know which shards it lists.
+    let record = dir.join("dropped_shards.bin");
+    let mut blob = std::fs::read(&record).expect("the drop left a record");
+    blob[4..8].copy_from_slice(&2u32.to_le_bytes());
+    std::fs::write(&record, blob).expect("rewrite the record");
+
+    let srv = ShardServer::pending_durable(Arc::clone(&n), EngineConfig::default(), dir.clone());
+    for attempt in ["first", "retried"] {
+        let refused = rt
+            .block_on(srv.adopt_dict(adopt_req_shard(&d, 3)))
+            .expect_err("an adoption over an unreadable record must fail");
+        assert_eq!(
+            refused.code(),
+            Code::FailedPrecondition,
+            "{attempt}: {refused:?}"
+        );
+        assert!(
+            refused.message().contains("dropped-shard record"),
+            "{attempt}: {refused:?}"
+        );
+        assert!(
+            srv.node_dict.load_full().is_none(),
+            "{attempt}: a refused adoption leaves the node pending"
+        );
+        assert!(
+            !srv.is_serving(),
+            "{attempt}: a refused adoption creates no slot"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

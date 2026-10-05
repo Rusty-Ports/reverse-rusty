@@ -141,6 +141,10 @@ fn failed_durable_quarantine_restores_the_fence_and_keeps_the_slot() {
         4,
         "the pre-drop fence is restored"
     );
+    assert!(
+        !srv.was_dropped(0).expect("record"),
+        "a drop that did not happen is not remembered (ADR-189)"
+    );
 }
 
 /// A slot pinned by an UNEXPIRED retention lease (an in-flight recovery's source) is never

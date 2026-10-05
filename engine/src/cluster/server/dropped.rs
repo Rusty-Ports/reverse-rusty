@@ -42,6 +42,20 @@ pub(super) struct SpaceId {
 }
 
 impl SpaceId {
+    pub(super) fn new(
+        dict_fingerprint: u64,
+        tag_dict_fingerprint: u64,
+        placement_generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Self {
+        SpaceId {
+            dict_fingerprint,
+            tag_dict_fingerprint,
+            placement_generation: placement_generation.get(),
+            num_shards,
+        }
+    }
+
     pub(super) fn of(space: &AdoptedSpace) -> Self {
         SpaceId {
             dict_fingerprint: space.dict.fingerprint(),
@@ -181,11 +195,28 @@ impl ShardServer {
     }
 
     /// Remember that `shard_id` is being dropped. Called before the slot is removed, so a
-    /// crash in between leaves the record, never a forgotten drop.
-    pub(super) fn record_dropped(&self, shard_id: u32) -> Result<(), Status> {
+    /// crash in between leaves the record, never a forgotten drop; and called with NO
+    /// slot-map lock held, because on a durable node this writes and syncs a file, and
+    /// that must not stall the node's other shards. Returns whether the id was newly added.
+    pub(super) fn record_dropped(&self, shard_id: u32) -> Result<bool, Status> {
+        #[cfg(test)]
+        while_recording_a_drop();
         let mut current = self.dropped_set()?;
+        if current.contains(&shard_id) {
+            return Ok(false);
+        }
         let mut next = current.clone();
         next.insert(shard_id);
+        self.store_dropped(&mut current, next)?;
+        Ok(true)
+    }
+
+    /// Take back a record made for a drop that did not happen. The slot is still hosted, so
+    /// nothing was given up.
+    pub(super) fn unrecord_dropped(&self, shard_id: u32) -> Result<(), Status> {
+        let mut current = self.dropped_set()?;
+        let mut next = current.clone();
+        next.remove(&shard_id);
         self.store_dropped(&mut current, next)
     }
 
@@ -200,37 +231,42 @@ impl ShardServer {
         Ok(())
     }
 
-    /// The node has adopted `space` (first adoption, or a different layout): take up the
-    /// record that belongs to it and bring every hosted slot in line.
+    /// The record that belongs to the layout `space`, read BEFORE the node commits to that
+    /// layout. A different layout is a fresh start, so its record is empty. A durable node
+    /// that restarted pending and adopts the layout it had before finds that layout's record
+    /// on disk and keeps honouring it.
     ///
-    /// A different layout is a fresh start, so its record is empty and any slot still
-    /// flagged from the old one is released: such a slot is empty (a layout can change only
-    /// while no slot holds data) and an idempotent re-adoption would never replace it. A
-    /// durable node that restarted pending and adopts the layout it had before finds that
-    /// layout's record on disk and keeps honouring it.
-    pub(super) fn adopt_layout(&self, space: &AdoptedSpace) -> Result<(), Status> {
-        let record = match &self.data_dir {
-            Some(dir) => restore(dir, SpaceId::of(space)).map_err(|error| {
+    /// Fallible on purpose and first: if the record cannot be read, the adoption fails with
+    /// the node unchanged, so a retry fails the same way instead of finding the layout
+    /// already adopted and skipping this step.
+    pub(super) fn layout_record(&self, space: SpaceId) -> Result<BTreeSet<u32>, Status> {
+        match &self.data_dir {
+            Some(dir) => restore(dir, space).map_err(|error| {
                 Status::failed_precondition(format!(
                     "cannot read this node's dropped-shard record: {error}"
                 ))
-            })?,
-            None => BTreeSet::new(),
-        };
-        // Never hold the record lock across the slot map: `DropShard` takes them in the
-        // other order.
-        self.dropped_set()?.clone_from(&record);
-        let slots = self
-            .shards
-            .read()
-            .map_err(|_| Status::internal("shard map lock poisoned"))?;
-        for (shard_id, slot) in slots.iter() {
-            slot.awaiting_recovery.store(
-                record.contains(shard_id),
-                std::sync::atomic::Ordering::Release,
-            );
+            }),
+            None => Ok(BTreeSet::new()),
         }
-        Ok(())
+    }
+
+    /// Take up `record` for the layout the node has just adopted and bring every hosted
+    /// slot in line. A slot still flagged from another layout is released: it is empty (a
+    /// layout can change only while no slot holds data) and an idempotent re-adoption
+    /// would never replace it. Cannot fail, so nothing after the adoption's commit point can.
+    pub(super) fn install_layout_record(&self, record: BTreeSet<u32>) {
+        use std::sync::PoisonError;
+        // Never hold the record lock across the slot map.
+        {
+            let slots = self.shards.read().unwrap_or_else(PoisonError::into_inner);
+            for (shard_id, slot) in slots.iter() {
+                slot.awaiting_recovery.store(
+                    record.contains(shard_id),
+                    std::sync::atomic::Ordering::Release,
+                );
+            }
+        }
+        *self.dropped.lock().unwrap_or_else(PoisonError::into_inner) = record;
     }
 }
 
@@ -256,6 +292,26 @@ pub(super) fn restore_for_slots<'a>(
 thread_local! {
     static BETWEEN_READINESS_AND_STATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static WHILE_RECORDING_A_DROP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: run `action` once, on this thread, when a drop is being recorded.
+#[cfg(test)]
+pub(super) fn arm_while_recording_a_drop(action: impl FnOnce() + 'static) {
+    WHILE_RECORDING_A_DROP.with(|cell| *cell.borrow_mut() = Some(Box::new(action)));
+}
+
+#[cfg(test)]
+fn while_recording_a_drop() {
+    let action = WHILE_RECORDING_A_DROP.with(|cell| cell.borrow_mut().take());
+    if let Some(action) = action {
+        action();
+    }
 }
 
 /// Test seam: run `action` once, on this thread, at the point where `loaded_slot` has
