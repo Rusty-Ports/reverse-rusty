@@ -22,6 +22,15 @@ reverse chronological and describe outcomes, not the current architecture or fut
   return to the main lane at the next merge when their body currently plans visible; otherwise
   recompile from retained source. `include_broad=true` reads and cluster shards were not affected.
 
+## 2026-10-05 — Multi-machine harness: converge handoff-window repairs
+
+- Fix an intermittent "multi-machine harness" failure: a write that reached a handoff source just
+  as it was fenced is acknowledged as a partial apply and queued for repair, which keeps `/_health`
+  yellow, and the leg that restarts the handoff target then waited for green without a resync.
+  Leg 4 now converges repairs before its green gate and checks every acknowledged write.
+- Add `RR_HARNESS_PORT`, `RR_HARNESS_WRITERS` and `RR_HARNESS_WRITE_GAP` to run the harness beside a
+  local server and to stress the handoff fence.
+
 ## 2026-10-01 — Recorded feature model
 
 - Fix silent false negatives after a restart under a different vocabulary: the single-node manifest
