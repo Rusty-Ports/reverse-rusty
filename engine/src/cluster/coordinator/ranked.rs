@@ -149,9 +149,13 @@ impl ClusterEngine {
         deadline: Option<Instant>,
     ) -> Result<ClusterRankedMatch, ClusterRankedError> {
         // ADR-185: a pass that overlapped a placement-moving upsert — including one that
-        // failed closed on the duplicate id such a move can expose — is repeated.
+        // failed closed on the duplicate id such a move can expose — is repeated. A read
+        // held back by a move past its own deadline fails with that deadline.
         self.move_fence
-            .read(|_| self.top_k_core(None, title, filter, options, program, deadline))
+            .read_until(deadline, |_| {
+                self.top_k_core(None, title, filter, options, program, deadline)
+            })
+            .unwrap_or(Err(ClusterRankedError::DeadlineExceeded))
     }
 
     /// The ONE bounded distributed collection body, parameterized by the view:

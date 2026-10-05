@@ -119,6 +119,9 @@ struct Observation {
     position: usize,
     call: WriteCall,
     waited: bool,
+    /// A point read taken while the writer was stopped. Point reads take no fence, so
+    /// this samples the half-done state directly.
+    exists_now: bool,
     seen: Seen,
 }
 
@@ -144,19 +147,20 @@ fn observe(
         while let Ok(Event::Step(position, call)) =
             stepper.events.recv_timeout(Duration::from_secs(20))
         {
+            let exists_now = cluster.document_exists(id).unwrap_or(false);
             let (tx, rx) = mpsc::channel();
             scope.spawn(move || {
                 let _ = tx.send(read_all(cluster, title, id));
             });
             let prompt = rx.recv_timeout(Duration::from_millis(150)).ok();
             let _ = stepper.go.send(());
-            pending.push((position, call, prompt, rx));
+            pending.push((position, call, exists_now, prompt, rx));
         }
         stepper.armed.store(false, Ordering::SeqCst);
         let result = writer.join().expect("writer thread");
         let observations = pending
             .into_iter()
-            .map(|(position, call, prompt, rx)| {
+            .map(|(position, call, exists_now, prompt, rx)| {
                 let waited = prompt.is_none();
                 let seen = prompt.unwrap_or_else(|| {
                     rx.recv_timeout(Duration::from_secs(20))
@@ -166,6 +170,7 @@ fn observe(
                     position,
                     call,
                     waited,
+                    exists_now,
                     seen,
                 }
             })
@@ -218,6 +223,7 @@ fn same_placement_upsert_is_never_missing(num_shards: usize) {
             Seen::exactly(999),
             "the query went missing mid-upsert: {observation:?}"
         );
+        assert!(observation.exists_now, "{observation:?}");
         assert!(
             matches!(observation.call, WriteCall::Replace(999, _)),
             "a same-placement upsert is one atomic replace per placement shard: {observation:?}"
@@ -274,6 +280,10 @@ fn a_moving_upsert_is_seen_exactly_once() {
             Seen::exactly(999),
             "a reader saw the move half-done: {observation:?}"
         );
+        assert!(
+            observation.exists_now,
+            "an unfenced point read found no version mid-move: {observation:?}"
+        );
     }
     assert!(
         observations.iter().any(|o| o.waited),
@@ -318,6 +328,80 @@ fn a_partially_overlapping_move_is_seen_exactly_once() {
             Seen::exactly(999),
             "a reader saw the move half-done: {observation:?}"
         );
+        assert!(
+            observation.exists_now,
+            "an unfenced point read found no version mid-move: {observation:?}"
+        );
     }
+    assert_eq!(read_all(&cluster, &title, 999), Seen::exactly(999));
+}
+
+/// A read with a deadline that arrives while a move is rewriting shards fails with its own
+/// deadline instead of being held until the move finishes.
+#[test]
+fn a_deadline_bounded_read_is_not_held_past_its_deadline_by_a_move() {
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        ..Default::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("cluster");
+    let tokens: Vec<String> = (0..64).map(|i| format!("zzdead{i}")).collect();
+    let home = placed(&cluster, &tokens[0]);
+    let away = tokens
+        .iter()
+        .find(|token| placed(&cluster, token) != home)
+        .expect("some token routes to another shard");
+    let (old, new) = (tokens[0].as_str(), away.as_str());
+    let title = format!("{old} {new}");
+    cluster.upsert_query(999, old, 1).expect("seed");
+    let stepper = step_writes(&mut cluster, 999);
+    let program = cluster
+        .compile_rank_program(&crate::rank::RankProgramSpec::default())
+        .expect("rank program");
+
+    let (timed, result) = std::thread::scope(|scope| {
+        stepper.armed.store(true, Ordering::SeqCst);
+        let done = stepper.done.clone();
+        let cluster = &cluster;
+        let writer = scope.spawn(move || {
+            let out = cluster.upsert_query(999, new, 2);
+            let _ = done.send(Event::Done);
+            out
+        });
+        let mut timed = None;
+        while let Ok(Event::Step(_, call)) = stepper.events.recv_timeout(Duration::from_secs(20))
+        {
+            // The first step inside the fence: the conditional replace declined before it.
+            let fenced = matches!(
+                call,
+                WriteCall::Delete(_)
+                    | WriteCall::Replace(_, crate::cluster::shard::ReplaceMode::Unconditional)
+            );
+            if fenced && timed.is_none() {
+                let started = Instant::now();
+                let read = cluster.try_percolate_filtered_top_k(
+                    &title,
+                    &[],
+                    crate::result::TopKOptions::default(),
+                    &program,
+                    Some(started + Duration::from_millis(40)),
+                );
+                timed = Some((
+                    matches!(read, Err(ClusterRankedError::DeadlineExceeded)),
+                    started.elapsed(),
+                ));
+            }
+            let _ = stepper.go.send(());
+        }
+        stepper.armed.store(false, Ordering::SeqCst);
+        (timed, writer.join().expect("writer thread"))
+    });
+    result.expect("moving upsert accepted");
+    let (deadline_exceeded, waited) = timed.expect("the move reached a fenced step");
+    assert!(deadline_exceeded, "the read must fail with its own deadline");
+    assert!(
+        waited < Duration::from_secs(5),
+        "the read returned at its deadline, not when the move ended: {waited:?}"
+    );
     assert_eq!(read_all(&cluster, &title, 999), Seen::exactly(999));
 }
