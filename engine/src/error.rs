@@ -129,6 +129,35 @@ impl fmt::Display for NormalizerError {
 
 impl std::error::Error for NormalizerError {}
 
+/// A committed corpus was opened under a different feature model than it was compiled with
+/// (ADR-184). The manifest records [`Normalizer::fingerprint`](crate::normalize::Normalizer::fingerprint)
+/// at every commit; serving the corpus under another normalizer would silently miss matches,
+/// so recovery refuses instead. For an engine whose manifest also records its vocabulary the
+/// vocabulary is restored automatically, so this means the binary rebuilt a different
+/// normalizer from it; otherwise the caller supplied the wrong bare normalizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureModelMismatch {
+    /// The fingerprint the committed manifest recorded.
+    pub recorded: u64,
+    /// The fingerprint of the normalizer recovery would have served.
+    pub supplied: u64,
+}
+
+impl fmt::Display for FeatureModelMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "feature-model mismatch: the committed corpus was compiled under normalizer \
+             {:#018x} but recovery would serve it under {:#018x}; open it with the \
+             normalizer it was built with (or apply a new vocabulary through set_vocab, \
+             which rebuilds from source)",
+            self.recorded, self.supplied
+        )
+    }
+}
+
+impl std::error::Error for FeatureModelMismatch {}
+
 /// An error from the live-write path ([`Engine::try_insert_live`](crate::segment::Engine::try_insert_live)).
 ///
 /// A write can fail two ways with very different meanings: the caller's query

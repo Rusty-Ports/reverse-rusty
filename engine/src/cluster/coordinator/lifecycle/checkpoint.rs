@@ -57,13 +57,14 @@ impl ClusterEngine {
         }
 
         // 3. Coordinator manifest = the atomic commit point (new base + new cursor).
-        //    Persist the installed vocab (ADR-046) so a runtime alias survives reopen;
-        //    serialization failure fails the checkpoint loudly rather than silently
-        //    dropping the alias (which would be a false negative on the next open).
+        //    Persist the installed vocab (ADR-046) so a runtime alias survives reopen,
+        //    verified to reopen as the serving normalizer (ADR-184); a vocabulary that
+        //    cannot be recorded fails the checkpoint loudly rather than writing a
+        //    manifest the next open would refuse or mis-serve.
         let vocab_data = match &self.vocab {
             Some(v) => v
-                .to_json()
-                .map_err(|e| ShardError::Log(format!("serializing cluster vocab: {e}")))?
+                .recordable_json(&self.norm, &self.dict)
+                .map_err(|e| ShardError::Log(format!("recording cluster vocab: {e}")))?
                 .into_bytes(),
             None => Vec::new(),
         };
@@ -88,6 +89,8 @@ impl ClusterEngine {
             // The frozen per-query tag space (ADR-049/055) — re-persisted so the filter resolves to
             // the same `TagId`s on the next reopen. Empty + finalized for an untagged cluster.
             tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
+            // ADR-184: the feature model of the committed base and log tail, checked on reopen.
+            feature_model_fingerprint: Some(self.norm.fingerprint()),
         };
         // An alias import retains the exact manifest it is attempting before
         // publication. `write_cluster_manifest` can report an error after the

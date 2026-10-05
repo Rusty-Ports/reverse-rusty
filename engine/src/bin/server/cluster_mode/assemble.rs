@@ -48,35 +48,14 @@ pub(super) fn assemble_cluster(
         let _ = (handle, mesh, control_endpoints, route_by_assignments);
         if let Some(dir) = data_dir.filter(|d| ClusterEngine::cluster_exists(d)) {
             info!(data_dir = ?dir, "reopening durable cluster from manifest");
-            // The manifest's persisted vocab is authoritative on a reopen (it matches
-            // the committed segments); the file-supplied one only derived `norm`.
-            let mut cluster = ClusterEngine::open(dir, norm, Some(cfg))?;
-            if let Some(v) = vocab {
-                if cluster.vocab().is_some() {
-                    info!(
-                        "--vocab-file ignored on reopen: the manifest's persisted \
-                         vocabulary is authoritative (change it via PUT /_vocab)"
-                    );
-                } else if cluster.num_queries()? == 0 {
-                    // A bare manifest (no persisted vocab) + an EMPTY corpus: activate
-                    // the file vocab so this reopen behaves exactly like a fresh
-                    // `build_with_vocab` — `set_vocab` installs the equivalence/alias
-                    // machinery and its own durable checkpoint persists the vocab,
-                    // BEFORE any --load-file ingest below (codex: this path used to
-                    // ingest with the rules silently inert and the next reopen lost
-                    // the file's vocabulary entirely).
-                    info!("activating the vocab file on the empty reopened cluster");
-                    cluster.set_vocab(v)?;
-                } else {
-                    warn!(
-                        "--vocab-file NOT applied: this reopened cluster is populated \
-                         and its manifest carries no vocabulary, so the file's \
-                         equivalence/alias rules stay inactive (only its \
-                         normalizer-level rules derived `norm`). Apply it explicitly \
-                         via PUT /_vocab (a full blue/green rebuild)."
-                    );
-                }
-            }
+            // ADR-184: the manifest is authoritative for the feature model, so the file only
+            // seeds it. A persisted vocabulary is restored; a cluster that persisted none was
+            // compiled under the stock normalizer and reopens under it (never the file's),
+            // activating the file only while it holds no queries — before any --load-file
+            // ingest below.
+            let seed_supplied = vocab.is_some();
+            let (cluster, outcome) = ClusterEngine::open_seeded(dir, vocab, Some(cfg))?;
+            crate::vocab_seed::log_outcome(outcome, seed_supplied);
             if !queries.is_empty() {
                 match cluster.num_queries()? {
                     0 => cluster.ingest(queries)?,

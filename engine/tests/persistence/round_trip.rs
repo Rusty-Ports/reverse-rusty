@@ -21,8 +21,10 @@ fn stamp_legacy_compiler_semantics(path: &std::path::Path) {
 }
 
 mod aliases;
+mod feature_model;
 mod formats;
 mod migration;
 mod priority;
 mod storage;
+mod vocab_seed;
 mod wal_aliases;

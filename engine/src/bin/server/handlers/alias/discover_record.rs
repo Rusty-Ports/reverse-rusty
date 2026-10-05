@@ -122,8 +122,8 @@ struct AliasDiscoverRecordResponse {
     took: u64,
     took_ms: f64,
     acknowledged: bool,
-    /// Runtime vocabulary changes are not written back to the standalone
-    /// operator's vocabulary file.
+    /// Whether the recorded candidates are committed to the durable manifest (ADR-184):
+    /// true on a durable engine, false on an in-memory one.
     persisted: bool,
     proposed: usize,
     new_candidates: usize,
@@ -136,6 +136,7 @@ struct AliasDiscoverRecordResponse {
 enum AliasDiscoverRecordWorkerError {
     Invalid(String),
     Mutation(String),
+    PersistenceUnavailable(String),
     Serialization(serde_json::Error),
 }
 
@@ -169,11 +170,19 @@ pub(crate) async fn discover_and_record_aliases(
             .map_err(AliasDiscoverRecordWorkerError::Invalid)?;
         let queries = work_state.engine.lock().live_sources();
         let proposals = reverse_rusty::vocab::discover_pairs(&queries, &config);
-        let report = {
+        let (report, persisted) = {
             let mut engine = work_state.engine.lock();
-            engine
+            let durable = engine.config().data_dir.is_some();
+            let report = engine
                 .record_discovered_aliases(&proposals)
-                .map_err(|source| AliasDiscoverRecordWorkerError::Mutation(source.to_string()))?
+                .map_err(|source| {
+                    if durable && !engine.persistence_healthy() {
+                        AliasDiscoverRecordWorkerError::PersistenceUnavailable(source.to_string())
+                    } else {
+                        AliasDiscoverRecordWorkerError::Mutation(source.to_string())
+                    }
+                })?;
+            (report, durable && engine.persistence_healthy())
         };
         work_state.publish_snapshot();
 
@@ -182,7 +191,7 @@ pub(crate) async fn discover_and_record_aliases(
             took: took_ms.floor() as u64,
             took_ms,
             acknowledged: true,
-            persisted: false,
+            persisted,
             proposed: report.proposed,
             new_candidates: report.new_candidates,
             rediscovered: report.rediscovered,
@@ -232,6 +241,15 @@ pub(crate) async fn discover_and_record_aliases(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "aliases_unavailable",
                 "alias discover-and-record mutation failed",
+            )
+        }
+        Ok(Err(AliasDiscoverRecordWorkerError::PersistenceUnavailable(reason))) => {
+            error!(error = %reason, "alias discover-and-record could not be recorded durably");
+            alias_discover_record_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "persistence_unavailable",
+                "alias candidates could not be recorded durably; repair or restart from the \
+                 last committed state",
             )
         }
         Ok(Err(AliasDiscoverRecordWorkerError::Serialization(source))) => {

@@ -136,3 +136,8 @@
 
 - **Follow-ons.** Match-feedback validation subsequently shipped in ADR-103. A cluster-side gather
   (needs a cross-shard sources RPC) and title-corpus contexts remain open.
+
+**Outcome update (2026-10-01).** [ADR-184](adr-184-recorded-feature-model.md) records the vocabulary
+in the single-node manifest (v8). The metadata-only seam now commits it with a vocabulary-only
+manifest write, and the discover-and-record response reports `persisted: true` on a durable engine;
+the "no vocab blob" statement above describes the pre-v8 format.

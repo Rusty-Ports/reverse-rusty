@@ -15,4 +15,5 @@ mod backup;
 mod build;
 mod checkpoint;
 mod open;
+mod open_seeded;
 mod sidecar_gc;

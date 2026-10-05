@@ -22,6 +22,10 @@ pub enum ShardError {
     /// against that shard would *silently* drop results — fail loud instead. This is the
     /// one false-negative path the otherwise-fallible seam cannot catch (ADR-029).
     DictMismatch { expected: u64, actual: u64 },
+    /// A durable cluster was reopened under a normalizer whose feature-model fingerprint
+    /// differs from the one its manifest recorded (ADR-184). Serving the committed base
+    /// and log tail under it would silently miss matches, so `open` refuses.
+    FeatureModelMismatch(crate::error::FeatureModelMismatch),
     /// Placement generation or per-row ownership metadata disagrees with the
     /// shard position/configuration. Serving it could duplicate or suppress a
     /// logical result, so ADR-109 requires a fail-closed typed error.
@@ -97,6 +101,7 @@ impl std::fmt::Display for ShardError {
                 "dict fingerprint mismatch: coordinator {expected:#018x} != shard \
                  {actual:#018x} (every shard must share the coordinator's frozen dict)"
             ),
+            ShardError::FeatureModelMismatch(error) => write!(f, "{error}"),
             ShardError::OwnershipMismatch(error) => write!(f, "{error}"),
             ShardError::DeadlineExceeded => f.write_str("shard read deadline exceeded"),
             ShardError::Admission(error) => error.fmt(f),

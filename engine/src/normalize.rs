@@ -19,11 +19,13 @@
 //! the public surface live in focused submodules:
 //!   - [`core`]    — the `Normalizer` struct + its byte-cleaning + two-phase `emit` hot path + the compile/match entry points + free helpers
 //!   - [`builder`] — `NormalizerBuilder` (off-hot-path construction + automaton build)
+//!   - [`fingerprint`] — the feature-model identity recorded by the manifests (ADR-184)
 
 use crate::dict::FeatureKind;
 
 mod builder;
 mod core;
+mod fingerprint;
 
 #[cfg(test)]
 mod tests;

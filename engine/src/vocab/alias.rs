@@ -74,6 +74,7 @@ pub enum AliasStatus {
 
 /// One governed alias group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AliasEntry {
     /// The surface forms treated as the same entity (raw — resolved through the normalizer
     /// when applied). Sorted + deduped on insert, so it is a canonical key for the group.
@@ -120,6 +121,7 @@ pub struct AliasSummary {
 /// A governed set of equivalence-alias groups (ADR-060). Default-empty ⇒ a no-op ⇒ the
 /// vocabulary behaves exactly as before this registry existed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AliasRegistry {
     #[serde(default)]
     entries: Vec<AliasEntry>,

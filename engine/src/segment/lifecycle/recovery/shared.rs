@@ -151,6 +151,7 @@ impl Engine {
             source_file_name: source_file_name.to_string(),
             source_commit_state: SourceCommitState::Ready,
             vocab_epoch: 0,
+            committed_wal_watermark: 0,
             owns_manifest: false,
         };
         if !allow_legacy_compiler_semantics && engine.needs_compiler_semantics_migration() {

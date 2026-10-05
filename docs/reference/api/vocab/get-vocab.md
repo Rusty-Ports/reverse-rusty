@@ -23,8 +23,10 @@ curl -I localhost:9200/_vocab
 }
 ```
 
-The GET response is the one complete installed `Vocab` document. It can be saved as the
-single-node `--vocab-file` or sent back to `PUT /_vocab` without projection or reconstruction.
+The GET response is the one complete installed `Vocab` document. It can seed a new store as
+`--vocab-file` or be sent back to `PUT /_vocab` without projection or reconstruction. A durable
+store does not need it saved before restart: its manifest records the installed vocabulary
+(ADR-184).
 `HEAD` performs the same snapshot capture and serialization but returns no body. Every outcome
 reached through the read route includes `Cache-Control: no-store`; success is
 `Content-Type: application/json`.
