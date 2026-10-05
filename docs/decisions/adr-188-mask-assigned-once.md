@@ -35,10 +35,13 @@ finalize. Nothing enforced it on the single-node engine.
 2. **A later build is an ordinary batch.** `try_build_from_queries` on an engine that already has
    a mask compiles against it, exactly like `bulk_ingest`.
 3. **The memtable is sealed before the first assignment.** On an engine with a WAL, the first
-   batch that will assign the mask flushes a non-empty memtable first
-   (`seal_before_first_mask`). The rows' classes are then stored in a segment and their WAL frames
-   retired, so no row is ever compiled on both sides of the assignment. If that flush cannot be
-   committed, the batch fails and the mask stays unassigned.
+   batch that will assign the mask seals a non-empty memtable first (`seal_before_first_mask`).
+   The rows' classes are then stored in a segment and their WAL frames retired, so no row is ever
+   compiled on both sides of the assignment. The seal is all-or-nothing: the segment is built
+   from a copy, and the memtable is replaced only once the manifest names it. If the segment
+   write or the commit fails, the engine is exactly as it was, the batch fails with the mask
+   unassigned, and a retry seals again. It deliberately does not reuse `flush`, which hands the
+   memtable over before it knows whether the write succeeds.
 4. **`--load-file` seeds an empty engine.** The single-node server skips the file, with a warning,
    when the reopened data directory already holds queries (`preload_queries`), as cluster mode
    does.
@@ -72,7 +75,9 @@ finalize. Nothing enforced it on the single-node engine.
 - `tests/persistence/mask_stability.rs`: a second, much heavier build on a reopened engine
   leaves a stored two-mask-bit query matching (and still requiring both features), across
   another reopen; a query inserted before the first finalize is default-visible before and after
-  a restart while a later copy stays opt-in.
+  a restart while a later copy stays opt-in, for both batch entry points; a seal that fails at
+  the segment write or at the commit changes nothing, a retry succeeds, and no acknowledged
+  query is lost by a later flush; an in-memory engine is not sealed.
 - `server::preload::tests`: two restarts with the same load file leave the query count and a
   match result unchanged.
 

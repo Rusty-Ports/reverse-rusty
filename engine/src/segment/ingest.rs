@@ -166,30 +166,6 @@ impl Engine {
         ids.dedup();
         ids
     }
-    /// Seal the memtable before the top-64 mask is assigned for the first time (ADR-188).
-    ///
-    /// A memtable row was compiled with no mask, and on a durable engine it also sits in
-    /// the WAL as text. Once the mask exists, a restart would compile that text again and
-    /// could plan it into the opt-in lane, hiding a query that default reads returned.
-    /// Flushing first stores the row's class in a segment and retires its WAL frame, so no
-    /// row is ever compiled on both sides of the first assignment. If the flush cannot be
-    /// committed the ingest fails with the mask still unassigned. An engine without a WAL
-    /// never replays, and a finalized dictionary never reassigns, so both need nothing.
-    pub(in crate::segment) fn seal_before_first_mask(&mut self) -> std::io::Result<()> {
-        if self.dict.is_finalized() || self.wal.is_none() || self.memtable.is_empty() {
-            return Ok(());
-        }
-        self.flush();
-        if self.persistence_healthy {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(
-                "could not seal the memtable before the first mask assignment; \
-                 the batch was not ingested",
-            ))
-        }
-    }
-
     /// Build the first BASE segment from a batch of `(logical_id, query_text)`.
     /// Two passes:
     ///   A: parse + extract + bump frequencies

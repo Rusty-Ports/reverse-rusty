@@ -540,6 +540,7 @@ impl Engine {
 }
 
 mod feature_model;
+mod seal;
 mod sources;
 
 #[cfg(test)]

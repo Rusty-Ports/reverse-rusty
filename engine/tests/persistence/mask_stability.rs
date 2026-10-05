@@ -140,48 +140,125 @@ fn a_restart_keeps_a_query_inserted_before_the_first_finalize_visible() {
     }
 }
 
-/// If the memtable cannot be sealed, the batch must fail before the mask is
-/// assigned: assigning it anyway would leave the unflushed insert to be
-/// re-planned on the next restart.
-#[test]
-fn a_failed_seal_fails_the_batch_and_leaves_the_mask_unassigned() {
-    use std::os::unix::fs::PermissionsExt;
+/// Where a seal can fail.
+#[derive(Clone, Copy, Debug)]
+enum SealFailure {
+    /// `segments/` is read-only: the segment file cannot be written.
+    SegmentWrite,
+    /// The data directory itself is read-only: the segment is written, but the
+    /// source sidecar and manifest that would commit it cannot be.
+    Commit,
+}
 
-    let dir = test_dir("mask_failed_seal");
-    let config = manual_config(&dir);
-    let batch: Vec<(u64, String)> = (0..200u64)
-        .map(|i| (1_000 + i, format!("rareword filler{i}")))
-        .collect();
-    {
-        let mut engine = Engine::with_config(make_norm(), config.clone());
-        engine.insert_live("rareword", 1, 1);
-
-        // Make segments/ read-only so the seal's segment write fails.
-        let seg_dir = dir.join("segments");
-        std::fs::create_dir_all(&seg_dir).expect("segments dir");
-        let orig = std::fs::metadata(&seg_dir).unwrap().permissions();
-        std::fs::set_permissions(&seg_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let result = engine.try_bulk_ingest(&batch);
-        std::fs::set_permissions(&seg_dir, orig).unwrap(); // restore before asserting
-
-        assert!(result.is_err(), "the batch must not be ingested");
-        assert!(
-            !engine.dict().is_finalized(),
-            "the mask must stay unassigned when the seal did not commit"
-        );
-        assert_eq!(
-            engine.num_live_queries(),
-            1,
-            "nothing from the batch is stored"
-        );
-        assert_eq!(reads(&engine, "rareword title").0, vec![1]);
+impl SealFailure {
+    fn blocked_dir(self, dir: &std::path::Path) -> std::path::PathBuf {
+        match self {
+            SealFailure::SegmentWrite => dir.join("segments"),
+            SealFailure::Commit => dir.to_path_buf(),
+        }
     }
-    // The insert is still in the WAL and replays under the same (absent) mask.
-    let engine = Engine::open(make_norm(), config).expect("reopen");
-    assert!(!engine.dict().is_finalized());
-    assert_eq!(reads(&engine, "rareword title").0, vec![1]);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(&dir);
+
+    /// Make the directory read-only; returns the permissions to restore.
+    fn block(self, dir: &std::path::Path) -> std::fs::Permissions {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir.join("segments")).expect("segments dir");
+        let blocked = self.blocked_dir(dir);
+        let original = std::fs::metadata(&blocked).unwrap().permissions();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        original
+    }
+
+    fn unblock(self, dir: &std::path::Path, original: std::fs::Permissions) {
+        std::fs::set_permissions(self.blocked_dir(dir), original).unwrap();
+    }
+}
+
+fn first_batch() -> Vec<(u64, String)> {
+    (0..200u64)
+        .map(|i| (1_000 + i, format!("rareword filler{i}")))
+        .collect()
+}
+
+/// If the memtable cannot be sealed, the batch must fail before the mask is
+/// assigned, and the engine must be exactly as it was: the insert is still in
+/// the memtable, so a retry seals it and nothing is lost.
+#[test]
+fn a_failed_seal_fails_the_batch_and_changes_nothing() {
+    for failure in [SealFailure::SegmentWrite, SealFailure::Commit] {
+        let dir = test_dir("mask_failed_seal");
+        let config = manual_config(&dir);
+        {
+            let mut engine = Engine::with_config(make_norm(), config.clone());
+            engine.insert_live("rareword", 1, 1);
+
+            let original = failure.block(&dir);
+            let result = engine.try_bulk_ingest(&first_batch());
+            failure.unblock(&dir, original); // before asserting
+
+            assert!(
+                result.is_err(),
+                "{failure:?}: the batch must not be ingested"
+            );
+            assert!(
+                !engine.dict().is_finalized(),
+                "{failure:?}: the mask must stay unassigned when the seal did not commit"
+            );
+            assert_eq!(engine.num_live_queries(), 1, "{failure:?}");
+            assert_eq!(
+                engine.num_segments(),
+                1,
+                "{failure:?}: the insert is still in the memtable"
+            );
+            assert_eq!(reads(&engine, "rareword title").0, vec![1], "{failure:?}");
+
+            // The disk is writable again: the retry seals, assigns the mask and ingests.
+            assert_eq!(
+                engine.bulk_ingest(&first_batch()).ingested,
+                200,
+                "{failure:?}"
+            );
+            assert!(engine.dict().is_finalized(), "{failure:?}");
+            assert_eq!(reads(&engine, "rareword title").0, vec![1], "{failure:?}");
+        }
+        let engine = Engine::open(make_norm(), config).expect("reopen");
+        assert_eq!(
+            reads(&engine, "rareword title").0,
+            vec![1],
+            "{failure:?}: still default-visible after the retry and a restart"
+        );
+        assert_eq!(engine.num_live_queries(), 201, "{failure:?}");
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// After a failed seal the rows must not be left where a later flush would
+/// retire their WAL frames without committing them: every acknowledged query
+/// survives a later write, flush and restart.
+#[test]
+fn a_failed_seal_loses_no_acknowledged_query() {
+    for failure in [SealFailure::SegmentWrite, SealFailure::Commit] {
+        let dir = test_dir("mask_failed_seal_then_flush");
+        let config = manual_config(&dir);
+        {
+            let mut engine = Engine::with_config(make_norm(), config.clone());
+            engine.insert_live("rareword", 1, 1);
+            let original = failure.block(&dir);
+            assert!(
+                engine.try_bulk_ingest(&first_batch()).is_err(),
+                "{failure:?}"
+            );
+            failure.unblock(&dir, original);
+
+            engine.insert_live("otherword", 2, 1);
+            engine.flush();
+        }
+        let engine = Engine::open(make_norm(), config).expect("reopen");
+        assert_eq!(reads(&engine, "rareword title").1, vec![1], "{failure:?}");
+        assert_eq!(reads(&engine, "otherword title").1, vec![2], "{failure:?}");
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// The seal exists only because a WAL replays text. An in-memory engine never
