@@ -216,6 +216,7 @@ impl Engine {
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> std::io::Result<IngestReport> {
+        self.seal_before_first_mask()?;
         let mut report = IngestReport::default();
         let mut lc = String::new();
         // carry the original query index so we can pair each accepted query with its tags
@@ -235,7 +236,9 @@ impl Engine {
                     report.rejected_parse += 1;
                 }
             }
-            // finalize the 64-bit common mask now that all frequencies are known
+            // Assign the 64-bit common mask now that the first corpus's frequencies are
+            // known. A no-op when the engine already has one: this batch then compiles
+            // against the existing mask, exactly like `bulk_ingest`.
             dict.finalize_mask();
         }
 
@@ -328,6 +331,7 @@ mod bulk;
 mod delete;
 mod extracted;
 mod live;
+mod replace;
 
 #[cfg(test)]
 mod tests;

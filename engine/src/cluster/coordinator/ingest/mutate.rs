@@ -219,7 +219,7 @@ impl ClusterEngine {
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
         self.ensure_serving_layout_committed()?;
         // Keep the same barrier -> logical-ID order as add/remove/resync.
-        // The barrier spans the log append and both delete/insert fan-out passes.
+        // The barrier spans the log append and the whole shard fan-out.
         let _pit_barrier = self
             .pit_open_barrier
             .read()
@@ -248,122 +248,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_upsert(id, version, dsl, tags, &placement)
-    }
-
-    /// Apply an UPSERT to the shards — the state-machine `apply` for replace-by-id,
-    /// shared by the live write path (after logging) and log replay, so live and
-    /// replayed application are byte-identical. Placement is decided FIRST: a class-D /
-    /// parse rejection returns before any tombstone (a failed replace never deletes,
-    /// ADR-067 parity). Then pass 1 tombstones the id on every shard (a re-placed query
-    /// may live anywhere) and pass 2 inserts the new version on its placement shards —
-    /// the two-pass order guarantees delete-before-insert on every shard that keeps the
-    /// query. Partial failures ride the ADR-047 machinery with the `Upsert` itself as
-    /// the queued repair mutation (re-driving it per shard is an idempotent
-    /// delete + insert).
-    pub(super) fn apply_upsert(
-        &self,
-        id: u64,
-        version: u32,
-        dsl: &str,
-        tags: &[(String, String)],
-        placement: &crate::ownership::QueryPlacement,
-    ) -> Result<(usize, AddOutcome), ShardError> {
-        self.note_tags(tags);
-        // This mutation was accepted and appended already. Re-application (live
-        // or recovery) must not re-litigate it against today's configurable or
-        // compiled-in policy limits.
-        let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
-            ShardError::Log(format!(
-                "parsing acknowledged cluster upsert during apply: {error}"
-            ))
-        })?;
-        let mut lc = String::new();
-        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-        // Force accept=true: apply is reached ONLY for already-accepted writes (live upsert
-        // classified + accepted before logging; replay sees only logged=accepted frames), so this
-        // placement is configuration-independent — a knob flip on reopen neither drops nor
-        // resurrects (codex review). The empty-class-D guard in `placement_of` still rejects a
-        // never-stored empty query defensively.
-        let target = placement_of(
-            &self.dict,
-            &self.ring,
-            &ex,
-            true,
-            self.per_shard.hot_anchor_threshold,
-        );
-        let expected = target.placement(self.placement_generation(), self.shards.len() as u32)?;
-        if &expected != placement {
-            return Err(crate::ownership::OwnershipError::PlacementDecisionMismatch.into());
-        }
-        let (insert_shards, outcome) = match target {
-            Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
-            // The broad lane is replicated to every shard (ADR-080); pass 1 already tombstones
-            // every shard, so pass 2 re-inserts the new version on every shard.
-            Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
-                ((0..self.shards.len()).collect(), AddOutcome::Replicated)
-            }
-            Target::Selective(shards) => (
-                shards.clone(),
-                AddOutcome::Placed {
-                    shards: shards.clone(),
-                },
-            ),
-        };
-        // Pass 1 — tombstone every prior copy, everywhere (idempotent on non-holders).
-        let mut removed = 0usize;
-        let mut failed: Vec<usize> = Vec::new();
-        let mut first_err: Option<ShardError> = None;
-        for (s, shard) in self.shards.iter().enumerate() {
-            match shard.delete_by_logical_id(id) {
-                Ok(n) => removed += n,
-                Err(e) => {
-                    failed.push(s);
-                    first_err.get_or_insert(e);
-                }
-            }
-        }
-        // Pass 2 — insert the new version on its placement shards. A shard whose delete
-        // failed is skipped (its repair re-drives the WHOLE upsert, preserving the
-        // per-shard delete-before-insert order).
-        let mut inserted: Vec<usize> = Vec::with_capacity(insert_shards.len());
-        for &s in &insert_shards {
-            if failed.contains(&s) {
-                continue;
-            }
-            match self.shards[s]
-                .insert_extracted_with_placement(&ex, id, version, dsl, tags, placement)
-            {
-                Ok(_) => inserted.push(s),
-                Err(e) => {
-                    failed.push(s);
-                    first_err.get_or_insert(e);
-                }
-            }
-        }
-        if !failed.is_empty() {
-            failed.sort_unstable();
-            failed.dedup();
-            // `applied` reports the shards that now HOLD the new version (the insert
-            // pass succeeded there) — not every shard that merely completed its
-            // tombstone half, which would overstate where the replacement lives
-            // (review finding). Repair targets only `failed`, so this is diagnostic.
-            return Err(self.note_partial(
-                ClusterMutation::Upsert {
-                    logical: id,
-                    version,
-                    dsl: dsl.to_string(),
-                    tags: tags.to_vec(),
-                    placement: placement.clone(),
-                },
-                id,
-                inserted,
-                failed,
-                first_err,
-            ));
-        }
-        self.clear_pending(id);
-        Ok((removed, outcome))
+        self.apply_upsert(id, version, dsl, tags, &placement, fresh_id)
     }
 
     /// Remove a query by logical id. Fans the (idempotent) delete out to every

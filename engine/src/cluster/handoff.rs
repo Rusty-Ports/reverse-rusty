@@ -52,6 +52,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus};
 use crate::compile::Extracted;
 use crate::config::EngineConfig;
 use crate::dict::Dict;
@@ -391,6 +392,14 @@ impl Shard for Arc<HandoffShard> {
         self.current
             .load()
             .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
+    }
+
+    fn replace_placed(
+        &self,
+        write: &PlacedWrite<'_>,
+        mode: ReplaceMode,
+    ) -> Result<ReplaceStatus, ShardError> {
+        self.current.load().replace_placed(write, mode)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {

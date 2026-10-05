@@ -74,6 +74,7 @@ impl RemoteShard {
         }
         if reply.tag_dict_fingerprint != self.tag_dict_fp
             || !reply.broad_replicate_all
+            || !reply.atomic_replace
             || reply.placement_generation != self.placement_generation.get()
             || reply.num_shards != self.num_shards
         {

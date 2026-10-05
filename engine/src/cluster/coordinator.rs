@@ -48,6 +48,7 @@ mod ingest;
 mod lifecycle;
 mod logical_ids;
 mod matching;
+mod move_fence;
 mod pit;
 mod ranked;
 mod ranked_batch;
@@ -453,6 +454,10 @@ pub struct ClusterEngine {
     /// is ALWAYS acquired first; `resync` has the same order, avoiding a
     /// writer-preferring RwLock cycle. Ordinary reads never touch it.
     pit_open_barrier: RwLock<()>,
+    /// ADR-185: the optimistic fence around an upsert that moves a query between shards.
+    /// Ordinary reads validate against it (two atomic loads) and retry when a move
+    /// overlapped them; a placement-preserving upsert never touches it.
+    move_fence: move_fence::MoveFence,
     /// The cluster-state control plane: membership + the shard→node map + ring params +
     /// feature-model version + epoch (ADR-037). Read at assembly / introspection time only,
     /// never on the per-title hot path. [`InMemoryControlPlane`] today; openraft-backed later.
