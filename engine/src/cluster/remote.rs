@@ -504,6 +504,32 @@ fn legacy_broad_layout_err(endpoint: &str) -> ShardError {
     ))
 }
 
+/// The capabilities a shard server must attest before this coordinator serves through it,
+/// checked by EVERY handshake (probe, adopt, add-shard). They are one function so a handshake
+/// cannot check one and skip another: a normal startup adopts and never probes, so a check that
+/// lived only on the probe would admit an old server and fail at the first write instead.
+///
+/// - `broad_replicate_all` (ADR-080): see [`legacy_broad_layout_err`].
+/// - `atomic_replace` (ADR-185): against a server without the per-shard replace an upsert could
+///   only be the reader-visible delete-then-insert, and the missing RPC would surface after
+///   other shards had already applied the write.
+fn require_shard_capabilities(
+    endpoint: &str,
+    broad_replicate_all: bool,
+    atomic_replace: bool,
+) -> Result<(), ShardError> {
+    if !broad_replicate_all {
+        return Err(legacy_broad_layout_err(endpoint));
+    }
+    if !atomic_replace {
+        return Err(ShardError::Remote(format!(
+            "shard server {endpoint} predates the atomic per-shard replace (ADR-185); \
+             upgrade the shard nodes before the coordinator"
+        )));
+    }
+    Ok(())
+}
+
 /// Fail-loud guard (ADR-074): pre-resolved `tag_ids` — the tagged vocabulary rebuild's
 /// carry-through — cannot cross the dict-agnostic wire. The proto ships raw `(key,value)`
 /// tags only, and a synthetic `TagId` has no recoverable string to send; silently dropping

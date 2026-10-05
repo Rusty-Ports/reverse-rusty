@@ -120,7 +120,7 @@ fn diff_vs_brute(eng: &Engine, brute: &Brute, titles: &[String], ctx: &str) {
 /// Dedup on ≡ dedup off, BOTH `include_broad` modes, scalar and batch — the
 /// kill-switch result-invariance that also covers the broad-off lane brute
 /// cannot express.
-fn assert_on_equals_off(on: &Engine, off: &Engine, titles: &[String], ctx: &str) {
+pub(crate) fn assert_on_equals_off(on: &Engine, off: &Engine, titles: &[String], ctx: &str) {
     for include_broad in [false, true] {
         let (a, _) = per_title_sets(on, titles, include_broad);
         let (b, _) = per_title_sets(off, titles, include_broad);
@@ -272,7 +272,7 @@ fn tag_divergent_duplicates_filter_independently() {
 /// Flush expands groups into plain on-disk postings; reopen (both the sealed
 /// mmap path and the WAL-replay path) matches brute. Also pins that the
 /// re-opened engine re-forms groups for NEW live writes.
-fn tempdir(tag: &str) -> std::path::PathBuf {
+pub(crate) fn tempdir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(

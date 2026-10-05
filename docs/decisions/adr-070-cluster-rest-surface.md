@@ -102,3 +102,9 @@
   semantics this ports), ADR-031/032 (the durable funnel the upsert frame rides), ADR-047 (partial
   apply + resync), ADR-055 (tags through the cluster), ADR-062 (the REST auth gate reused verbatim),
   [`reference/api.md`](../reference/api.md) (the cluster-mode endpoint reference this adds).
+
+**Outcome update (2026-10-05).** Item 3's single-frame upsert was atomic for crash replay only.
+Its apply funnel tombstoned the id on every shard and then inserted it, so an unfenced reader
+between the passes saw neither version. [ADR-185](adr-185-reader-atomic-cluster-upsert.md) replaces
+that funnel with an atomic per-shard replace plus an optimistic fence for upserts that move the
+query, which is what makes the cluster honor ADR-067's "never both, never neither" for readers.

@@ -128,8 +128,12 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict, theta: u32) -> AnchorPlan {
         };
         let worst = best.iter().map(|&f| dict.freq(f)).max().unwrap_or(0);
         if best.iter().any(|&f| is_hot(dict, f)) {
-            // ≥1 top-64 member -> the opt-in broad lane, exactly as before (the
-            // C boundary is mask-keyed and θ-invariant — visibility never moves).
+            // ≥1 top-64 member -> the opt-in broad lane, exactly as before. The
+            // C boundary is mask-keyed and θ-invariant: θ never moves visibility.
+            // It is NOT invariant across compiles of one body, though. `best` is
+            // chosen by live frequency, and nothing is top-64 before the first
+            // mask finalize, so equal bodies can land on either side of it —
+            // which is why dedup joins compare visibility (ADR-186).
             for &f in best {
                 broad_anchors.push(vec![f]);
             }

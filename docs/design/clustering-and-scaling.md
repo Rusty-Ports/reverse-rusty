@@ -277,6 +277,22 @@ mutations hold the bulk barrier's shared side; initial bulk ingest holds its exc
 the empty check, directory installation, and all shard writes. Bulk never acquires individual ID
 locks. Ordinary matching does not enter this table.
 
+**What a reader sees during an upsert**
+([ADR-185](../decisions/adr-185-reader-atomic-cluster-upsert.md)). An unfenced read returns the
+query exactly once: never neither version, never both.
+
+- An upsert that keeps the query's placement (a re-put, a tag or version edit, a bulk re-index)
+  replaces it atomically on each placement shard, in one engine critical section with one published
+  snapshot. The same shard owns the row before and after, so no reader coordination is needed and
+  none is taken.
+- An upsert that moves the query to other shards or another lane rewrites several shards inside an
+  optimistic move fence, a sequence counter. A read samples it, fans out, and repeats if a move
+  started or finished meanwhile; a read that begins during a move waits for it, up to its own
+  deadline. Readers pay two atomic loads and never block a writer.
+- A partial failure is the documented exception (§5.1): until `resync`, a shard whose replace
+  failed serves the old version, and a failed tombstone can leave a stale copy that exact ranked
+  reads refuse as a duplicate id.
+
 `resync` snapshots queued IDs, then selects each current repair under its ID lock. A newer successful
 write can clear an entry while the pass handles another ID; a newer partial write can replace it.
 Repair therefore skips cleared entries and uses the latest remaining mutation and failed targets.

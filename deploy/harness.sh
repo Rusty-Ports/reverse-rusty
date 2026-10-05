@@ -10,13 +10,19 @@
 #   deploy/harness.sh                      # build the image from source (slow first time)
 #   deploy/harness.sh --prebuilt DIR       # wrap prebuilt linux bins from DIR (the CI path)
 #
+# Environment: RR_HARNESS_PORT (default 19200) is the host port the coordinator is
+# published on. RR_HARNESS_WRITERS (default 1) and RR_HARNESS_WRITE_GAP (default 0.05)
+# set leg 4's concurrent writer loops and the pause between their writes.
+#
 # Requires: docker (compose v2), curl, jq, openssl. Exits 0 on PASS.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO_ROOT=$(pwd)
 COMPOSE_FILE="$REPO_ROOT/deploy/compose.harness.yml"
-BASE="http://127.0.0.1:19200"
+# RR_HARNESS_PORT moves the published coordinator port off a port already in use locally.
+export RR_HARNESS_PORT="${RR_HARNESS_PORT:-19200}"
+BASE="http://127.0.0.1:$RR_HARNESS_PORT"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/rr_harness.XXXXXX")
 
 PREBUILT_DIR=""
@@ -182,6 +188,24 @@ wait_for_green() { # label
   fail "$1: coordinator never reported green"
 }
 
+# Converge queued partial-apply repairs (ADR-047). /_health stays YELLOW (not green)
+# while any repair is pending, so every leg that can leave one — a shard killed
+# mid-write, or a write that reaches a handoff source just as it is fenced — must
+# resync BEFORE its green gate. The retry loop also rides out a restarting node: a
+# resync only converges once its target is reachable again. Leaves the last response
+# in RESYNC.
+RESYNC=""
+converge_repairs() { # label
+  for _ in $(seq 1 60); do
+    # ADR-169 makes resync a bodyless native operation; keep this production
+    # exercise on the same strict transport contract as documented clients.
+    RESYNC=$(rqcurl -X POST "$BASE/_cluster/resync")
+    echo "$RESYNC" | jq -e '.still_pending == 0' >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  fail "$1: partial-apply repairs never converged: $RESYNC"
+}
+
 # ---------------------------------------------------------------------------
 step "leg 0 — baseline over the secured mesh"
 wait_for_green "startup"
@@ -269,19 +293,9 @@ echo "    SIGKILLed shard0 mid-write loop"
 sleep 2 # a window of writes streams at the dead shard (logged + queued, ADR-047)
 compose start shard0 >/dev/null # restart promptly, while the writer is still streaming
 wait "$kw_pid" # the writer finishes its loop across the kill + restart
-# Converge the partial-applies that queued while shard0 was down (ADR-047 repair path).
-# /_health stays YELLOW (not green) while repairs are pending, so resync BEFORE the
-# green gate; the retry loop also rides out shard0's restart — a resync only converges
-# once shard0 is reachable again (its re-driven writes land).
-converged=0 resync=""
-for _ in $(seq 1 60); do
-  # ADR-169 makes resync a bodyless native operation; keep this production
-  # exercise on the same strict transport contract as documented clients.
-  resync=$(rqcurl -X POST "$BASE/_cluster/resync")
-  echo "$resync" | jq -e '.still_pending == 0' >/dev/null 2>&1 && { converged=1; break; }
-  sleep 1
-done
-[[ "$converged" -eq 1 ]] || fail "partial-apply repairs never converged after restart: $resync"
+# Converge the partial-applies that queued while shard0 was down (ADR-047 repair path)
+# before the green gate; the retry loop rides out shard0's restart.
+converge_repairs "after mid-write kill"
 wait_for_green "after mid-write kill"
 accepted=$(grep -c . "$kw.accepted" || true)
 [[ "$accepted" -gt 0 ]] || fail "no writes were acknowledged around the mid-write kill window"
@@ -295,26 +309,29 @@ while IFS= read -r id; do
 done < "$kw.accepted"
 [[ $miss -eq 0 ]] || fail "$miss acknowledged writes unmatchable after the mid-write kill+restart+resync (FN!)"
 assert_equals_baseline "$WORK/baseline.txt" "after mid-write kill"
-echo "    $accepted acked writes; zero FN after kill+restart+resync ($resync); probes ≡ baseline"
+echo "    $accepted acked writes; zero FN after kill+restart+resync ($RESYNC); probes ≡ baseline"
 
 # ---------------------------------------------------------------------------
 step "leg 4 — explicit uncommitted live handoff under load (position 1: shard1 → target)"
 writer_log="$WORK/writer.log"
 : > "$writer_log.accepted"
-(
-  set +e  # a fence-window 503 is expected; never let it kill the writer
-  ok=0
-  for i in $(seq 0 199); do
-    code=$(put_doc $((9100 + i)) "zzload$i unique$i")
-    if [[ "$code" == "201" || "$code" == "200" ]]; then
-      ok=$((ok + 1))
-      echo "$((9100 + i))" >> "$writer_log.accepted"
-    fi
-    sleep 0.05
-  done
-  echo "$ok" > "$writer_log.count"
-) &
-writer_pid=$!
+# A write in the fence window either fails (503) or, when it applied on one shard and
+# reached the fenced source on another, is acknowledged as a 200 "partial" that is durably
+# logged and queued for repair (ADR-047). The window is microseconds wide, so one paced
+# writer rarely lands in it; RR_HARNESS_WRITERS=8 RR_HARNESS_WRITE_GAP=0.002 keeps several
+# upserts of the same ids in flight across the fence to reproduce it on demand.
+writer_pids=()
+for _ in $(seq 1 "${RR_HARNESS_WRITERS:-1}"); do
+  (
+    set +e # a fence-window failure must never kill the writer
+    for i in $(seq 0 199); do
+      code=$(put_doc $((9100 + i)) "zzload$i unique$i")
+      [[ "$code" == "201" || "$code" == "200" ]] && echo "$((9100 + i))" >> "$writer_log.accepted"
+      sleep "${RR_HARNESS_WRITE_GAP:-0.05}"
+    done
+  ) &
+  writer_pids+=("$!")
+done
 sleep 1
 handoff=$(curl -s --max-time 120 -X POST "$BASE/_cluster/handoff" \
   -H 'content-type: application/json' \
@@ -322,9 +339,16 @@ handoff=$(curl -s --max-time 120 -X POST "$BASE/_cluster/handoff" \
   || echo '{"error":"handoff request timed out or failed"}')
 echo "$handoff" | jq -e '.acknowledged == true and .moved == true and .committed == false' >/dev/null \
   || fail "handoff not acknowledged: $handoff"
-wait "$writer_pid"
-accepted=$(cat "$writer_log.count")
+for pid in "${writer_pids[@]}"; do
+  wait "$pid"
+done
+sort -un "$writer_log.accepted" -o "$writer_log.accepted"
+accepted=$(grep -c . "$writer_log.accepted" || true)
 [[ "$accepted" -gt 0 ]] || fail "the write loop never succeeded around the handoff window"
+# Re-drive any fence-window partial apply onto the position's new owner. Leg 4b's green
+# gate deliberately does NOT resync: a repair still pending after this is a failure.
+converge_repairs "after handoff"
+wait_for_green "after handoff"
 # Every ACCEPTED write must be matchable after the move (recall of acknowledged writes).
 miss=0
 while IFS= read -r id; do
@@ -332,10 +356,10 @@ while IFS= read -r id; do
   r=$(percolate "zzload$i unique$i sealed")
   [[ "$r" == HTTP:* ]] && fail "post-handoff percolate failed: $r"
   echo "$r" | jq -e --argjson id "$id" 'index($id) != null' >/dev/null || miss=$((miss + 1))
-done < <(head -20 "$writer_log.accepted")
+done < "$writer_log.accepted"
 [[ $miss -eq 0 ]] || fail "$miss acknowledged writes unmatchable after the handoff (FN!)"
 assert_equals_baseline "$WORK/baseline.txt" "after handoff"
-echo "    handoff complete under load ($accepted writes accepted); zero FN; probes ≡ baseline"
+echo "    handoff complete under load ($accepted writes accepted; resync $RESYNC); zero FN; probes ≡ baseline"
 
 step "leg 4b — restart the recovered handoff target without an intervening seal"
 compose restart target >/dev/null

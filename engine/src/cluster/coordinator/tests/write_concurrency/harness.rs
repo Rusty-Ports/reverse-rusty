@@ -1,8 +1,10 @@
 use super::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WriteCall {
     Insert(u64),
+    /// An atomic per-shard replace (ADR-185), with whether it was conditional.
+    Replace(u64, crate::cluster::shard::ReplaceMode),
     Delete(u64),
     Bulk,
 }
@@ -76,6 +78,55 @@ impl Shard for ObservedShard {
             .percolate_filtered_ranked(title, broad, pred, spec)
     }
 
+    // The ownership-aware reads default to a loud refusal on the trait, so a wrapper
+    // that observes writes must forward them for the read paths to work through it.
+    fn percolate_filtered_ranked_owned(
+        &self,
+        title: &str,
+        broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        context: &crate::ownership::OwnershipContext,
+        position: u32,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.inner
+            .percolate_filtered_ranked_owned(title, broad, pred, spec, context, position)
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<crate::cluster::shard::ShardRankedMatch, ShardError> {
+        self.inner.percolate_top_k_owned(
+            title, broad, pred, program, options, context, position, deadline,
+        )
+    }
+
+    fn percolate_top_k_batch_owned(
+        &self,
+        titles: &[crate::cluster::shard::BatchTitleRequest<'_>],
+        broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<crate::cluster::shard::ShardBatchRankedMatch, ShardError> {
+        self.inner
+            .percolate_top_k_batch_owned(titles, broad, pred, program, options, position, deadline)
+    }
+
+    fn has_live_query(&self, logical: u64) -> Result<bool, ShardError> {
+        self.inner.has_live_query(logical)
+    }
+
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.inner.num_queries()
     }
@@ -114,6 +165,15 @@ impl Shard for ObservedShard {
         (self.hook)(self.position, WriteCall::Insert(logical))?;
         self.inner
             .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
+    }
+
+    fn replace_placed(
+        &self,
+        write: &crate::cluster::shard::PlacedWrite<'_>,
+        mode: crate::cluster::shard::ReplaceMode,
+    ) -> Result<crate::cluster::shard::ReplaceStatus, ShardError> {
+        (self.hook)(self.position, WriteCall::Replace(write.logical, mode))?;
+        self.inner.replace_placed(write, mode)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {

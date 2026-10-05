@@ -268,11 +268,24 @@ impl ClusterEngine {
         TagPredicate::new(groups)
     }
 
+    /// The unfenced percolate: one consistent view per call (ADR-185). A pass that
+    /// overlapped an upsert moving a query between shards is discarded and repeated.
     fn percolate_inner(
         &self,
         title: &str,
         include_broad: bool,
         pred: &TagPredicate,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        self.move_fence
+            .read(|pass| self.percolate_pass(title, include_broad, pred, pass))
+    }
+
+    fn percolate_pass(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        pass: &super::move_fence::ReadPass<'_>,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         let (targets, broad_eval_shard) = self.route(title);
         let ownership = crate::ownership::OwnershipContext::new(
@@ -324,9 +337,8 @@ impl ClusterEngine {
         let shard_rows = out.len();
         out.sort_unstable();
         out.dedup();
-        debug_assert_eq!(
-            shard_rows,
-            out.len(),
+        debug_assert!(
+            shard_rows == out.len() || pass.overlapped_a_move(),
             "ADR-109 ownership-aware shard replies must not overlap"
         );
         stats.record_cross_source_duplicates(shard_rows, out.len());
@@ -369,6 +381,18 @@ impl ClusterEngine {
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
         let pred = self.compile_tag_predicate(filter);
         let spec = self.compile_rank_spec(rank);
+        self.move_fence
+            .read(|pass| self.ranked_pass(title, include_broad, &pred, &spec, pass))
+    }
+
+    fn ranked_pass(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        pass: &super::move_fence::ReadPass<'_>,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
         let (targets, broad_eval_shard) = self.route(title);
         let ownership = crate::ownership::OwnershipContext::new(
             self.placement_generation(),
@@ -385,8 +409,8 @@ impl ClusterEngine {
                     self.shards[s].percolate_filtered_ranked_owned(
                         title,
                         include_broad && s == broad_eval_shard,
-                        &pred,
-                        &spec,
+                        pred,
+                        spec,
                         &ownership,
                         s as u32,
                     )
@@ -400,8 +424,8 @@ impl ClusterEngine {
                     self.shards[s].percolate_filtered_ranked_owned(
                         title,
                         include_broad && s == broad_eval_shard,
-                        &pred,
-                        &spec,
+                        pred,
+                        spec,
                         &ownership,
                         s as u32,
                     )
@@ -418,9 +442,8 @@ impl ClusterEngine {
         let shard_rows = out.len();
         out.sort_unstable_by_key(|&(id, _)| id);
         out.dedup_by_key(|&mut (id, _)| id);
-        debug_assert_eq!(
-            shard_rows,
-            out.len(),
+        debug_assert!(
+            shard_rows == out.len() || pass.overlapped_a_move(),
             "ADR-109 ranked ownership-aware shard replies must not overlap"
         );
         stats.record_cross_source_duplicates(shard_rows, out.len());

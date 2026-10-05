@@ -237,6 +237,13 @@ impl Shard for RecordingShard {
     ) -> Result<Option<u32>, ShardError> {
         Ok(None)
     }
+    fn replace_placed(
+        &self,
+        _write: &crate::cluster::shard::PlacedWrite<'_>,
+        _mode: crate::cluster::shard::ReplaceMode,
+    ) -> Result<crate::cluster::shard::ReplaceStatus, ShardError> {
+        Ok(crate::cluster::shard::ReplaceStatus::Replaced { removed: 7 }) // sentinel
+    }
     fn delete_by_logical_id(&self, _l: u64) -> Result<usize, ShardError> {
         Ok(0)
     }
@@ -322,4 +329,31 @@ fn forwards_writes_to_backing() {
         .expect("probe")
         .0
         .contains(&2));
+
+    // The atomic replace (ADR-185) reaches the backing too: id 1 switches from its old
+    // text to the new one in one step, and the count does not change.
+    let status = h
+        .replace_placed(
+            &crate::cluster::shard::PlacedWrite {
+                ex: ex2,
+                logical: 1,
+                version: 2,
+                text: dsl2,
+                tags: &[],
+                placement: &crate::ownership::QueryPlacement::standalone(),
+            },
+            crate::cluster::shard::ReplaceMode::Unconditional,
+        )
+        .expect("replace via wrapper");
+    assert_eq!(
+        status,
+        crate::cluster::shard::ReplaceStatus::Replaced { removed: 1 }
+    );
+    let probe = |title: &str| {
+        h.percolate_filtered(title, false, &TagPredicate::empty())
+            .expect("probe")
+            .0
+    };
+    assert!(probe("charlie delta echo").contains(&1), "new version live");
+    assert!(!probe("alpha bravo echo").contains(&1), "old version gone");
 }
