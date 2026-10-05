@@ -9,6 +9,14 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-05 — Memtable deletes survive a commit and a restart
+
+- Fix an acknowledged delete coming back after a restart: deleting a query that was still in the
+  memtable, followed by a compaction or a bulk ingest and then a restart, replayed the insert from
+  the WAL but skipped the delete, because the commit had advanced the WAL watermark past it without
+  sealing the memtable. Recovery now always applies a delete to memtable copies and leaves only the
+  segment copies to the watermark rule (ADR-066, later outcome).
+
 ## 2026-10-01 — Recorded feature model
 
 - Fix silent false negatives after a restart under a different vocabulary: the single-node manifest
