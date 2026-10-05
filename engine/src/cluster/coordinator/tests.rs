@@ -281,6 +281,24 @@ impl Shard for ToggleFailShard {
                 .insert_extracted_with_placement(ex, logical, version, text, tags, placement),
         }
     }
+    fn replace_placed(
+        &self,
+        write: &crate::cluster::shard::PlacedWrite<'_>,
+        mode: crate::cluster::shard::ReplaceMode,
+    ) -> Result<crate::cluster::shard::ReplaceStatus, ShardError> {
+        // Mirror the gRPC seam's coverage check, as the placed insert above does.
+        if let Some(p) = self.position {
+            if write.placement.mode() == crate::ownership::PlacementMode::Selective
+                && write.placement.positions().binary_search(&p).is_err()
+            {
+                return Err(crate::ownership::OwnershipError::LocalPositionMissing(p).into());
+            }
+        }
+        match self.write_err() {
+            Some(e) => Err(e),
+            None => self.inner.replace_placed(write, mode),
+        }
+    }
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
         match self.write_err() {
             Some(e) => Err(e),

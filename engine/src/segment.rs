@@ -74,7 +74,7 @@ pub use match_types::{
 };
 pub use outcomes::{
     AliasApplyReport, AliasDiscoveryReport, AliasFeedbackApplyReport, CompactionReport,
-    IngestItemStatus, IngestReport, InsertOutcome, UpsertOutcome,
+    HeldPlacement, IngestItemStatus, IngestReport, InsertOutcome, ReplaceOutcome, UpsertOutcome,
 };
 pub(crate) use tag_summary::TagSummary;
 

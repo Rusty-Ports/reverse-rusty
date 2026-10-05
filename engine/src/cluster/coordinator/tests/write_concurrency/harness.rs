@@ -3,6 +3,8 @@ use super::*;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WriteCall {
     Insert(u64),
+    /// An atomic per-shard replace (ADR-185), with whether it was conditional.
+    Replace(u64, crate::cluster::shard::ReplaceMode),
     Delete(u64),
     Bulk,
 }
@@ -114,6 +116,15 @@ impl Shard for ObservedShard {
         (self.hook)(self.position, WriteCall::Insert(logical))?;
         self.inner
             .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
+    }
+
+    fn replace_placed(
+        &self,
+        write: &crate::cluster::shard::PlacedWrite<'_>,
+        mode: crate::cluster::shard::ReplaceMode,
+    ) -> Result<crate::cluster::shard::ReplaceStatus, ShardError> {
+        (self.hook)(self.position, WriteCall::Replace(write.logical, mode))?;
+        self.inner.replace_placed(write, mode)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {

@@ -148,7 +148,10 @@ impl ClusterEngine {
         program: &CompiledRankProgram,
         deadline: Option<Instant>,
     ) -> Result<ClusterRankedMatch, ClusterRankedError> {
-        self.top_k_core(None, title, filter, options, program, deadline)
+        // ADR-185: a pass that overlapped a placement-moving upsert — including one that
+        // failed closed on the duplicate id such a move can expose — is repeated.
+        self.move_fence
+            .read(|_| self.top_k_core(None, title, filter, options, program, deadline))
     }
 
     /// The ONE bounded distributed collection body, parameterized by the view:

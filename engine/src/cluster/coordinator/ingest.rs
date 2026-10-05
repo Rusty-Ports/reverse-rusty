@@ -20,3 +20,4 @@ mod placement;
 mod repair;
 #[cfg(feature = "distributed")]
 mod resize_load;
+mod upsert;

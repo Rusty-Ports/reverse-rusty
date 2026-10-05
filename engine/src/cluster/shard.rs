@@ -54,6 +54,7 @@ pub(crate) use local::LocalShard;
 mod api;
 mod error;
 mod mutation;
+mod replace;
 
 pub(crate) use api::{
     BatchTitleRequest, EventSink, FetchedMatch, LiveTaggedQuery, Shard, ShardBatchRankedMatch,
@@ -61,3 +62,4 @@ pub(crate) use api::{
 };
 pub use error::ShardError;
 pub(crate) use mutation::apply_mutation;
+pub(crate) use replace::{PlacedWrite, ReplaceMode, ReplaceStatus};

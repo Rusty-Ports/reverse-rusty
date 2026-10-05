@@ -471,6 +471,20 @@ pub(crate) trait Shard: Send + Sync {
         }
         self.insert_extracted_with_tags(ex, logical, version, text, tags)
     }
+    /// ADR-185: atomically replace this shard's copy of `write.logical` — tombstone every
+    /// prior live copy and insert the new version as ONE visibility step (one engine
+    /// critical section, one translog frame, one published snapshot), so no reader of this
+    /// shard sees a gap between the versions. `mode` decides whether a copy held under a
+    /// different placement (or no copy) is replaced or reported unchanged.
+    ///
+    /// Deliberately required: an implementation that fell back to
+    /// [`delete_by_logical_id`](Self::delete_by_logical_id) followed by an insert would
+    /// silently reopen the reader gap this seam exists to close.
+    fn replace_placed(
+        &self,
+        write: &super::PlacedWrite<'_>,
+        mode: super::ReplaceMode,
+    ) -> Result<super::ReplaceStatus, ShardError>;
     /// Tombstone every live entry for `logical` (idempotent; a cheap no-op on a shard
     /// that doesn't hold it).
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError>;

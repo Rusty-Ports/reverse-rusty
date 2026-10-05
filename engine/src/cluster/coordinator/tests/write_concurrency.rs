@@ -53,9 +53,10 @@ fn same_id_log_order_spans_complete_fanout_and_reopen() {
     instrument(&mut cluster, {
         let gate = Arc::clone(&gate);
         Arc::new(move |position, call| {
-            if position == 2
-                && call == WriteCall::Delete(7)
-                && pause_once.swap(false, Ordering::SeqCst)
+            // The first shard call of the id-7 upsert (ADR-185: an atomic replace on a
+            // placement shard), wherever its placement landed.
+            let _ = position;
+            if matches!(call, WriteCall::Replace(7, _)) && pause_once.swap(false, Ordering::SeqCst)
             {
                 pause(&gate);
             }
@@ -180,7 +181,8 @@ fn resync_does_not_reapply_a_repair_superseded_by_a_successful_write() {
             if fail.load(Ordering::SeqCst) {
                 return Err(ShardError::Remote("injected failure".into()));
             }
-            if position == 2 && call == WriteCall::Delete(7) {
+            let _ = position;
+            if matches!(call, WriteCall::Replace(7, _) | WriteCall::Delete(7)) {
                 pause(&gate);
             }
             Ok(())

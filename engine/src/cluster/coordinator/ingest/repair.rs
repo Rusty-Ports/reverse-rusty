@@ -193,8 +193,8 @@ impl ClusterEngine {
                 tags,
                 placement,
             } => {
-                self.insert_logical_id(logical);
-                self.apply_upsert(logical, version, &dsl, &tags, &placement)?;
+                let fresh = self.insert_logical_id(logical);
+                self.apply_upsert(logical, version, &dsl, &tags, &placement, fresh)?;
             }
         }
         Ok(())

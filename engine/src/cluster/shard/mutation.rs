@@ -53,14 +53,14 @@ pub(crate) fn apply_mutation(
                     "parsing acknowledged shard upsert during recovery: {error}"
                 ))
             })?;
-            // Replace-by-id ON THIS SHARD: tombstone any prior copy, then insert the new
-            // version — but only where the placement actually STORES the row. An upsert's
-            // delete half fans to every shard, so a repair can legitimately target a
-            // delete-only position; ADR-109 made shard-side inserts validate placement
-            // coverage, so re-driving the insert there is refused (`LocalPositionMissing`)
-            // and would wedge `resync` on that mutation forever (distributed recovery
-            // regression catch). Replicated modes cover every position; only Selective restricts.
-            shard.delete_by_logical_id(*logical)?;
+            // Replace-by-id ON THIS SHARD, as one visibility step (ADR-185) — but only
+            // where the placement actually STORES the row. A moved upsert tombstones the
+            // id on shards outside its new placement, so a repair can legitimately target
+            // a delete-only position; ADR-109 made shard-side writes validate placement
+            // coverage, so re-driving the new version there is refused
+            // (`LocalPositionMissing`) and would wedge `resync` on that mutation forever
+            // (distributed recovery regression catch). Replicated modes cover every
+            // position; only Selective restricts.
             let covered = position.is_none_or(|p| {
                 placement.mode() != crate::ownership::PlacementMode::Selective
                     || placement.positions().binary_search(&p).is_ok()
@@ -68,9 +68,19 @@ pub(crate) fn apply_mutation(
             if covered {
                 let mut lc = String::new();
                 let ex = extract_readonly(&ast, norm, dict, &mut lc);
-                shard.insert_extracted_with_placement(
-                    &ex, *logical, *version, dsl, tags, placement,
+                shard.replace_placed(
+                    &super::PlacedWrite {
+                        ex: &ex,
+                        logical: *logical,
+                        version: *version,
+                        text: dsl,
+                        tags,
+                        placement,
+                    },
+                    super::ReplaceMode::Unconditional,
                 )?;
+            } else {
+                shard.delete_by_logical_id(*logical)?;
             }
         }
     }

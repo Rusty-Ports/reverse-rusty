@@ -73,6 +73,7 @@ impl ShardService for LegacyOwnershipServer {
             coordinator_id: 0,
             compiler_semantics_version: current_compiler_semantics_version(),
             retired_operation: 0,
+            atomic_replace: true,
         }))
     }
 
@@ -200,6 +201,12 @@ impl ShardService for LegacyOwnershipServer {
         &self,
         _req: Request<raw::InsertRequest>,
     ) -> Result<Response<raw::InsertReply>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
+    async fn replace_extracted(
+        &self,
+        _req: Request<raw::ReplaceRequest>,
+    ) -> Result<Response<raw::ReplaceReply>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
     async fn delete(

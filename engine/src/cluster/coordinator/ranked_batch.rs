@@ -67,6 +67,20 @@ impl ClusterEngine {
         program: &CompiledRankProgram,
         deadline: Option<Instant>,
     ) -> Result<ClusterBatchRankedMatch, ClusterRankedError> {
+        // ADR-185: the whole batch is one read; a pass that overlapped a placement-moving
+        // upsert is repeated.
+        self.move_fence
+            .read(|_| self.top_k_batch_pass(titles, filter, options, program, deadline))
+    }
+
+    fn top_k_batch_pass(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        filter: &[(String, Vec<String>)],
+        options: TopKOptions,
+        program: &CompiledRankProgram,
+        deadline: Option<Instant>,
+    ) -> Result<ClusterBatchRankedMatch, ClusterRankedError> {
         validate_options(options)?;
         // ADR-113: a pagination boundary is a single-title cursor primitive.
         // Reject it HERE, before routing — an empty batch would otherwise

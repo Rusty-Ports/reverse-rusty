@@ -138,6 +138,14 @@ impl RemoteShard {
         if !reply.broad_replicate_all {
             return Err(legacy_broad_layout_err(endpoint));
         }
+        if !reply.atomic_replace {
+            // ADR-185: against such a server an upsert could only be the reader-visible
+            // delete-then-insert. Upgrade shard nodes before the coordinator.
+            return Err(ShardError::Remote(format!(
+                "shard server {endpoint} predates the atomic per-shard replace (ADR-185); \
+                 upgrade the shard nodes before the coordinator"
+            )));
+        }
         if reply.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
             return Err(ShardError::Remote(format!(
                 "compiler semantics mismatch at connect: coordinator {} != server {}",
