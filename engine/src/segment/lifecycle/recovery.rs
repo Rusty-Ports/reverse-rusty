@@ -127,16 +127,20 @@ fn replay_wal_tail(
             }
             WalEntry::DeleteByLogical { seq, logical } => {
                 // Address-free (ADR-066): re-derive the affected copies from the
-                // recovered state. Frames at/below the watermark are SKIPPED, not
-                // just for economy: bulk ingest bypasses the WAL (its segment +
-                // manifest commit IS its durability, ADR-017), so a same-id query
-                // bulk-ingested AFTER this delete is already in the attached
-                // segments — replaying the older delete over it would erase the
-                // newer query (codex P1). The manifest commit that covered this
-                // frame also baked its tombstones, so skipping loses nothing.
-                if seq > watermark {
-                    engine.apply_delete_by_logical(logical);
-                }
+                // recovered state. For a frame at/below the watermark the SEGMENT
+                // half is skipped, not just for economy: bulk ingest bypasses the
+                // WAL (its segment + manifest commit IS its durability, ADR-017),
+                // so a same-id query bulk-ingested AFTER this delete is already in
+                // the attached segments — replaying the older delete over it would
+                // erase the newer query (codex P1). The commit that covered this
+                // frame baked its segment tombstones, so that half loses nothing.
+                //
+                // The MEMTABLE half always replays. A compaction or bulk commit
+                // advances the watermark without sealing the memtable, so the
+                // insert this frame deleted may exist only as an earlier frame
+                // that was just replayed; skipping the delete would bring an
+                // acknowledged delete back.
+                engine.apply_delete_by_logical(logical, seq > watermark);
             }
             WalEntry::Upsert {
                 seq,

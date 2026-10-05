@@ -202,3 +202,9 @@
   ADR-056 (the re-anchoring seam + the demote guard this extends), ADR-068 (the fence idiom +
   the lane-addition precedent), ADR-080 (cluster broad placement — the contrast), the program
   spec §5.2/§8, [`matching.md`](../design/matching.md) §4.
+
+- **Outcome update (2026-10-05).** Item 8 calls the C→H refusal defensive "since a C anchor cannot
+  lose its bit". For a body with no required feature it is reachable: the re-plan can pick a
+  different any-of group, one with no top-64 member. The refusal stands and is exercised; see
+  [ADR-186](adr-186-visibility-partitioned-dedup.md), which also applies the guard to dedup
+  members, not only to the leader that re-derives the cover.

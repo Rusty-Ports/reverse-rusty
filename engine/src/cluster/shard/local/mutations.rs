@@ -40,11 +40,8 @@ impl LocalShard {
             ClusterMutation::Remove { logical } => {
                 eng.delete_by_logical_id(*logical).unwrap_or(0);
             }
-            // Defensive: a per-shard translog never holds an Upsert frame today — the
-            // coordinator decomposes a cluster upsert into per-shard delete + insert seam
-            // calls, each re-logged as its own Remove/Add record (ADR-070). Replay one
-            // anyway (same delete-then-insert semantics) rather than panic on a future
-            // writer that logs it whole.
+            // ADR-185: an atomic per-shard replace logs one whole Upsert frame. Replay it
+            // through the same engine funnel the live write used, so live ≡ replay.
             ClusterMutation::Upsert {
                 logical,
                 version,
@@ -57,12 +54,11 @@ impl LocalShard {
                         "parsing acknowledged shard upsert during self-restart: {error}"
                     ))
                 })?;
-                eng.delete_by_logical_id(*logical).unwrap_or(0);
                 let mut lc = String::new();
                 let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
                 if eng
-                    .insert_extracted_with_placement(&ex, *logical, *version, dsl, tags, placement)
-                    .is_none()
+                    .replace_extracted_with_placement(&ex, *logical, *version, dsl, tags, placement)
+                    == crate::segment::ReplaceOutcome::Rejected
                 {
                     return Err(ShardError::Log(format!(
                         "acknowledged shard upsert {logical} was rejected during self-restart"

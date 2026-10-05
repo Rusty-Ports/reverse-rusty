@@ -5,6 +5,7 @@ use super::{
     PlacedQuery, RemoteShard, RpcMethod, RpcOutcome, Shard, ShardBatchRankedMatch, ShardError,
     ShardRankedMatch, ShardRankedTitle, TagPredicate,
 };
+use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus};
 
 impl Shard for RemoteShard {
     fn percolate_filtered(
@@ -926,6 +927,57 @@ impl Shard for RemoteShard {
             }
         })?;
         Ok(reply.present.then_some(reply.local_id))
+    }
+
+    fn replace_placed(
+        &self,
+        write: &PlacedWrite<'_>,
+        mode: ReplaceMode,
+    ) -> Result<ReplaceStatus, ShardError> {
+        write.placement.validate_for_shard(
+            self.shard_id,
+            self.placement_generation,
+            self.num_shards,
+        )?;
+        let req = proto::ReplaceRequest {
+            item: Some(proto::AddItem {
+                logical_id: write.logical,
+                dsl: write.text.to_string(),
+                version: write.version,
+                tags: proto::tags_to_proto(write.tags),
+                placement: Some(proto::placement_to_proto(write.placement)),
+            }),
+            shard_id: self.shard_id,
+            only_if_same_placement: mode == ReplaceMode::IfSamePlacement,
+        };
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Replace, CallKind::Write, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move {
+                client
+                    .replace_extracted(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
+        let conditional = mode == ReplaceMode::IfSamePlacement;
+        match proto::ReplaceStatus::try_from(reply.status) {
+            Ok(proto::ReplaceStatus::Replaced) => Ok(ReplaceStatus::Replaced {
+                removed: reply.removed as usize,
+            }),
+            Ok(proto::ReplaceStatus::Inserted) => Ok(ReplaceStatus::Inserted),
+            Ok(proto::ReplaceStatus::Rejected) => Ok(ReplaceStatus::Rejected),
+            // A declined condition is only an honest answer to a conditional request.
+            Ok(proto::ReplaceStatus::Absent) if conditional => Ok(ReplaceStatus::Absent),
+            Ok(proto::ReplaceStatus::PlacementMismatch) if conditional => {
+                Ok(ReplaceStatus::PlacementMismatch)
+            }
+            _ => Err(ShardError::Protocol(format!(
+                "shard {} returned replace status {} for logical {}",
+                self.shard_id, reply.status, write.logical
+            ))),
+        }
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {

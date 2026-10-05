@@ -88,6 +88,33 @@ pub enum UpsertOutcome {
     RejectedClassD,
 }
 
+/// How the live copies an engine holds for one logical id relate to a placement
+/// (ADR-185) — the precondition a conditional per-shard replace checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldPlacement {
+    /// No live copy of the id.
+    Absent,
+    /// Every live copy carries exactly the placement asked about.
+    Same,
+    /// At least one live copy carries a different placement.
+    Different,
+}
+
+/// Outcome of [`Engine::replace_extracted_with_placement`](crate::segment::Engine::replace_extracted_with_placement):
+/// the new version is inserted and every prior live copy tombstoned in one
+/// critical section (ADR-185), so a snapshot published afterwards shows the new
+/// version and none before it shows a gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceOutcome {
+    /// `removed` prior live copies were tombstoned and the new version inserted.
+    Replaced { removed: usize },
+    /// No prior live copy existed; the new version was inserted.
+    Inserted,
+    /// The new version was rejected (class D); prior copies are untouched — a
+    /// failed replace never deletes.
+    Rejected,
+}
+
 /// Per-item outcome for one query in a bulk batch, returned in submission order
 /// by [`Engine::try_bulk_ingest_detailed`]. Lets a caller (e.g. the HTTP
 /// `/_bulk` handler) report exactly which items were rejected and why — ES-style

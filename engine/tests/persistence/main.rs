@@ -12,6 +12,7 @@ mod backup;
 mod compaction;
 mod durability;
 mod mask_stability;
+mod memtable_delete_replay;
 mod round_trip;
 mod sources;
 mod tombstone_durability;

@@ -1,6 +1,7 @@
 //! Unit tests for the translog retention-lease bookkeeping (ADR-040/048).
 
 mod recovery;
+mod replace;
 
 #[cfg(test)]
 mod retention_lease_tests {

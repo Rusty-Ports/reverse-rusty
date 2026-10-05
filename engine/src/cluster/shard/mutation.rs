@@ -1,5 +1,15 @@
 use super::{extract_readonly, ClusterMutation, Dict, Normalizer, Shard, ShardError};
 
+/// Whether an upsert with `placement` STORES its row at `position` (as opposed to only
+/// tombstoning the id there). Replicated modes cover every position; only Selective restricts.
+pub(crate) fn upsert_stores_at(
+    placement: &crate::ownership::QueryPlacement,
+    position: u32,
+) -> bool {
+    placement.mode() != crate::ownership::PlacementMode::Selective
+        || placement.positions().binary_search(&position).is_ok()
+}
+
 /// Apply one logged mutation to a shard through its normal write path — so the op is itself
 /// re-logged into that shard's translog (a recovered replica's tail stays consistent) and
 /// applied to its engine. Re-derives features from the raw DSL against the frozen `dict`
@@ -53,24 +63,30 @@ pub(crate) fn apply_mutation(
                     "parsing acknowledged shard upsert during recovery: {error}"
                 ))
             })?;
-            // Replace-by-id ON THIS SHARD: tombstone any prior copy, then insert the new
-            // version — but only where the placement actually STORES the row. An upsert's
-            // delete half fans to every shard, so a repair can legitimately target a
-            // delete-only position; ADR-109 made shard-side inserts validate placement
-            // coverage, so re-driving the insert there is refused (`LocalPositionMissing`)
-            // and would wedge `resync` on that mutation forever (distributed recovery
-            // regression catch). Replicated modes cover every position; only Selective restricts.
-            shard.delete_by_logical_id(*logical)?;
-            let covered = position.is_none_or(|p| {
-                placement.mode() != crate::ownership::PlacementMode::Selective
-                    || placement.positions().binary_search(&p).is_ok()
-            });
+            // Replace-by-id ON THIS SHARD, as one visibility step (ADR-185) — but only
+            // where the placement actually STORES the row. A moved upsert tombstones the
+            // id on shards outside its new placement, so a repair can legitimately target
+            // a delete-only position; ADR-109 made shard-side writes validate placement
+            // coverage, so re-driving the new version there is refused
+            // (`LocalPositionMissing`) and would wedge `resync` on that mutation forever
+            // (distributed recovery regression catch).
+            let covered = position.is_none_or(|p| upsert_stores_at(placement, p));
             if covered {
                 let mut lc = String::new();
                 let ex = extract_readonly(&ast, norm, dict, &mut lc);
-                shard.insert_extracted_with_placement(
-                    &ex, *logical, *version, dsl, tags, placement,
+                shard.replace_placed(
+                    &super::PlacedWrite {
+                        ex: &ex,
+                        logical: *logical,
+                        version: *version,
+                        text: dsl,
+                        tags,
+                        placement,
+                    },
+                    super::ReplaceMode::Unconditional,
                 )?;
+            } else {
+                shard.delete_by_logical_id(*logical)?;
             }
         }
     }

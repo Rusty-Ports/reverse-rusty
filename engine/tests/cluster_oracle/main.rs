@@ -28,5 +28,6 @@ mod ranked_batch;
 mod ranking;
 mod replication;
 mod resize;
+mod upsert_visibility;
 mod vocab_learning;
 mod vocab_reopen;

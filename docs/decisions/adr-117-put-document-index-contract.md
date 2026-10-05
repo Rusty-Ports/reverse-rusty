@@ -64,3 +64,7 @@
   numbers/primary terms, custom routing, ingest pipelines, active-shard waits, and shard-level write
   acknowledgements each require their own honest state model or API audit. They are not silently
   accepted here.
+
+**Outcome update (2026-10-05).** "The proven atomic upsert" was reader-atomic only on a single
+node when this was accepted; the cluster path became reader-atomic with
+[ADR-185](adr-185-reader-atomic-cluster-upsert.md).
