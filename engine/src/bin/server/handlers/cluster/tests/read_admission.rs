@@ -170,3 +170,46 @@ fn a_cancelled_read_keeps_its_admission_until_the_worker_finishes() {
         "every permit returns once the lock frees"
     );
 }
+
+/// A ranked request's timeout covers its compile step. That step waits for read admission, a
+/// blocking thread and the cluster lock; while the exclusive lock is held, the request must
+/// answer 408 at its deadline instead of waiting for the rebuild to finish.
+#[test]
+fn a_ranked_request_times_out_while_its_compile_waits_for_the_cluster_lock() {
+    type Case = (&'static str, fn() -> Request<Body>);
+    let cases: [Case; 2] = [
+        ("POST /v2/_search", || {
+            req(
+                "POST",
+                "/v2/_search",
+                &serde_json::json!({"document": {"title": "1994 acme"}, "timeout_ms": 20}),
+            )
+        }),
+        ("POST /v2/_mpercolate", || {
+            req(
+                "POST",
+                "/v2/_mpercolate",
+                &serde_json::json!({"documents": [{"title": "1994 acme"}], "timeout_ms": 20}),
+            )
+        }),
+    ];
+    for (route, request) in cases {
+        let state = test_state(&seed());
+        let (holder, release) = hold_cluster_exclusively(&state);
+        let run_state = Arc::clone(&state);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let answer = runtime.block_on(async move {
+            tokio::time::timeout(Duration::from_secs(5), send(&run_state, request())).await
+        });
+        drop(release);
+        holder.join().expect("holder");
+        drop(runtime);
+        let (status, body) =
+            answer.unwrap_or_else(|_| panic!("{route}: the request ignored its timeout"));
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{route}: {body}");
+    }
+}

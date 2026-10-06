@@ -409,8 +409,10 @@ async fn cluster_v2_mpercolate_inner(
         include_source,
         timeout,
     } = prepared;
-    // The compile reads the cluster under its lock, on a blocking thread (ADR-191).
-    let compiled = {
+    // The compile reads the cluster under its lock, on a blocking thread (ADR-191), inside
+    // the one deadline the whole request runs under.
+    let deadline = Instant::now().checked_add(timeout);
+    let compile = {
         let worker_state = Arc::clone(&state);
         crate::handlers::cluster::read_cluster(&state, move |cluster| {
             let max_batch = cluster.per_shard_config().max_percolate_batch;
@@ -418,7 +420,15 @@ async fn cluster_v2_mpercolate_inner(
                 .compile_rank_program_with_profiles(&rank, &worker_state.rank_profiles)
                 .map(|program| (program, max_batch))
         })
-        .await
+    };
+    let Some(compiled) = super::cluster_compile::within_deadline(deadline, compile).await else {
+        return Err(super::cluster_compile::timed_out(
+            &state,
+            started,
+            options,
+            timeout,
+            "v2_mpercolate",
+        ));
     };
     let (program, max_batch) = match compiled {
         Ok(Ok(compiled)) => compiled,
@@ -436,7 +446,7 @@ async fn cluster_v2_mpercolate_inner(
         }
     };
     admit_batch_len(&state.prom, options.query_scope, titles.len(), max_batch)?;
-    let Some(deadline) = Instant::now().checked_add(timeout) else {
+    let Some(deadline) = deadline else {
         record_outcome(&state.prom, "validation", options.query_scope);
         return Err(validation("timeout is too large"));
     };

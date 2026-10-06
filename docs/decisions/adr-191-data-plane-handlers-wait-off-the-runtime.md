@@ -49,7 +49,10 @@ This is an availability defect. Matching correctness and durability were never a
    every permit. The worker re-checks under the lock.
 6. **Coordinator reads** go through `read_cluster`, the same shape with its own semaphore
    (`MAX_QUEUED_CLUSTER_READS`, 64): the brief read of the cluster engine runs on a blocking
-   thread, and the threads parked behind one exclusive holder are bounded.
+   thread, and the threads parked behind one exclusive holder are bounded. For `/v2/_search`
+   and `/v2/_mpercolate` that step runs inside the request's deadline, which is armed before
+   it: the wait for admission, a thread and the lock counts against the timeout, and the
+   request answers 408 at its deadline as it does when delivery times out.
 7. **A write that cannot report a result** (its worker panicked, or admission is closed at
    shutdown) answers `500 write_worker_failed`. Whether it was applied is not known to the
    server in that case, and the response says so rather than guessing.
@@ -93,7 +96,8 @@ This is an availability defect. Matching correctness and durability were never a
 - `handlers/cluster/tests/read_admission.rs`: with the exclusive cluster lock held, each of
   `GET /_doc`, `HEAD /_doc`, `GET /`, `POST /v2/_search`, `POST /v2/_mpercolate` and
   `POST /_percolate/jobs` waits without stopping a timer on a single-threaded runtime;
-  cancelled reads keep their permits until their workers finish.
+  cancelled reads keep their permits until their workers finish; a ranked request with a
+  20 ms timeout answers 408 while its compile step waits for the lock.
 
 Each case fails, within its timeout, when its handler takes the lock on the async worker.
 

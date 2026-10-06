@@ -5,13 +5,54 @@
 //! (ADR-191), because the cluster lock is not available while a vocabulary rebuild or a
 //! resize holds or waits for it, and a request waiting for it must not park an async worker.
 
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use reverse_rusty::{CompiledRankProgram, PitId, QueryScope, RankProgramSpec};
+use reverse_rusty::cluster::ClusterRankedError;
+use reverse_rusty::{CompiledRankProgram, PitId, QueryScope, RankProgramSpec, TopKOptions};
 
+use super::delivery::{failure_response, DeliveryFailure};
 use super::{page, rank_program_error, record_outcome, ApiError, ClusterAppState, Reject};
+
+/// Run a compile step inside the request's deadline. The step waits for read admission, a
+/// blocking thread and the cluster lock, and all of that counts against the request's
+/// timeout, as the wait for a search permit does (ADR-099). `None` when the deadline passed
+/// first; the admitted worker still finishes and frees its permit on its own.
+///
+/// A timeout too large to represent has no deadline. It is reported after the compile, as
+/// it always was, so the step runs unbounded here.
+pub(in crate::handlers::search) async fn within_deadline<T>(
+    deadline: Option<Instant>,
+    step: impl Future<Output = T>,
+) -> Option<T> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), step)
+            .await
+            .ok(),
+        None => Some(step.await),
+    }
+}
+
+/// The 408 a ranked request answers when its compile step did not finish in time: the same
+/// response, metrics and log line as a delivery that timed out.
+pub(in crate::handlers::search) fn timed_out(
+    state: &ClusterAppState,
+    started: Instant,
+    options: TopKOptions,
+    timeout: Duration,
+    label: &'static str,
+) -> Reject {
+    failure_response::<ClusterAppState, ClusterRankedError>(
+        state,
+        started,
+        options,
+        timeout,
+        label,
+        DeliveryFailure::Elapsed,
+    )
+}
 
 pub(super) struct CompileRequest {
     pub(super) rank: RankProgramSpec,

@@ -640,7 +640,9 @@ async fn cluster_v2_search_inner(
             }
         },
     };
-    let (program, mint) = cluster_compile::compile(
+    // One deadline for the whole request: the compile step waits too.
+    let deadline = Instant::now().checked_add(timeout);
+    let compile = cluster_compile::compile(
         &state,
         cluster_compile::CompileRequest {
             rank,
@@ -650,13 +652,22 @@ async fn cluster_v2_search_inner(
             filter: filter.clone(),
             scope: options.query_scope,
         },
-    )
-    .await?;
+    );
+    let Some(compiled) = cluster_compile::within_deadline(deadline, compile).await else {
+        return Err(cluster_compile::timed_out(
+            &state,
+            started,
+            options,
+            timeout,
+            "v2_search",
+        ));
+    };
+    let (program, mint) = compiled?;
     let options = reverse_rusty::TopKOptions {
         search_after,
         ..options
     };
-    let Some(deadline) = Instant::now().checked_add(timeout) else {
+    let Some(deadline) = deadline else {
         record_outcome(&state.prom, "validation", options.query_scope);
         return Err(validation("timeout is too large"));
     };
