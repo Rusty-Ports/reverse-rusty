@@ -1,9 +1,9 @@
 use super::{
     block_on_timeout_in_context, grpc_deadline_status, no_live_coordinator_lease_status, proto,
-    ranked_rpc_err, refuse_wire_tag_ids, remaining_micros, BatchTitleRequest, CallKind,
-    ClusterMutation, Duration, Extracted, FetchedMatch, IngestReport, Instant, LogPos, MatchStats,
-    PlacedQuery, RemoteShard, RpcMethod, RpcOutcome, Shard, ShardBatchRankedMatch, ShardError,
-    ShardRankedMatch, ShardRankedTitle, TagPredicate,
+    ranked_rpc_err, remaining_micros, BatchTitleRequest, CallKind, ClusterMutation, Duration,
+    Extracted, FetchedMatch, IngestReport, Instant, LogPos, MatchStats, PlacedQuery, RemoteShard,
+    RpcMethod, RpcOutcome, Shard, ShardBatchRankedMatch, ShardError, ShardRankedMatch,
+    ShardRankedTitle, TagPredicate,
 };
 use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus};
 
@@ -752,6 +752,14 @@ impl Shard for RemoteShard {
         Ok(reply.count as usize)
     }
 
+    fn set_bulk_load_incomplete(&self, incomplete: bool) -> Result<(), ShardError> {
+        self.set_bulk_load_mark(incomplete)
+    }
+
+    fn bulk_load_incomplete(&self) -> Result<bool, ShardError> {
+        self.bulk_load_mark()
+    }
+
     fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
         self.enumerate_logical_ids()
     }
@@ -826,39 +834,7 @@ impl Shard for RemoteShard {
     }
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
-        refuse_wire_tag_ids(items)?;
-        // Send raw DSL + raw tags, NOT the pre-extracted feature ids: the server re-compiles
-        // read-only against its own frozen dict + resolves tags against its adopted frozen tag
-        // space (dict-/tag-agnostic wire). The coordinator's `Extracted` was only for placement.
-        let req = proto::IngestRequest {
-            items: items
-                .iter()
-                .map(|q| proto::AddItem {
-                    logical_id: q.logical,
-                    dsl: q.dsl.clone(),
-                    version: q.version,
-                    tags: proto::tags_to_proto(&q.tags),
-                    placement: Some(proto::placement_to_proto(&q.placement)),
-                })
-                .collect(),
-            shard_id: self.shard_id,
-        };
-        let client = self.client.clone();
-        let reply = self.call(RpcMethod::Ingest, CallKind::Write, move || {
-            let mut client = client.clone();
-            let req = req.clone();
-            async move {
-                client
-                    .ingest_extracted(req)
-                    .await
-                    .map(tonic::Response::into_inner)
-            }
-        })?;
-        Ok(IngestReport {
-            ingested: reply.ingested as usize,
-            rejected_parse: reply.rejected_parse as usize,
-            rejected_class_d: reply.rejected_class_d as usize,
-        })
+        self.bulk_load(items)
     }
 
     fn insert_extracted_with_tags(

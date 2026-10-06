@@ -21,6 +21,83 @@ reverse chronological and describe outcomes, not the current architecture or fut
   it serializes these calls itself.
 - `backup_to` no longer asks its caller to hold a lock.
 
+## 2026-10-06 — An interrupted bootstrap is not served
+
+- Fix a remote cluster serving part of its corpus after a `--load-file` bootstrap that stopped
+  part-way: the coordinator exited, was restarted by its supervisor, found the cluster "already
+  populated", skipped the load and served what had landed. The shard nodes now carry a mark
+  from before the first bucket until after the last, kept on disk, and a coordinator that finds
+  one refuses to start and says the load did not complete
+  ([ADR-196](decisions/adr-196-unfinished-bulk-loads-are-remembered.md)). Reset the shard
+  nodes' data and load again.
+- Upgrade shard nodes before a coordinator that bulk-loads: a node that cannot record the mark
+  is not loaded in bulk. Attaching to older nodes is unaffected.
+
+## 2026-10-06 — Replicas are proven before they are trusted
+
+- Fix a silent miss on the remote replicated topology: every coordinator that connected marked
+  every replica in sync without checking, so a replica that had missed writes while it was down,
+  or one started on an empty volume, was served again after the next coordinator restart, and a
+  read that failed over to it answered without those queries. A connecting coordinator now
+  compares each replica's content fingerprint with its primary's and trusts only an exact match
+  ([ADR-195](decisions/adr-195-replicas-are-proven-at-connect.md)). A replica that is not proven
+  is left as it is and never served; a read with no primary and no proven replica fails with 502.
+- `--recover-divergent-replicas` on the coordinator re-recovers such replicas from their
+  primaries at startup. It is off by default: recovery discards the replica's data, which is the
+  wrong thing when the primary is the copy that lost its volume.
+- `/_health` and `/_stats` report `out_of_sync_replicas`, and health is yellow while it is
+  non-zero.
+
+## 2026-10-06 — A partial cluster write is a failure to retry
+
+- **Behaviour change (remote clusters).** A `PUT /_doc/{id}` or bulk item that not every shard
+  took now answers **503** `"result": "partial"` (bulk: item status 503, type `partial_write`)
+  with no `_version`, and tells the caller to repeat it
+  ([ADR-194](decisions/adr-194-partial-cluster-writes-are-retryable-failures.md)). It used to
+  answer 200, say the write was "durably logged" and warn against repeating it. A remote
+  coordinator has no log and keeps its repair queue in memory, so a coordinator restart before a
+  manual resync left the write missing from the shards that refused it, for good. `DELETE`
+  already worked this way (ADR-125).
+- A retried `op_type=create` no longer answers 409 "already exists" while an earlier write of
+  the id is still queued for repair: it re-drives the repair and answers 503
+  `earlier_write_unconverged` until it converges. Retry a partial create as an index operation,
+  which converges on any coordinator.
+- Fix `resync` storing a second row when the shard had applied a create whose acknowledgement
+  was lost. That left the shard unable to enumerate its ids, and after the next coordinator
+  attach every create-only write was refused. A repair now replaces the id on the shard.
+- A stopping coordinator logs the document ids whose repairs it never completed.
+- The documents that described a remote partial write as durably logged are corrected (ADR-047
+  later outcome, the coordinator, bulk and resync references, the design note, the runbooks).
+
+## 2026-10-06 — Requests larger than one gRPC message
+
+- Fix the remote `--load-file` bootstrap failing with `OutOfRange` once a shard's bucket passed
+  4 MiB: the coordinator sent each bucket as one request, and a shard node accepts at most
+  tonic's default. A bucket is now one staged load, the stream a remote resize already uses,
+  in messages of at most 3 MiB ([ADR-193](decisions/adr-193-inbound-request-size.md)). The
+  node compacts to its segment policy and writes its source store once when the load ends.
+- Fix a coordinator being unable to connect, or restart, once its dictionary serialized to more
+  than 4 MiB: `AdoptDict` ships the dictionary in one request. Shard nodes now accept requests
+  up to `shardserver --max-grpc-request-bytes` (default 64 MiB; Helm
+  `shard.maxGrpcRequestBytes`), and a dictionary above a node's limit is refused with an error
+  that names the flag. **Upgrade shard nodes before a coordinator whose dictionary exceeds
+  4 MiB.**
+- Replies are unchanged: the ADR-110 result cap still holds them at or under 4 MiB.
+
+## 2026-10-06 — Boolean server flags that could not be set to false
+
+- Fix `--retain-source`, `--broad-columnar` and `--broad-materialize` on `server`: each was a
+  switch that only set `true`, its default, so it could never be turned off and passing `false`
+  was a startup error. The documented low-memory `retain_source=false` profile could not be
+  selected on the shipped binary. All three now take a value (`--retain-source false`), like
+  `--tag-segment-skipping`. A bare `--retain-source` with no value, which did nothing, is now an
+  error.
+- `shardserver` takes `--broad-columnar <true|false>` and `--broad-materialize <true|false>`
+  beside `--retain-source`; a remote coordinator warns that its own copies do not reach the
+  shards. Helm: `shard.broadColumnar`, `shard.broadMaterialize`. Compose:
+  `RR_SHARD_RETAIN_SOURCE`.
+- `server --retain-source false` without `--data-dir` warns that the setting saves nothing.
+
 ## 2026-10-06 — Shard-local engine settings
 
 - Fix the remote topology having no way to turn on power-loss durability: `shardserver` built
@@ -37,6 +114,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   `reverse_rusty_shard_translog_sync_on_write{shard}`.
 - Helm: `shard.walSyncOnWrite`, `shard.retainSource`, `shard.maxSegments`,
   `shard.memtableFlushThreshold`. Compose: `RR_SHARD_WAL_SYNC_ON_WRITE`.
+
 ## 2026-10-06 — Data-plane handlers wait off the runtime
 
 - Fix the server becoming unresponsive, `/_health` included, when writes queued behind
@@ -49,6 +127,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   whenever a vocabulary rebuild or resize held or queued for the exclusive cluster lock.
 - A standalone write whose client disconnects after admission still completes and is published;
   shutdown waits for such writes before its final flush.
+
 ## 2026-10-06 — First read after a shard restart, and wider test margins
 
 - Fix a read failing with a transport error right after a shard node restarted: the coordinator
@@ -99,6 +178,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   ([ADR-189](decisions/adr-189-dropped-shards-await-recovery.md)).
 - Moving a shard back to a node that gave it up is unchanged. Re-seeding such a node from scratch
   under the same dictionary and placement generation now requires wiping its data directory.
+
 ## 2026-10-05 — Any-of cover and visibility-preserving rebuilds
 
 - Fix default-read false negatives for queries shaped `<top-64 term> (<variants>)`: a query whose
@@ -114,6 +194,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **Upgrade:** compiler semantics version 7. Single-node stores rebuild from retained source on
   open; cluster data follows the existing compiler-semantics procedure (rebuild through the
   coordinator, or reseed remote shard volumes).
+
 ## 2026-10-05 — The top-64 mask is assigned once
 
 - Fix silent false negatives after a second initial build: `Dict::finalize_mask` re-ranked the
@@ -129,6 +210,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - A store that was restarted with `--load-file` before this fix may hold rows with stale mask
   bits. They are repaired by the next rebuild from source (a vocabulary change, or a
   compiler-semantics migration on open).
+
 ## 2026-10-05 — Memtable deletes survive a commit and a restart
 
 - Fix an acknowledged delete coming back after a restart: deleting a query that was still in the
@@ -136,6 +218,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   the WAL but skipped the delete, because the commit had advanced the WAL watermark past it without
   sealing the memtable. Recovery now always applies a delete to memtable copies and leaves only the
   segment copies to the watermark rule (ADR-066, later outcome).
+
 ## 2026-10-05 — Reader-atomic cluster upsert
 
 - Fix silent false negatives during cluster upserts: `PUT /_doc` and every `_bulk` index item

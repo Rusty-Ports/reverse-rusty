@@ -26,7 +26,6 @@ use parking_lot::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardError};
-use reverse_rusty::config::EngineConfig;
 use reverse_rusty::events::EngineEvent;
 use reverse_rusty::loader;
 use reverse_rusty::normalize::Normalizer;
@@ -93,25 +92,7 @@ pub(crate) async fn run(
     // Per-shard engine config from the same flags single-node mode maps; the
     // coordinator derives each shard's data dir itself (ADR-032), so data_dir
     // stays unset here.
-    let per_shard = EngineConfig {
-        data_dir: None,
-        max_segments: cli.max_segments,
-        memtable_flush_threshold: cli.memtable_flush_threshold,
-        max_query_length: cli.max_query_length,
-        max_query_clauses: cli.max_query_clauses,
-        max_anyof_group_size: cli.max_anyof_group_size,
-        max_tags: cli.max_tags,
-        wal_sync_on_write: cli.wal_sync_on_write,
-        retain_source: cli.retain_source,
-        broad_batch_size: cli.broad_batch_size,
-        hot_anchor_threshold: cli.hot_anchor_threshold,
-        broad_columnar: cli.broad_columnar,
-        tag_segment_skipping: cli.tag_segment_skipping,
-        broad_materialize: cli.broad_materialize,
-        max_percolate_batch: cli.max_percolate_batch,
-        accept_class_d: cli.accept_class_d,
-        ..EngineConfig::default()
-    };
+    let per_shard = cli.engine_config();
     let problems = per_shard.validate();
     if !problems.is_empty() {
         for p in &problems {
@@ -204,6 +185,15 @@ pub(crate) async fn run(
         );
         std::process::exit(1);
     }
+    // --recover-divergent-replicas rebuilds REMOTE replicas at connect (ADR-195). An in-process
+    // cluster rebuilds its replicas from the primary on every open, so the flag would do nothing.
+    if cli.recover_divergent_replicas && in_process {
+        error!(
+            "--recover-divergent-replicas applies to remote replicas (--shard-endpoint groups); \
+             an in-process cluster rebuilds its replicas from the primary on every start"
+        );
+        std::process::exit(1);
+    }
     // --reconcile-interval-secs runs the unattended reconciler (ADR-092), which re-points routing by
     // MOVING data to the committed map's owner. It is only safe + meaningful when the coordinator
     // actually ROUTES by that committed map — otherwise a converged map would not change routing.
@@ -259,19 +249,7 @@ pub(crate) async fn run(
     } else {
         remote_groups.len()
     };
-    let cluster_config = ClusterConfig {
-        num_shards,
-        replication_factor: cli.replication_factor,
-        per_shard,
-        include_broad: cli.include_broad,
-        data_dir: if in_process {
-            cli.data_dir.clone()
-        } else {
-            None
-        },
-        wal_sync_on_write: cli.wal_sync_on_write,
-        ..ClusterConfig::default()
-    };
+    let cluster_config = cli.cluster_config(num_shards, per_shard, in_process);
 
     // Mesh client security for the remote links (ADR-071), resolved fail-loud HERE so a
     // misconfiguration refuses startup. Kept as plain bytes — the typed ClientSecurity is
@@ -785,6 +763,8 @@ pub(crate) async fn run(
                 Err(e) => error!(error = %e, "shutdown checkpoint failed"),
             }
         }
+        // The repair queue is this process's memory (ADR-194): say what stops with it.
+        shutdown::log_unconverged_writes(&cluster);
     }
     info!("shutdown complete");
 }

@@ -19,6 +19,7 @@ The multi-shard correctness core, remote shard seam, shared feature space, and d
 | [197](../adr-197-checkpoint-excludes-mutations.md) | Checkpoint excludes mutations | Makes the public cluster `checkpoint`, `flush` and `backup_to` take the exclusive side of the mutation barrier, so a write in flight can neither be truncated out of the log before it reaches its shard nor land in both a committed segment and the log tail. | Accepted |
 | [185](../adr-185-reader-atomic-cluster-upsert.md) | Reader-atomic cluster upsert | Replaces a query atomically on each shard and fences only placement-moving upserts, so an unfenced reader never sees neither version or both. | Accepted |
 | [192](../adr-192-shard-local-engine-settings.md) | Shard-local engine settings | Gives `shardserver` its own durability and storage flags, makes a remote coordinator refuse or warn about the ones it cannot honour, and marks them in `/_settings`. | Accepted |
+| [193](../adr-193-inbound-request-size.md) | Inbound request size | Sends a bulk bucket as one staged load of bounded messages and makes the shard node's inbound limit a named setting, so bootstrap and dictionary shipping no longer stop at tonic's 4 MiB default. | Accepted |
 
 ---
 

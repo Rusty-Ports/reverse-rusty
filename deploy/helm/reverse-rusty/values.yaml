@@ -53,6 +53,12 @@ shard:
   maxSegments: 8
   # Memtable entries before an automatic flush.
   memtableFlushThreshold: 100000
+  # Largest inbound request a shard node decodes (ADR-193), in bytes. Raise it when the
+  # coordinator's dictionary no longer fits; the coordinator's error names this setting.
+  maxGrpcRequestBytes: 67108864
+  # Broad-lane kill switches (ADR-026). False changes cost, never results.
+  broadColumnar: true
+  broadMaterialize: true
 
 ports:
   shardGrpc: 50051

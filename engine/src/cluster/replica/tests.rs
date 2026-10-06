@@ -10,5 +10,6 @@
 //!   - [`retention`] — retention leases across a concurrent seal + the stuck-lease TTL reap
 
 mod failover;
+mod proofs;
 mod recovery;
 mod retention;

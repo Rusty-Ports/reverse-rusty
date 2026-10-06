@@ -93,7 +93,8 @@ at startup. Which binary takes the flag depends on the topology (ADR-192):
 - **Remote cluster:** the settings that belong to the process holding a shard's disk are
   `shardserver` flags and must be set on every shard node: `--wal-sync-on-write <true|false>`,
   `--retain-source <true|false>`, `--max-segments N`, `--memtable-flush-threshold N`,
-  `--hot-anchor-threshold N` and `--tag-segment-skipping <true|false>`. The coordinator's flags of
+  `--hot-anchor-threshold N`, `--tag-segment-skipping <true|false>`,
+  `--broad-columnar <true|false>` and `--broad-materialize <true|false>`. The coordinator's flags of
   the same names do not reach a shard: it refuses `--wal-sync-on-write` and warns about the others.
   Keep `--hot-anchor-threshold` and `--tag-segment-skipping` the same on the coordinator and the
   shards.

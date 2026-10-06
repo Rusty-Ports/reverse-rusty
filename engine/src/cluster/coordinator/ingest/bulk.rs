@@ -56,6 +56,9 @@ impl ClusterEngine {
             .enumerate()
             .map(|(i, (l, t))| (*l, 1, t.clone(), tags.get(i).cloned().unwrap_or_default()))
             .collect();
+        // A load that stops part-way must be remembered by the shards, not by this process
+        // (ADR-196): `bucket_and_ingest` marks them all before the first bucket, and the
+        // marks are cleared below, after the last.
         self.bucket_and_ingest(&entries)?;
         // These bulk adds bypassed the log (they go straight to base segments), so on a
         // durable cluster a checkpoint commits them into the coordinator manifest's
@@ -64,7 +67,68 @@ impl ClusterEngine {
             // This load holds the barrier shared and the bulk guard: it is the only writer.
             self.checkpoint_quiesced()?;
         }
+        self.mark_bulk_load_complete()
+    }
+
+    /// Mark every shard as holding a bulk load in progress. Nothing has been loaded while
+    /// this runs, so when a shard cannot be marked the marks are taken back (on that shard
+    /// too: its refusal may have come after it recorded the mark) and the load does not
+    /// start. A mark that cannot be taken back stays: the next coordinator then refuses the
+    /// cluster, which is the safe side.
+    fn mark_bulk_load_begun(&self) -> Result<(), ShardError> {
+        for (position, shard) in self.shards.iter().enumerate() {
+            if let Err(error) = shard.set_bulk_load_incomplete(true) {
+                self.take_back_bulk_load_marks(position + 1);
+                return Err(error);
+            }
+        }
         Ok(())
+    }
+
+    /// Clear the marks of the first `marked` shards after a load that never wrote to one.
+    /// Best effort: a mark that cannot be cleared stays, and the next coordinator refuses
+    /// the cluster, which is the safe side.
+    fn take_back_bulk_load_marks(&self, marked: usize) {
+        for shard in &self.shards[..marked] {
+            drop(shard.set_bulk_load_incomplete(false));
+        }
+    }
+
+    /// Clear the marks once every bucket has landed. A shard whose mark cannot be cleared
+    /// fails the load: its mark would make the next coordinator refuse a complete cluster.
+    fn mark_bulk_load_complete(&self) -> Result<(), ShardError> {
+        for shard in &self.shards {
+            shard.set_bulk_load_incomplete(false)?;
+        }
+        Ok(())
+    }
+
+    /// The first shard position that still carries the mark of a bulk load that began and
+    /// was never completed (ADR-196), or `None`. Such a cluster holds part of a corpus.
+    pub fn unfinished_bulk_load(&self) -> Result<Option<usize>, ShardError> {
+        for (position, shard) in self.shards.iter().enumerate() {
+            if shard.bulk_load_incomplete()? {
+                return Ok(Some(position));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Refuse to hand out a cluster that holds part of a corpus. Used by the remote builders:
+    /// a coordinator that connects to shards a bulk load was abandoned on must not serve
+    /// them, and the only evidence is the mark the shards kept.
+    #[cfg(feature = "distributed")]
+    pub(in crate::cluster::coordinator) fn refusing_unfinished_bulk_load(
+        self,
+    ) -> Result<Self, ShardError> {
+        match self.unfinished_bulk_load()? {
+            None => Ok(self),
+            Some(position) => Err(ShardError::Config(format!(
+                "shard position {position} holds a bulk load that did not complete: a coordinator \
+                 stopped, or a shard failed, part-way through loading a corpus, so this cluster \
+                 holds only part of it. Reset the shard nodes' data and load the corpus again"
+            ))),
+        }
     }
 
     /// Bucket a set of `(logical, version, dsl, tags)` queries by placement and bulk-ingest one
@@ -124,12 +188,22 @@ impl ClusterEngine {
             }
         }
         super::super::logical_ids::sort_and_check_unique(&mut accepted_ids)?;
+        // Everything above only read the corpus: a load refused there (a duplicate id, a
+        // query that cannot be placed) touched no shard and must leave no mark, or a
+        // corrected file could not be loaded without resetting the shards. The shards are
+        // marked before the ids are reserved: a load that cannot be marked does not start,
+        // and must not leave the ids of a corpus it never loaded reserved either.
+        self.mark_bulk_load_begun()?;
         // Reserve the complete semantic corpus BEFORE the first shard mutation.
         // If a remote bulk write fails part-way, retaining these reservations is
         // fail-closed: an incremental Add cannot coexist with a physical row that
         // may already have landed. Retrying ingest on the still-empty cluster may
         // replace this directory with the same corpus and continue.
-        self.replace_logical_ids(accepted_ids)?;
+        if let Err(error) = self.replace_logical_ids(accepted_ids) {
+            // Still nothing loaded.
+            self.take_back_bulk_load_marks(self.shards.len());
+            return Err(error);
+        }
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
                 if let Err(error) = self.shards[s].ingest_extracted(&bucket) {
