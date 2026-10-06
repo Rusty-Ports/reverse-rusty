@@ -9,6 +9,20 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Sizing and memory documentation corrected
+
+- The sizing guide now says what compaction, a flush and a resident-source open hold on the heap
+  (about three times the merge range for a compaction, the whole source store file for every
+  flush), that a forced merge makes the merge range the whole engine or shard, that the default
+  profile is `retain_source=true`, and that the throughput captures need the segment working set
+  in the page cache on a durable node.
+- Two claims were wrong and are corrected where they appeared (roadmap, ADR-020 outcome, the
+  capture notes and a code comment): aliveness is one byte per row, not bit-packed; and the
+  dictionary does not saturate in the captures, where its cost per query is flat and its total
+  grows with the corpus.
+- The roadmap's memory item lists the heap copies, the byte-per-row aliveness and the ungated
+  default profile as candidates. No behaviour change.
+
 ## 2026-10-06 — Boolean server flags that could not be set to false
 
 - Fix `--retain-source`, `--broad-columnar` and `--broad-materialize` on `server`: each was a

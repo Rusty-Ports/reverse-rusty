@@ -18,7 +18,7 @@ and a `--data-dir`: on `server` for single-node and in-process clusters, and on 
 
 | Profile | What the engine keeps | Sizing consequence |
 |---|---|---|
-| `retain_source=true` | canonical query text resident with compiled state | easiest source/explain/admin reads; current captures are roughly a little over 100 B/query of engine-accounted resident memory |
+| `retain_source=true` (the default, and what a node runs unless told otherwise) | canonical query text resident with compiled state | easiest source/explain/admin reads; current captures are roughly a little over 100 B/query of engine-accounted resident memory, which counts string capacities and not the allocator's size-class and hash-table slack around them |
 | `retain_source=false` + durable `--data-dir` | compiled state resident; canonical source in the durable source store and read lazily | current captures report roughly 5–6 B/query of engine-accounted resident memory, but source pages, filesystem cache, and source-read I/O still consume host resources |
 
 Those rounded ranges describe the current pinned workloads, not constants. Vocabulary size, tag
@@ -48,7 +48,9 @@ fanout     = routed logical positions per title
 ```
 
 `B_engine` is useful for component attribution. `B_rss` includes allocator overhead and resident mmap
-pages. Neither predicts filesystem cache perfectly; observe the node over a realistic source/explain
+pages. The published throughput figures come from engines built in memory; a durable node reaches
+them only with its segment working set in the page cache, so budget page cache up to the committed
+segment bytes on top of `B_engine`. Neither predicts filesystem cache perfectly; observe the node over a realistic source/explain
 read workload. `B_durable` must come from file sizes, not from the memory gauge.
 
 ## 3. Separate selective and replicated query cost
@@ -97,16 +99,24 @@ operator-managed; see [`deployment-modes.md`](deployment-modes.md).
 
 Steady state is not the peak:
 
-- flush/compaction writes a replacement while old segments still serve;
+- compaction copies every segment in its merge range onto the heap (also the mmap-backed ones),
+  builds the merged segment in memory beside them, and reads the file it wrote back to checksum
+  it: plan for about three times the merge range, in memory, while the old segments still serve.
+  A forced merge (`POST /_forcemerge`) makes that range the whole engine or shard;
+- every flush (by default every 100,000 writes) rebuilds the complete source store file in heap
+  buffers before writing it, whatever the size of the flush;
+- opening a node with `retain_source=true` reads the whole source store into memory and then
+  builds the resident map from it, so it briefly holds about twice the sources;
 - in-process vocabulary rebuild and resize build replacement state before swapping;
 - peer recovery temporarily holds source and target copies;
 - open PITs retain snapshots and may keep unlinked mmap segments alive;
 - ingest bursts grow the memtable before its flush threshold.
 
-Two-times steady-state memory/disk is a useful **starting reserve**, not a guarantee. Large source
-stores can make disk the dominant dimension, and the largest compaction/rebuild unit determines the
-temporary copy. Measure a forced compaction, vocabulary rebuild, resize, and peer recovery against the
-representative data before tightening headroom.
+Two-times steady-state memory/disk is a useful **starting reserve**, not a guarantee, and a forced
+merge of one large engine or shard exceeds it. Large source stores can make disk the dominant
+dimension, and the largest compaction/rebuild unit determines the temporary copy; sharding divides
+that unit. Measure the peak of a `POST /_forcemerge`, a vocabulary rebuild, a resize, and a peer
+recovery against the representative data before tightening headroom.
 
 For disk, budget separately:
 
