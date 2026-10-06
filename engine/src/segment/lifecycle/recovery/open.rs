@@ -270,10 +270,15 @@ impl Engine {
             } else {
                 SourceCommitState::IncompleteRecovery
             },
+            selected_source_version: None,
             vocab_epoch: 0,
             committed_wal_watermark: manifest.wal_seq_watermark,
             owns_manifest: true,
         };
+        // The store was just read from the selected sidecar and nothing has been replayed
+        // into it yet: this is the moment the two are known equal (ADR-200). A recovery
+        // that could not load the sidecar, or skipped a segment, records nothing.
+        engine.mark_selected_sources_current();
 
         // Install the vocab BEFORE the WAL replay below (codex R13): the replay recompiles the
         // tail queries from raw text, and without the equivalence map installed they would

@@ -139,8 +139,9 @@ captures, bounded scratch memory, and a demonstrated broad or hot batch improvem
 
 ### Memory headroom for 100M-query deployments
 
-**Problem.** The shipped durable `retain_source=false` profile already leaves canonical source text
-in the mmap-backed source store and reads it lazily, reducing engine-accounted resident memory from
+**Problem.** The durable `retain_source=false` profile (opt-in on `server` and `shardserver`; the
+default is `true`) already leaves canonical source text in the mmap-backed source store and reads it
+lazily, reducing engine-accounted resident memory from
 roughly a little over 100 B/query to about 5–6 B/query in the current captures. Those measurements
 do not establish host RSS, source-read working set, page-cache pressure, or memory-bandwidth behavior
 at 100M queries, and the remaining dictionary, index, and verification columns may become the
@@ -157,8 +158,13 @@ dominant resident cost.
 - tighten SoA fields and access order to reduce bytes touched per candidate.
 
 Potential techniques include pooled string storage, mmap-backed immutable dictionaries, and narrower
-columns where format bounds prove them safe. Aliveness is already bit-packed; do not count that as
-future savings. SIMD is useful only after a profile identifies a stable intersection kernel.
+columns where format bounds prove them safe. Aliveness is one byte per row (a `Vec<bool>` in
+memory, a `u8` column on disk; only the tombstone sets beside it are bitmaps), so a bitset would
+save about 0.875 B/query and shrink every copy-on-write segment clone. Compaction and flush also
+hold whole copies on the heap (see the sizing guide, §5): an incremental checksum on segment write,
+merging from mmap without materializing, and a cap on the merge range would lower the peak. The CI
+resident-memory gate measures only `retain_source=false`; the default profile is not gated. SIMD is
+useful only after a profile identifies a stable intersection kernel.
 
 **Completion.** A measured 100M memory model with component attribution, no regression to the
 allocation-free matching contract, and pressure tests showing that the new representation remains
@@ -321,6 +327,22 @@ Export to object storage requires an ADR that narrows or amends the shared-nothi
 **Completion.** A killed coordinator can resume or safely abandon a job, a restored cluster proves
 the same logical corpus, and operators no longer coordinate shard snapshots manually.
 
+### Durable in-sync set and online replica recovery
+
+**Problem.** Which replicas may serve a failover read is a flag in the coordinator's memory. A
+connecting coordinator re-derives it by comparing content (ADR-195), which costs a fingerprint of
+every replicated copy, cannot tell which copy is right when they differ, and can restore a
+replica only through a coordinator restart with `--recover-divergent-replicas`.
+
+**Direction.** Record the in-sync set and a primary term per position in the control plane, and
+remove a replica from the set before acknowledging the write it missed. Add an online operation
+that recovers one replica from its primary and promotes it under a brief write quiesce. Primary
+promotion depends on the same terms.
+
+**Completion.** A replica that missed a write is excluded across any coordinator restart without
+a content comparison; an operator restores redundancy without restarting the coordinator; a
+position whose primary lost its volume can promote an in-sync replica.
+
 ### Kubernetes operator and RF>1 topology
 
 **Problem.** Helm installs static resources but does not own lifecycle state, backup schedules,
@@ -382,6 +404,12 @@ change, and acceptance boundary; promotion changes its priority, not its documen
   server's `--include-broad` default (the coordinator's does). Add a response header on the
   compatibility routes so their bodies stay unchanged, the scope in the completion frame, and
   the default in single-node settings.
+- **A byte budget for request bodies.** The request limit is per endpoint (ADR-199) and counts
+  requests, not what they hold: the document, bulk and search routes buffer bodies of up to
+  100 MB each, on endpoints that each admit 256. Add a configurable budget for buffered body
+  bytes, give the read routes a body limit that matches their real maximum, and decide whether
+  a request beyond the budget waits or is refused. A budget on bytes is the server-wide bound a
+  shared request pool cannot safely be.
 - **Thread-pool introspection.** Search admission is bounded but operators cannot see queue
   pressure directly. Expose active, queued, rejected, and completed work through fixed-cardinality
   metrics and an operator endpoint, then verify the counters under saturation.
@@ -416,8 +444,16 @@ change, and acceptance boundary; promotion changes its priority, not its documen
 
 - **Reusable WAL encoding.** Pool serialization buffers across writes while preserving frame
   atomicity and ensuring a failed append cannot leak bytes into the next frame.
-- **Faster manifest CRC.** Replace byte-at-a-time CRC with a table or hardware-assisted path,
-  retaining byte-identical checksums and malformed-manifest failures.
+- **Faster checksums for every durable file.** One byte-at-a-time CRC serves the manifest,
+  segments, the source sidecar, the WAL, the translog and the control store. Replace it with a
+  table or hardware-assisted path, retaining byte-identical checksums and the malformed-file
+  failures, and stream the segment checksum while writing instead of reading the file back.
+- **Source commits proportional to the change.** A standalone flush, and every bulk load of new
+  ids, still writes the whole source sidecar under the write lock (ADR-200 removed only the
+  writes that changed nothing). Write what changed instead: a base sidecar plus small deltas
+  selected together by the manifest, folded into a new base outside the write lock. Needs a
+  manifest version with a rollback fence, crash-window coverage for the delta and fold commits,
+  and backup support for several selected files.
 - **Profile-gated SIMD.** Evaluate vectorized intersections only when representative profiles are
   dominated by medium or large postings; keep the scalar path when setup cost wins.
 

@@ -11,6 +11,35 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 impl Wal {
+    /// Whether `path` is a log whose header was never completely written: shorter than a
+    /// header, and every byte it does hold is the byte a header this reader supports has
+    /// there.
+    ///
+    /// A log is created, and was once reset, by truncating the file and then writing the
+    /// eight header bytes. A crash between the two left a file like this. It never held a
+    /// record: a creation has none yet, and a reset runs only after the manifest covers
+    /// every record the old log held. So it is an empty log, not a damaged one. A short
+    /// file with any other content is not ours to reinterpret and stays an error.
+    pub(super) fn header_was_interrupted(path: &Path) -> io::Result<bool> {
+        let len = std::fs::metadata(path)?.len();
+        if len >= WAL_HEADER_SIZE as u64 {
+            return Ok(false);
+        }
+        let held = std::fs::read(path)?;
+        // The version bytes changed between releases, so any supported header may have been
+        // the one in progress. A prefix of no supported header (a later format's, or bytes
+        // no header has) is refused like the full header would be.
+        Ok((1..=WAL_VERSION).any(|version| Self::header(version).starts_with(&held)))
+    }
+
+    /// The eight bytes that open a log of format `version`.
+    pub(super) fn header(version: u32) -> [u8; WAL_HEADER_SIZE] {
+        let mut header = [0u8; WAL_HEADER_SIZE];
+        header[..WAL_MAGIC.len()].copy_from_slice(&WAL_MAGIC);
+        header[WAL_MAGIC.len()..].copy_from_slice(&version.to_le_bytes());
+        header
+    }
+
     /// Validate every complete record before permitting any repair or append.
     pub(super) fn read_entries(path: &Path) -> io::Result<(FrameScan<WalEntry>, u32)> {
         let data = std::fs::read(path)?;
@@ -42,6 +71,12 @@ impl Wal {
     /// Return only records after the last materialized FlushCheckpoint. Unknown
     /// or malformed complete frames are errors, not an implicitly discarded tail.
     pub fn recover(path: &Path) -> io::Result<WalRecovery> {
+        if Self::header_was_interrupted(path)? {
+            return Ok(WalRecovery {
+                entries: Vec::new(),
+                skipped_bytes: 0,
+            });
+        }
         let (scan, _) = Self::read_entries(path)?;
         let all = scan.records;
         let last_checkpoint_idx = all

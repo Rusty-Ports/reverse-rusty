@@ -28,7 +28,7 @@ failure class. "Crash" = the process dies (OOM-kill, SIGKILL, node reboot with t
 | In-process cluster | volume loss | since the last backup | restore + restart |
 | Remote (Compose/Helm), RF=1 | shard pod crash | **0** (per-shard translog + committed segments, including successfully recovered targets; ADR-039/181) | pod restart; reads routing to it `502` meanwhile (fail-loud, ADR-072) |
 | Remote, RF=1 | **shard volume loss** | since the last snapshot **of that shard** | §3.1 below |
-| Remote, RF≥2 | one node lost | **0 for reads** (failover to an in-sync replica, ADR-035); writes need the primary | automatic for reads; replica replacement per [runbook §6](cluster-deployment.md) |
+| Remote, RF≥2 | one node lost | **0 for reads when the position has an in-sync replica** (failover, ADR-035); a replica that missed a write, or was not proven equal to its primary when the coordinator connected (ADR-195), is never served, so those reads fail loud (502) instead. Writes need the primary | automatic for reads; `/_health` is yellow and reports `out_of_sync_replicas` while redundancy is reduced; replica recovery per [runbook §6](cluster-deployment.md) |
 | Remote | coordinator crash or restart | **0 acked writes** (it holds no data). A write answered 503 `partial` was never acked: until its writer repeats it, it stays missing from the shards that refused it, because the repair queue is the coordinator's memory (ADR-194) | restart; writers repeat their 503s |
 | Remote | control-plane **minority** loss | 0 (quorum holds; durable Raft, ADR-041) | restart the node; it rejoins |
 | Remote | control-plane **majority** loss | cluster-state document: to the last control-volume snapshot (query data is unaffected — it lives on the shards) | §3.2 below |

@@ -449,6 +449,7 @@ mod read_admission;
 mod reassign;
 mod rebalance;
 mod reconcile;
+mod request_limit;
 mod resize;
 mod resync;
 mod settings_read;

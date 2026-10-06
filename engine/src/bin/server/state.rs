@@ -474,3 +474,6 @@ pub(crate) async fn request_id_middleware<S: RequestCtx>(
     }
     response
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;

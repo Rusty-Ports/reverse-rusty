@@ -184,6 +184,7 @@ fn probe_actual_dict_fingerprint(
 
 mod add_shard;
 mod adopt;
+mod bulk_load;
 mod call;
 mod connect;
 mod ingest_chunks;

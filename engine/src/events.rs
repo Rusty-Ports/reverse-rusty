@@ -32,9 +32,12 @@ pub enum DurabilityOp {
     /// Writing the post-flush WAL checkpoint marker failed. Benign: the next
     /// recovery simply replays from an earlier point.
     WalCheckpoint,
-    /// Truncating/resetting the WAL after a successful checkpoint failed. Benign:
+    /// Resetting the WAL after a successful checkpoint failed. The log is reset by
+    /// renaming an empty one over it (ADR-198). A failure before that rename is benign:
     /// the WAL keeps already-checkpointed entries that the next recovery re-applies
-    /// idempotently.
+    /// idempotently, and keeps taking writes. A failure after it also disables appends
+    /// until a reopen, which each refused write then reports as `WalAppend`. The cluster
+    /// coordinator reuses this op for its own log truncation, where it is always benign.
     WalReset,
     /// Writing a segment file to disk failed; the engine fell back to an
     /// in-memory segment (`build_*`/`bulk_ingest` instead roll the batch back).
@@ -196,6 +199,16 @@ pub enum EngineEvent {
         /// Total base segment count after compaction.
         base_segments_after: usize,
         /// Wall-clock seconds spent merging the selected range of base segments.
+        duration_secs: f64,
+    },
+
+    /// The whole source corpus was written to a sidecar file: every live document, whatever
+    /// the size of the change that caused it. A commit that changes only the segment
+    /// registry writes none (ADR-200).
+    SourceCommit {
+        /// Size of the file written.
+        bytes: u64,
+        /// Wall-clock seconds spent building, checksumming and syncing the file.
         duration_secs: f64,
     },
 

@@ -163,6 +163,8 @@ Current pinned captures:
 | Historical 1M component capture, resident source | source ~113.5 B/query; dict ~4.9 B/query | — | illustrates why source policy is the first sizing choice |
 
 These are engine-reported/accounted bytes for the named workloads, not a promise about process RSS.
+The CI regression baseline covers only the opt-in `retain_source=false` profile; the default
+profile (`retain_source=true`, resident source) is measured in the historical rows and is not gated.
 Allocator overhead, mmap residency, filesystem page cache, source/explain access, tags, predicates,
 and lane mix still consume real host memory. Durable bytes include source/file-format data and must be
 measured independently from resident memory.

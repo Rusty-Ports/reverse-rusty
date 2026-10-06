@@ -112,3 +112,10 @@
   checks); a deadline through `trait Shard::percolate_filtered`; cross-request QoS /
   bounded-queue-429; runtime resize of the permit count; arming implicit-default-timeout
   requests.
+
+## Later outcome — 2026-10-06
+
+The context says the tower `ConcurrencyLimit(256)` "caps HTTP requests of every kind". It caps
+each endpoint separately; there is no server-wide request cap.
+[ADR-199](adr-199-request-limit-per-endpoint.md) keeps it that way on purpose. The match-pool
+bound this ADR added is unchanged, and remains the bound on concurrent match work.

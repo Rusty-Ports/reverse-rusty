@@ -491,8 +491,10 @@ pub struct Engine {
     /// write mutex (ADR-016).
     vocab: Option<Arc<crate::vocab::Vocab>>,
     /// Feature dictionary. `Arc` so a snapshot shares it; writers take a
-    /// copy-on-write handle via `Arc::make_mut` (the dict is O(vocab), which
-    /// saturates, so the occasional CoW clone is bounded — not O(corpus)).
+    /// copy-on-write handle via `Arc::make_mut`. That clone costs O(dict), and the
+    /// dict grows with the number of distinct features: in the synthetic captures
+    /// it grew about as fast as the corpus, so the clone is not bounded by a fixed
+    /// vocabulary.
     dict: Arc<Dict>,
     /// Per-query metadata tag dictionary (ADR-049). `Arc` + CoW exactly like `dict`:
     /// a snapshot shares it; a tagged write interns new `(key,value)`s via
@@ -577,6 +579,12 @@ pub struct Engine {
     /// must restore the selected corpus before any later manifest can replace it
     /// with an accidentally partial snapshot.
     source_commit_state: SourceCommitState,
+    /// The [`SourceStore::content_version`] at which the manifest-selected sidecar was
+    /// known to hold exactly the store's documents (ADR-200). `None` when that is not
+    /// known: no sidecar has been written, or the store has documents it does not hold. A
+    /// commit that finds the store at this version selects the same file again instead of
+    /// writing the corpus out a second time.
+    selected_source_version: Option<u64>,
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,

@@ -63,10 +63,15 @@ use super::shard::{apply_mutation, EventSink, LocalShard, Shard, ShardError};
 struct ReplicaSlot {
     shard: Box<dyn Shard>,
     /// Cleared when a replicated op to this replica failed: it may be missing a write, so
-    /// reads must NOT fail over to it (a stale read would be a silent false negative). Reset
-    /// only by a (future) peer re-recovery.
+    /// reads must NOT fail over to it (a stale read would be a silent false negative). A remote
+    /// replica also starts cleared when it could not be proven equal to its primary at connect
+    /// (ADR-195). Nothing sets it again at runtime.
     in_sync: AtomicBool,
 }
+
+/// What is known about a replica when its composite is assembled: `Ok` when it holds exactly
+/// what its primary holds, `Err` with the reason when that could not be established.
+pub(crate) type ReplicaProof = Result<(), String>;
 
 /// A [`Shard`] composite: one primary + N replicas for a single shard position.
 pub(crate) struct ReplicatedShard {
@@ -91,12 +96,40 @@ impl ReplicatedShard {
     /// Wrap a primary + replicas. RF = 1 + `replicas.len()`. All copies must already be
     /// set-equal (seeded with the same op stream, or peer-recovered from the primary).
     pub(crate) fn new(primary: Box<dyn Shard>, replicas: Vec<Box<dyn Shard>>) -> Self {
+        Self::with_proofs(
+            primary,
+            replicas.into_iter().map(|shard| (shard, Ok(()))).collect(),
+        )
+    }
+
+    /// Wrap a primary + replicas whose equality with the primary the caller has checked
+    /// (ADR-195). A replica without a proof starts out of the in-sync set: reads never fail over
+    /// to it and writes are not fanned to it, exactly as if a replicated op to it had failed.
+    /// Each such replica is reported as a `ReplicaDesync` event once the coordinator installs
+    /// its observer.
+    pub(crate) fn with_proofs(
+        primary: Box<dyn Shard>,
+        replicas: Vec<(Box<dyn Shard>, ReplicaProof)>,
+    ) -> Self {
+        let mut unproven = Vec::new();
         let replicas = replicas
             .into_iter()
-            .map(|shard| {
+            .enumerate()
+            .map(|(copy, (shard, proof))| {
+                if let Err(reason) = &proof {
+                    unproven.push(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::ReplicaDesync,
+                        detail: format!(
+                            "replica {copy} starts outside the in-sync set: it was not proven \
+                             equal to its primary at connect; redundancy reduced until it is \
+                             recovered from the primary"
+                        ),
+                        error: reason.clone(),
+                    });
+                }
                 Arc::new(ReplicaSlot {
                     shard,
-                    in_sync: AtomicBool::new(true),
+                    in_sync: AtomicBool::new(proof.is_ok()),
                 })
             })
             .collect();
@@ -105,8 +138,16 @@ impl ReplicatedShard {
             replicas: Mutex::new(replicas),
             write_lock: Mutex::new(()),
             event_sink: Mutex::new(None),
-            pending_events: Mutex::new(Vec::new()),
+            pending_events: Mutex::new(unproven),
         }
+    }
+
+    /// How many replicas are outside the in-sync set.
+    fn out_of_sync(&self) -> usize {
+        self.replica_handles()
+            .iter()
+            .filter(|slot| !slot.in_sync.load(Ordering::Acquire))
+            .count()
     }
 
     /// Snapshot-clone the current replica handles (cheap `Arc` clones) so a read/fan-out can work

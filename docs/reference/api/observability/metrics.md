@@ -24,8 +24,10 @@ by `--auth-protect-reads` before collection begins. Since the registry is gather
 current response is finalized, a scrape reports completed earlier scrapes, not itself.
 
 The exposition includes engine gauges, event counters, per-endpoint HTTP latency, an
-in-flight-request gauge, WAL size/pending gauges, cumulative flush/compaction-time counters, a
-`durability_failures_total{op}` counter (ADR-021), and — when bearer-token auth is enabled — an
+in-flight-request gauge, WAL size/pending gauges, cumulative flush/compaction-time counters,
+`source_commits_total`, `source_commit_bytes_total` and `source_commit_time_seconds_total` for
+complete writes of the stored-document sidecar (which `flush_time_seconds_total` does not
+include, ADR-200), a `durability_failures_total{op}` counter (ADR-021), and — when bearer-token auth is enabled — an
 `auth_failures_total{reason="missing"|"invalid"}` counter for rejected requests (ADR-062).
 
 Standalone collection refreshes engine gauges from one lock-free snapshot. In

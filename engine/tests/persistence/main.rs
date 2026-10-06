@@ -20,3 +20,4 @@ mod sources;
 mod tombstone_durability;
 mod upsert;
 mod wal;
+mod wal_reset;

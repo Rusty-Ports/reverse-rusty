@@ -84,3 +84,9 @@
   source-write failure preserving the prior manifest, recompile failure preserving a later logical
   delete in the WAL, and later live/bulk source ordering. Manifest tests pin v7 round-trip, rollback
   version, and basename validation; backup tests require and copy only the selected generation.
+
+## Later outcome — 2026-10-06
+
+A commit no longer writes a new sidecar when the selected one already holds exactly the store's
+documents ([ADR-200](adr-200-keep-an-exact-source-sidecar.md)). The joint selection is
+unchanged: such a commit selects the same sidecar again in the manifest it writes.
