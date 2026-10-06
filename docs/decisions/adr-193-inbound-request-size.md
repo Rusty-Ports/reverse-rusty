@@ -30,7 +30,10 @@ limit: the gRPC oracle loads 4,000 queries, and the scale soak builds in-process
    and then its checkpoint sidecar. The budget is below tonic's default, so no node setting
    bounds a load. A replica receives the bucket through the same client. A single query that
    exceeds the budget on its own fails before anything is sent, naming the query. The load's
-   deadline is one write timeout per message plus one for the node to finish.
+   deadline is one write timeout per message plus one for the node to finish. A node that
+   restarted since the coordinator connected refuses the stream for a lease it no longer
+   holds; the load reclaims the lease and sends the bucket once more, as a unary write does.
+   The node checks the lease before any handler runs, so the refused call applied nothing.
 2. **A shard node's inbound limit is a named setting.** `shardserver
    --max-grpc-request-bytes` (default 64 MiB) is applied as the service's decode limit. It
    bounds the dictionary a coordinator can ship, and what one caller can make the node buffer.
@@ -68,8 +71,9 @@ limit: the gRPC oracle loads 4,000 queries, and the scale soak builds in-process
 - A bulk load that fails part-way leaves the rows it had sealed in the slot's memory, outside
   the slot's checkpoint sidecar and source store. The coordinator already treats a failed bulk
   load as not converged; wipe the shard nodes and load again.
-- The coordinator's `ingest` transport metric is one call per bucket, as it was. The node's
-  `ingest` latency histogram times the unary RPC only, which this coordinator no longer sends.
+- The coordinator's `ingest` transport metric is one call per bucket, as it was. The node times
+  a staged load as the slot's `ingest` latency, so that histogram now also covers a resize
+  target's load.
 - The unary `IngestExtracted` RPC stays for a coordinator that predates this change.
 - Dictionaries up to the configured limit can be adopted. Past it the operator gets a message
   naming the flag. Shard nodes that predate this change still refuse a dictionary over 4 MiB:
@@ -86,9 +90,15 @@ limit: the gRPC oracle loads 4,000 queries, and the scale soak builds in-process
   and re-adopted by a second connect to the populated node; a dictionary above a node's limit
   is refused with a configuration error that names `--max-grpc-request-bytes` and the limit.
   The bulk load and the dictionary adoption failed with `OutOfRange` before this change.
-- `cluster/remote/ingest_chunks.rs`: every message stays within the budget, order is kept,
-  messages are filled before a new one starts, an empty batch is one empty message, an item
-  above the budget is refused by id, and pre-resolved tag ids are refused.
+- `cluster/remote/ingest_chunks.rs`: every message stays within the budget as a whole
+  request, order is kept, messages are filled before a new one starts, an empty batch is one
+  empty message, an item above the budget is refused by id, and pre-resolved tag ids are
+  refused.
+- `cluster/server/tests/stage_ingest.rs`: a bulk load sent to a node that no longer holds the
+  coordinator's lease reclaims it and loads the bucket. `cluster/remote/stage_ingest.rs`: the
+  retry is taken once, only for a lost lease, and only by a client that can claim.
+- `tests/cluster_grpc_oracle/transport.rs`: the node's `ingest` count still equals the
+  coordinator's.
 - `cluster/server/tests/stage_ingest.rs` (ADR-180) already proves the node's half: segments of
   the flush threshold, the source store written once when the stream closes, compaction to
   the policy, and a failed sidecar write failing the load.

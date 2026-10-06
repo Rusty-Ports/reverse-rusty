@@ -49,13 +49,20 @@ pub(super) fn bounded_requests(
 /// a length prefix of up to five bytes.
 const ITEM_FRAMING_BYTES: usize = 1 + 5;
 
-/// Split `items` into consecutive groups whose encoded size stays within `budget`. Order is
-/// preserved, so applying the groups in turn is applying the bucket. An item that exceeds
-/// the budget on its own cannot be sent in any group, and fails here with its id.
+/// What a request costs beyond its items: the `shard_id` field's tag and a varint of up to
+/// five bytes.
+const REQUEST_ENVELOPE_BYTES: usize = 1 + 5;
+
+/// Split `items` into consecutive groups, each of which encodes, as a whole request, to at
+/// most `budget` bytes. Order is preserved, so applying the groups in turn is applying the
+/// bucket. An item that exceeds the budget on its own cannot be sent in any group, and fails
+/// here with its id.
 fn split_by_encoded_size(
     items: Vec<proto::AddItem>,
     budget: usize,
 ) -> Result<Vec<Vec<proto::AddItem>>, ShardError> {
+    let request_bytes = budget;
+    let budget = budget.saturating_sub(REQUEST_ENVELOPE_BYTES);
     let mut groups: Vec<Vec<proto::AddItem>> = Vec::new();
     let mut current: Vec<proto::AddItem> = Vec::new();
     let mut current_bytes = 0usize;
@@ -64,7 +71,7 @@ fn split_by_encoded_size(
         if item_bytes > budget {
             return Err(ShardError::Config(format!(
                 "query {} encodes to {item_bytes} bytes, more than one bulk-ingest request \
-                 may carry ({budget} bytes); it cannot be loaded in bulk",
+                 may carry ({request_bytes} bytes); it cannot be loaded in bulk",
                 item.logical_id
             )));
         }
@@ -130,7 +137,8 @@ mod tests {
     fn groups_are_filled_before_a_new_one_starts() {
         let one = encoded_len(&item(1, 100)) + ITEM_FRAMING_BYTES;
         let items: Vec<_> = (0..10).map(|id| item(id, 100)).collect();
-        let groups = split_by_encoded_size(items, one * 4).expect("split");
+        let groups =
+            split_by_encoded_size(items, one * 4 + super::REQUEST_ENVELOPE_BYTES).expect("split");
         let sizes: Vec<usize> = groups.iter().map(Vec::len).collect();
         assert_eq!(sizes, vec![4, 4, 2]);
     }
@@ -210,6 +218,30 @@ mod tests {
         )])
         .expect_err("refused");
         assert!(error.to_string().contains("tag ids"), "{error}");
+    }
+
+    /// The budget is for the request the node decodes, so the largest item it admits has to
+    /// leave room for the request's own field.
+    #[test]
+    fn the_largest_item_that_fits_still_fits_as_a_whole_request() {
+        let budget = 1_000;
+        let (dsl_len, groups) = (0..=budget)
+            .rev()
+            .find_map(|dsl_len| {
+                split_by_encoded_size(vec![item(1, dsl_len)], budget)
+                    .ok()
+                    .map(|groups| (dsl_len, groups))
+            })
+            .expect("some item fits");
+        assert!(
+            split_by_encoded_size(vec![item(1, dsl_len + 1)], budget).is_err(),
+            "this is the largest item the budget admits"
+        );
+        let encoded = request_bytes(&groups[0]);
+        assert!(
+            encoded <= budget,
+            "a request of {encoded} bytes exceeds the {budget}-byte budget"
+        );
     }
 
     #[test]
