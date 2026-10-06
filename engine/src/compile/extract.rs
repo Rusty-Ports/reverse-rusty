@@ -262,7 +262,8 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
         forbidden_phrases,
     };
     // Apply learned equivalences (ADR-054). No-op unless a vocabulary installed them on the
-    // dict; FN-safe (the match set only grows). See `Extracted::expand_equivalences`.
+    // dict; FN-safe (the accepted set only grows, and `anchor_plan`'s any-of cover keeps the
+    // expanded query default-visible, ADR-187). See `Extracted::expand_equivalences`.
     out.expand_equivalences(dict.equivalences());
     out
 }

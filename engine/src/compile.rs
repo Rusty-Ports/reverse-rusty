@@ -278,7 +278,11 @@ impl Extracted {
     /// Because this only ever WIDENS the accepted positive feature set, the query's match
     /// set can only grow — it can never drop a true match, so it **cannot introduce a false
     /// negative**; a wrong/low-confidence equivalence degrades to a bounded false positive
-    /// (the cardinal-sin-free failure mode this engine is built around). A no-op when
+    /// (the cardinal-sin-free failure mode this engine is built around). That is a claim
+    /// about what the query ACCEPTS. Moving a required feature into a group also changes
+    /// which anchors are available, so default visibility is kept separately: `anchor_plan`
+    /// anchors on the new group when the remaining required feature is top-64, and a
+    /// rebuild keeps a stored default-visible query visible (ADR-187). A no-op when
     /// `equiv` is empty, so the default path is byte-identical. Idempotent.
     pub fn expand_equivalences(&mut self, equiv: &crate::dict::EquivMap) {
         if equiv.is_empty() {
@@ -523,6 +527,23 @@ pub struct SigPlan {
     /// itself is the signal — `class_counts()[4]`). Purely observational:
     /// nothing reads it on the match path.
     pub would_be_hot: bool,
+}
+
+impl SigPlan {
+    /// Keep a query that default reads already return on an always-probed lane.
+    ///
+    /// A class-C plan anchors arity-1 on top-64 features in the opt-in broad lane.
+    /// The main lane is probed arity-1 with every title feature too, so the same
+    /// signatures are an equally lossless cover there: the query stays visible and
+    /// pays for it with a fat main posting. This is the state a query compiled
+    /// before the first mask finalize is already in once its anchor turns top-64.
+    /// A class-D plan has no positive anchor to move and is left alone.
+    pub(crate) fn pin_visible(&mut self) {
+        if self.class == CostClass::C {
+            self.main_sigs.append(&mut self.broad_sigs);
+            self.class = CostClass::B;
+        }
+    }
 }
 
 /// The pre-hash form of a [`SigPlan`]: the actual *feature groups* the lossless

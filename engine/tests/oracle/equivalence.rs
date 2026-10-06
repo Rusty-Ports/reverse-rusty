@@ -57,7 +57,9 @@ fn equivalence_expansion_grows_matches_and_is_fn_safe() {
 
 /// The structural safety claim for expansion (ADR-054): even a WRONG (nonsense) equivalence
 /// can only add false positives — it must NEVER drop a true match. We apply a garbage
-/// equivalence and assert every match the ORIGINAL (unexpanded) queries had still survives.
+/// equivalence and assert every match the ORIGINAL (unexpanded) queries had still survives,
+/// in BOTH read modes: with the broad lane, and on the default read, where an expansion that
+/// leaves a query only a top-64 anchor used to hide it (ADR-187).
 #[test]
 fn wrong_equivalence_never_causes_false_negatives() {
     use reverse_rusty::vocab::Vocab;
@@ -80,12 +82,36 @@ fn wrong_equivalence_never_causes_false_negatives() {
         queries.push((9_000_000 + i, format!("wibble u{i}")));
         queries.push((9_100_000 + i, format!("wobble u{i}")));
     }
+    // The shape the default read used to lose: anchored on the rare aliased term, with a
+    // top-64 term (`standard`) as the only other requirement.
+    let mixed = 9_200_000u64;
+    queries.push((mixed, "wibble standard".to_string()));
+    let mut titles = data.titles.clone();
+    titles.push("wibble standard edition".to_string());
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
 
     // Ground truth under the ORIGINAL semantics (no equivalence).
     let brute = Brute::build(&queries);
+    let default_reads = |eng: &Engine| -> Vec<HashSet<u64>> {
+        let mut s = MatchScratch::new();
+        let mut out = Vec::new();
+        titles
+            .iter()
+            .map(|title| {
+                eng.match_title(title, &mut s, &mut out, false);
+                out.iter().copied().collect()
+            })
+            .collect()
+    };
+    let default_before = default_reads(&eng);
+    assert!(
+        default_before
+            .last()
+            .is_some_and(|set| set.contains(&mixed)),
+        "precondition: the mixed query is default-visible before the equivalence"
+    );
 
     // Apply a nonsense equivalence and recompile.
     let mut v = Vocab::new();
@@ -99,7 +125,7 @@ fn wrong_equivalence_never_causes_false_negatives() {
     let mut bfeats = Vec::new();
     let mut false_neg = 0usize;
     let mut total_truth = 0usize;
-    for title in &data.titles {
+    for title in &titles {
         eng.match_title(title, &mut s, &mut out, true);
         let engine_set: HashSet<u64> = out.iter().copied().collect();
         let truth = brute.matches(title, &mut blc, &mut bfeats); // original semantics
@@ -115,6 +141,15 @@ fn wrong_equivalence_never_causes_false_negatives() {
         "expansion of a WRONG equivalence must never drop a true match (structural FN-safety)"
     );
     assert!(total_truth > 0, "degenerate test: no matches");
+
+    let default_after = default_reads(&eng);
+    for ((title, before), after) in titles.iter().zip(&default_before).zip(&default_after) {
+        let hidden: Vec<_> = before.difference(after).collect();
+        assert!(
+            hidden.is_empty(),
+            "the equivalence removed {hidden:?} from the default read of {title:?}"
+        );
+    }
 }
 
 /// The learned source end-to-end (ADR-054): `learn_and_apply_with(learn_equivalences=true)`

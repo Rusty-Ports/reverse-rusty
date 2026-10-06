@@ -179,3 +179,87 @@ fn migration_interns_features_exposed_by_splitting_the_legacy_stream() {
     drop(reopened);
     std::fs::remove_dir_all(dir).expect("cleanup");
 }
+
+fn default_read(engine: &Engine, title: &str) -> Vec<u64> {
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+    engine.match_title(title, &mut scratch, &mut out, false);
+    out.sort_unstable();
+    out
+}
+
+/// The version-7 rebuild (ADR-187) re-plans every stored query. It must add
+/// default visibility where the new any-of cover applies and take none away:
+/// a query default reads return stays visible even when a fresh compile of it
+/// would be opt-in, because its only term turned top-64 after it was compiled.
+#[test]
+fn semantics_seven_rebuild_adds_visibility_and_never_removes_it() {
+    let dir = scratch_dir();
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        auto_compact_on_flush: false,
+        auto_compact_on_ingest: false,
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(
+            Normalizer::default_vocab().expect("normalizer"),
+            config.clone(),
+        );
+        // Compiled before the first mask finalize: main lane.
+        engine.insert_live("hotword", 1, 1);
+        engine.flush();
+        // Finalizes the mask with `hotword` in the top 64.
+        let batch: Vec<(u64, String)> = (0..200u64)
+            .map(|i| (1_000 + i, format!("hotword filler{i}")))
+            .collect();
+        engine.bulk_ingest(&batch);
+        // Compiled now: only a top-64 anchor, opt-in.
+        engine.insert_live("hotword", 2, 1);
+        engine.insert_live("hotword", 3, 1);
+        engine.flush();
+        assert_eq!(default_read(&engine, "hotword title"), vec![1]);
+
+        // Row 3 stands in for a version-6 materialization of a query with a
+        // selective any-of group: stored opt-in, anchored on the top-64 term.
+        let source = engine
+            .snapshot()
+            .get_query_document(3)
+            .expect("source metadata");
+        engine.query_store.insert_document_with_generation(
+            3,
+            "hotword (acme, zenith)".to_string(),
+            source.version(),
+            source.source_generation(),
+            source.tags(),
+        );
+        engine.save_query_sources();
+    }
+    let manifest = crate::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &manifest.segment_files {
+        stamp_semantics(
+            &dir.join("segments").join(name),
+            crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION - 1,
+        );
+    }
+
+    let reopened = Engine::open(Normalizer::default_vocab().expect("normalizer"), config)
+        .expect("source-driven migration");
+    assert!(reopened.segments.iter().all(|segment| {
+        segment.compiler_semantics_version() == crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION
+    }));
+    assert_eq!(
+        default_read(&reopened, "hotword title"),
+        vec![1],
+        "the rebuild keeps the visible query visible and the opt-in one opt-in"
+    );
+    assert_eq!(
+        default_read(&reopened, "hotword acme"),
+        vec![1, 3],
+        "the any-of cover makes the mixed query default-visible"
+    );
+    assert!(matches(&reopened, "hotword title", 2), "nothing is lost");
+
+    drop(reopened);
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}
