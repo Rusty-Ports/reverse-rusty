@@ -462,6 +462,17 @@ impl ClusterEngine {
         self.ring.num_shards()
     }
 
+    /// How many replicas, across all positions, reads may not fail over to: a replicated write
+    /// to them failed, or they were not proven equal to their primary at connect (ADR-195).
+    /// Redundancy is reduced by that many copies until they are recovered. 0 without replicas.
+    #[must_use]
+    pub fn out_of_sync_replicas(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.out_of_sync_replicas())
+            .sum()
+    }
+
     /// A point-in-time snapshot of the cluster gRPC transport metrics (ADR-085): per-RPC
     /// call counts, errors, timeouts, retries, and summed latency. All-zero for an
     /// in-process cluster (no remote RPCs). Off the hot path — introspection / scraping.

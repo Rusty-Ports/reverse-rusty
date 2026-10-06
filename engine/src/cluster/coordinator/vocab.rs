@@ -136,7 +136,7 @@ impl ClusterEngine {
         //    new manifest (re-minted dict + serialized vocab + green segment registry — the atomic
         //    commit point), truncate the log, and GC the superseded old segment files.
         if self.data_dir.is_some() {
-            self.checkpoint()?;
+            self.checkpoint_quiesced()?;
         }
         Ok(rebuilt)
     }
@@ -352,7 +352,7 @@ impl ClusterEngine {
                 self.epoch.store(manifest.epoch, Ordering::Relaxed);
                 self.record_committed_manifest(*manifest);
             }
-            AliasImportManifestState::ImmediatePredecessor => self.checkpoint()?,
+            AliasImportManifestState::ImmediatePredecessor => self.checkpoint_quiesced()?,
         }
         self.clear_pending_alias_import_identity();
         Ok(())

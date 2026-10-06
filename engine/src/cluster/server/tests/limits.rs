@@ -15,6 +15,25 @@ fn grpc_result_cap_can_only_be_lowered_within_static_bounds() {
     assert!(server.with_max_grpc_result_bytes(1).is_ok());
 }
 
+/// The inbound request limit may be raised above tonic's default (ADR-193), unlike the result
+/// cap, but it cannot be zero: a node that decodes nothing serves nothing.
+#[test]
+fn grpc_request_limit_is_any_positive_size() {
+    let n = norm();
+    let server = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    assert!(server.with_max_grpc_request_bytes(0).is_err());
+
+    let server = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    assert_eq!(
+        server.max_grpc_request_bytes,
+        super::super::DEFAULT_MAX_GRPC_REQUEST_BYTES
+    );
+    let server = server
+        .with_max_grpc_request_bytes(1 << 30)
+        .expect("a limit above the default is allowed");
+    assert_eq!(server.max_grpc_request_bytes, 1 << 30);
+}
+
 /// A node admits at most `max_concurrent_exhaustive_streams` workers, and a worker keeps its
 /// permit for the whole stream.
 ///

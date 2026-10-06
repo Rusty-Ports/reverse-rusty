@@ -366,7 +366,7 @@ pub(crate) fn spin_three_servers(
 }
 
 /// The writer's per-add loop: an add routes to position 0's CURRENT backing (source pre-flip, target
-/// post-flip) and is briefly REJECTED in the fence→flip window (durably logged + queued for repair).
+/// post-flip) and is briefly REJECTED in the fence→flip window (queued for repair on this coordinator).
 pub(crate) fn stream_add(cluster: &ClusterEngine, id: u64, dsl: &str) {
     loop {
         match cluster.add_query(id, dsl) {

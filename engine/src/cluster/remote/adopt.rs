@@ -175,6 +175,7 @@ impl RemoteShard {
             num_shards,
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
         };
+        let request_bytes = reverse_rusty_shard_proto::encoded_len(&req);
         let (
             adopted,
             adopted_tag,
@@ -220,6 +221,16 @@ impl RemoteShard {
                     }
                 }
                 return Err(ShardError::Remote(format!("adopt_dict: {status}")));
+            }
+            // The dictionary is one message, and the node refused its size (ADR-193). Say
+            // what to change instead of passing on a transport error.
+            Err(status) if status.code() == tonic::Code::OutOfRange => {
+                return Err(ShardError::Config(format!(
+                    "the dictionary request to {endpoint} is {request_bytes} bytes, more than \
+                     that shard node accepts ({}). Raise `shardserver \
+                     --max-grpc-request-bytes` on every shard node",
+                    status.message()
+                )));
             }
             Err(status) => return Err(ShardError::Remote(format!("adopt_dict: {status}"))),
         };

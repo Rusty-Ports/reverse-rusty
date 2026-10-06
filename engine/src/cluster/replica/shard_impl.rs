@@ -229,6 +229,45 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.live_sources())
     }
 
+    /// Every copy is marked: the mark is about what a copy holds on its own disk, and any
+    /// copy can be the one a later coordinator reads. The marks are cleared only when every
+    /// copy took the load. A replica that refused its bucket was dropped from the in-sync
+    /// set while the load itself went on, so clearing its mark would leave nothing that
+    /// remembers it holds less than its primary: the load is reported unfinished instead,
+    /// and no mark of this position is cleared.
+    fn set_bulk_load_incomplete(&self, incomplete: bool) -> Result<(), ShardError> {
+        let _g = self.lock();
+        let replicas = self.replica_handles();
+        if !incomplete {
+            if let Some(copy) = replicas
+                .iter()
+                .position(|slot| !slot.in_sync.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Err(ShardError::Remote(format!(
+                    "replica {copy} did not take the bulk load, so the load is not complete on \
+                     every copy"
+                )));
+            }
+        }
+        self.primary.set_bulk_load_incomplete(incomplete)?;
+        for slot in replicas {
+            slot.shard.set_bulk_load_incomplete(incomplete)?;
+        }
+        Ok(())
+    }
+
+    fn bulk_load_incomplete(&self) -> Result<bool, ShardError> {
+        if self.primary.bulk_load_incomplete()? {
+            return Ok(true);
+        }
+        for slot in self.replica_handles() {
+            if slot.shard.bulk_load_incomplete()? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
         // Replicas are set-equal; avoid copying source text while rebuilding the
         // coordinator's compact admission directory on durable open.
@@ -505,5 +544,9 @@ impl Shard for ReplicatedShard {
             .event_sink
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(sink);
+    }
+
+    fn out_of_sync_replicas(&self) -> usize {
+        self.out_of_sync()
     }
 }

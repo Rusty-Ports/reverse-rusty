@@ -159,6 +159,19 @@ put_doc() { # id dsl -> http code
     -d "$(jq -nc --arg q "$2" '{query:$q}')"
 }
 
+# A document write as a client has to make it (ADR-194): a write that not every shard took
+# answers 503 "partial" and is NOT acknowledged, so it is repeated until a 2xx. Bounded, so a
+# leg whose shard never comes back still ends. Prints the last status code.
+put_doc_until_stored() { # id dsl -> http code
+  local code=""
+  for _ in $(seq 1 "${RR_HARNESS_WRITE_RETRIES:-80}"); do
+    code=$(put_doc "$1" "$2")
+    [[ "$code" == "201" || "$code" == "200" ]] && break
+    sleep 0.25
+  done
+  echo "$code"
+}
+
 snapshot_baseline() { # writes one result per probe to the named file
   local file=$1 r
   : > "$file"
@@ -191,7 +204,8 @@ wait_for_green() { # label
 # Converge queued partial-apply repairs (ADR-047). /_health stays YELLOW (not green)
 # while any repair is pending, so every leg that can leave one — a shard killed
 # mid-write, or a write that reaches a handoff source just as it is fenced — must
-# resync BEFORE its green gate. The retry loop also rides out a restarting node: a
+# resync BEFORE its green gate. (A writer's own retry converges its id; this covers a
+# write that gave up, and any upsert whose clean-up of an old copy was deferred.) The retry loop also rides out a restarting node: a
 # resync only converges once its target is reachable again. Leaves the last response
 # in RESYNC.
 RESYNC=""
@@ -272,16 +286,16 @@ step "leg 3b — SIGKILL a shard MID-WRITE: every acknowledged in-flight write s
 # The single-node real-SIGKILL crash suite (engine/tests/crash_injection, ADR-088)
 # proves an acked write survives a kill BETWEEN ops; this is its cluster analogue —
 # kill a shard while writes are STREAMING through it. A write that routed to the dead
-# shard returns 200 "partial" (durably logged at the coordinator + queued for repair,
-# ADR-047); one that applied cleanly returns 201. EVERY acknowledged (2xx) id must be
-# matchable after the shard restarts and we converge the queued repairs with
-# /_cluster/resync — zero false negatives across a real kill mid-write.
+# shard returns 503 "partial" (not acknowledged; queued for repair in the coordinator's
+# memory, ADR-194) and its writer repeats it until the shard is back; one that applied
+# cleanly returns 201. EVERY acknowledged (2xx) id must be matchable after the shard
+# restarts — zero false negatives across a real kill mid-write.
 kw="$WORK/killwrite"
 : > "$kw.accepted"
 (
-  set +e # a write landing in the dead window may fail; record only the acknowledged ones
+  set +e # a write landing in the dead window fails and is repeated; record the acknowledged ones
   for i in $(seq 0 199); do
-    code=$(put_doc $((9300 + i)) "zzkill$i unique$i")
+    code=$(put_doc_until_stored $((9300 + i)) "zzkill$i unique$i")
     [[ "$code" == "201" || "$code" == "200" ]] && echo "$((9300 + i))" >> "$kw.accepted"
     sleep 0.05
   done
@@ -290,10 +304,10 @@ kw_pid=$!
 sleep 1.5 # let a batch of writes land cleanly before the kill
 docker kill -s KILL "$(compose ps -q shard0)" >/dev/null
 echo "    SIGKILLed shard0 mid-write loop"
-sleep 2 # a window of writes streams at the dead shard (logged + queued, ADR-047)
+sleep 2 # a window of writes streams at the dead shard (each answered 503 and repeated)
 compose start shard0 >/dev/null # restart promptly, while the writer is still streaming
 wait "$kw_pid" # the writer finishes its loop across the kill + restart
-# Converge the partial-applies that queued while shard0 was down (ADR-047 repair path)
+# Converge whatever is still queued from the window shard0 was down (ADR-047 repair path)
 # before the green gate; the retry loop rides out shard0's restart.
 converge_repairs "after mid-write kill"
 wait_for_green "after mid-write kill"
@@ -315,9 +329,9 @@ echo "    $accepted acked writes; zero FN after kill+restart+resync ($RESYNC); p
 step "leg 4 — explicit uncommitted live handoff under load (position 1: shard1 → target)"
 writer_log="$WORK/writer.log"
 : > "$writer_log.accepted"
-# A write in the fence window either fails (503) or, when it applied on one shard and
-# reached the fenced source on another, is acknowledged as a 200 "partial" that is durably
-# logged and queued for repair (ADR-047). The window is microseconds wide, so one paced
+# A write in the fence window fails (503), including the case where it applied on one shard
+# and reached the fenced source on another ("partial", ADR-194); its writer repeats it until
+# the position's new owner takes it. The window is microseconds wide, so one paced
 # writer rarely lands in it; RR_HARNESS_WRITERS=8 RR_HARNESS_WRITE_GAP=0.002 keeps several
 # upserts of the same ids in flight across the fence to reproduce it on demand.
 writer_pids=()
@@ -325,7 +339,7 @@ for _ in $(seq 1 "${RR_HARNESS_WRITERS:-1}"); do
   (
     set +e # a fence-window failure must never kill the writer
     for i in $(seq 0 199); do
-      code=$(put_doc $((9100 + i)) "zzload$i unique$i")
+      code=$(put_doc_until_stored $((9100 + i)) "zzload$i unique$i")
       [[ "$code" == "201" || "$code" == "200" ]] && echo "$((9100 + i))" >> "$writer_log.accepted"
       sleep "${RR_HARNESS_WRITE_GAP:-0.05}"
     done

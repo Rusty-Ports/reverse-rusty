@@ -37,6 +37,14 @@ use super::shard::{LocalShard, Shard, ShardError};
 /// cap but ADR-110 deliberately does not permit raising this transport cliff.
 pub const DEFAULT_MAX_GRPC_RESULT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_GRPC_RESULT_BYTES: usize = DEFAULT_MAX_GRPC_RESULT_BYTES;
+/// The largest request a shard node accepts, unless configured otherwise (ADR-193). Tonic's
+/// own default is 4 MiB, which a dictionary outgrows: `AdoptDict` ships the whole dictionary
+/// in one message, at every coordinator connect. Bulk ingest does not depend on this; the
+/// coordinator splits a bucket into requests of [`INGEST_REQUEST_BUDGET_BYTES`].
+pub const DEFAULT_MAX_GRPC_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// The size the coordinator keeps each bulk-ingest request under. Below tonic's 4 MiB default
+/// with room for framing, so a shard node of any version and configuration accepts it.
+pub const INGEST_REQUEST_BUDGET_BYTES: usize = 3 * 1024 * 1024;
 /// Node-local admission for long-running exhaustive shard streams. This is
 /// deliberately independent of the coordinator HTTP job quota because a
 /// shard endpoint can be called by more than one coordinator or directly.
@@ -90,6 +98,10 @@ struct ShardSlot {
     /// Set when this slot was created for a shard the node had dropped (ADR-189): it is empty
     /// by construction, so it serves nothing until `RecoverFrom` installs the owner's data.
     awaiting_recovery: std::sync::atomic::AtomicBool,
+    /// A coordinator began a bulk load into this slot and has not reported it complete
+    /// (ADR-196). A durable node keeps the mark on disk and answers from there; this flag is
+    /// the whole record on a node without a data directory.
+    bulk_load_incomplete: std::sync::atomic::AtomicBool,
 }
 
 impl ShardSlot {
@@ -102,6 +114,7 @@ impl ShardSlot {
             broad: super::node_metrics::SlotBroadCost::new(),
             ranked: super::node_metrics::SlotRankDelivery::new(),
             awaiting_recovery: std::sync::atomic::AtomicBool::new(false),
+            bulk_load_incomplete: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -214,6 +227,8 @@ pub struct ShardServer {
     /// Exact protobuf encoded-result cap for unary result messages and each
     /// `FetchMatches` stream item (ADR-110).
     max_grpc_result_bytes: usize,
+    /// The largest inbound request this node decodes (ADR-193).
+    max_grpc_request_bytes: usize,
     /// One bounded logical-ID snapshot at a time per node, including stream lifetime.
     logical_id_permits: Arc<tokio::sync::Semaphore>,
     /// Node-scope non-queuing admission for `PercolateAll` blocking workers.
@@ -233,6 +248,7 @@ pub struct ShardServer {
     dropped: std::sync::Mutex<dropped::DroppedRecord>,
 }
 
+mod bulk_load;
 mod construct;
 mod dropped;
 mod retirement;

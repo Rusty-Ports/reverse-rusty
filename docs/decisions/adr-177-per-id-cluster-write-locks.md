@@ -48,6 +48,12 @@ Live registrations and wait objects are bounded by currently active mutation cal
 waiters, rather than stored or previously seen IDs. There is no new fixed admission cap: the serving
 layer retains its admission policy, and library embedders control their own concurrent calls.
 
+*Later outcome — 2026-10-06 ([ADR-197](adr-197-checkpoint-excludes-mutations.md)):* "control
+their own concurrent calls" did not cover a checkpoint. `checkpoint`, `flush` and `backup_to`
+took no lock a write takes, so an embedder that checkpointed while writing could lose an
+acknowledged write or leave a cluster that does not reopen. They now exclude mutations
+themselves.
+
 This introduces allocation and short registry work on the mutation path. It removes collision waits
 but does not parallelize actual shared log or shard storage locks. Matching, visibility, ownership,
 WAL/segment formats, wire protocols, and public APIs are unchanged. Rollback needs no migration.

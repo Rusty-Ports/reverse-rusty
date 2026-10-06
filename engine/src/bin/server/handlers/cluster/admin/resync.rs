@@ -2,7 +2,7 @@
 //!
 //! Elasticsearch and OpenSearch expose `/_cluster/reroute?retry_failed=true`
 //! for failed shard *allocation*. Reverse Rusty's queue instead records query
-//! mutations that were durably logged but reached only some target positions.
+//! mutations that reached only some target positions (their writers were told to retry).
 //! Keep the native path rather than presenting mutation delivery as allocation,
 //! while adopting the familiar manager-timeout spellings for the admission and
 //! exclusive-writer wait that precede a repair pass.

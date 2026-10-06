@@ -327,6 +327,22 @@ Export to object storage requires an ADR that narrows or amends the shared-nothi
 **Completion.** A killed coordinator can resume or safely abandon a job, a restored cluster proves
 the same logical corpus, and operators no longer coordinate shard snapshots manually.
 
+### Durable in-sync set and online replica recovery
+
+**Problem.** Which replicas may serve a failover read is a flag in the coordinator's memory. A
+connecting coordinator re-derives it by comparing content (ADR-195), which costs a fingerprint of
+every replicated copy, cannot tell which copy is right when they differ, and can restore a
+replica only through a coordinator restart with `--recover-divergent-replicas`.
+
+**Direction.** Record the in-sync set and a primary term per position in the control plane, and
+remove a replica from the set before acknowledging the write it missed. Add an online operation
+that recovers one replica from its primary and promotes it under a brief write quiesce. Primary
+promotion depends on the same terms.
+
+**Completion.** A replica that missed a write is excluded across any coordinator restart without
+a content comparison; an operator restores redundancy without restarting the coordinator; a
+position whose primary lost its volume can promote an in-sync replica.
+
 ### Kubernetes operator and RF>1 topology
 
 **Problem.** Helm installs static resources but does not own lifecycle state, backup schedules,

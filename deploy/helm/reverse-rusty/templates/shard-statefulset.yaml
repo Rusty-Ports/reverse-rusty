@@ -72,6 +72,8 @@ spec:
             - {{ .Values.shard.maxSegments | int64 | quote }}
             - --memtable-flush-threshold
             - {{ .Values.shard.memtableFlushThreshold | int64 | quote }}
+            - --max-grpc-request-bytes
+            - {{ .Values.shard.maxGrpcRequestBytes | int64 | quote }}
             - --broad-columnar
             - {{ .Values.shard.broadColumnar | quote }}
             - --broad-materialize
