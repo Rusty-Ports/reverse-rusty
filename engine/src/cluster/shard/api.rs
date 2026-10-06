@@ -298,6 +298,15 @@ pub(crate) trait Shard: Send + Sync {
     fn num_queries(&self) -> Result<usize, ShardError>;
     /// Per-class entry tally `[A, B, C, D]` for this shard (introspection/tests).
     fn class_counts(&self) -> Result<[u64; 5], ShardError>;
+    /// Entries this shard holds that are stored at every position, so that adding shards
+    /// does not shrink them. An in-process shard counts them by placement. The default,
+    /// which a remote shard uses, counts classes C and D: it misses replicated class-B rows
+    /// (top-64 pairs and phrase proxies), and a remote cluster holds no row a rebuild kept
+    /// visible (ADR-203).
+    fn replicated_rows(&self) -> Result<u64, ShardError> {
+        let classes = self.class_counts()?;
+        Ok(classes[2] + classes[3])
+    }
     /// Validate every published row against the coordinator's logical position
     /// before the shard becomes reachable (ADR-109).
     fn validate_ownership(

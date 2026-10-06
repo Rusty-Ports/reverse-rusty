@@ -224,6 +224,9 @@ impl Shard for RecordingShard {
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         Ok([0; 5])
     }
+    fn replicated_rows(&self) -> Result<u64, ShardError> {
+        Ok(7) // sentinel: the default would derive 0 from `class_counts`
+    }
     fn ingest_extracted(&self, _i: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         Ok(IngestReport::default())
     }
@@ -282,6 +285,9 @@ fn forwards_defaulted_methods_to_backing() {
     // Value-returning methods forward (sentinels prove they reached the backing).
     assert_eq!(h.num_queries().expect("num_queries"), 42);
     assert_eq!(h.seal_for_checkpoint().expect("seal"), LogPos(99));
+    // The backing counts its replicated rows by placement (ADR-203); the trait default would
+    // count classes C and D and miss the rows a rebuild kept visible.
+    assert_eq!(h.replicated_rows().expect("replicated_rows"), 7);
 
     // The defaulted method forwards too (the shared flag flips on the backing).
     let sink: EventSink = Arc::new(|_ev: &EngineEvent| {});

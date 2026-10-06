@@ -19,6 +19,14 @@ fn default_reads(cluster: &ClusterEngine, titles: &[String]) -> Vec<HashSet<u64>
         .collect()
 }
 
+/// The part of each shard's corpus that is stored on every shard.
+fn replicated_corpus(cluster: &ClusterEngine) -> usize {
+    cluster
+        .collect_load(&reverse_rusty::cluster::AutoscaleConfig::default())
+        .expect("collect_load")
+        .replicated_corpus
+}
+
 fn assert_nothing_hidden(
     what: &str,
     titles: &[String],
@@ -55,7 +63,7 @@ fn a_kept_row_survives_reopen_and_a_rebuild_after_it() {
 
     for &k in &[1usize, 3] {
         let dir = unique_dir(&format!("kept_visible_k{k}"));
-        let before = {
+        let (before, replicated) = {
             let mut cluster =
                 ClusterEngine::build(vocab(), &durable_cfg(k, dir.clone(), false), &queries)
                     .expect("durable cluster builds");
@@ -63,12 +71,19 @@ fn a_kept_row_survives_reopen_and_a_rebuild_after_it() {
             cluster.set_vocab(aliased()).expect("set_vocab");
             let after = default_reads(&cluster, &titles);
             assert_nothing_hidden(&format!("k={k} alias"), &titles, &before, &after);
-            before
+            (before, replicated_corpus(&cluster))
         };
+        assert!(
+            replicated > 0,
+            "k={k}: the rebuild kept rows on every shard"
+        );
 
         let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
         let after_reopen = default_reads(&reopened, &titles);
         assert_nothing_hidden(&format!("k={k} reopen"), &titles, &before, &after_reopen);
+        // Sealed segments report the same replicated share, so a restart does not turn kept
+        // rows into load a split would seem to relieve.
+        assert_eq!(replicated_corpus(&reopened), replicated, "k={k}");
 
         // The rebuild reads each row's kept placement back from the reopened shards.
         reopened.resize(k + 2).expect("resize");

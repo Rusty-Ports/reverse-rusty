@@ -8,7 +8,7 @@
 //! refused that since ADR-187. The cluster rebuild did not.
 
 use crate::harness::*;
-use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
+use reverse_rusty::cluster::{AutoscaleConfig, ClusterConfig, ClusterEngine};
 use reverse_rusty::vocab::Vocab;
 use std::collections::HashSet;
 
@@ -178,8 +178,25 @@ fn a_resize_changes_no_read_and_promotes_no_opt_in_row() {
         "precondition: some matching query is opt-in"
     );
     let classes_before = cluster.class_counts().expect("class counts");
+    let autoscale = AutoscaleConfig::default();
+    let replicated_before = cluster
+        .collect_load(&autoscale)
+        .expect("collect_load")
+        .replicated_corpus;
+    assert!(
+        replicated_before as u64 >= (classes_before[2] + classes_before[3]) / 3,
+        "the broad lane is part of the replicated share"
+    );
 
     cluster.resize(5).expect("resize");
+    assert_eq!(
+        cluster
+            .collect_load(&autoscale)
+            .expect("collect_load")
+            .replicated_corpus,
+        replicated_before,
+        "the same rows are replicated at any shard count"
+    );
 
     assert_eq!(default_reads(&cluster, &titles), default_before);
     assert_eq!(broad_reads(&cluster), broad_before);
@@ -296,4 +313,82 @@ fn a_compiler_migration_on_reopen_keeps_a_kept_row() {
     assert_nothing_hidden("compiler migration", &titles, &before, &after);
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A kept row is on every position, so adding shards does not shrink it and it is not load
+/// a split relieves. Sixty single-term queries written to an empty cluster are selective.
+/// A vocabulary rebuild ranks every one of their terms into the top-64 mask, so all sixty
+/// are kept and replicated; counted as splittable, they would recommend a larger cluster
+/// after every resize.
+#[test]
+fn kept_rows_do_not_drive_a_resize() {
+    for replication_factor in [1usize, 2] {
+        let cfg = ClusterConfig {
+            num_shards: 3,
+            replication_factor,
+            include_broad: false,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("build");
+        for i in 0..60u64 {
+            cluster
+                .add_query(i + 1, &format!("zzsolo{i}"))
+                .expect("add");
+        }
+        let titles: Vec<String> = (0..60).map(|i| format!("zzsolo{i} item")).collect();
+        let before = default_reads(&cluster, &titles);
+        assert!(
+            (0..60).all(|i| before[i].contains(&(i as u64 + 1))),
+            "precondition: every query is visible"
+        );
+        let autoscale = AutoscaleConfig {
+            enabled: true,
+            target_replication_factor: replication_factor,
+            max_node_load_skew: 0.0,
+            split_corpus_threshold: 25,
+        };
+        assert_eq!(
+            cluster
+                .collect_load(&autoscale)
+                .expect("collect_load")
+                .replicated_corpus,
+            0,
+            "precondition: every query is selective"
+        );
+
+        cluster.set_vocab(Vocab::new()).expect("set_vocab");
+        let after = default_reads(&cluster, &titles);
+        assert_nothing_hidden("rebuild", &titles, &before, &after);
+
+        let load = cluster.collect_load(&autoscale).expect("collect_load");
+        assert_eq!(
+            load.shard_corpus,
+            vec![60, 60, 60],
+            "every query was kept, so every shard holds all of them"
+        );
+        assert_eq!(load.replicated_corpus, 60);
+        assert_eq!(
+            cluster
+                .resize_to_recommended(&autoscale)
+                .expect("resize_to_recommended"),
+            None,
+            "replicated rows are not a reason to add shards"
+        );
+        assert_eq!(cluster.num_shards(), 3);
+
+        // A new write of a term the rebuilt mask ranks as very common is class C: opt-in,
+        // on every shard, and counted with the replicated rows while it is still unsealed.
+        cluster.add_query(1_000, "zzsolo0").expect("add");
+        assert!(!cluster
+            .percolate_with_broad("zzsolo0 item", false)
+            .expect("percolate")
+            .contains(&1_000));
+        assert_eq!(
+            cluster
+                .collect_load(&autoscale)
+                .expect("collect_load")
+                .replicated_corpus,
+            61
+        );
+    }
 }

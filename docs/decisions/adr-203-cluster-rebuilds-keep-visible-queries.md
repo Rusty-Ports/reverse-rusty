@@ -46,6 +46,11 @@ unchanged mask.
    row's placement mode is replicated-always-visible, as it does for ADR-187's `keep_visible`. The
    plan's top-64 signatures go to the main lane and the row is class B.
 
+4. **Replicated rows are counted by placement.** A kept row is on every position, so adding
+   shards does not shrink it. `collect_load` discounted only classes C and D from split pressure,
+   and a kept row is class B. `Shard::replicated_rows` reports the rows stored at every position:
+   an in-process shard counts them by placement mode, and `collect_load` subtracts that count.
+
 It is lossless because the row is on every position, a title always probes at least one position,
 a shard probes its main lane arity-1 with every title feature, and a title that satisfies the
 query carries the feature each of those signatures was built from. The row is owned by the first
@@ -75,6 +80,9 @@ same compile step. Compaction already refuses to move a main-lane row into the b
 - A kept row is stored on every position and rides a top-64 feature's main posting there, so a
   probed shard considers it for every title that carries the feature. Only rows that were visible
   and would otherwise have been hidden take this path. `class_counts` reports them as class B.
+- Kept rows do not raise the resize recommendation. Counting by placement also discounts the
+  replicated class-B rows that ADR-080 left as a residual (top-64 pairs and phrase proxies) on an
+  in-process cluster. A remote shard reports classes C and D, as before.
 - A row that was opt-in takes the lane its plan gives it, and no selective row is replicated that
   was not before. A resize, which reuses the dictionary, changes no read.
 - Upserting a kept row compiles it fresh, so it takes the lane of its current plan, as on the
@@ -93,12 +101,14 @@ same compile step. Compaction already refuses to move a main-lane row into the b
   and then a resize, with every default read compared before and after; a resize that changes no
   default or broad read and replicates no selective row; broad reads exact against an independent
   oracle with kept rows present, and a kept row deleted on every position; a kept row through the
-  compiler migration on reopen.
+  compiler migration on reopen; sixty kept rows that are all counted as replicated, with one and
+  two copies per position, and recommend no resize.
 - `tests/cluster_durability_oracle/kept_visible.rs`: a kept row through a reopen, a resize after
-  it, and a second reopen.
+  it, and a second reopen, with the same replicated share reported from the sealed segments.
 - Ten mutations of the rule (never keep, keep every class-C row, forget either visible mode, no
   pin on the shard, replicate every visible row, and each rebuild path forgetting what it read)
-  each fail at least one of those tests.
+  each fail at least one of those tests. So do ten of the count (by class at the coordinator or
+  in any shard wrapper, either replicated mode left out, and each store left out).
 
 **See also:** ADR-187 (the single-node rule this extends), ADR-056 (the compaction guard),
 ADR-109 (ownership of replicated rows), ADR-054 and ADR-060 (alias expansion), ADR-180 (the remote

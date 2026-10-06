@@ -206,6 +206,10 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.class_counts())
     }
 
+    fn replicated_rows(&self) -> Result<u64, ShardError> {
+        self.read(|s| s.replicated_rows())
+    }
+
     fn validate_ownership(
         &self,
         position: u32,

@@ -438,8 +438,11 @@ growing to the ceiling. The server loop executes an accepted operation through t
 admission path with the observed placement generation as a precondition (ADR-179). Remote
 shard-count changes and scale-out remain decisions for an external operator.
 
-Adding positions does not reduce the replicated C/D corpus per node unless physical placement changes,
-so `collect_load` subtracts the replicated broad share when assessing selective split pressure.
+Adding positions does not reduce the replicated corpus per node: the broad C/D lane and the
+replicated always-visible rows (top-64 pairs, phrase proxies, and rows a rebuild kept visible).
+`collect_load` subtracts that share when assessing selective split pressure. An in-process shard
+counts its replicated rows by placement; a remote shard counts classes C and D, so its replicated
+class-B rows are still counted as splittable.
 
 ---
 

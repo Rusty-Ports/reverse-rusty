@@ -143,3 +143,8 @@ multi-coordinator deployments); a connect-time handshake carrying the `accept_cl
 the broad-layout version (the remote analogue of the in-process forward fence — refuse a populated
 pre-ADR-080 shard server instead of mis-routing it); and class-D under remote partial-apply `resync`
 (ADR-047), where re-driving a queued class-D mutation must likewise force accept.
+
+**Outcome update (2026-10-06).** An in-process shard now counts its replicated rows by placement
+([ADR-203](adr-203-cluster-rebuilds-keep-visible-queries.md)), so the class-B-arity-2 rows are
+discounted from split pressure there. A remote shard still counts classes C and D. The per-title
+evaluation cost of replicated main-lane rows described above is unchanged.

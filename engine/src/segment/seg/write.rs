@@ -382,6 +382,14 @@ impl Segment {
         self.alive.get(local_id as usize).copied().unwrap_or(false)
     }
 
+    /// Entries stored at every position of their cluster (tombstoned ones included, like
+    /// [`Self::class_counts`]).
+    pub fn replicated_rows(&self) -> u64 {
+        (0..self.len() as u32)
+            .filter(|&local| self.exact.placement(local).mode.is_replicated())
+            .count() as u64
+    }
+
     pub fn class_counts(&self, c: &mut [u64; 5]) {
         for &cl in &self.class {
             match cl {

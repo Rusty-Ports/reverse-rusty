@@ -22,6 +22,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   has done the same since ADR-187. Reads that ask for the broad lane are unchanged. A query that
   was opt-in stays where its plan puts it, and a new write of the same text is placed by its plan.
 - A kept query costs a copy on every position and a place on a very common term's main posting.
+- The resize recommendation counts the rows stored on every position by their placement, where
+  it counted classes C and D. Kept queries, top-64 pairs and phrase proxies are replicated class-B
+  rows, and adding shards does not shrink them, so on an in-process cluster they no longer count
+  toward a split.
 
 ## 2026-10-06 — Every search response says which scope ran
 

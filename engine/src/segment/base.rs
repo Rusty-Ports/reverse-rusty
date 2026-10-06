@@ -73,6 +73,12 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.alive_count(),
         }
     }
+    pub fn replicated_rows(&self) -> u64 {
+        match self {
+            BaseSegment::Memory(s) => s.replicated_rows(),
+            BaseSegment::Mmap(s) => s.replicated_rows(),
+        }
+    }
     pub fn is_alive(&self, local_id: u32) -> bool {
         match self {
             BaseSegment::Memory(s) => *s.alive.get(local_id as usize).unwrap_or(&false),

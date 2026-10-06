@@ -46,6 +46,11 @@ pub enum PlacementMode {
 }
 
 impl PlacementMode {
+    /// Whether a row in this mode is stored at every position.
+    pub fn is_replicated(self) -> bool {
+        matches!(self, Self::ReplicatedAlwaysVisible | Self::ReplicatedBroad)
+    }
+
     pub fn from_byte(value: u8) -> Result<Self, OwnershipError> {
         match value {
             0 => Ok(Self::Standalone),

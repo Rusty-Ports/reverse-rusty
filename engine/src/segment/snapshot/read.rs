@@ -253,6 +253,17 @@ impl EngineSnapshot {
         ))
     }
 
+    /// Entries this engine holds that its cluster stores at every position: the part of a
+    /// shard's corpus that adding shards does not shrink. Counted like [`Self::num_queries`],
+    /// tombstoned entries included, so the two subtract cleanly.
+    pub fn replicated_rows(&self) -> u64 {
+        self.segments
+            .iter()
+            .map(|segment| segment.replicated_rows())
+            .sum::<u64>()
+            + self.memtable.replicated_rows()
+    }
+
     pub fn class_counts(&self) -> [u64; 5] {
         let mut c = [0u64; 5];
         for seg in &self.segments {
