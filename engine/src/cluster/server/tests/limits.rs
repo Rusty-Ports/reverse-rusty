@@ -15,29 +15,44 @@ fn grpc_result_cap_can_only_be_lowered_within_static_bounds() {
     assert!(server.with_max_grpc_result_bytes(1).is_ok());
 }
 
+/// A node admits at most `max_concurrent_exhaustive_streams` workers, and a worker keeps its
+/// permit for the whole stream.
+///
+/// The first stream has to still be running when the second arrives, so it must have more to
+/// send than its queue holds. These queries all require one term that is in the top-64 mask,
+/// which makes them opt-in: with `include_broad = false` the stream matched nothing, sent a
+/// lone summary and finished at once, and the test only passed while the second request beat
+/// the first worker's exit. It asks for the broad lane now, so the stream carries one chunk
+/// per query, and it checks that it did.
 #[test]
 fn exhaustive_stream_workers_are_admitted_before_spawn() {
+    use tokio_stream::StreamExt;
+    /// The response queue in `percolate_all`; a stream longer than this blocks its worker.
+    const STREAM_QUEUE: usize = 8;
+    const QUERIES: u64 = 32;
+
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
     let dict = Arc::new(frozen_dict(&["deliveryneedle"], &n));
     let server = ShardServer::new(Arc::clone(&n), dict, EngineConfig::default())
         .with_max_concurrent_exhaustive_streams(1)
         .expect("one exhaustive worker");
-    let items: Vec<_> = (0..32)
+    let items: Vec<_> = (0..QUERIES)
         .map(|id| (id, "deliveryneedle".to_string()))
         .collect();
     server.ingest_dsl(&items);
+    // Shard 0 evaluates the broad lane, so an `include_broad` read is valid there.
     let ownership = crate::ownership::OwnershipContext::new(
         crate::ownership::PlacementGeneration::INITIAL,
         1,
         vec![0],
-        None,
+        Some(0),
     )
     .expect("ownership context");
     let request = || {
         Request::new(proto::PercolateAllRequest {
             title: "deliveryneedle".into(),
-            include_broad: false,
+            include_broad: true,
             filter: Vec::new(),
             rank: None,
             chunk_size: 1,
@@ -47,19 +62,37 @@ fn exhaustive_stream_workers_are_admitted_before_spawn() {
         })
     };
 
-    // Retain but do not drain the first stream. Its bounded channel fills, so
-    // the worker and its admission permit remain live.
+    // Retain but do not drain the first stream. Its bounded queue fills, so the worker and
+    // its admission permit remain live.
     let first = rt
         .block_on(server.percolate_all(request()))
         .expect("first stream admitted");
-    let Err(error) = rt.block_on(server.percolate_all(request())) else {
+    let second = rt.block_on(server.percolate_all(request()));
+
+    // Drain the first stream before asserting, so a failure cannot leave its worker parked.
+    let mut first = first.into_inner();
+    let chunks = rt.block_on(async {
+        let mut chunks = 0;
+        while let Some(frame) = first.next().await {
+            let frame = frame.expect("stream frame");
+            if matches!(
+                frame.frame,
+                Some(proto::percolate_all_frame::Frame::Chunk(_))
+            ) {
+                chunks += 1;
+            }
+        }
+        chunks
+    });
+    assert!(
+        chunks > STREAM_QUEUE,
+        "the first stream sent {chunks} chunks: it must outgrow its {STREAM_QUEUE}-frame queue, \
+         or its worker is not held and this test proves nothing"
+    );
+    let Err(error) = second else {
         panic!("second stream bypassed node-local admission");
     };
     assert_eq!(error.code(), Code::ResourceExhausted);
-    drop(first);
-    rt.block_on(async {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    });
 }
 
 #[test]
