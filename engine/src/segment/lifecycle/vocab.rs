@@ -9,8 +9,11 @@ use std::sync::Arc;
 
 mod aliases;
 mod install;
+mod intern;
 mod recompile;
 mod sources;
+
+pub(in crate::segment::lifecycle) use intern::intern_live_names;
 
 #[cfg(test)]
 mod tests;

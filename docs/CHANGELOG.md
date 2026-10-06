@@ -27,6 +27,22 @@ reverse chronological and describe outcomes, not the current architecture or fut
   multi-word forms; the at-scale test that claimed it could not fail and is replaced by one that
   rewrites real generated queries.
 
+## 2026-10-06 — A vocabulary change no longer strands queries at the next insert
+
+- **A silent false negative on single-node engines is fixed.** After a vocabulary change that
+  introduced a new feature name (a synonym's canonical, a phrase's entity), the next stored query
+  that used the name made every query the change had rewritten to it stop matching: store
+  `refurb widget`, add the synonym `refurb → term:refurbished`, store `refurbished gadget`, and
+  the title `refurb widget` no longer matched the first query. The recompile had written the
+  name's synthetic id; the insert gave it a dense one
+  ([ADR-204](decisions/adr-204-vocabulary-change-interns-its-names.md)).
+- A vocabulary change now interns every name it produces for the stored queries before it
+  recompiles them. Existing ids, frequencies and the top-64 mask are unchanged. Clusters were not
+  affected.
+- **If a store may already be affected** (a vocabulary change, then writes that use a new
+  canonical word), re-apply its vocabulary once: `GET /_vocab`, then `PUT /_vocab` with the same
+  document. The replacement recompiles every stored query.
+
 ## 2026-10-06 — The vocabulary learner no longer narrows by default
 
 - **Behaviour change.** `POST /_vocab/learn_and_apply` with no mode, and the `learn_and_apply`
