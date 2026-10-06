@@ -85,8 +85,9 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
     `MeshAuthVerify` *before any handler runs* (default-deny by construction — the interceptor wraps
     the whole service). Same fail-loud validation rules as the REST token (`resolve_mesh_token`).
 - **Transport hardening (ADR-085).** Connect timeout + HTTP/2 keepalive + per-call deadlines, and a
-  bounded fail-loud retry of **idempotent reads only** — writes never retry (non-idempotent; converge
-  via the durable log + `resync`). A hung peer becomes a loud `ShardError`, never a silently dropped
+  bounded fail-loud retry of **idempotent reads only** — the transport never retries a write; a
+  write that not every shard took is answered as a failure its caller repeats (ADR-194), or
+  `resync` re-drives it. A hung peer becomes a loud `ShardError`, never a silently dropped
   shard in the percolate union (which would be a false negative). An `https://` endpoint with no client
   TLS config is named as a misconfiguration rather than dying opaquely.
 - **Threats addressed:** an unauthorized node joining the mesh, on-path eavesdropping/tampering of the

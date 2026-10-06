@@ -214,23 +214,14 @@ async fn main() {
     // Build engine config from CLI flags.
     let config = EngineConfig {
         data_dir: cli.data_dir.clone(),
-        max_segments: cli.max_segments,
-        memtable_flush_threshold: cli.memtable_flush_threshold,
-        max_query_length: cli.max_query_length,
-        max_query_clauses: cli.max_query_clauses,
-        max_anyof_group_size: cli.max_anyof_group_size,
-        max_tags: cli.max_tags,
-        wal_sync_on_write: cli.wal_sync_on_write,
-        retain_source: cli.retain_source,
-        broad_batch_size: cli.broad_batch_size,
-        hot_anchor_threshold: cli.hot_anchor_threshold,
-        broad_columnar: cli.broad_columnar,
-        tag_segment_skipping: cli.tag_segment_skipping,
-        broad_materialize: cli.broad_materialize,
-        max_percolate_batch: cli.max_percolate_batch,
-        accept_class_d: cli.accept_class_d,
-        ..EngineConfig::default()
+        ..cli.engine_config()
     };
+    if cli.retain_source_saves_nothing() {
+        warn!(
+            "--retain-source false without --data-dir saves nothing: source text is kept on \
+             disk only when there is a data directory"
+        );
+    }
     let problems = config.validate();
     if !problems.is_empty() {
         for p in &problems {

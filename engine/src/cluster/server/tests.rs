@@ -141,6 +141,7 @@ mod adopt;
 mod bulk_load;
 mod drop_sequence;
 mod dropped;
+mod engine_config;
 mod fence;
 mod gc;
 mod limits;

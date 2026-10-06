@@ -79,6 +79,40 @@ async fn quiesce_admission(
     Arc::clone(permits).acquire_many_owned(capacity).await
 }
 
+/// Log, at error level, the writes `cluster` is about to stop repairing.
+pub(crate) fn log_unconverged_writes(cluster: &reverse_rusty::cluster::ClusterEngine) {
+    let ids = cluster.pending_repair_ids();
+    if let Some(report) = unconverged_writes_report(&ids) {
+        error!(pending_repairs = ids.len(), "{report}");
+    }
+}
+
+/// How many ids one shutdown report names.
+const REPORTED_IDS: usize = 100;
+
+/// What a stopping coordinator says about the writes it never converged, or `None` when there
+/// are none. Each was answered with a retryable failure and queued for repair in this process
+/// only (ADR-194), so once it stops nothing remembers that some shard lacks the write.
+fn unconverged_writes_report(ids: &[u64]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = ids.iter().take(REPORTED_IDS).map(u64::to_string).collect();
+    let unnamed = ids.len() - named.len();
+    let more = if unnamed == 0 {
+        String::new()
+    } else {
+        format!(" and {unnamed} more")
+    };
+    Some(format!(
+        "{} document write(s) or delete(s) did not reach every shard, and their queued repairs \
+         stop with this coordinator; send them again (index or delete) to converge them: \
+         ids [{}]{more}",
+        ids.len(),
+        named.join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +146,26 @@ mod tests {
         );
         drop(guard);
         assert_eq!(permits.available_permits(), 2);
+    }
+
+    #[test]
+    fn a_converged_coordinator_reports_nothing() {
+        assert_eq!(unconverged_writes_report(&[]), None);
+    }
+
+    #[test]
+    fn the_report_names_the_ids_that_stop_being_repaired() {
+        let report = unconverged_writes_report(&[5, 9]).expect("two writes are unconverged");
+        assert!(report.starts_with("2 document"), "{report}");
+        assert!(report.ends_with("ids [5, 9]"), "{report}");
+    }
+
+    #[test]
+    fn a_long_list_is_cut_and_still_counted() {
+        let ids: Vec<u64> = (0..REPORTED_IDS as u64 + 7).collect();
+        let report = unconverged_writes_report(&ids).expect("unconverged");
+        assert!(report.starts_with("107 document"), "{report}");
+        assert!(report.ends_with("99] and 7 more"), "{report}");
+        assert!(!report.contains(", 100"), "{report}");
     }
 }

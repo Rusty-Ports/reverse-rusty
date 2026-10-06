@@ -207,8 +207,14 @@ impl ClusterEngine {
             }
             .with_metrics(Arc::clone(&metrics));
             logical_ids.include(&primary, position, 0);
-            let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
-            for (copy, ep) in g.replicas.iter().enumerate() {
+            // A replica is trusted for failover only when it holds exactly what its primary
+            // holds now (ADR-195). The copies are quiescent: this coordinator is not serving
+            // yet, and its exclusive lease has fenced the previous one.
+            let mut proofs: Vec<crate::cluster::replica::ReplicaProof> =
+                Vec::with_capacity(g.replicas.len());
+            let mut replicas: Vec<crate::cluster::remote::RemoteShard> =
+                Vec::with_capacity(g.replicas.len());
+            for ep in &g.replicas {
                 let r = if adopted.insert(ep.as_str()) {
                     match coordinator_id {
                         Some(id) => {
@@ -269,15 +275,32 @@ impl ClusterEngine {
                     }?
                 }
                 .with_metrics(Arc::clone(&metrics));
-                logical_ids.include(&r, position, copy + 1);
-                replicas.push(Box::new(r) as Box<dyn Shard>);
+                replicas.push(r);
+            }
+            {
+                let mut content = super::replica_sync::PrimaryContent::new(&primary, &g.primary);
+                for replica in &replicas {
+                    let mut proof = content.prove(replica);
+                    if proof.is_err() && config.recover_divergent_replicas {
+                        proof = content.recover_then_prove(replica, &norm, &dict);
+                    }
+                    proofs.push(proof);
+                }
+            }
+            // Enumerate ids after any recovery, so a replica's discarded rows are not reserved.
+            for (copy, replica) in replicas.iter().enumerate() {
+                logical_ids.include(replica, position, copy + 1);
             }
             let shard: Box<dyn Shard> = if replicas.is_empty() {
                 Box::new(primary)
             } else {
-                Box::new(crate::cluster::replica::ReplicatedShard::new(
+                Box::new(crate::cluster::replica::ReplicatedShard::with_proofs(
                     Box::new(primary) as Box<dyn Shard>,
-                    replicas,
+                    replicas
+                        .into_iter()
+                        .map(|replica| Box::new(replica) as Box<dyn Shard>)
+                        .zip(proofs)
+                        .collect(),
                 ))
             };
             let (boxed, h) = wrap_handoff(shard, 0);

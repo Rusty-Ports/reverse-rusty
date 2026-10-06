@@ -274,3 +274,83 @@ async fn staged_load_compacts_to_the_segment_policy_before_finishing() {
         "compaction keeps every staged row"
     );
 }
+
+/// A coordinator's client for slot 0 of `server`, served on a loopback port of the current
+/// runtime, plus the lease the served node keeps.
+fn coordinator_client(
+    server: ShardServer,
+    dict: &Dict,
+    coordinator: u64,
+) -> (
+    crate::cluster::RemoteShard,
+    Arc<crate::cluster::security::CoordinatorLease>,
+    Arc<super::super::ServerState>,
+) {
+    let lease = Arc::clone(&server.coordinator_lease);
+    let (_, state) = server.loaded_slot(0).expect("slot 0");
+    let incoming =
+        tonic::transport::server::TcpIncoming::bind("127.0.0.1:0".parse().expect("addr"))
+            .expect("bind");
+    let endpoint = format!("http://{}", incoming.local_addr().expect("bound address"));
+    tokio::spawn(async move { server.serve_with_incoming(incoming).await.expect("serve") });
+    let shard = crate::cluster::RemoteShard::connect_for_coordinator_with_security(
+        &endpoint,
+        tokio::runtime::Handle::current(),
+        dict.fingerprint(),
+        state.tag_dict.fingerprint(),
+        0,
+        Some(coordinator),
+        &crate::cluster::ClientSecurity::default(),
+    )
+    .expect("connect the coordinator's client");
+    (shard, lease, state)
+}
+
+fn placed(logical: u64, normalizer: &Normalizer, dict: &Dict) -> crate::segment::PlacedQuery {
+    let ast = crate::dsl::parse("stageneedle").expect("parse");
+    let mut lc = String::new();
+    crate::segment::PlacedQuery {
+        logical,
+        ex: crate::compile::extract_readonly(&ast, normalizer, dict, &mut lc),
+        dsl: "stageneedle".into(),
+        version: 1,
+        source_generation: None,
+        tags: Vec::new(),
+        tag_ids: Vec::new(),
+        rank: crate::rank::RankValues::default(),
+        placement: crate::ownership::QueryPlacement::selective(
+            crate::ownership::PlacementGeneration::INITIAL,
+            1,
+            vec![0],
+        )
+        .expect("placement"),
+    }
+}
+
+/// A node that restarted holds no lease for its coordinator and refuses the coordinator's
+/// calls until it claims again. A bulk load is a stream, and it has to reclaim and resend as a
+/// unary write does: a restarted replica that refused it would only be marked out of sync,
+/// and the load would succeed without that copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bulk_load_reclaims_the_lease_a_restarted_node_no_longer_holds() {
+    use crate::cluster::shard::Shard;
+
+    let normalizer = norm();
+    let dict = Arc::new(frozen_dict(&["stageneedle"], &normalizer));
+    let server = ShardServer::new(
+        Arc::clone(&normalizer),
+        Arc::clone(&dict),
+        EngineConfig::default(),
+    );
+    let (shard, lease, state) = coordinator_client(server, &dict, 77);
+    assert_eq!(lease.owner(), 77, "connecting claimed the lease");
+    lease.forget_owner_for_test();
+
+    let bucket: Vec<_> = (0..5).map(|id| placed(id, &normalizer, &dict)).collect();
+    let report = shard
+        .ingest_extracted(&bucket)
+        .expect("the load reclaims the lease and is sent again");
+    assert_eq!(report.ingested, 5);
+    assert_eq!(lease.owner(), 77, "the lease is held again");
+    assert_eq!(Shard::num_queries(&state.shard).expect("count"), 5);
+}

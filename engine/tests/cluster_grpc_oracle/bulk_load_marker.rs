@@ -398,6 +398,47 @@ fn grpc_a_load_a_replica_missed_is_not_complete() {
     assert!(message.contains("did not complete"), "{message}");
 }
 
+/// The other side of the case above, and the two connect-time checks together: a load that
+/// every copy took leaves no mark, and the next coordinator finds the replica equal to its
+/// primary (ADR-195), so it serves the whole corpus with the replica in the in-sync set.
+#[test]
+fn grpc_a_completed_bulk_load_of_a_replicated_position_is_served_with_its_replica() {
+    let fixture = Fixture::start("replica_complete");
+    let groups = vec![ShardGroup {
+        primary: fixture.nodes[0].endpoint(),
+        replicas: vec![fixture.nodes[1].endpoint()],
+    }];
+    let connect = || {
+        ClusterEngine::connect_replicated(
+            Arc::clone(&fixture.norm),
+            Arc::clone(&fixture.dict),
+            empty_tag_dict(),
+            &ClusterConfig {
+                num_shards: 1,
+                include_broad: true,
+                ..ClusterConfig::default()
+            },
+            &groups,
+            fixture.client.handle(),
+        )
+    };
+    let first = connect().expect("connect the empty replicated position");
+    first
+        .ingest(&fixture.queries)
+        .expect("every copy takes the load");
+    assert_eq!(first.unfinished_bulk_load().expect("marks"), None);
+    let loaded = first.num_queries().expect("count");
+    drop(first);
+
+    let second = connect().expect("a completed load is not refused");
+    assert_eq!(second.num_queries().expect("count"), loaded);
+    assert_eq!(
+        second.out_of_sync_replicas(),
+        0,
+        "the replica took the same load as its primary"
+    );
+}
+
 /// A node that predates the mark cannot record a load in progress, so it must not be loaded
 /// in bulk: if that load stopped part-way, nothing would remember it. Such a node can still
 /// be attached (it cannot hold a mark, so its answer reads as "none").

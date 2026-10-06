@@ -17,6 +17,8 @@ The multi-shard correctness core, remote shard seam, shared feature space, and d
 | [177](../adr-177-per-id-cluster-write-locks.md) | Per-ID cluster write locks | Removes stripe collisions while bounding lock storage to active callers and preserving log/apply and bulk exclusion. | Accepted |
 | [183](../adr-183-cluster-rpc-runtime-isolation.md) | Cluster RPC runtime isolation | Drives cluster RPCs on a dedicated runtime and moves write-handler lock waits to blocking threads, so concurrent writes can no longer deadlock a remote coordinator. | Accepted |
 | [185](../adr-185-reader-atomic-cluster-upsert.md) | Reader-atomic cluster upsert | Replaces a query atomically on each shard and fences only placement-moving upserts, so an unfenced reader never sees neither version or both. | Accepted |
+| [192](../adr-192-shard-local-engine-settings.md) | Shard-local engine settings | Gives `shardserver` its own durability and storage flags, makes a remote coordinator refuse or warn about the ones it cannot honour, and marks them in `/_settings`. | Accepted |
+| [193](../adr-193-inbound-request-size.md) | Inbound request size | Sends a bulk bucket as one staged load of bounded messages and makes the shard node's inbound limit a named setting, so bootstrap and dictionary shipping no longer stop at tonic's 4 MiB default. | Accepted |
 
 ---
 

@@ -583,6 +583,12 @@ pub(crate) trait Shard: Send + Sync {
     /// here). The coordinator fans its observer in via `ClusterEngine::set_observer`.
     fn set_event_sink(&self, _sink: EventSink) {}
 
+    /// How many of this position's replicas reads may not fail over to (ADR-195). 0 for a
+    /// position without replicas.
+    fn out_of_sync_replicas(&self) -> usize {
+        0
+    }
+
     /// Record (`true`) or clear (`false`) that a bulk load into this shard is in progress
     /// (ADR-196). A coordinator marks every shard before the first bucket of a bulk load and
     /// clears the marks after the last one, so a load that stops part-way is remembered by the

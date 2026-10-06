@@ -74,3 +74,13 @@
   `pending_repairs`), `src/cluster/coordinator.rs` (`PendingRepair`/`ResyncReport`/the queue field),
   `src/cluster/coordinator/autoscale.rs` (`tick`), `src/cluster/shard.rs` (`ShardError::PartiallyApplied`),
   `src/events.rs` (`DurabilityOp::ClusterPartialApply`), `src/cluster/remote.rs` (`block_on_in_context`).
+- **Later outcome — 2026-10-06 ([ADR-194](adr-194-partial-cluster-writes-are-retryable-failures.md)):**
+  three premises above did not hold on the coordinator that produces partial applies. A remote
+  coordinator has no durable cluster log, so a reopen replays nothing and the in-memory repair
+  queue is the only record: the write is now answered as a retryable failure (503 `partial`),
+  never as committed, and repeating it is the remedy, not a double-log. A shard that reported
+  failure may have applied the write, so a queued Add is re-driven as a replace of the id, not
+  as "a clean first insert". And the server never calls the autoscaler `tick`, so nothing heals
+  the queue on its own; `POST /_cluster/resync` or the writer's retry does. The scope note that
+  a single-shard failure is a clean `Err` is also out of date: every per-shard write error is
+  reported as `PartiallyApplied`, with `applied` empty when no shard took the write.

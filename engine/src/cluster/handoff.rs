@@ -464,6 +464,10 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().set_event_sink(sink);
     }
 
+    fn out_of_sync_replicas(&self) -> usize {
+        self.current.load().out_of_sync_replicas()
+    }
+
     fn set_bulk_load_incomplete(&self, incomplete: bool) -> Result<(), ShardError> {
         self.current.load().set_bulk_load_incomplete(incomplete)
     }

@@ -220,6 +220,15 @@ impl CoordinatorLease {
             .expect("test setup requires an unowned coordinator lease")
     }
 
+    /// Leave the lease as a restarted node holds it: no owner. The next owner-stamped call is
+    /// refused until a claim-capable handshake takes the lease again.
+    #[cfg(test)]
+    pub(crate) fn forget_owner_for_test(&self) {
+        let mut transition = self.transition();
+        self.owner.store(0, Ordering::Release);
+        transition.owner_expires_at = None;
+    }
+
     #[cfg(test)]
     pub(super) fn claim_waiters(&self) -> usize {
         self.transition().claimant.map_or(0, |claim| claim.waiters)
