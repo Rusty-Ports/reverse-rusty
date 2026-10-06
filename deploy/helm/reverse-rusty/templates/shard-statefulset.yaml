@@ -63,6 +63,21 @@ spec:
             - /data
             - --tag-segment-skipping
             - {{ .Values.tagSegmentSkipping | quote }}
+            # Shard-local engine settings (ADR-192): only this binary can set them.
+            - --wal-sync-on-write
+            - {{ .Values.shard.walSyncOnWrite | quote }}
+            - --retain-source
+            - {{ .Values.shard.retainSource | quote }}
+            - --max-segments
+            - {{ .Values.shard.maxSegments | int64 | quote }}
+            - --memtable-flush-threshold
+            - {{ .Values.shard.memtableFlushThreshold | int64 | quote }}
+            - --max-grpc-request-bytes
+            - {{ .Values.shard.maxGrpcRequestBytes | int64 | quote }}
+            - --broad-columnar
+            - {{ .Values.shard.broadColumnar | quote }}
+            - --broad-materialize
+            - {{ .Values.shard.broadMaterialize | quote }}
             - --health-addr
             - 0.0.0.0:{{ .Values.ports.shardHealth }}
             {{- if .Values.metrics.enabled }}

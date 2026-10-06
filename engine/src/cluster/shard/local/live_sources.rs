@@ -9,6 +9,13 @@ use crate::cluster::shard::LiveTaggedQuery;
 
 impl LocalShard {
     /// Whether this shard persists to a data directory (a checkpoint survives a restart).
+    /// Whether this shard's translog is fsynced on every write (ADR-192). False for an
+    /// in-memory shard, whose translog persists nothing.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn translog_syncs_each_write(&self) -> bool {
+        self.translog.syncs_each_write()
+    }
+
     pub(crate) fn is_durable(&self) -> bool {
         self.data_dir.is_some()
     }

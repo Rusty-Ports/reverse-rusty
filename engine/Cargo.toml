@@ -194,9 +194,9 @@ required-features = ["server"]
 [[bin]]
 name = "shardserver"
 path = "src/bin/shardserver.rs"
-test = false
 # A deployable shard node: serves ShardService over gRPC. Builds only with the
-# `distributed` feature (and its tonic/proto deps).
+# `distributed` feature (and its tonic/proto deps). Its tests are the argument parser's
+# (`shardserver/args.rs`, ADR-192), so the bin is a test target.
 required-features = ["distributed"]
 
 [[bin]]

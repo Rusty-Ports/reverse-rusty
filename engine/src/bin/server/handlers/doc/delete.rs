@@ -35,16 +35,31 @@ pub(crate) async fn delete_doc(
         }
     };
     params.acknowledge_refresh_policy();
-    let deleted = {
-        let mut engine = state.engine.lock();
-        engine.delete_by_logical_id(id)
-    };
-    state.publish_snapshot();
+    // The engine mutex is waited on, and the delete applied, on a blocking thread (ADR-191).
+    let deleted =
+        crate::state::run_engine_write(&state, move |engine| engine.delete_by_logical_id(id)).await;
     state
         .prom
         .http_request_duration
         .with_label_values(&["delete_doc"])
         .observe(start.elapsed().as_secs_f64());
+    let deleted = match deleted {
+        Ok(deleted) => deleted,
+        Err(worker) => {
+            error!(query_id = id, error = %worker, "delete-document worker failed");
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["delete_doc", "500"])
+                .inc();
+            return ApiError::response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "write_worker_failed",
+                format!("delete-document request did not complete: {worker}"),
+            )
+            .into_response();
+        }
+    };
     match deleted {
         Ok(n) if n > 0 => {
             info!(query_id = id, deleted = n, "query deleted");

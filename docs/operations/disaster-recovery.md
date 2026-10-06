@@ -36,9 +36,17 @@ failure class. "Crash" = the process dies (OOM-kill, SIGKILL, node reboot with t
 
 **The power-loss caveat** (deployment-modes [§4](deployment-modes.md)): `wal_sync_on_write`
 defaults **false** — an acked write survives a process crash, not necessarily a power cut on the
-same host (the OS page cache is the window). Flip the knob for fsync-per-write where that RPO
-matters; on Kubernetes/cloud volumes a "node loss" normally detaches the volume rather than losing
-the page cache silently, but the honest statement is: default RPO 0 is against process death, not
+same host (the OS page cache is the window). Turn on fsync-per-write where that RPO matters, on
+the process that holds the data (ADR-192):
+
+- single-node and in-process cluster: `server --wal-sync-on-write`;
+- remote (Compose/Helm): `shardserver --wal-sync-on-write true` on **every shard node** (Helm
+  `shard.walSyncOnWrite=true`, Compose `RR_SHARD_WAL_SYNC_ON_WRITE=true`). The coordinator holds
+  no shard data and refuses the flag. Confirm it per shard with
+  `reverse_rusty_shard_translog_sync_on_write == 1` on the shard's `/_metrics`.
+
+On Kubernetes/cloud volumes a "node loss" normally detaches the volume rather than losing the
+page cache silently, but the honest statement is: default RPO 0 is against process death, not
 power loss.
 
 **RTO evidence, not promises:** restore time is dominated by copying the backup and reopening

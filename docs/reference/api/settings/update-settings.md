@@ -87,9 +87,17 @@ Attempting to set a static or unknown key returns `400`:
 
 Coordinator mode validates this same query, media, JSON, size, and patch contract, then returns
 `501 not_supported_in_cluster_mode` for an otherwise valid request. Per-shard configuration is fixed
-when the cluster is assembled; restart the coordinator and every consistently configured shard node
-with the new flags. In particular, the ADR-174 kill switch is
-`--tag-segment-skipping <true|false>` on both `server --cluster` and `shardserver`.
+at startup. Which binary takes the flag depends on the topology (ADR-192):
+
+- **In-process cluster:** restart `server --cluster` with the new flags; they configure every shard.
+- **Remote cluster:** the settings that belong to the process holding a shard's disk are
+  `shardserver` flags and must be set on every shard node: `--wal-sync-on-write <true|false>`,
+  `--retain-source <true|false>`, `--max-segments N`, `--memtable-flush-threshold N`,
+  `--hot-anchor-threshold N`, `--tag-segment-skipping <true|false>`,
+  `--broad-columnar <true|false>` and `--broad-materialize <true|false>`. The coordinator's flags of
+  the same names do not reach a shard: it refuses `--wal-sync-on-write` and warns about the others.
+  Keep `--hot-anchor-threshold` and `--tag-segment-skipping` the same on the coordinator and the
+  shards.
 
 This native API does not accept `settings`, `persistent`, or `transient` wrapper objects, and does
 not accept `null` reset. Elasticsearch's

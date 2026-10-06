@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::cluster::node_metrics::ShardRpc;
 use crate::cluster::proto;
 use crate::segment::PlacedQuery;
 
@@ -19,6 +20,7 @@ pub(super) async fn stage_ingest(
     server: &ShardServer,
     request: Request<Streaming<proto::IngestRequest>>,
 ) -> Result<Response<proto::IngestReply>, Status> {
+    let started = std::time::Instant::now();
     let mut stream = request.into_inner();
     let mut reply = proto::IngestReply::default();
     let mut loaded: Option<(u32, Arc<ServerState>, usize)> = None;
@@ -68,6 +70,12 @@ pub(super) async fn stage_ingest(
     })
     .await?
     .map_err(|error| Status::internal(error.to_string()))?;
+    // A staged load is how a slot is bulk-loaded, by a bootstrap or by a resize: time it as
+    // the slot's bulk ingest.
+    server
+        .slot(shard_id)?
+        .latency
+        .observe(ShardRpc::Ingest, started.elapsed());
     Ok(Response::new(reply))
 }
 

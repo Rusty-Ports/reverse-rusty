@@ -394,7 +394,8 @@ the reference Compose topology binds shards on `9100` and control nodes on `9101
 (not published to the host; scrape from a Prometheus on that network). Shard nodes report
 `reverse_rusty_total_queries`, `reverse_rusty_memory_bytes{component=…}`,
 `reverse_rusty_tombstoned_entries` (compaction backlog), `reverse_rusty_class_queries{class=…}`, and
-`reverse_rusty_shard_ready`, plus the per-shard RPC latency histogram
+`reverse_rusty_shard_ready`, `reverse_rusty_shard_translog_sync_on_write` (1 when the shard
+fsyncs its translog on every write, ADR-192), plus the per-shard RPC latency histogram
 `reverse_rusty_shard_rpc_duration_seconds{shard,method,le}` (ADR-100) and the per-shard broad-lane
 cost counters `reverse_rusty_broad_{candidates,postings_scanned,queries_evaluated,batches}_total{shard}`
 (ADR-101 — the coordinator's counter names, `{shard}`-labeled). ADR-110 adds top-K/fetch latency

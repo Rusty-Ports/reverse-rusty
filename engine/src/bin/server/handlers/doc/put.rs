@@ -1,7 +1,7 @@
 use super::{
     error, extract_ranked_ingest, info, instrument, warn, ApiError, AppState, Arc, Instant,
-    IntoResponse, Json, Path, PutDocBody, PutDocParams, PutDocResponse, PutEngineOutcome, Query,
-    QueryRejection, Response, State, StatusCode, CLASS_D_REJECT_MSG, QUERY_INDEX,
+    IntoResponse, Json, Path, PutDocBody, PutDocParams, PutDocResponse, PutEngineOutcome, PutWrite,
+    Query, QueryRejection, Response, State, StatusCode, CLASS_D_REJECT_MSG, QUERY_INDEX,
 };
 
 /// PUT /_doc/{id} — register or replace a single query. ES `index` semantics
@@ -76,154 +76,174 @@ pub(crate) async fn put_doc(
             return ApiError::response(StatusCode::BAD_REQUEST, error_type, msg).into_response();
         }
     };
-    let response = {
-        let mut engine = state.engine.lock();
-        if params.create_only() && engine.snapshot().has_live_query(id) {
-            warn!(
-                query_id = id,
-                "create-only write conflicts with a live document"
-            );
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["put_doc", "409"])
-                .inc();
-            ApiError::response(
-                StatusCode::CONFLICT,
-                "version_conflict_engine_exception",
-                format!("document {id} already exists; op_type=create requires a missing id"),
-            )
-            .into_response()
+    let create_only = params.create_only();
+    let (query, version) = (body.query.clone(), body.version);
+    // The engine mutex is waited on, and the write applied, on a blocking thread (ADR-191).
+    let write = crate::state::run_engine_write(&state, move |engine| {
+        if create_only && engine.snapshot().has_live_query(id) {
+            return PutWrite::Conflict;
+        }
+        PutWrite::Applied(if create_only {
+            engine
+                .try_insert_live_ranked(&query, id, version, &tags, rank)
+                .map(|outcome| match outcome {
+                    reverse_rusty::segment::InsertOutcome::Inserted(_) => PutEngineOutcome::Created,
+                    reverse_rusty::segment::InsertOutcome::RejectedClassD => {
+                        PutEngineOutcome::RejectedClassD
+                    }
+                })
         } else {
-            let write = if params.create_only() {
-                engine
-                    .try_insert_live_ranked(&body.query, id, body.version, &tags, rank)
-                    .map(|outcome| match outcome {
-                        reverse_rusty::segment::InsertOutcome::Inserted(_) => {
-                            PutEngineOutcome::Created
-                        }
-                        reverse_rusty::segment::InsertOutcome::RejectedClassD => {
-                            PutEngineOutcome::RejectedClassD
-                        }
-                    })
-            } else {
-                engine
-                    .try_upsert_live_ranked(&body.query, id, body.version, &tags, rank)
-                    .map(|outcome| match outcome {
-                        reverse_rusty::segment::UpsertOutcome::Created(_) => {
-                            PutEngineOutcome::Created
-                        }
-                        reverse_rusty::segment::UpsertOutcome::Updated { replaced, .. } => {
-                            PutEngineOutcome::Updated { replaced }
-                        }
-                        reverse_rusty::segment::UpsertOutcome::RejectedClassD => {
-                            PutEngineOutcome::RejectedClassD
-                        }
-                    })
-            };
-            match write {
-                Ok(PutEngineOutcome::Created) => {
-                    info!(query_id = id, "query registered");
-                    state
-                        .prom
-                        .http_requests_total
-                        .with_label_values(&["put_doc", "201"])
-                        .inc();
-                    (
-                        StatusCode::CREATED,
-                        Json(PutDocResponse {
-                            _index: QUERY_INDEX,
-                            _id: id,
-                            _version: Some(body.version),
-                            result: "created",
-                            error: None,
-                        }),
-                    )
-                        .into_response()
-                }
-                Ok(PutEngineOutcome::Updated { replaced }) => {
-                    info!(query_id = id, replaced, "query replaced");
-                    state
-                        .prom
-                        .http_requests_total
-                        .with_label_values(&["put_doc", "200"])
-                        .inc();
-                    (
-                        StatusCode::OK,
-                        Json(PutDocResponse {
-                            _index: QUERY_INDEX,
-                            _id: id,
-                            _version: Some(body.version),
-                            result: "updated",
-                            error: None,
-                        }),
-                    )
-                        .into_response()
-                }
-                Ok(PutEngineOutcome::RejectedClassD) => {
-                    warn!(query_id = id, "query rejected: cost class D");
-                    state
-                        .prom
-                        .http_requests_total
-                        .with_label_values(&["put_doc", "400"])
-                        .inc();
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(PutDocResponse {
-                            _index: QUERY_INDEX,
-                            _id: id,
-                            _version: None,
-                            result: "rejected",
-                            error: Some(CLASS_D_REJECT_MSG.into()),
-                        }),
-                    )
-                        .into_response()
-                }
-                Err(reverse_rusty::WriteError::Parse(e)) => {
-                    warn!(query_id = id, error = %e, "query parse error");
-                    state
-                        .prom
-                        .http_requests_total
-                        .with_label_values(&["put_doc", "400"])
-                        .inc();
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(PutDocResponse {
-                            _index: QUERY_INDEX,
-                            _id: id,
-                            _version: None,
-                            result: "error",
-                            error: Some(format!("parse error: {e}")),
-                        }),
-                    )
-                        .into_response()
-                }
-                Err(reverse_rusty::WriteError::Wal(e)) => {
-                    // Durability failure: the mutation was NOT applied. Never
-                    // acknowledge a write we couldn't log (see ADR-013). 503 tells
-                    // the client to retry — the engine state is unchanged.
-                    error!(query_id = id, error = %e, "WAL write failed, mutation rejected");
-                    state
-                        .prom
-                        .http_requests_total
-                        .with_label_values(&["put_doc", "503"])
-                        .inc();
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(PutDocResponse {
-                            _index: QUERY_INDEX,
-                            _id: id,
-                            _version: None,
-                            result: "error",
-                            error: Some(format!("write-ahead log error: {e}")),
-                        }),
-                    )
-                        .into_response()
+            engine
+                .try_upsert_live_ranked(&query, id, version, &tags, rank)
+                .map(|outcome| match outcome {
+                    reverse_rusty::segment::UpsertOutcome::Created(_) => PutEngineOutcome::Created,
+                    reverse_rusty::segment::UpsertOutcome::Updated { replaced, .. } => {
+                        PutEngineOutcome::Updated { replaced }
+                    }
+                    reverse_rusty::segment::UpsertOutcome::RejectedClassD => {
+                        PutEngineOutcome::RejectedClassD
+                    }
+                })
+        })
+    })
+    .await;
+    let response = {
+        match write {
+            Err(worker) => {
+                error!(query_id = id, error = %worker, "index-document worker failed");
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["put_doc", "500"])
+                    .inc();
+                ApiError::response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "write_worker_failed",
+                    format!("index-document request did not complete: {worker}"),
+                )
+                .into_response()
+            }
+            Ok(PutWrite::Conflict) => {
+                warn!(
+                    query_id = id,
+                    "create-only write conflicts with a live document"
+                );
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["put_doc", "409"])
+                    .inc();
+                ApiError::response(
+                    StatusCode::CONFLICT,
+                    "version_conflict_engine_exception",
+                    format!("document {id} already exists; op_type=create requires a missing id"),
+                )
+                .into_response()
+            }
+            Ok(PutWrite::Applied(write)) => {
+                match write {
+                    Ok(PutEngineOutcome::Created) => {
+                        info!(query_id = id, "query registered");
+                        state
+                            .prom
+                            .http_requests_total
+                            .with_label_values(&["put_doc", "201"])
+                            .inc();
+                        (
+                            StatusCode::CREATED,
+                            Json(PutDocResponse {
+                                _index: QUERY_INDEX,
+                                _id: id,
+                                _version: Some(body.version),
+                                result: "created",
+                                error: None,
+                            }),
+                        )
+                            .into_response()
+                    }
+                    Ok(PutEngineOutcome::Updated { replaced }) => {
+                        info!(query_id = id, replaced, "query replaced");
+                        state
+                            .prom
+                            .http_requests_total
+                            .with_label_values(&["put_doc", "200"])
+                            .inc();
+                        (
+                            StatusCode::OK,
+                            Json(PutDocResponse {
+                                _index: QUERY_INDEX,
+                                _id: id,
+                                _version: Some(body.version),
+                                result: "updated",
+                                error: None,
+                            }),
+                        )
+                            .into_response()
+                    }
+                    Ok(PutEngineOutcome::RejectedClassD) => {
+                        warn!(query_id = id, "query rejected: cost class D");
+                        state
+                            .prom
+                            .http_requests_total
+                            .with_label_values(&["put_doc", "400"])
+                            .inc();
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(PutDocResponse {
+                                _index: QUERY_INDEX,
+                                _id: id,
+                                _version: None,
+                                result: "rejected",
+                                error: Some(CLASS_D_REJECT_MSG.into()),
+                            }),
+                        )
+                            .into_response()
+                    }
+                    Err(reverse_rusty::WriteError::Parse(e)) => {
+                        warn!(query_id = id, error = %e, "query parse error");
+                        state
+                            .prom
+                            .http_requests_total
+                            .with_label_values(&["put_doc", "400"])
+                            .inc();
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(PutDocResponse {
+                                _index: QUERY_INDEX,
+                                _id: id,
+                                _version: None,
+                                result: "error",
+                                error: Some(format!("parse error: {e}")),
+                            }),
+                        )
+                            .into_response()
+                    }
+                    Err(reverse_rusty::WriteError::Wal(e)) => {
+                        // Durability failure: the mutation was NOT applied. Never
+                        // acknowledge a write we couldn't log (see ADR-013). 503 tells
+                        // the client to retry — the engine state is unchanged.
+                        error!(query_id = id, error = %e, "WAL write failed, mutation rejected");
+                        state
+                            .prom
+                            .http_requests_total
+                            .with_label_values(&["put_doc", "503"])
+                            .inc();
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(PutDocResponse {
+                                _index: QUERY_INDEX,
+                                _id: id,
+                                _version: None,
+                                result: "error",
+                                error: Some(format!("write-ahead log error: {e}")),
+                            }),
+                        )
+                            .into_response()
+                    }
                 }
             }
         }
     };
-    state.publish_snapshot();
     state
         .prom
         .http_request_duration
