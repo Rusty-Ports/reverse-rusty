@@ -506,4 +506,8 @@ impl Shard for ReplicatedShard {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(sink);
     }
+
+    fn out_of_sync_replicas(&self) -> usize {
+        self.out_of_sync()
+    }
 }

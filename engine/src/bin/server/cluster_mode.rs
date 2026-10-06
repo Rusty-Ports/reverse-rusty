@@ -189,6 +189,15 @@ pub(crate) async fn run(
         );
         std::process::exit(1);
     }
+    // --recover-divergent-replicas rebuilds REMOTE replicas at connect (ADR-195). An in-process
+    // cluster rebuilds its replicas from the primary on every open, so the flag would do nothing.
+    if cli.recover_divergent_replicas && in_process {
+        error!(
+            "--recover-divergent-replicas applies to remote replicas (--shard-endpoint groups); \
+             an in-process cluster rebuilds its replicas from the primary on every start"
+        );
+        std::process::exit(1);
+    }
     // --reconcile-interval-secs runs the unattended reconciler (ADR-092), which re-points routing by
     // MOVING data to the committed map's owner. It is only safe + meaningful when the coordinator
     // actually ROUTES by that committed map — otherwise a converged map would not change routing.
@@ -244,19 +253,7 @@ pub(crate) async fn run(
     } else {
         remote_groups.len()
     };
-    let cluster_config = ClusterConfig {
-        num_shards,
-        replication_factor: cli.replication_factor,
-        per_shard,
-        include_broad: cli.include_broad,
-        data_dir: if in_process {
-            cli.data_dir.clone()
-        } else {
-            None
-        },
-        wal_sync_on_write: cli.wal_sync_on_write,
-        ..ClusterConfig::default()
-    };
+    let cluster_config = cli.cluster_config(num_shards, per_shard, in_process);
 
     // Mesh client security for the remote links (ADR-071), resolved fail-loud HERE so a
     // misconfiguration refuses startup. Kept as plain bytes — the typed ClientSecurity is

@@ -184,6 +184,13 @@ pub struct ClusterConfig {
     /// passes the committed control-state generation (ADR-180). In-process and durable builds
     /// ignore it: their generation comes from the build or the manifest.
     pub remote_placement_generation: u64,
+    /// What a replicated remote builder does with a replica that does not hold exactly what its
+    /// primary holds (ADR-195). `false` (default): the replica starts outside the in-sync set
+    /// and its data is left alone. `true`: the replica is first re-recovered from its primary,
+    /// which discards whatever it held. Set it only when the primaries are known to be the
+    /// authoritative copies; when a primary is the copy that lost data, recovery would erase the
+    /// surviving one. Ignored by every other builder.
+    pub recover_divergent_replicas: bool,
 }
 
 impl ClusterConfig {
@@ -206,6 +213,7 @@ impl Default for ClusterConfig {
             handoff_drain_passes: Self::DEFAULT_HANDOFF_DRAIN_PASSES,
             handoff_final_drain_cap: Self::DEFAULT_HANDOFF_FINAL_DRAIN_CAP,
             remote_placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
+            recover_divergent_replicas: false,
         }
     }
 }

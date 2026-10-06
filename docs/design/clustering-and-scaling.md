@@ -233,6 +233,10 @@ to the deployment-mode RPO in
 - A replica failure marks that copy out of sync; it does **not** fail an already successful primary
   write. There is no quorum-ack query-write mode.
 - Reads use the primary and fail over on a transport failure only to a replica marked in sync.
+- The mark is the coordinator's memory. A remote coordinator earns it at connect by proving each
+  replica's content fingerprint equal to its primary's (ADR-195); a replica that is not proven
+  starts out of sync and is left as it is unless the operator asked for divergent replicas to
+  be recovered from their primaries.
 - Aggregation, source fetch, checkpoint identity, and content fingerprints remain
   primary-authoritative.
 

@@ -9,6 +9,21 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Replicas are proven before they are trusted
+
+- Fix a silent miss on the remote replicated topology: every coordinator that connected marked
+  every replica in sync without checking, so a replica that had missed writes while it was down,
+  or one started on an empty volume, was served again after the next coordinator restart, and a
+  read that failed over to it answered without those queries. A connecting coordinator now
+  compares each replica's content fingerprint with its primary's and trusts only an exact match
+  ([ADR-195](decisions/adr-195-replicas-are-proven-at-connect.md)). A replica that is not proven
+  is left as it is and never served; a read with no primary and no proven replica fails with 502.
+- `--recover-divergent-replicas` on the coordinator re-recovers such replicas from their
+  primaries at startup. It is off by default: recovery discards the replica's data, which is the
+  wrong thing when the primary is the copy that lost its volume.
+- `/_health` and `/_stats` report `out_of_sync_replicas`, and health is yellow while it is
+  non-zero.
+
 ## 2026-10-06 — First read after a shard restart, and wider test margins
 
 - Fix a read failing with a transport error right after a shard node restarted: the coordinator

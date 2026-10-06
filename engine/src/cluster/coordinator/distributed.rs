@@ -28,4 +28,5 @@ pub use remote_resize::{
     recover_durable_resize, PreparedRemoteResize, RemoteResizeReport, RemoteResizeRequest,
     ResizeRecovery, RetiredRemoteLayout,
 };
+mod replica_sync;
 mod replicated;

@@ -125,6 +125,8 @@ struct ClusterStatsResponse {
     epoch: u64,
     /// Mutations queued for partial-apply repair (ADR-047) — 0 on a healthy cluster.
     pending_repairs: usize,
+    /// Replicas reads cannot fail over to (ADR-195) — 0 on a healthy or unreplicated cluster.
+    out_of_sync_replicas: usize,
     /// Whether any stored query carries tags (the `set_vocab` refusal condition).
     has_tagged_queries: bool,
 }
@@ -211,6 +213,7 @@ pub(crate) async fn cluster_stats(
             },
             epoch: cluster.epoch(),
             pending_repairs: cluster.pending_repairs(),
+            out_of_sync_replicas: cluster.out_of_sync_replicas(),
             has_tagged_queries: cluster.has_tagged_queries(),
         })
     });

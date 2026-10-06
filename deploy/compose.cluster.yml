@@ -107,8 +107,10 @@ services:
   # RF=1 even though the replica is serving):
   #   server --cluster ... --replication-factor 2 \
   #     --shard-endpoint https://shard0:50051,https://shard0r:50051
-  # NOTE: a fresh replica is assembled as in-sync without recovery — bring replicas up
-  # from a recovered/same volume, not an empty one (cluster-deployment.md §6).
+  # NOTE: the coordinator trusts a replica for failover only when it holds exactly what
+  # its primary holds at connect (ADR-195). A fresh or stale replica is left out of the
+  # in-sync set (/_health yellow) until the coordinator is started once with
+  # --recover-divergent-replicas (cluster-deployment.md §6).
   #
   # FEWER PODS THAN SHARDS (co-location, ADR-093 Stage 2/3): a node hosts MANY shards
   # keyed by shard-id (= position), so K positions can run on N<K pods — express it by

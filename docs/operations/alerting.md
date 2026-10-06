@@ -90,7 +90,11 @@ member self-heals on restart from its durable log (ADR-041).
 made durable (WAL append / segment write / manifest commit failed — ADR-021/051). The engine
 fails closed, but the underlying cause (disk full, volume failure) compounds. **Do:** check disk
 space/health immediately; do not take a backup onto the same failing disk; once resolved, verify
-with a sentinel write and take a fresh backup.
+with a sentinel write and take a fresh backup. The `op="replica_desync"` series is different: a
+replica left the in-sync set (a replicated write to it failed, or it was not proven equal to its
+primary when the coordinator connected, ADR-195). No write was lost, but that position has less
+redundancy until the replica is recovered ([runbook §6](cluster-deployment.md), *Replica
+replacement*); `/_health` reports `out_of_sync_replicas`.
 
 ### RRTransportErrors
 Shard-RPC errors from the coordinator sustained for 5m — the fan-out is failing **loud** against
