@@ -13,7 +13,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 
 - The sizing guide now says what compaction, a flush and a resident-source open hold on the heap
   (about three times the merge range for a compaction, the whole source store file for every
-  flush), that a forced merge makes the merge range the whole engine or shard, that the default
+  flush), which requests run a full merge (the whole engine as the merge range), that the default
   profile is `retain_source=true`, and that the throughput captures need the segment working set
   in the page cache on a durable node.
 - Two claims were wrong and are corrected where they appeared (roadmap, ADR-020 outcome, the

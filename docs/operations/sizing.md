@@ -102,7 +102,11 @@ Steady state is not the peak:
 - compaction copies every segment in its merge range onto the heap (also the mmap-backed ones),
   builds the merged segment in memory beside them, and reads the file it wrote back to checksum
   it: plan for about three times the merge range, in memory, while the old segments still serve.
-  A forced merge (`POST /_forcemerge`) makes that range the whole engine or shard;
+  A full merge makes that range the whole engine: `POST /_compact`, or
+  `POST /_forcemerge?max_num_segments=1` (a bare `POST /_forcemerge` only runs the merge
+  policy, which may merge nothing). Both are standalone routes; a coordinator answers 501.
+  A shard node merges only by policy, and the range the policy picks can include the shard's
+  largest segment;
 - every flush (by default every 100,000 writes) rebuilds the complete source store file in heap
   buffers before writing it, whatever the size of the flush;
 - opening a node with `retain_source=true` reads the whole source store into memory and then
@@ -115,8 +119,9 @@ Steady state is not the peak:
 Two-times steady-state memory/disk is a useful **starting reserve**, not a guarantee, and a forced
 merge of one large engine or shard exceeds it. Large source stores can make disk the dominant
 dimension, and the largest compaction/rebuild unit determines the temporary copy; sharding divides
-that unit. Measure the peak of a `POST /_forcemerge`, a vocabulary rebuild, a resize, and a peer
-recovery against the representative data before tightening headroom.
+that unit. Measure the peak of a full merge (`POST /_forcemerge?max_num_segments=1` on a
+standalone engine holding one shard's share of the data), a vocabulary rebuild, a resize, and a
+peer recovery against the representative data before tightening headroom.
 
 For disk, budget separately:
 
