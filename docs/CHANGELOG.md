@@ -9,6 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — First read after a shard restart, and wider test margins
+
+- Fix a read failing with a transport error right after a shard node restarted: the coordinator
+  could write the request to its old connection before noticing the close, and that failure was
+  not classified as retryable. An idempotent read whose connection was lost is now retried
+  (ADR-085, later outcome). Writes still never retry.
+- Widen four wall-clock bounds in the tests (a 10 ms and two 100 ms margins, and one of 750 ms)
+  to at least an order of magnitude by slowing the path each test must beat. Each still fails
+  against a build that ignores its deadline or timeout.
+- `docs/testing.md` records what to do when the gate goes red, and the two test shapes behind
+  most of the intermittent failures.
+
 ## 2026-10-06 — Three flaky gate tests
 
 - Fix three tests that failed the gate intermittently, on `main` as well as on branches:
