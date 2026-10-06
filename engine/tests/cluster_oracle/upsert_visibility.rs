@@ -163,7 +163,10 @@ fn unfenced_reads_stay_exact_across_lane_changing_upserts() {
         "precondition: the rare-anchored body is selective"
     );
     assert!(
-        matches!(placed_on(&cluster, 800_001, broad), AddOutcome::Replicated),
+        matches!(
+            placed_on(&cluster, 800_001, broad),
+            AddOutcome::Replicated { .. }
+        ),
         "precondition: the hot-only body is replicated to the broad lane"
     );
     cluster.upsert_query(ID, selective, 1).expect("seed");

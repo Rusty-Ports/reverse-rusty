@@ -166,7 +166,9 @@ fn ranked_columnar_metadata_walk_uses_the_active_sampler_and_aborts() {
         else {
             panic!("selective test query was unexpectedly rejected");
         };
-        engine.tombstone(local).expect("tombstone legacy copy");
+        engine
+            .tombstone(local.local)
+            .expect("tombstone legacy copy");
     }
     let snapshot = engine.snapshot();
     assert!(

@@ -20,7 +20,7 @@ fn upsert_creates_then_replaces_by_logical_id() {
     assert_eq!(removed, 0, "fresh id ⇒ created");
     assert!(matches!(
         outcome,
-        AddOutcome::Placed { .. } | AddOutcome::Replicated
+        AddOutcome::Placed { .. } | AddOutcome::Replicated { .. }
     ));
     assert!(cluster.percolate("1996 vertex").expect("p").contains(&3));
 
@@ -141,7 +141,10 @@ fn upsert_threads_request_version_into_the_log_frame() {
         .upsert_query(5, "1995 vertex", 42)
         .expect("versioned upsert");
     assert!(
-        matches!(outcome, AddOutcome::Placed { .. } | AddOutcome::Replicated),
+        matches!(
+            outcome,
+            AddOutcome::Placed { .. } | AddOutcome::Replicated { .. }
+        ),
         "in-vocabulary upsert is accepted, got {outcome:?}"
     );
 

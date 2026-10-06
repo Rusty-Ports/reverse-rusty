@@ -59,7 +59,7 @@ fn upsert_status(
     outcome: &AddOutcome,
 ) -> (StatusCode, &'static str, Option<String>) {
     match outcome {
-        AddOutcome::Placed { .. } | AddOutcome::Replicated => {
+        AddOutcome::Placed { .. } | AddOutcome::Replicated { .. } => {
             if removed > 0 {
                 (StatusCode::OK, "updated", None)
             } else {

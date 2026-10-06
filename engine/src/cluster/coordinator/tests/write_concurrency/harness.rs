@@ -1,4 +1,5 @@
 use super::*;
+use crate::compile::Extracted;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WriteCall {

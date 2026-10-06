@@ -23,6 +23,7 @@ fn item_inner(id: u64) -> BulkItemInner {
         version: None,
         result: None,
         status: 0,
+        stored: None,
         error: None,
     }
 }
@@ -65,11 +66,13 @@ pub(crate) fn succeed_item(
     status: StatusCode,
     version: u32,
     result: &'static str,
+    class: reverse_rusty::compile::CostClass,
 ) {
     let inner = item_inner_mut(item);
     inner.status = status.as_u16();
     inner.version = Some(version);
     inner.result = Some(result);
+    inner.stored = Some(class.into());
     inner.error = None;
 }
 
@@ -83,6 +86,7 @@ pub(crate) fn fail_item(
     inner.status = status.as_u16();
     inner.version = None;
     inner.result = None;
+    inner.stored = None;
     inner.error = Some(BulkItemError {
         error_type,
         reason: reason.into(),
@@ -244,12 +248,13 @@ fn apply_fresh_batch(
         engine.try_bulk_ingest_detailed_with_tags_and_ranks(&pairs, &tags, &ranks)?;
     for ((slot, _, _, source), outcome) in prepared.iter().zip(outcomes) {
         match outcome {
-            IngestItemStatus::Ingested => {
+            IngestItemStatus::Ingested { class } => {
                 succeed_item(
                     &mut responses[*slot],
                     StatusCode::CREATED,
                     source.version,
                     "created",
+                    class,
                 );
             }
             IngestItemStatus::RejectedParse(error) => {
@@ -303,8 +308,8 @@ fn apply_one(
         engine
             .try_insert_live_ranked(&source.query, id, source.version, &source.tags, source.rank)
             .map(|outcome| match outcome {
-                reverse_rusty::segment::InsertOutcome::Inserted(_) => {
-                    reverse_rusty::segment::UpsertOutcome::Created(0)
+                reverse_rusty::segment::InsertOutcome::Inserted(stored) => {
+                    reverse_rusty::segment::UpsertOutcome::Created(stored)
                 }
                 reverse_rusty::segment::InsertOutcome::RejectedClassD => {
                     reverse_rusty::segment::UpsertOutcome::RejectedClassD
@@ -315,11 +320,23 @@ fn apply_one(
     };
 
     match write {
-        Ok(reverse_rusty::segment::UpsertOutcome::Created(_)) => {
-            succeed_item(response, StatusCode::CREATED, source.version, "created");
+        Ok(reverse_rusty::segment::UpsertOutcome::Created(stored)) => {
+            succeed_item(
+                response,
+                StatusCode::CREATED,
+                source.version,
+                "created",
+                stored.class,
+            );
         }
-        Ok(reverse_rusty::segment::UpsertOutcome::Updated { .. }) => {
-            succeed_item(response, StatusCode::OK, source.version, "updated");
+        Ok(reverse_rusty::segment::UpsertOutcome::Updated { stored, .. }) => {
+            succeed_item(
+                response,
+                StatusCode::OK,
+                source.version,
+                "updated",
+                stored.class,
+            );
         }
         Ok(reverse_rusty::segment::UpsertOutcome::RejectedClassD) => {
             fail_item(

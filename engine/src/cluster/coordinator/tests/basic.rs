@@ -114,7 +114,7 @@ fn create_waits_for_a_provisional_reservation_to_commit_or_roll_back() {
     assert!(
         matches!(
             second_result,
-            Ok(AddOutcome::Placed { .. } | AddOutcome::Replicated)
+            Ok(AddOutcome::Placed { .. } | AddOutcome::Replicated { .. })
         ),
         "the waiter must create after rollback, got {second_result:?}"
     );

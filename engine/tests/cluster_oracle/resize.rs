@@ -311,7 +311,10 @@ fn repeated_resizes_under_concurrent_writes_keep_every_acknowledged_query() {
                         .expect("cluster lock")
                         .add_query(*id, dsl)
                         .expect("an in-process add either applies or is rejected");
-                    if matches!(outcome, AddOutcome::Placed { .. } | AddOutcome::Replicated) {
+                    if matches!(
+                        outcome,
+                        AddOutcome::Placed { .. } | AddOutcome::Replicated { .. }
+                    ) {
                         acknowledged
                             .lock()
                             .expect("ack lock")

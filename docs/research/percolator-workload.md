@@ -119,6 +119,8 @@ FP-only loosening the precision stage re-filters. Run with the **broad lane enab
 or per request: `include_broad` on the compatibility routes, `query_scope: "with_broad"` on v2 and
 exhaustive jobs) when class-C and accepted class-D rows belong in the requested scope.
 With broad disabled they are excluded by the documented visibility contract, not lost silently.
+Which delivery surface returns every candidate, the default page sizes, and how a write reports
+its query's class are in the [recall-first integration guide](../reference/integration.md).
 Raise `ParseLimits` to envelope the corpus (side-listing anything still rejected).
 
 **Translation rules** (each preserves semantics or makes RR strictly *more* permissive — FP-only, which

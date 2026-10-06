@@ -1,4 +1,5 @@
 use super::{extract, Arc, Engine, Extracted, InsertOutcome, UpsertOutcome};
+use crate::segment::StoredRow;
 
 impl Engine {
     /// Live insert (hot delta -> memtable). New features get fresh ids; since
@@ -21,7 +22,7 @@ impl Engine {
         tags: &[(String, String)],
     ) -> Option<u32> {
         match self.try_insert_live_with_tags(text, logical, version, tags) {
-            Ok(InsertOutcome::Inserted(local)) => Some(local),
+            Ok(InsertOutcome::Inserted(stored)) => Some(stored.local),
             Ok(InsertOutcome::RejectedClassD) => None,
             Err(crate::error::WriteError::Parse(_)) => {
                 self.rejected_parse += 1;
@@ -180,7 +181,10 @@ impl Engine {
                 tags,
             );
             self.maybe_flush();
-            Ok(InsertOutcome::Inserted(added.local))
+            Ok(InsertOutcome::Inserted(StoredRow {
+                local: added.local,
+                class: added.class,
+            }))
         } else {
             // Unreachable: the pre-WAL gate shares its predicate with
             // add_compiled, and the dict is unchanged in between. Kept as a
@@ -401,7 +405,10 @@ impl Engine {
             return UpsertOutcome::RejectedClassD;
         };
         self.record_compiled(&added);
-        let new_local = added.local;
+        let stored = StoredRow {
+            local: added.local,
+            class: added.class,
+        };
 
         let replaced = prior.len();
         for (seg_idx, local) in prior {
@@ -420,12 +427,9 @@ impl Engine {
             tags,
         );
         if replaced == 0 {
-            UpsertOutcome::Created(new_local)
+            UpsertOutcome::Created(stored)
         } else {
-            UpsertOutcome::Updated {
-                local: new_local,
-                replaced,
-            }
+            UpsertOutcome::Updated { stored, replaced }
         }
     }
 

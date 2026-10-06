@@ -8,7 +8,9 @@ use crate::error::{ParseError, ParseErrorKind};
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::segment::PlacedQuery;
 
-use super::{placement_of, AddOutcome, ClusterEngine, PendingRepair, ResyncReport, Target};
+use super::{
+    placement_of, planned, AddOutcome, ClusterEngine, PendingRepair, ResyncReport, Target,
+};
 
 /// One bulk-load entry: `(logical, version, dsl, raw tags)` (ADR-055) — the input to
 /// [`ClusterEngine::bucket_and_ingest`], before placement turns it into a [`PlacedQuery`] per shard.

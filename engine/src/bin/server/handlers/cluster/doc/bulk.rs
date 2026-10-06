@@ -97,9 +97,9 @@ fn cluster_bulk_inner(state: &Arc<ClusterAppState>, items: Vec<ParsedBulkItem>) 
         match result {
             Ok((removed, outcome)) => {
                 let (status, result, error) = super::upsert_status(removed, &outcome);
-                if status.is_success() {
+                if let Some(class) = outcome.class().filter(|_| status.is_success()) {
                     accepted += 1;
-                    succeed_item(&mut response, status, source.version, result);
+                    succeed_item(&mut response, status, source.version, result, class);
                 } else {
                     fail_item(
                         &mut response,

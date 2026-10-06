@@ -35,5 +35,6 @@ mod learn_default;
 mod messy;
 mod reanchor;
 mod segments;
+mod stored_class;
 mod vocab;
 mod vocab_ids;

@@ -83,7 +83,7 @@ fn grpc_partial_apply_is_detected_and_queued() {
         .add_query(900_001, dsl)
         .expect("healthy selective add over gRPC")
     {
-        AddOutcome::Placed { shards } => {
+        AddOutcome::Placed { shards, .. } => {
             assert_eq!(
                 shards.len(),
                 1,
@@ -207,7 +207,7 @@ fn grpc_a_partial_write_is_lost_with_its_coordinator_and_a_retry_stores_it() {
     // One out-of-dictionary required term: placed on exactly one shard. Find which.
     let dsl = "zzlostrepairterm";
     let (_, outcome) = first.upsert_query(900_010, dsl, 1).expect("healthy upsert");
-    let AddOutcome::Placed { shards } = outcome else {
+    let AddOutcome::Placed { shards, .. } = outcome else {
         panic!("expected a selective placement, got {outcome:?}");
     };
     let target = shards[0];

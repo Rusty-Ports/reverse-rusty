@@ -94,7 +94,7 @@ pub use result::{
 };
 pub use segment::{
     AliasApplyReport, CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport,
-    InsertOutcome, MatchStats, SegmentAddress,
+    InsertOutcome, MatchStats, SegmentAddress, StoredRow,
 };
 pub use tagdict::{TagDict, TagId};
 pub use vocab::{

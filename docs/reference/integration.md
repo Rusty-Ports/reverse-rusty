@@ -53,9 +53,16 @@ at the first bulk load ([ADR-188](../decisions/adr-188-mask-assigned-once.md)). 
 can be class B on one deployment and class C on another. Do not assume a query is default-visible because it
 looks selective; ask for the broad scope, or check.
 
-To see what a deployment holds, `GET /_stats` reports `class_counts` (rows per class,
-[stats reference](api/observability/stats.md)). A non-zero `c` or `d` means some stored queries
-are matched only in the broad scope. A write does not report the class of the query it stored.
+**Every write says how its query was stored.** `PUT /_doc/{id}` and each `_bulk` item answer
+with `class` and `default_visible`
+([document reference](api/documents/put-document.md)). `"default_visible": false` means the
+query is matched only in the broad scope. A consumer that must never miss one can check the
+field on every write, and either use the broad scope or reword the query. The fields describe
+the write: a later rebuild can change a query's class, but never hides one that was visible.
+
+To see what a deployment holds as a whole, `GET /_stats` reports `class_counts` (rows per
+class, [stats reference](api/observability/stats.md)). A non-zero `c` or `d` means some stored
+queries are matched only in the broad scope.
 
 A negation-only query is rejected at write time unless the server runs with `--accept-class-d`;
 the response says so. If the corpus has such queries, turn the setting on before loading it.

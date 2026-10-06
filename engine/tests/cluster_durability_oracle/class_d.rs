@@ -258,7 +258,9 @@ fn clog_class_d_replay_is_configuration_independent() {
             cluster
                 .add_query(CLASS_D_ID_BASE, "-loggedwhileon")
                 .expect("add"),
-            AddOutcome::Replicated,
+            AddOutcome::Replicated {
+                class: reverse_rusty::compile::CostClass::D
+            },
             "a class-D add with the lane on is accepted + logged"
         );
         // drop without checkpoint: the add lives only in the clog tail.

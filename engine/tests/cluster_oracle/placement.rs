@@ -3,6 +3,7 @@
 
 use crate::harness::*;
 use reverse_rusty::cluster::{AddOutcome, ClusterConfig, ClusterEngine};
+use reverse_rusty::compile::CostClass;
 use reverse_rusty::gen::{generate, GenConfig};
 
 #[test]
@@ -25,7 +26,7 @@ fn placement_by_cost_class() {
         .add_query(next(), "1994 north star rareentity0")
         .unwrap()
     {
-        AddOutcome::Placed { shards } => {
+        AddOutcome::Placed { shards, .. } => {
             assert_eq!(shards.len(), 1, "class A should hit exactly one shard");
             assert!(shards[0] < 8);
         }
@@ -35,14 +36,18 @@ fn placement_by_cost_class() {
     // class B arity-2: all-hot required, no rare anchor -> replicated lane.
     assert_eq!(
         cluster.add_query(next(), "1994 north star").unwrap(),
-        AddOutcome::Replicated,
+        AddOutcome::Replicated {
+            class: CostClass::B
+        },
         "all-hot {{year}} {{brand}} should be class-B arity-2 -> replicated lane"
     );
 
     // class C: a single hot anchor (broad) -> replicated lane.
     assert_eq!(
         cluster.add_query(next(), "standard").unwrap(),
-        AddOutcome::Replicated,
+        AddOutcome::Replicated {
+            class: CostClass::C
+        },
         "broad single-hot anchor should be replicated"
     );
 
@@ -51,7 +56,7 @@ fn placement_by_cost_class() {
         .add_query(next(), "(rareentity0,rareentity1000)")
         .unwrap()
     {
-        AddOutcome::Placed { shards } => {
+        AddOutcome::Placed { shards, .. } => {
             assert!(
                 (1..=2).contains(&shards.len()),
                 "any-of of two members places on 1..=2 shards, got {shards:?}"
@@ -87,10 +92,12 @@ fn a_top64_required_term_with_a_selective_group_places_selectively() {
         // Precondition: on its own the required term is opt-in.
         assert_eq!(
             cluster.add_query(9_100_000, "standard").unwrap(),
-            AddOutcome::Replicated
+            AddOutcome::Replicated {
+                class: CostClass::C
+            }
         );
         match cluster.add_query(9_100_001, mixed).unwrap() {
-            AddOutcome::Placed { shards } => assert!(
+            AddOutcome::Placed { shards, .. } => assert!(
                 (1..=2).contains(&shards.len()),
                 "K={num_shards}: one shard per group member, got {shards:?}"
             ),
@@ -128,7 +135,7 @@ fn anyof_query_can_place_on_multiple_shards() {
     let mut saw_two = false;
     for i in 0..150u64 {
         id += 1;
-        if let AddOutcome::Placed { shards } = cluster
+        if let AddOutcome::Placed { shards, .. } = cluster
             .add_query(id, &format!("(rareentity{i},rareentity{})", i + 1000))
             .unwrap()
         {
@@ -206,4 +213,68 @@ fn ingest_on_a_populated_cluster_is_rejected() {
         ),
         "ingest() on a populated cluster must error, not silently duplicate"
     );
+}
+
+/// An accepted write reports the class the coordinator planned it under, and that is the
+/// class every shard stored its copy under: a selective row on the shards it was placed on,
+/// a replicated one on all of them.
+#[test]
+fn a_write_reports_the_class_every_copy_was_stored_under() {
+    let (queries, _titles) = build_corpus();
+    for &num_shards in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards,
+            include_broad: true,
+            per_shard: reverse_rusty::config::EngineConfig {
+                accept_class_d: true,
+                ..reverse_rusty::config::EngineConfig::default()
+            },
+            ..ClusterConfig::default()
+        };
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let slot = |class: CostClass| match class {
+            CostClass::A => 0,
+            CostClass::B => 1,
+            CostClass::C => 2,
+            CostClass::D => 3,
+            CostClass::H => 4,
+        };
+        for (at, (dsl, class)) in [
+            ("1994 north star rareentity0", CostClass::A),
+            ("(rareentity0,rareentity1000)", CostClass::B),
+            ("1994 north star", CostClass::B),
+            ("standard", CostClass::C),
+            ("-standard", CostClass::D),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let before = cluster.class_counts().expect("class counts");
+            let outcome = cluster.add_query(9_200_000 + at as u64, dsl).expect("add");
+            assert_eq!(outcome.class(), Some(class), "K={num_shards} {dsl:?}");
+            let copies = match &outcome {
+                AddOutcome::Placed { shards, .. } => shards.len() as u64,
+                AddOutcome::Replicated { .. } => num_shards as u64,
+                other => panic!("K={num_shards} {dsl:?}: rejected as {other:?}"),
+            };
+            let mut want = before;
+            want[slot(class)] += copies;
+            assert_eq!(
+                cluster.class_counts().expect("class counts"),
+                want,
+                "K={num_shards} {dsl:?}: every stored copy is counted under the reported class"
+            );
+            // Default visibility follows from the class alone.
+            let visible = cluster
+                .percolate_with_broad(&dsl.replace(['(', ')', ',', '-'], " "), false)
+                .expect("percolate")
+                .contains(&(9_200_000 + at as u64));
+            if class != CostClass::D {
+                assert_eq!(visible, !class.is_opt_in(), "K={num_shards} {dsl:?}");
+            }
+        }
+        // A rejected write reports none.
+        let rejected = cluster.add_query(9_300_000, "(((").expect("add");
+        assert_eq!(rejected.class(), None);
+    }
 }

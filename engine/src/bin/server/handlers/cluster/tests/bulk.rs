@@ -142,3 +142,40 @@ async fn cluster_bulk_uses_the_shared_strict_transport_contract() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_bulk_items_report_the_class_each_query_was_stored_under() {
+    let state = test_state(&seed());
+    let body = concat!(
+        "{\"index\":{\"_id\":30}}\n",
+        "{\"query\":\"zzrare\"}\n",
+        "{\"create\":{\"_id\":31}}\n",
+        "{\"query\":\"acme\"}\n",
+        "{\"index\":{\"_id\":32}}\n",
+        "{\"query\":\"1994 vertex\"}\n",
+        "{\"create\":{\"_id\":1}}\n",
+        "{\"query\":\"must not replace\"}\n",
+        "{\"index\":{\"_id\":33}}\n",
+        "{\"query\":\"-acme\"}\n",
+    );
+    let (status, response) = send(
+        &state,
+        bulk_request("/_bulk", Some("application/x-ndjson"), body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let items = &response["items"];
+    assert_eq!(items[0]["index"]["class"], "a", "{response}");
+    assert_eq!(items[0]["index"]["default_visible"], true);
+    assert_eq!(items[1]["create"]["class"], "c", "{response}");
+    assert_eq!(items[1]["create"]["default_visible"], false);
+    assert_eq!(items[2]["index"]["class"], "b", "{response}");
+    assert_eq!(items[2]["index"]["default_visible"], true);
+    for (at, action) in [(3, "create"), (4, "index")] {
+        assert!(items[at][action].get("class").is_none(), "{response}");
+        assert!(
+            items[at][action].get("default_visible").is_none(),
+            "{response}"
+        );
+    }
+}

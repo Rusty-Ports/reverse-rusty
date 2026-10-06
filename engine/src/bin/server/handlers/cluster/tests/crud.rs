@@ -356,3 +356,94 @@ async fn rejections_are_loud_not_silent() {
     .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_reports_the_class_the_query_was_stored_under() {
+    // The seed corpus has fewer than 64 terms, so each of them holds a top-64 bit.
+    let state = test_state(&seed());
+    for (id, query, class) in [
+        (20u64, "zzrare", "a"),
+        (21, "1994 vertex", "b"),
+        (22, "acme", "c"),
+    ] {
+        let before = state.cluster.read().class_counts().expect("class counts");
+        let (status, body) = send(
+            &state,
+            req(
+                "PUT",
+                &format!("/_doc/{id}"),
+                &serde_json::json!({ "query": query }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["class"], class, "{query:?}: {body}");
+        let visible = class != "c";
+        assert_eq!(body["default_visible"], visible, "{query:?}: {body}");
+
+        // Every copy the shards stored is counted under the reported class, and under no
+        // other: one copy of a selective row, one per shard of a replicated one.
+        let after = state.cluster.read().class_counts().expect("class counts");
+        let slot = ["a", "b", "c", "d", "h"]
+            .iter()
+            .position(|name| *name == class)
+            .expect("class");
+        for (at, (was, is)) in before.iter().zip(&after).enumerate() {
+            if at == slot {
+                let copies = if class == "a" { 1 } else { 3 };
+                assert_eq!(is - was, copies, "{query:?}: {before:?} -> {after:?}");
+            } else {
+                assert_eq!(is, was, "{query:?}: {before:?} -> {after:?}");
+            }
+        }
+
+        // A read in the default scope returns exactly the queries reported default-visible.
+        for (include_broad, expected) in [(false, visible), (true, true)] {
+            let (status, found) = send(
+                &state,
+                req(
+                    "POST",
+                    "/_search",
+                    &serde_json::json!({
+                        "document": { "title": query },
+                        "include_broad": include_broad,
+                        "size": 100
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{found}");
+            let returned = found["hits"]["hits"]
+                .as_array()
+                .expect("hits")
+                .iter()
+                .any(|hit| hit["_id"] == id);
+            assert_eq!(
+                returned, expected,
+                "{query:?} broad={include_broad}: {found}"
+            );
+        }
+    }
+
+    // A replacement reports the class of the new version; a rejected write reports none.
+    let (status, body) = send(
+        &state,
+        req(
+            "PUT",
+            "/_doc/22",
+            &serde_json::json!({ "query": "zzrare two" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["class"], "a");
+    assert_eq!(body["default_visible"], true);
+    let (status, body) = send(
+        &state,
+        req("PUT", "/_doc/23", &serde_json::json!({ "query": "-acme" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.get("class").is_none(), "{body}");
+    assert!(body.get("default_visible").is_none(), "{body}");
+}

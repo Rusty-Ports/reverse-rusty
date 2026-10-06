@@ -1,6 +1,6 @@
 use super::repair::Redrive;
 use super::{
-    extract_readonly, placement_of, AddOutcome, ClusterEngine, ClusterMutation, DurabilityOp,
+    extract_readonly, planned, AddOutcome, ClusterEngine, ClusterMutation, DurabilityOp,
     EngineEvent, Extracted, ShardError, Target,
 };
 
@@ -395,7 +395,7 @@ impl ClusterEngine {
         // reproduces the writer's decision regardless of the current knob, so a knob flip on
         // reopen cannot drop or resurrect a class-D write (codex review). Rejected writes never
         // reach the log (classified out in add_query), so the Reject arm is defensive.
-        let target = placement_of(
+        let (target, class) = planned(
             &self.dict,
             &self.ring,
             &ex,
@@ -424,7 +424,7 @@ impl ClusterEngine {
                     dsl,
                     tags,
                     placement,
-                    AddOutcome::Replicated,
+                    AddOutcome::Replicated { class },
                 )?
             }
             Target::Selective(shards) => self.insert_on_shards(
@@ -437,6 +437,7 @@ impl ClusterEngine {
                 placement,
                 AddOutcome::Placed {
                     shards: shards.clone(),
+                    class,
                 },
             )?,
         };

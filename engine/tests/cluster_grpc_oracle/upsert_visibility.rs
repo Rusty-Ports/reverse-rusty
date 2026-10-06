@@ -48,7 +48,7 @@ fn remote_cluster(rt: &tokio::runtime::Runtime, k: usize) -> ClusterEngine {
 /// The single shard a one-token query lands on.
 fn home_shard(cluster: &ClusterEngine, probe_id: u64, dsl: &str) -> usize {
     let shard = match cluster.add_query(probe_id, dsl).expect("probe add") {
-        AddOutcome::Placed { shards } => shards[0],
+        AddOutcome::Placed { shards, .. } => shards[0],
         other => panic!("expected a selective placement, got {other:?}"),
     };
     cluster.remove_query(probe_id).expect("remove probe");

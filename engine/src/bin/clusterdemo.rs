@@ -69,8 +69,8 @@ fn main() {
         id += 1;
         let outcome = cluster.add_query(id, dsl).expect("add_query (in-process)");
         let where_ = match &outcome {
-            AddOutcome::Placed { shards } => format!("selective shard(s) {shards:?}"),
-            AddOutcome::Replicated => "replicated lane (shard 0)".to_string(),
+            AddOutcome::Placed { shards, .. } => format!("selective shard(s) {shards:?}"),
+            AddOutcome::Replicated { .. } => "replicated lane (shard 0)".to_string(),
             AddOutcome::RejectedClassD => "rejected (class D)".to_string(),
             AddOutcome::RejectedParse(e) => format!("parse error: {e}"),
         };

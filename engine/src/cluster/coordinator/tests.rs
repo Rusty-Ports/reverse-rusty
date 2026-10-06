@@ -2,6 +2,7 @@
 //! `log` field), kept in-module rather than in the integration oracles.
 
 use super::*;
+use crate::compile::Extracted;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
