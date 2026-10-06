@@ -9,11 +9,13 @@ impl Engine {
     /// normalizer carry stale feature ids, and a title normalized with the new
     /// normalizer can miss them — a **false negative**.
     ///
-    /// Queries are recompiled READ-ONLY against the existing (frozen) dict via
+    /// Queries are recompiled READ-ONLY against the dict via
     /// [`extract_readonly`](crate::compile::extract_readonly): a declared alias
-    /// collapses both surface forms to one feature (so both now match), and a new
-    /// alias canonical that isn't interned resolves to a stable synthetic id
-    /// (mechanism 1). The dict's feature space is unchanged.
+    /// collapses both surface forms to one feature (so both now match). Every name
+    /// the current normalizer produces for a stored query must already be interned:
+    /// [`set_vocab`](Self::set_vocab) and the compiler migration do that first
+    /// (ADR-204). A name left to its synthetic id here would get a second, dense id
+    /// from the next insert that uses it.
     ///
     /// A no-op (returns 0) when nothing is stale; after it, `has_stale_segments()`
     /// is false. Returns the number of queries recompiled.

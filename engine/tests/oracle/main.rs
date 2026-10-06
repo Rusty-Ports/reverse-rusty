@@ -36,3 +36,4 @@ mod messy;
 mod reanchor;
 mod segments;
 mod vocab;
+mod vocab_ids;

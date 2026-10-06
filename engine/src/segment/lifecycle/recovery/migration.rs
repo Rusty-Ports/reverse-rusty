@@ -75,42 +75,30 @@ impl Engine {
         // frozen mask bits stay fixed. Existing frequencies are restored after
         // the discovery pass; newly exposed features retain their corpus counts.
         let mut proposed_dict = self.dict.as_ref().clone();
-        let old_len = proposed_dict.len();
-        let old_freqs: Vec<u32> = (0..old_len)
-            .map(|id| proposed_dict.freq(id as crate::dict::FeatureId))
-            .collect();
-        let old_masks: Vec<u8> = (0..old_len)
-            .map(|id| proposed_dict.mask_bit(id as crate::dict::FeatureId))
-            .collect();
-        let mut lc = String::new();
-        for (logical, text, ..) in &live {
-            let ast = crate::dsl::parse_for_recovery(text).map_err(|error| {
-                std::io::Error::new(
+        crate::segment::lifecycle::vocab::intern_live_names(
+            &mut proposed_dict,
+            &self.norm,
+            &live,
+            |logical, compiled| match compiled {
+                Err(error) => Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
                         "cannot migrate legacy compiler semantics: stored query {logical} \
                          no longer parses: {error}"
                     ),
-                )
-            })?;
-            let ex = crate::compile::extract(&ast, &self.norm, &mut proposed_dict, &mut lc);
-            if let Some(width) = ex.column_overflow() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "cannot migrate legacy compiler semantics: stored query {logical} \
-                         exceeds the exact-store column limit ({width} features)"
-                    ),
-                ));
-            }
-        }
-        for id in 0..old_len {
-            proposed_dict.set_freq_and_mask(
-                id as crate::dict::FeatureId,
-                old_freqs[id],
-                old_masks[id],
-            );
-        }
+                )),
+                Ok(ex) => match ex.column_overflow() {
+                    Some(width) => Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "cannot migrate legacy compiler semantics: stored query {logical} \
+                             exceeds the exact-store column limit ({width} features)"
+                        ),
+                    )),
+                    None => Ok(()),
+                },
+            },
+        )?;
         // Newly interned equivalence members must be keyed by their new dense
         // IDs before the read-only materialization pass below.
         if let Some(vocab) = self.vocab.as_deref() {

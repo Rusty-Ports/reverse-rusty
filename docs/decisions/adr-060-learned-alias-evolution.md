@@ -121,3 +121,10 @@
   engine.
 - **Outcome update (2026-10-06).** [ADR-203](adr-203-cluster-rebuilds-keep-visible-queries.md)
   closes it on a cluster.
+
+- **Outcome update (2026-10-06).** The alias-ID-stability fix interned equivalence forms only.
+  Any other name a vocabulary change introduced (a synonym's canonical, a phrase's entity) could
+  still be compiled as a synthetic id by the recompile and then interned by a later insert,
+  which stranded the recompiled queries.
+  [ADR-204](adr-204-vocabulary-change-interns-its-names.md) interns every name the change
+  produces for the stored corpus.

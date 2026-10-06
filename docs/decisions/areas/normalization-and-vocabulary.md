@@ -12,6 +12,7 @@ Shared query/title normalization, dictionaries, learned vocabulary, aliases, and
 | [053](../adr-053-corpus-phrase-vocab-source.md) | Corpus phrase induction | Adds opt-in NPMI phrase learning as another source for the runtime vocabulary. | Accepted |
 | [054](../adr-054-equivalence-expansion.md) | Alias expansion | Widens required features into compile-time any-of groups instead of collapsing meanings. | Accepted |
 | [058](../adr-058-punctuation-equivalence-folding.md) | Punctuation folding | Makes punctuation treatment configurable and shared across query and title normalization. | Accepted |
+| [204](../adr-204-vocabulary-change-interns-its-names.md) | A vocabulary change interns the names it introduces | Gives every feature name a single-node vocabulary change produces for stored queries its dense id before the read-only recompile, so a later insert cannot give the name a second id and strand the recompiled queries. | Accepted |
 | [202](../adr-202-the-default-learner-expands.md) | The default learner expands | Makes the vocabulary learner apply what any-of groups teach by expansion unless `anyof_mode=collapse` is asked for, because a collapse rule can remove matches stored queries had. | Accepted |
 
 ---

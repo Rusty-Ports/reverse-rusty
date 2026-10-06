@@ -194,6 +194,34 @@ async fn replacement_is_synchronous_round_trippable_and_observable() {
     );
 }
 
+/// The replacement introduces `term:package`, a name no stored query had used. A later
+/// write that uses the word must not give the name a second id, or query 7, which the
+/// replacement rewrote to it, would stop matching (ADR-204).
+#[tokio::test]
+async fn a_later_write_of_the_new_canonical_changes_no_earlier_match() {
+    let state = memory_state();
+    let (status, _, body) = send(
+        &state,
+        "/_vocab",
+        replacement().to_string(),
+        Some("application/json"),
+        VOCAB_WRITE_BODY_LIMIT,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_matches(&state.engine.lock(), "pkg", 7);
+
+    state
+        .engine
+        .lock()
+        .try_insert_live("package deal", 8, 1)
+        .expect("insert");
+
+    assert_matches(&state.engine.lock(), "pkg", 7);
+    assert_matches(&state.engine.lock(), "package", 7);
+    assert_matches(&state.engine.lock(), "pkg deal", 8);
+}
+
 #[tokio::test]
 async fn replacement_canonicalizes_duplicate_physical_histories() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
