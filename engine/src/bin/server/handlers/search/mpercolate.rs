@@ -22,6 +22,7 @@ use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy};
 
 use crate::dto::{ApiError, HitSource};
 use crate::handlers::doc::QUERY_INDEX;
+use crate::handlers::scope_echo::{effective_scope, Scoped};
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 
@@ -55,7 +56,7 @@ pub(crate) struct MPercolateBody {
     pub(super) query: Option<serde_json::Value>,
     /// Per-request override of the server's broad-lane default. When set, controls
     /// whether class-C (broad) queries are evaluated for this batch.
-    pub(super) include_broad: Option<bool>,
+    pub(in crate::handlers) include_broad: Option<bool>,
     /// Include original query text in each hit (default: true).
     pub(super) include_source: Option<bool>,
     /// ES/OS spelling for `include_source`.
@@ -243,7 +244,7 @@ pub(crate) async fn mpercolate_route(
     State(state): State<Arc<AppState>>,
     params: Result<Query<MPercolateParams>, QueryRejection>,
     body: Result<Json<MPercolateBody>, JsonRejection>,
-) -> Result<Json<MPercolateResponse>, Reject> {
+) -> Result<Scoped<Json<MPercolateResponse>>, Reject> {
     let _duration = state
         .prom
         .http_request_duration
@@ -251,7 +252,9 @@ pub(crate) async fn mpercolate_route(
         .start_timer();
     let Query(_) = params.map_err(|error| mpercolate_query_rejection(&state.prom, &error))?;
     let Json(body) = body.map_err(|error| mpercolate_body_rejection(&state.prom, &error))?;
-    mpercolate_inner(state, body).await
+    let scope = effective_scope(body.include_broad, state.default_query_scope());
+    let response = mpercolate_inner(state, body).await?;
+    Ok(Scoped(scope, response))
 }
 
 /// POST /_mpercolate — strict native batch percolation.

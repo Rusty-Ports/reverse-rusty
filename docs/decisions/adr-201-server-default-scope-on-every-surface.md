@@ -72,3 +72,10 @@ was started with `--include-broad`.
 
 **See also:** ADR-107 (the result contract and its reserved defaults), ADR-108, ADR-073 (the
 compatibility `include_broad` override), ADR-131 (exhaustive jobs).
+
+## Later outcome — 2026-10-06
+
+The last consequence is closed. `/_search` and `/_mpercolate` responses carry the header
+`x-rr-query-scope` (their bodies are unchanged, as ADR-107 requires), a job's completion record
+carries `query_scope`, and a standalone `GET /_settings` reports `include_broad` as the
+coordinator's does. Every search response now says which scope it was matched in.

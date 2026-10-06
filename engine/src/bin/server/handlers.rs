@@ -11,6 +11,7 @@ mod cluster;
 mod doc;
 mod jobs;
 mod pit;
+mod scope_echo;
 mod search;
 mod settings_read;
 mod settings_write;

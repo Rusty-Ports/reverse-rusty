@@ -30,6 +30,7 @@ use reverse_rusty::segment::MatchStats;
 
 use crate::dto::{ApiError, HitSource};
 use crate::handlers::doc::QUERY_INDEX;
+use crate::handlers::scope_echo::{effective_scope, Scoped};
 use crate::handlers::search::{
     mpercolate_body_rejection, mpercolate_query_rejection, mpercolate_rejection,
     prepare_mpercolate, resolve_percolate_strict, resolve_search_controls, to_rank_spec,
@@ -253,7 +254,7 @@ pub(crate) async fn cluster_search_route(
     State(state): State<Arc<ClusterAppState>>,
     params: Result<Query<SearchParams>, QueryRejection>,
     body: Result<Json<ClusterSearchBody>, JsonRejection>,
-) -> Result<Json<ClusterSearchResponse>, Reject> {
+) -> Result<Scoped<Json<ClusterSearchResponse>>, Reject> {
     let _duration = state
         .prom
         .http_request_duration
@@ -262,7 +263,9 @@ pub(crate) async fn cluster_search_route(
     let Query(params) = params
         .map_err(|error| validation(&state, format!("invalid search query parameters: {error}")))?;
     let Json(body) = body.map_err(|error| body_rejection(&state, &error))?;
-    cluster_search_inner(state, body, params).await
+    let scope = effective_scope(body.include_broad, state.default_query_scope());
+    let response = cluster_search_inner(state, body, params).await?;
+    Ok(Scoped(scope, response))
 }
 
 /// GET|POST /_search — percolate one or more titles against the cluster.
@@ -436,7 +439,7 @@ pub(crate) async fn cluster_mpercolate_route(
     State(state): State<Arc<ClusterAppState>>,
     params: Result<Query<MPercolateParams>, QueryRejection>,
     body: Result<Json<MPercolateBody>, JsonRejection>,
-) -> Result<Json<ClusterMPercolateResponse>, Reject> {
+) -> Result<Scoped<Json<ClusterMPercolateResponse>>, Reject> {
     let _duration = state
         .prom
         .http_request_duration
@@ -444,7 +447,9 @@ pub(crate) async fn cluster_mpercolate_route(
         .start_timer();
     let Query(_) = params.map_err(|error| mpercolate_query_rejection(&state.prom, &error))?;
     let Json(body) = body.map_err(|error| mpercolate_body_rejection(&state.prom, &error))?;
-    cluster_mpercolate_inner(state, body).await
+    let scope = effective_scope(body.include_broad, state.default_query_scope());
+    let response = cluster_mpercolate_inner(state, body).await?;
+    Ok(Scoped(scope, response))
 }
 
 /// POST /_mpercolate — strict native batch percolation against the cluster

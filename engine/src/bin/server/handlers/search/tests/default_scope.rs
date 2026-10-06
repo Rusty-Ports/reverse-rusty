@@ -182,3 +182,111 @@ async fn the_compatibility_and_v2_routes_agree_under_one_server_default() {
         assert_eq!(v1, v2, "include_broad={include_broad}");
     }
 }
+
+// -- The scope that ran is visible on every response ---------------------------------------
+
+/// Send one JSON request through the real router and return the response.
+async fn routed(
+    state: &Arc<AppState>,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let mut request = Request::builder().method(method).uri(path);
+    let body = match body {
+        Some(json) => {
+            request = request.header("content-type", "application/json");
+            Body::from(json.to_string())
+        }
+        None => Body::empty(),
+    };
+    crate::router::build_router(Arc::clone(state), 8)
+        .oneshot(request.body(body).expect("request"))
+        .await
+        .expect("response")
+}
+
+fn scope_header(response: &axum::response::Response) -> String {
+    response
+        .headers()
+        .get("x-rr-query-scope")
+        .expect("the response says which scope ran")
+        .to_str()
+        .expect("header text")
+        .to_string()
+}
+
+/// The compatibility bodies do not say which scope ran, and a consumer relying on the
+/// server default could not tell from any response. A header says it, on both routes, for
+/// the default and for a named scope.
+#[tokio::test]
+async fn compatibility_responses_say_which_scope_ran() {
+    for (server_default, default_scope) in [(true, "with_broad"), (false, "standard")] {
+        let fixture = fixture(server_default);
+        let one = serde_json::json!({"document": {"title": fixture.title}});
+        let many = serde_json::json!({"documents": [{"title": fixture.title}]});
+        for (path, body) in [("/_search", &one), ("/_mpercolate", &many)] {
+            let response = routed(&fixture.state, "POST", path, Some(body.clone())).await;
+            assert!(response.status().is_success(), "{path}");
+            assert_eq!(scope_header(&response), default_scope, "{path} default");
+
+            for (named, scope) in [(true, "with_broad"), (false, "standard")] {
+                let mut body = body.clone();
+                body["include_broad"] = named.into();
+                let response = routed(&fixture.state, "POST", path, Some(body)).await;
+                assert!(response.status().is_success(), "{path}");
+                assert_eq!(scope_header(&response), scope, "{path} named {named}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn single_node_settings_show_the_server_default_scope() {
+    for include_broad in [true, false] {
+        let fixture = fixture(include_broad);
+        let response = routed(&fixture.state, "GET", "/_settings", None).await;
+        assert!(response.status().is_success());
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+        assert_eq!(json["include_broad"], include_broad, "{json}");
+        assert!(json["settings"].is_object());
+    }
+}
+
+/// A consumer commits a job's result on its completion record, so that record says which
+/// scope the result covers.
+#[tokio::test]
+async fn a_job_completion_record_says_which_scope_ran() {
+    for (server_default, scope) in [(true, "with_broad"), (false, "standard")] {
+        let fixture = fixture(server_default);
+        let job = crate::handlers::jobs::create_job_for_test(
+            &fixture.state,
+            serde_json::json!({"document": {"title": fixture.title}}),
+        );
+        let response = routed(
+            &fixture.state,
+            "GET",
+            &format!("/_percolate/jobs/{job}/stream"),
+            None,
+        )
+        .await;
+        assert!(response.status().is_success());
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .expect("stream");
+        let completion: serde_json::Value = String::from_utf8(bytes.to_vec())
+            .expect("NDJSON")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("frame"))
+            .find(|frame| frame["type"] == "completion")
+            .expect("the stream ends with a completion record");
+        assert_eq!(completion["query_scope"], scope, "{completion}");
+    }
+}

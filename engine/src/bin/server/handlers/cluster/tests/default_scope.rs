@@ -64,3 +64,43 @@ async fn a_request_that_names_a_scope_gets_that_scope_whatever_the_server_defaul
         assert_eq!(job_scope_of(&state, &one).await, named);
     }
 }
+
+/// The coordinator's compatibility responses say which scope ran, as the single-node ones do.
+#[tokio::test]
+async fn compatibility_responses_say_which_scope_ran() {
+    use tower::ServiceExt;
+
+    for (server_default, default_scope) in [(true, "with_broad"), (false, "standard")] {
+        let state = state_with_default(server_default);
+        let router = crate::cluster_mode::router::build_cluster_router(Arc::clone(&state), 8);
+        let one = serde_json::json!({"document": {"title": "1994 acme"}});
+        let many = serde_json::json!({"documents": [{"title": "1994 acme"}]});
+        for (path, body) in [("/_search", &one), ("/_mpercolate", &many)] {
+            let cases = [
+                (None, default_scope),
+                (Some(true), "with_broad"),
+                (Some(false), "standard"),
+            ];
+            for (named, scope) in cases {
+                let mut body = body.clone();
+                if let Some(named) = named {
+                    body["include_broad"] = named.into();
+                }
+                let response = router
+                    .clone()
+                    .oneshot(req("POST", path, &body))
+                    .await
+                    .expect("response");
+                assert!(response.status().is_success(), "{path} {named:?}");
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("x-rr-query-scope")
+                        .map(axum::http::HeaderValue::as_bytes),
+                    Some(scope.as_bytes()),
+                    "{path} {named:?}"
+                );
+            }
+        }
+    }
+}
