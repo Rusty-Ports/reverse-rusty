@@ -2,8 +2,13 @@
 
 > [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
-> **Current outcome:** the lazy `retain_source=false` profile remains shipped and is the measured
-> low-resident-memory option. ADR-057 subsequently closed the dictionary format-versioning hazard
+> **Current outcome:** the lazy `retain_source=false` profile is the measured low-resident-memory
+> option. It is opt-in (`--retain-source false` on `server` and on each `shardserver`); until
+> ADR-192 no shipped binary could select it, and the default remains `retain_source=true`. The
+> rationale below that the dictionary "saturates" did not hold up: in later captures its cost per
+> query stayed flat (4.9 B/query at 1M, 4.2 B/query at 20M) while its total grew roughly in
+> proportion to the corpus, because the benchmark adds entities as it adds queries. Whether it
+> saturates on a real corpus is unmeasured. ADR-057 subsequently closed the dictionary format-versioning hazard
 > left open below, and ADR-116 added source metadata/readback on top of the durable source store.
 > Current measurements live in [`performance/results.md`](../performance/results.md).
 

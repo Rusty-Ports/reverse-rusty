@@ -491,8 +491,10 @@ pub struct Engine {
     /// write mutex (ADR-016).
     vocab: Option<Arc<crate::vocab::Vocab>>,
     /// Feature dictionary. `Arc` so a snapshot shares it; writers take a
-    /// copy-on-write handle via `Arc::make_mut` (the dict is O(vocab), which
-    /// saturates, so the occasional CoW clone is bounded — not O(corpus)).
+    /// copy-on-write handle via `Arc::make_mut`. That clone costs O(dict), and the
+    /// dict grows with the number of distinct features: in the synthetic captures
+    /// it grew about as fast as the corpus, so the clone is not bounded by a fixed
+    /// vocabulary.
     dict: Arc<Dict>,
     /// Per-query metadata tag dictionary (ADR-049). `Arc` + CoW exactly like `dict`:
     /// a snapshot shares it; a tagged write interns new `(key,value)`s via
