@@ -96,3 +96,8 @@ hardening against power loss, and the cost settings.
 **See also:** ADR-013 (write-ahead log), ADR-039 (per-shard translog), ADR-072 (shard
 self-restore), ADR-105 and ADR-174 (the two settings that were already node-local), ADR-091
 (shard metrics).
+
+**Later outcome — 2026-10-06:** `shardserver` also takes `--broad-columnar` and
+`--broad-materialize`, the two broad-lane kill switches, and they join the `shard_local` list. The
+same change fixed `server`'s own `--retain-source`, `--broad-columnar` and `--broad-materialize`,
+which were switches that could only set `true` and so could never be turned off.

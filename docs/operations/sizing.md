@@ -11,7 +11,10 @@ method.
 
 ## 1. Pick the source-retention profile first
 
-`--retain-source` defaults to `true`.
+`--retain-source` defaults to `true`. Select the low-memory profile with `--retain-source false`
+and a `--data-dir`: on `server` for single-node and in-process clusters, and on every
+`shardserver` for a remote cluster (Helm `shard.retainSource=false`, Compose
+`RR_SHARD_RETAIN_SOURCE=false`). The coordinator's flag does not reach remote shards.
 
 | Profile | What the engine keeps | Sizing consequence |
 |---|---|---|

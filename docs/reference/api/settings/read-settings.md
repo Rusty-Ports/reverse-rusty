@@ -79,7 +79,8 @@ flags (ADR-192):
 
 ```json
 "shard_local": ["wal_sync_on_write", "retain_source", "max_segments",
-                "memtable_flush_threshold", "hot_anchor_threshold", "tag_segment_skipping"]
+                "memtable_flush_threshold", "hot_anchor_threshold", "tag_segment_skipping",
+                "broad_columnar", "broad_materialize"]
 ```
 
 For those keys the values under `per_shard` are the coordinator's and say nothing about the

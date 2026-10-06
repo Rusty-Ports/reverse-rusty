@@ -10,13 +10,15 @@ use reverse_rusty::config::EngineConfig;
 
 /// The `per_shard` keys a remote shard node decides for itself. `/_settings` lists them so
 /// a reader knows which of the coordinator's values say nothing about the shards.
-pub(crate) const SHARD_LOCAL_SETTINGS: [&str; 6] = [
+pub(crate) const SHARD_LOCAL_SETTINGS: [&str; 8] = [
     "wal_sync_on_write",
     "retain_source",
     "max_segments",
     "memtable_flush_threshold",
     "hot_anchor_threshold",
     "tag_segment_skipping",
+    "broad_columnar",
+    "broad_materialize",
 ];
 
 /// What a remote coordinator makes of its shard-local engine flags.
@@ -62,6 +64,14 @@ pub(crate) fn in_remote_mode(per_shard: &EngineConfig) -> ShardLocalFlags {
         per_shard.retain_source != defaults.retain_source,
         "--retain-source",
     );
+    inert(
+        per_shard.broad_columnar != defaults.broad_columnar,
+        "--broad-columnar",
+    );
+    inert(
+        per_shard.broad_materialize != defaults.broad_materialize,
+        "--broad-materialize",
+    );
     flags
 }
 
@@ -98,14 +108,18 @@ mod tests {
             max_segments: 4,
             memtable_flush_threshold: 500,
             retain_source: false,
+            broad_columnar: false,
+            broad_materialize: false,
             ..EngineConfig::default()
         });
         assert!(flags.refused.is_empty(), "{flags:?}");
-        assert_eq!(flags.inert.len(), 3, "{flags:?}");
+        assert_eq!(flags.inert.len(), 5, "{flags:?}");
         for flag in [
             "--max-segments",
             "--memtable-flush-threshold",
             "--retain-source",
+            "--broad-columnar",
+            "--broad-materialize",
         ] {
             assert!(
                 flags
@@ -113,6 +127,33 @@ mod tests {
                     .iter()
                     .any(|warning| warning.contains(&format!("shardserver {flag}"))),
                 "{flag}: {flags:?}"
+            );
+        }
+    }
+
+    /// Every flag this module refuses or warns about is listed for `/_settings`, so the two
+    /// cannot drift: a flag that is inert on a remote coordinator is a key whose value there
+    /// says nothing about the shards.
+    #[test]
+    fn every_classified_flag_is_a_listed_setting() {
+        let flags = in_remote_mode(&EngineConfig {
+            wal_sync_on_write: true,
+            max_segments: 4,
+            memtable_flush_threshold: 500,
+            retain_source: false,
+            broad_columnar: false,
+            broad_materialize: false,
+            ..EngineConfig::default()
+        });
+        for message in flags.refused.iter().chain(&flags.inert) {
+            let flag = message
+                .split_whitespace()
+                .next()
+                .expect("a message starts with its flag");
+            let key = flag.trim_start_matches("--").replace('-', "_");
+            assert!(
+                SHARD_LOCAL_SETTINGS.contains(&key.as_str()),
+                "{flag} is classified but {key} is not listed"
             );
         }
     }

@@ -41,14 +41,14 @@ Options:
 | `--max-query-clauses` | 256 | Maximum clauses per query |
 | `--max-anyof-group-size` | 64 | Maximum members in an any-of group |
 | `--max-tags` | 65535 | Maximum metadata tags on one query; larger inputs are rejected rather than truncated |
-| `--retain-source` | true | Keep query source text resident; set `false` to store it on disk and fetch `_source`/explain lazily (large memory saving at scale — ADR-020) |
+| `--retain-source <true\|false>` | true | Keep query source text resident; `--retain-source false` stores it on disk and fetches `_source`/explain lazily (large memory saving at scale — ADR-020). Needs `--data-dir`: without one there is no disk copy and the server warns that the setting saves nothing |
 | `--accept-class-d` | false | Store negation-only queries as broad-lane always-candidates instead of rejecting them (ADR-068) — needed at startup for a `--load-file` corpus containing such queries; also dynamic via `/_settings` |
 | `--wal-sync-on-write` | false | Fsync the WAL on every mutation before acknowledging it (SQLite FULL). When false, appends reach the OS page cache and fsync at the next flush checkpoint — survives a process crash but not power loss until checkpoint (RocksDB sync=false / SQLite NORMAL). A coordinator of **remote** shard nodes refuses this flag: set `shardserver --wal-sync-on-write true` on each shard node instead (ADR-192) |
 | `--broad-batch-size` | 256 | Title sub-batch size for the columnar broad lane on `POST /_mpercolate` (ADR-026) — larger amortizes broad-posting scans over more titles. Dynamic via `/_settings` |
 | `--hot-anchor-threshold` | 0 (off) | The hot-anchor threshold θ (class H, ADR-105; recommended 1024): a query whose deciding anchor has no top-64 mask bit but frequency ≥ θ is stored in the always-probed, columnar-evaluated hot tier instead of fattening the realtime lane. Dynamic via `/_settings`; in remote cluster mode run every `shardserver` with the same value (divergence is cost-only, never correctness) |
-| `--broad-columnar` | true | Use the columnar broad evaluator (once per batch); set `false` to fall back to the inline per-title broad probe — the kill-switch (identical results, no amortization). Dynamic via `/_settings` |
+| `--broad-columnar <true\|false>` | true | Use the columnar broad evaluator (once per batch); set `false` to fall back to the inline per-title broad probe — the kill-switch (identical results, no amortization). Dynamic via `/_settings` |
 | `--tag-segment-skipping <true\|false>` | true | Consult exact sealed-segment tag unions before filtered reads (ADR-174); `false` bypasses the optimization without changing results or stored state. Dynamic via `/_settings` in single-node mode; in remote cluster mode restart the coordinator and every `shardserver` with the same value |
-| `--broad-materialize` | true | Use the pure-anchor materialization fast path (emit pure-anchor broad queries straight from the anchor bitmap, skipping verification). Dynamic via `/_settings` |
+| `--broad-materialize <true\|false>` | true | Use the pure-anchor materialization fast path (emit pure-anchor broad queries straight from the anchor bitmap, skipping verification). Dynamic via `/_settings` |
 | `--max-percolate-batch` | 10000 | Maximum documents accepted in one `/_mpercolate` or multi-document `/_search` request; larger requests are rejected with 400. Dynamic via `/_settings` |
 
 Example with persistence, vocabulary, and pre-loaded queries:
