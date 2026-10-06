@@ -335,6 +335,58 @@ fn a_form_built_on_another_forms_entity_differential() {
     oracle.assert_matches(&titles, "alias/forms-built-on-one-another");
 }
 
+/// Chained ordinary imports, with no declared phrase between them: `ny catalog` is a form
+/// whose word `ny` a title can carry only through the equivalence `ny ≡ new york`, and
+/// `pkg deal` is a form whose word `pkg` a title can write as `package` (ADR-205).
+#[test]
+fn a_form_word_carried_through_an_equivalence_differential() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "ny catalog".into()),
+        (2, "nycat".into()),
+        (3, "new york catalog".into()),
+        (4, "york".into()),
+        (5, "sale -(ny catalog,zzother)".into()),
+        (6, "pkg deal".into()),
+        (7, "bargain".into()),
+        (8, "package -bargain".into()),
+        (9, "(nycat,bargain) sale".into()),
+    ];
+    let titles: Vec<String> = [
+        "york new catalog",
+        "new york catalog",
+        "ny catalog",
+        "nycat",
+        "catalog york",
+        "new york city catalog sale",
+        "catalog sale ny",
+        "ny catalog sale",
+        "deal package",
+        "package of the deal sale",
+        "pkg deal",
+        "package",
+        "bargain package",
+        "york package catalog deal new sale",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let ref_vocab = RefVocab::default_vocab()
+        .phrase("new york", "term:new_york", PhraseMode::Alias)
+        .phrase("ny catalog", "term:ny_catalog", PhraseMode::Alias)
+        .phrase("pkg deal", "term:pkg_deal", PhraseMode::Alias)
+        .equivalence(&["ny", "new york"])
+        .equivalence(&["nycat", "ny catalog"])
+        .equivalence(&["pkg", "package"])
+        .equivalence(&["bargain", "pkg deal"]);
+    let oracle = RefOracle::build_with_vocab_and_alias_import(
+        &queries,
+        reverse_rusty::vocab::Vocab::new(),
+        "ny => new york\nnycat => ny catalog\npkg => package\nbargain => pkg deal",
+        ref_vocab,
+    );
+    oracle.assert_matches(&titles, "alias/form-words-through-equivalences");
+}
+
 /// A randomized at-scale alias corpus combining the overlapping forms (`ny` / `new york` /
 /// `new york city` / `nyc` / component tokens) with fillers, negations (incl. forbidden phrases),
 /// and any-of groups (incl. multi-word members) — so the two-view normalization, the overlap scan,

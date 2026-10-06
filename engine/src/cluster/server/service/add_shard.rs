@@ -155,5 +155,6 @@ fn add_shard_reply(
         coordinator_id,
         compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
         atomic_replace: true,
+        alias_form_words: true,
     })
 }

@@ -530,3 +530,83 @@ fn a_form_built_on_another_forms_entity_removes_no_match() {
         "one word of the form is not the form"
     );
 }
+
+#[test]
+fn a_chain_of_imports_removes_no_match() {
+    // Two ordinary imports and no declared phrase. After the first, `ny catalog` asks for
+    // `ny` or its equivalent `new york`, and a title with `york new` carries that. The
+    // second import makes `ny catalog` a form, whose word `ny` the title carries only
+    // through the same equivalence.
+    let mut eng = Engine::with_vocab(Vocab::new(), EngineConfig::default()).expect("engine");
+    eng.build_from_queries(&owned(&[
+        (1, "ny catalog"),
+        (2, "new york catalog"),
+        (3, "nycat"),
+    ]));
+    let titles = [
+        "york new catalog",
+        "new york catalog",
+        "ny catalog",
+        "catalog york",
+        "nycat",
+    ];
+
+    eng.import_alias_synonyms("ny => new york").expect("import");
+    let first = matches_of(&mut eng, &titles);
+    assert!(first[0].contains(&1) && first[0].contains(&2));
+    assert!(!first[3].contains(&1));
+
+    eng.import_alias_synonyms("nycat => ny catalog")
+        .expect("import");
+    let second = matches_of(&mut eng, &titles);
+    assert_nothing_lost(&titles, &first, &second);
+    assert!(
+        second[0].contains(&3),
+        "the title carries the second form, so it matches the alias's other form"
+    );
+    assert!(
+        !second[3].contains(&1) && !second[3].contains(&3),
+        "one word of the form is not the form"
+    );
+
+    // A third link, built on the second form's other name.
+    eng.import_alias_synonyms("bigsale => nycat sale")
+        .expect("import");
+    let third = matches_of(&mut eng, &titles);
+    assert_nothing_lost(&titles, &second, &third);
+}
+
+#[test]
+fn a_word_counts_through_a_single_word_alias() {
+    // `pkg` and `package` are one word to a query. `pkg deal` therefore matched a title
+    // that says `package`, and still does once `pkg deal` is a form of its own.
+    let mut eng = Engine::with_vocab(Vocab::new(), EngineConfig::default()).expect("engine");
+    eng.build_from_queries(&owned(&[(1, "pkg deal"), (2, "bargain"), (3, "deal")]));
+    let titles = ["deal package", "package of the deal", "pkg deal", "package"];
+
+    eng.import_alias_synonyms("pkg => package").expect("import");
+    let before = matches_of(&mut eng, &titles);
+    assert!(before[0].contains(&1) && before[1].contains(&1));
+    assert!(!before[3].contains(&1));
+
+    eng.import_alias_synonyms("bargain => pkg deal")
+        .expect("import");
+    let after = matches_of(&mut eng, &titles);
+    assert_nothing_lost(&titles, &before, &after);
+    assert!(after[0].contains(&2), "the title carries the form");
+    assert!(!after[3].contains(&1) && !after[3].contains(&2));
+
+    // A declared equivalence counts the same way as an imported one.
+    let mut vocab = Vocab::new();
+    vocab.add_equivalence(&["sofa", "couch"]);
+    let mut eng = Engine::with_vocab(vocab, EngineConfig::default()).expect("engine");
+    eng.build_from_queries(&owned(&[(1, "sofa bed"), (2, "daybed")]));
+    let titles = ["bed, couch", "sofa bed", "bed"];
+    let before = matches_of(&mut eng, &titles);
+    assert!(before[0].contains(&1));
+    eng.import_alias_synonyms("daybed => sofa bed")
+        .expect("import");
+    let after = matches_of(&mut eng, &titles);
+    assert_nothing_lost(&titles, &before, &after);
+    assert!(after[0].contains(&2));
+}

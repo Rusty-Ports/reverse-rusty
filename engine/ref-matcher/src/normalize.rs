@@ -444,9 +444,11 @@ pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<F
 
     // A title that carries every word of a multi-word alias form carries the form, wherever
     // the words stand (ADR-205). A word is carried as its own token, or under whatever the
-    // word analyzes to by itself (a synonym's canonical, a typed number). A form the title
-    // carries is itself carried, and may be a word of another form, so the rule is applied
-    // until it adds nothing.
+    // word analyzes to by itself (a synonym's canonical, a typed number), or under anything
+    // a query that asked for the word would accept in its place (an equivalent). A form the
+    // title carries is itself carried, and may be a word of another form, so the rule is
+    // applied until it adds nothing.
+    let equivalents = crate::semantic::resolve_equivalences(vocab);
     loop {
         let carried = pos.clone();
         for phrase in &vocab.phrases {
@@ -458,10 +460,14 @@ pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<F
                 continue;
             }
             let every_word = phrase.tokens.iter().all(|word| {
-                carried.contains(&Feature::term(word))
-                    || emit(vocab, word, Side::Title, false)
-                        .iter()
-                        .any(|feature| carried.contains(feature))
+                let mut readings = vec![Feature::term(word)];
+                readings.extend(emit(vocab, word, Side::Title, false));
+                readings.iter().any(|reading| {
+                    carried.contains(reading)
+                        || equivalents
+                            .get(reading)
+                            .is_some_and(|class| class.iter().any(|same| carried.contains(same)))
+                })
             });
             if every_word {
                 pos.push(entity);

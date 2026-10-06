@@ -244,6 +244,36 @@ fn a_form_the_title_carries_can_be_a_word_of_another_form() {
     assert!(!canonical_has(&norm, "york new catalog", "term:ny_catalog"));
 }
 
+#[test]
+fn a_word_counts_under_what_a_query_takes_it_to_be_equivalent_to() {
+    // To a query, `pkg` is `pkg` or `package`, and `ny` is `ny` or the form `new york`.
+    // A title carries the words of `pkg deal` and `ny catalog` under either name.
+    let norm = build(|b| {
+        b.add_alias_form("new york");
+        b.add_alias_form("ny catalog");
+        b.add_alias_form("pkg deal");
+        b.add_equivalent_forms(&["ny".to_string(), "new york".to_string()]);
+        b.add_equivalent_forms(&["pkg".to_string(), "package".to_string()]);
+        // Groups that share a member are one class.
+        b.add_equivalent_forms(&["package".to_string(), "parcel".to_string()]);
+        // A form that does not compile to one feature is no member of a group.
+        b.add_equivalent_forms(&["deal".to_string(), "two words".to_string()]);
+    });
+    assert!(positive_has(&norm, "deal package", "term:pkg_deal"));
+    assert!(positive_has(&norm, "parcel deal", "term:pkg_deal"));
+    assert!(!positive_has(&norm, "two words pkg", "term:pkg_deal"));
+    assert!(!positive_has(&norm, "package", "term:pkg_deal"));
+    // `york new` carries `new york`, which is what a query means by `ny`.
+    assert!(positive_has(&norm, "york new catalog", "term:ny_catalog"));
+    assert!(positive_has(&norm, "catalog new york", "term:ny_catalog"));
+    assert!(!positive_has(&norm, "york catalog", "term:ny_catalog"));
+    assert!(!canonical_has(&norm, "deal package", "term:pkg_deal"));
+
+    // Without the groups, a word is only itself.
+    let norm = build(|b| b.add_alias_form("pkg deal"));
+    assert!(!positive_has(&norm, "deal package", "term:pkg_deal"));
+}
+
 /// Run the completion on a title given by the names it carries. Returns the entities added,
 /// distinct and in order, and how many times a form was examined.
 fn complete(words: &super::core::AliasWords, carried: &mut Vec<u64>) -> (Vec<FeatureId>, usize) {

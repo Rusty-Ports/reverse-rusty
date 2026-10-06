@@ -21,8 +21,14 @@ reverse chronological and describe outcomes, not the current architecture or fut
   adjacency.
 - **Wider than before:** a query that names another form of the alias (`ny catalog`) also matches
   a title with the words of `new york` apart. An alias made of very common words adds candidates.
-- Nothing stored changes: no recompile, no migration and no upgrade order. The rule is applied
-  to titles and costs a few lookups per title while a multi-word alias is active.
+- A word of a form also counts under what a query would accept in its place: after
+  `ny => new york`, a title with `york new catalog` carries the form `ny catalog`, so a later
+  `nycat => ny catalog` removes no match either.
+- Nothing stored changes: no recompile and no migration. The rule is applied to titles and
+  costs a few lookups per title while a multi-word alias is active.
+- **Remote clusters: upgrade shard servers before the coordinator.** Every handshake reply now
+  attests the rule (`alias_form_words`), and a coordinator refuses a shard server that does not,
+  because that server would answer without the matches the rule adds.
 - The reference documents and four ADRs said activation only widens. That is now true for
   multi-word forms; the at-scale test that claimed it could not fail and is replaced by one that
   rewrites real generated queries.

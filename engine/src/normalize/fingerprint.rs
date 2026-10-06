@@ -14,7 +14,9 @@
 //! - the number-context words, sorted and deduplicated (membership is all that matters).
 //!
 //! Derived state (both automata, `has_multiword_aliases`) is excluded because it is a pure
-//! function of the hashed data. The normalization *code* is not hashed: a change to it is a
+//! function of the hashed data. The alias word table (ADR-205) is excluded too, although it
+//! also reads the vocabulary's equivalence groups, which are not hashed: it only adds to a
+//! title's positive view, and no compiled row depends on it. The normalization *code* is not hashed: a change to it is a
 //! compiler-semantics bump (ADR-118), which rebuilds every committed row from source.
 //! Changing what this function hashes changes every recorded value, so it must ship with
 //! such a bump as well.

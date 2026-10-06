@@ -85,6 +85,11 @@ impl Vocab {
         for form in self.aliases.active_alias_forms() {
             b.add_alias_form(&form);
         }
+        // ADR-205: a title carries a word of an alias form under any name the word is
+        // equivalent to. The groups are the ones `resolve_equivalences` installs.
+        for group in self.effective_equivalence_groups() {
+            b.add_equivalent_forms(&group);
+        }
 
         b.build()
     }
