@@ -137,6 +137,10 @@ pre-upgrade backup:
   `/v2/_search` against an old shard fails closed (`UNIMPLEMENTED` → 502) with no partial hits. Enable
   or route v2 traffic only after every shard is upgraded; keep each shard's
   `--max-grpc-result-bytes` at or below 4 MiB.
+- **ADR-196 unfinished bulk loads:** one new marker file per slot on durable shard nodes
+  (`bulk_load.incomplete`, present only while a bulk load is unfinished) and two additive RPCs.
+  An old shard answers `UNIMPLEMENTED`: a new coordinator still attaches to it, but refuses to
+  bulk-load through it. Upgrade shards first, as usual. An old coordinator ignores the file.
 - **ADR-163 ranking-profile attestation:** no durable format changes. A new shard accepts an old
   request without profile identity only as built-in `static_v1`, but a new coordinator rejects an
   old shard's missing terminal identity even for that profile. Preserve the same profile

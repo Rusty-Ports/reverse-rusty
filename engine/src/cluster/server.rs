@@ -90,6 +90,10 @@ struct ShardSlot {
     /// Set when this slot was created for a shard the node had dropped (ADR-189): it is empty
     /// by construction, so it serves nothing until `RecoverFrom` installs the owner's data.
     awaiting_recovery: std::sync::atomic::AtomicBool,
+    /// A coordinator began a bulk load into this slot and has not reported it complete
+    /// (ADR-196). A durable node keeps the mark on disk and answers from there; this flag is
+    /// the whole record on a node without a data directory.
+    bulk_load_incomplete: std::sync::atomic::AtomicBool,
 }
 
 impl ShardSlot {
@@ -102,6 +106,7 @@ impl ShardSlot {
             broad: super::node_metrics::SlotBroadCost::new(),
             ranked: super::node_metrics::SlotRankDelivery::new(),
             awaiting_recovery: std::sync::atomic::AtomicBool::new(false),
+            bulk_load_incomplete: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -233,6 +238,7 @@ pub struct ShardServer {
     dropped: std::sync::Mutex<dropped::DroppedRecord>,
 }
 
+mod bulk_load;
 mod construct;
 mod dropped;
 mod retirement;

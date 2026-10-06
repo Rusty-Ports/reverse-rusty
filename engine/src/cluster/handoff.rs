@@ -463,6 +463,14 @@ impl Shard for Arc<HandoffShard> {
     fn set_event_sink(&self, sink: EventSink) {
         self.current.load().set_event_sink(sink);
     }
+
+    fn set_bulk_load_incomplete(&self, incomplete: bool) -> Result<(), ShardError> {
+        self.current.load().set_bulk_load_incomplete(incomplete)
+    }
+
+    fn bulk_load_incomplete(&self) -> Result<bool, ShardError> {
+        self.current.load().bulk_load_incomplete()
+    }
 }
 
 #[cfg(test)]

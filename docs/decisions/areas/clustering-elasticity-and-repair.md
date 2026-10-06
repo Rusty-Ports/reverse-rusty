@@ -25,6 +25,7 @@ Allocation, handoff, autoscaling, resize, reconciliation, and repair after parti
 | [178](../adr-178-uncommitted-rebuild-write-fence.md) | Uncommitted-rebuild write fence | Pauses placement-stamped writes until a swapped resize/vocabulary rebuild commits, and reclaims superseded source sidecars. | Accepted |
 | [179](../adr-179-governed-resize-operations.md) | Governed resize operations | Adds idempotent resize records, a placement-generation precondition, status reads, and an opt-in hysteresis/cooldown/futility-governed growth loop. | Accepted |
 | [180](../adr-180-remote-blue-green-resize.md) | Remote blue/green resize | Resizes a resolve-only remote cluster onto fresh nodes through a durable intent, paused writes, corpus export, fingerprint evidence, durable retirement of the old nodes, and one atomic layout commit. | Accepted |
+| [196](../adr-196-unfinished-bulk-loads-are-remembered.md) | Unfinished bulk loads are remembered | Marks every shard for the duration of a bulk load and makes a connecting coordinator refuse a cluster that still carries a mark, so a bootstrap that stopped part-way is never served as the whole corpus. | Accepted |
 | [189](../adr-189-dropped-shards-await-recovery.md) | Dropped shards await recovery | Makes a shard node remember the shards orphan GC dropped, so a slot re-created for one refuses to serve until a peer recovery fills it. | Accepted |
 
 ---

@@ -22,6 +22,7 @@ mod harness;
 
 mod block_on;
 mod broad_cost;
+mod bulk_load_marker;
 mod capability_handshake;
 mod class_d;
 mod colocation;

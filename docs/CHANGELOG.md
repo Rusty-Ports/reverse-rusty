@@ -9,6 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — An interrupted bootstrap is not served
+
+- Fix a remote cluster serving part of its corpus after a `--load-file` bootstrap that stopped
+  part-way: the coordinator exited, was restarted by its supervisor, found the cluster "already
+  populated", skipped the load and served what had landed. The shard nodes now carry a mark
+  from before the first bucket until after the last, kept on disk, and a coordinator that finds
+  one refuses to start and says the load did not complete
+  ([ADR-196](decisions/adr-196-unfinished-bulk-loads-are-remembered.md)). Reset the shard
+  nodes' data and load again.
+- Upgrade shard nodes before a coordinator that bulk-loads: a node that cannot record the mark
+  is not loaded in bulk. Attaching to older nodes is unaffected.
+
 ## 2026-10-06 — Data-plane handlers wait off the runtime
 
 - Fix the server becoming unresponsive, `/_health` included, when writes queued behind

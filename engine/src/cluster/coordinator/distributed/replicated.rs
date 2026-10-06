@@ -290,7 +290,7 @@ impl ClusterEngine {
             dict.fingerprint(),
             generation,
         );
-        Ok(Self::from_parts(
+        Self::from_parts(
             norm,
             dict,
             tag_dict,
@@ -307,6 +307,7 @@ impl ClusterEngine {
         .with_client_security(security)
         .with_coordinator_id(coordinator_id)
         .with_transport_metrics(metrics)
-        .with_collected_remote_logical_ids(logical_ids))
+        .with_collected_remote_logical_ids(logical_ids)
+        .refusing_unfinished_bulk_load()
     }
 }

@@ -45,7 +45,11 @@ an **in-process** cluster durable (build once, reopen on restart — `--load-fil
 warning when the reopened cluster is already populated). A **remote** coordinator is stateless and
 refuses `--data-dir`: durability lives on the shard nodes (`shardserver --data-dir`, the per-shard
 translog — ADR-039); restarting the coordinator reconnects and re-mints the identical frozen dict
-from the same `--load-file`, so the fingerprint handshake holds. Its new boot ID may need to retry
+from the same `--load-file`, so the fingerprint handshake holds. The file is loaded in bulk only
+into an empty cluster. The shard nodes are marked for the duration of that load (ADR-196): if it
+stops part-way, every later coordinator start fails with "holds a bulk load that did not
+complete" instead of serving the part that landed, until the shard nodes' data is reset and the
+corpus is loaded again. Its new boot ID may need to retry
 until the 30-second renewable owner lease expires, then wait for any response bodies/streams
 admitted under the prior owner to drain before taking over a node.
 
