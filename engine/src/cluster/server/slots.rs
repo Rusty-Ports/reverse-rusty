@@ -42,7 +42,30 @@ impl ShardServer {
     /// The slot + its adopted [`ServerState`] for `shard_id` — `not_found` if the slot is absent,
     /// `failed_precondition` if present-but-pending. The per-shard handlers' one-line replacement for
     /// the old node-wide `loaded()`.
+    ///
+    /// Every data RPC resolves its slot here, so this is also where a slot awaiting recovery
+    /// (ADR-189) refuses to serve. The few RPCs that must reach such a slot use
+    /// [`loaded_slot_awaiting_recovery_ok`](Self::loaded_slot_awaiting_recovery_ok).
     pub(in crate::cluster::server) fn loaded_slot(
+        &self,
+        shard_id: u32,
+    ) -> Result<(Arc<ShardSlot>, Arc<ServerState>), Status> {
+        let slot = self.slot(shard_id)?;
+        // Readiness BEFORE the state. `RecoverFrom` publishes the recovered state and only
+        // then releases the slot, so a released slot means the state loaded next is the
+        // recovered one. In the other order a request could load the empty state, find the
+        // slot released a moment later, and answer from the empty state.
+        slot.ensure_recovered(shard_id)?;
+        #[cfg(test)]
+        super::dropped::between_readiness_and_state();
+        let st = slot.loaded_state()?;
+        Ok((slot, st))
+    }
+
+    /// [`loaded_slot`](Self::loaded_slot) for the RPCs that manage a slot rather than serve
+    /// from it: `RecoverFrom` (which fills it) and `Fence`/`Unfence` (so orphan GC can still
+    /// arm and drop a slot an abandoned handoff left behind).
+    pub(in crate::cluster::server) fn loaded_slot_awaiting_recovery_ok(
         &self,
         shard_id: u32,
     ) -> Result<(Arc<ShardSlot>, Arc<ServerState>), Status> {
@@ -92,6 +115,11 @@ impl ShardServer {
     ) -> Result<(), Status> {
         // No path (adoption, recovery, co-location) may give a retired node a slot (ADR-180).
         self.ensure_not_retired()?;
+        // Both slot-creating RPCs come through here, and a new slot is empty. For a shard
+        // this node gave up, empty must not mean "serves no matches" (ADR-189).
+        if self.was_dropped(shard_id)? {
+            slot.awaiting_recovery.store(true, Ordering::Release);
+        }
         self.shards
             .write()
             .map_err(|_| Status::internal("shard map lock poisoned"))?
@@ -108,18 +136,36 @@ impl ShardServer {
     /// the slot was already absent (an idempotent re-run); `Err` ⇒ the fence changed. In-flight
     /// RPCs holding the old `Arc` complete against it (serve-then-drop at micro scale); memory
     /// frees when the last `Arc` drops.
+    ///
+    /// Three steps, because the drop must be REMEMBERED before the slot is gone (ADR-189) and
+    /// remembering it is a synced file write that must not hold the lock every shard on this
+    /// node resolves its slot through:
+    ///
+    /// 1. tombstone the fence (no map lock needed beyond finding the slot) — from here no
+    ///    fence traffic can bring the slot back;
+    /// 2. record the drop durably, with no slot-map lock held;
+    /// 3. under the map write lock, run `persist_removal` (the directory rename) and remove
+    ///    the slot.
+    ///
+    /// If step 2 or 3 fails the fence is restored, the record is taken back, and the slot
+    /// stays hosted for an idempotent retry. `DropShard` holds the install mutex, so no slot
+    /// is created while a drop runs; step 3 still re-checks that the map holds the slot that
+    /// was tombstoned and refuses otherwise.
     pub(in crate::cluster::server) fn remove_slot_if_fenced_at_with<T>(
         &self,
         shard_id: u32,
         expected_generation: u64,
         persist_removal: impl FnOnce() -> Result<T, Status>,
     ) -> Result<Option<T>, Status> {
-        let mut map = self
-            .shards
-            .write()
-            .map_err(|_| Status::internal("shard map lock poisoned"))?;
-        let Some(slot) = map.get(&shard_id).cloned() else {
-            return Ok(None);
+        let slot = {
+            let map = self
+                .shards
+                .read()
+                .map_err(|_| Status::internal("shard map lock poisoned"))?;
+            match map.get(&shard_id) {
+                Some(slot) => Arc::clone(slot),
+                None => return Ok(None),
+            }
         };
         if let Err(now) = slot.fenced_at_generation.compare_exchange(
             expected_generation,
@@ -132,29 +178,68 @@ impl ShardServer {
                 ({now} != expected {expected_generation}); re-plan"
             )));
         }
-        let persisted = match persist_removal() {
-            Ok(persisted) => persisted,
+        let restore_fence = || {
+            slot.fenced_at_generation
+                .compare_exchange(
+                    DROPPED_TOMBSTONE,
+                    expected_generation,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .map(|_| ())
+                .map_err(|_| {
+                    Status::internal(format!(
+                        "DropShard: failed to restore shard {shard_id}'s fence after the drop \
+                         did not complete"
+                    ))
+                })
+        };
+
+        let newly_recorded = match self.record_dropped(shard_id) {
+            Ok(newly_recorded) => newly_recorded,
             Err(source) => {
-                if slot
-                    .fenced_at_generation
-                    .compare_exchange(
-                        DROPPED_TOMBSTONE,
-                        expected_generation,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_err()
-                {
-                    return Err(Status::internal(format!(
-                        "DropShard: failed to restore shard {shard_id}'s fence after durable \
-                         quarantine failed"
-                    )));
-                }
+                restore_fence()?;
                 return Err(source);
             }
         };
-        map.remove(&shard_id);
-        Ok(Some(persisted))
+
+        let removed = (|| {
+            let mut map = self
+                .shards
+                .write()
+                .map_err(|_| Status::internal("shard map lock poisoned"))?;
+            if !map
+                .get(&shard_id)
+                .is_some_and(|hosted| Arc::ptr_eq(hosted, &slot))
+            {
+                return Err(Status::failed_precondition(format!(
+                    "DropShard: shard {shard_id}'s slot was replaced under the drop; re-plan"
+                )));
+            }
+            let persisted = persist_removal()?;
+            map.remove(&shard_id);
+            Ok(persisted)
+        })();
+        match removed {
+            Ok(persisted) => Ok(Some(persisted)),
+            Err(source) => {
+                restore_fence()?;
+                if newly_recorded {
+                    // A record left behind is safe but not silent: this slot, which the
+                    // coordinator was dropping as an orphan, would refuse to serve after a
+                    // restart until it is recovered.
+                    if let Err(kept) = self.unrecord_dropped(shard_id) {
+                        return Err(Status::internal(format!(
+                            "{}; and shard {shard_id}'s drop record could not be taken back \
+                             ({}), so the shard will await recovery after a restart",
+                            source.message(),
+                            kept.message()
+                        )));
+                    }
+                }
+                Err(source)
+            }
+        }
     }
 
     /// Whether ANY hosted slot currently holds ≥1 query (ADR-093). The `AdoptDict` divergence guard:

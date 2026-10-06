@@ -46,6 +46,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(None)),
+            dropped: std::sync::Mutex::default(),
         }
     }
 
@@ -72,6 +73,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(None)),
+            dropped: std::sync::Mutex::default(),
         }
     }
 
@@ -138,6 +140,12 @@ impl ShardServer {
                     .validate_ownership(position, placement_generation, num_shards)?;
             }
         }
+        // A shard this node gave up stays given up across a restart (ADR-189), and a slot
+        // re-created for it that no recovery has filled yet is still awaiting one.
+        let dropped = match node_dict.load_full() {
+            Some(space) => super::dropped::restore_for_slots(&data_dir, &space, &slots)?,
+            None => std::sync::Mutex::default(),
+        };
         Ok(ShardServer {
             norm,
             config,
@@ -156,6 +164,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
+            dropped,
         })
     }
 
@@ -183,6 +192,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
+            dropped: std::sync::Mutex::default(),
         }
     }
 
@@ -208,11 +218,18 @@ impl ShardServer {
             sc,
         )?;
         let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
-        let shards = single_slot(ShardSlot::loaded(ServerState {
+        let slot = ShardSlot::loaded(ServerState {
             dict,
             tag_dict,
             shard,
-        }));
+        });
+        // The pre-built node remembers its drops too (ADR-189): reopening a directory whose
+        // slot 0 was dropped must not serve a fresh empty slot 0.
+        let dropped = match node_dict.load_full() {
+            Some(space) => super::dropped::restore_for_slots(&data_dir, &space, [(&0, &slot)])?,
+            None => std::sync::Mutex::default(),
+        };
+        let shards = single_slot(slot);
         Ok(ShardServer {
             norm,
             config,
@@ -231,6 +248,7 @@ impl ShardServer {
             )),
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
+            dropped,
         })
     }
 }

@@ -139,6 +139,21 @@ pub(super) async fn adopt_dict(
         (Arc::new(dict), Arc::new(tag_dict))
     };
 
+    // The shards this node dropped are remembered per layout (ADR-189). Read this layout's
+    // record before anything is built, persisted or published: a record that cannot be read
+    // must fail the adoption with the node unchanged, so a retry fails the same way instead
+    // of finding the layout already adopted and creating a slot that serves.
+    let layout_record = if node_matches {
+        None
+    } else {
+        Some(server.layout_record(super::super::dropped::SpaceId::new(
+            fp,
+            tag_fp,
+            placement_generation,
+            req.num_shards,
+        ))?)
+    };
+
     // Build this slot's shard over the node-shared space (the durable subdir + sidecar-divergence
     // check, or in-memory) — the tail half factored so `add_shard` (ADR-093 Stage 2) reuses it.
     let shard = build_slot_shard(server, shard_id, &space_dict, &space_tag, fp)?;
@@ -149,7 +164,7 @@ pub(super) async fn adopt_dict(
     // acknowledging self-restores without a coordinator (ADR-072) and a refused adopt overwrites
     // nothing. Order: node cell before the slot, so `DictFingerprint` never sees a slot the node
     // cell lacks.
-    if !node_matches {
+    if let Some(dropped) = layout_record {
         if let Some(root) = &server.data_dir {
             super::super::durable::persist_adopted_space(
                 root,
@@ -171,6 +186,9 @@ pub(super) async fn adopt_dict(
             placement_generation,
             num_shards: req.num_shards,
         })));
+        // A different layout starts over; the layout a restarted node had before is taken
+        // up again.
+        server.install_layout_record(dropped);
     }
     server.insert_slot(
         shard_id,

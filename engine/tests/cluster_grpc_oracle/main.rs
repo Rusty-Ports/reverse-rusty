@@ -33,6 +33,7 @@ mod exhaustive;
 mod filtered;
 mod fingerprint;
 mod gc;
+mod gc_readopt;
 mod handoff;
 mod health;
 mod hot;
