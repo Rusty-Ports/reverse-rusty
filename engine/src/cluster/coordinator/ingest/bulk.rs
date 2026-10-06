@@ -61,7 +61,8 @@ impl ClusterEngine {
         // durable cluster a checkpoint commits them into the coordinator manifest's
         // per-shard segment registry to survive reopen.
         if self.data_dir.is_some() {
-            self.checkpoint()?;
+            // This load holds the barrier shared and the bulk guard: it is the only writer.
+            self.checkpoint_quiesced()?;
         }
         Ok(())
     }

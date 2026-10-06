@@ -11,12 +11,12 @@ use crate::storage::BackupError;
 impl ClusterEngine {
     /// Back up the cluster's durable state into `dest` (which must not already exist).
     ///
-    /// `&self` (matches [`checkpoint`](ClusterEngine::checkpoint)); the caller holds
-    /// the cluster write-serialization lock across this call (see the
-    /// `_cluster/backup` handler), so no concurrent mutation runs and no shard
-    /// compaction deletes a segment mid-copy. The pre-conditions (in-memory cluster,
-    /// pre-existing `dest`) are rejected BEFORE `checkpoint()` so a bad request never
-    /// has the side effect of bumping the epoch / truncating the log. `checkpoint()`
+    /// `&self` (matches [`checkpoint`](ClusterEngine::checkpoint)). The checkpoint and
+    /// the copy run under one hold of the mutation barrier (ADR-197), so no concurrent
+    /// mutation runs between them and no flush or compaction deletes a segment mid-copy;
+    /// the caller needs no lock of its own. The pre-conditions (in-memory cluster,
+    /// pre-existing `dest`) are rejected BEFORE the checkpoint so a bad request never
+    /// has the side effect of bumping the epoch / truncating the log. The checkpoint
     /// then runs so the source dir is fully consistent — `seal_for_checkpoint`
     /// persists every shard's `sources.dat` even when its memtable is empty (the
     /// ADR-074 seam), which a raw hot-copy would miss. Then `copy_cluster_dir` copies
@@ -55,7 +55,8 @@ impl ClusterEngine {
         }
         // Make the source dir a consistent on-disk snapshot (seal + atomic manifest
         // + log truncate + orphan GC). Fails loud if any shard fell back to memory.
-        self.checkpoint()?;
+        let _quiesced = self.quiesce_mutations();
+        self.checkpoint_quiesced()?;
         // copy_cluster_dir stages + verifies + atomically commits. A precondition
         // error (NotDurable/DestExists) is a bad request (400); a copy/verify failure
         // is a durability problem (503).

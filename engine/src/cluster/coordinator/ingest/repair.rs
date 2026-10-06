@@ -240,8 +240,11 @@ impl ClusterEngine {
         Ok(())
     }
 
-    /// Seal every shard's memtable into an immutable base segment.
+    /// Seal every shard's memtable into an immutable base segment. Excludes mutations and
+    /// checkpoints while it runs (ADR-197): a flush that wrote a segment between a
+    /// checkpoint's registry snapshot and its orphan sweep would have that file deleted.
     pub fn flush(&self) -> Result<(), ShardError> {
+        let _quiesced = self.quiesce_mutations();
         for s in &self.shards {
             s.flush()?;
         }
