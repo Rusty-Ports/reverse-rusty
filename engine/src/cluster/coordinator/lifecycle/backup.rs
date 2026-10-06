@@ -34,6 +34,10 @@ impl ClusterEngine {
                 "cluster is in-memory (no data_dir): nothing to back up".into(),
             ));
         };
+        // Exclude mutations, checkpoints and other backups before looking at `dest`: two
+        // backups to one destination must not both find it absent, or the second would
+        // checkpoint (epoch bump, log truncation) and only then learn it cannot succeed.
+        let _quiesced = self.quiesce_mutations();
         // Reject every existing directory entry up front, including a dangling
         // symlink: checkpoint() has side effects (epoch bump, log truncation), so
         // a request that cannot succeed must not run it. `Path::exists` follows
@@ -55,7 +59,6 @@ impl ClusterEngine {
         }
         // Make the source dir a consistent on-disk snapshot (seal + atomic manifest
         // + log truncate + orphan GC). Fails loud if any shard fell back to memory.
-        let _quiesced = self.quiesce_mutations();
         self.checkpoint_quiesced()?;
         // copy_cluster_dir stages + verifies + atomically commits. A precondition
         // error (NotDurable/DestExists) is a bad request (400); a copy/verify failure

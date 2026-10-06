@@ -231,6 +231,41 @@ fn a_backup_waits_for_a_write_and_contains_it() {
     let _ = std::fs::remove_dir_all(&dest);
 }
 
+/// Two backups to the same destination. The second waits for the first, then finds the
+/// destination taken and is refused before it checkpoints: a request that cannot succeed
+/// must not bump the epoch and truncate the log on its way to saying so.
+#[test]
+fn a_second_backup_to_the_same_destination_is_refused_without_a_checkpoint() {
+    let (mut cluster, _cfg, dir) = durable("backup_same_dest");
+    let dest = scratch_dir("backup_same_dest_dest");
+    cluster.add_query(1, "zzbackedup").expect("a write");
+    let before = cluster.epoch();
+    let gate = pause_first(&mut cluster, |call| matches!(call, WriteCall::Seal));
+    let second = std::thread::scope(|scope| {
+        let cluster = &cluster;
+        let dest = &dest;
+        let first = scope.spawn(move || cluster.backup_to(dest));
+        gate.wait_until_entered();
+        let second = scope.spawn(move || cluster.backup_to(dest));
+        // Give the second time to get as far as it can while the first is paused.
+        std::thread::sleep(WOULD_HAVE_FINISHED);
+        gate.release_first();
+        first.join().expect("first").expect("the first backup");
+        second.join().expect("second")
+    });
+    assert!(
+        matches!(second, Err(ShardError::Config(_))),
+        "the destination exists by then: {second:?}"
+    );
+    assert_eq!(
+        cluster.epoch(),
+        before + 1,
+        "only the backup that succeeded checkpointed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
 /// A bulk load into a durable cluster checkpoints at its end while it still holds the
 /// barrier shared. It must use the variant that does not take the barrier again, or it
 /// would wait for itself.

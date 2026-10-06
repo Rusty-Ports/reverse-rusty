@@ -34,8 +34,10 @@ server's lock and not something the library offers.
    introduced: every write holds it shared from before its log append until its shard fan-out
    is complete). In-flight writes finish first and new ones wait until the manifest is
    committed, the log truncated and the sweep done.
-2. **`flush` and `backup_to` take it too.** A backup holds it across its checkpoint and its
-   copy, so it is a consistent snapshot with no lock of the caller's.
+2. **`flush` and `backup_to` take it too.** A backup holds it across its destination check,
+   its checkpoint and its copy, so it is a consistent snapshot with no lock of the caller's,
+   and a backup that cannot succeed is refused before it checkpoints even when another backup
+   to the same destination is running.
 3. **`checkpoint_quiesced` is the body, for callers that already exclude mutations.** A bulk
    load checkpoints while it holds the barrier shared together with the bulk id guard, and
    taking the barrier again would wait for itself. Vocabulary rebuilds and resize have
@@ -73,7 +75,8 @@ wrapper that pauses one call:
 - a create issued while a checkpoint is sealing does not complete until the checkpoint does,
   and the cluster reopens with it (reopen failed with a duplicate id before);
 - two checkpoints commit two epochs; a flush waits for a checkpoint; a backup waits for an
-  in-flight write and contains it;
+  in-flight write and contains it; a second backup to the same destination is refused
+  without a checkpoint;
 - a bulk load into a durable cluster still checkpoints and returns.
 
 The copy inside `backup_to` runs under the same hold as its checkpoint; no test pauses between
