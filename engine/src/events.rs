@@ -32,9 +32,12 @@ pub enum DurabilityOp {
     /// Writing the post-flush WAL checkpoint marker failed. Benign: the next
     /// recovery simply replays from an earlier point.
     WalCheckpoint,
-    /// Truncating/resetting the WAL after a successful checkpoint failed. Benign:
+    /// Resetting the WAL after a successful checkpoint failed. The log is reset by
+    /// renaming an empty one over it (ADR-198). A failure before that rename is benign:
     /// the WAL keeps already-checkpointed entries that the next recovery re-applies
-    /// idempotently.
+    /// idempotently, and keeps taking writes. A failure after it also disables appends
+    /// until a reopen, which each refused write then reports as `WalAppend`. The cluster
+    /// coordinator reuses this op for its own log truncation, where it is always benign.
     WalReset,
     /// Writing a segment file to disk failed; the engine fell back to an
     /// in-memory segment (`build_*`/`bulk_ingest` instead roll the batch back).
@@ -82,10 +85,11 @@ pub enum DurabilityOp {
     ReplicaDesync,
     /// A cluster multi-shard mutation (a selective Add or a Remove) applied to SOME but not
     /// all of its target shards: a remote shard write failed mid-fan-out (ADR-047). The
-    /// mutation is durably logged (so it WILL converge on `ClusterEngine::resync` or reopen)
-    /// and the failed shards are queued for repair — but until then the query is only
-    /// partially visible: a transient FALSE-NEGATIVE window on the un-applied shards. Data at
-    /// risk (a missed match is this system's worst outcome). Distributed layer only; the
+    /// write was answered as a failure and the failed shards are queued for repair in the
+    /// coordinator's memory (ADR-194): a retry of the write or `ClusterEngine::resync`
+    /// converges it, and a remote coordinator that stops first loses the queue. Until then the
+    /// query is only partially visible: a FALSE-NEGATIVE window on the un-applied shards. Data
+    /// at risk (a missed match is this system's worst outcome). Distributed layer only; the
     /// in-process / RF=1 path never produces it (its `LocalShard` writes are infallible).
     ClusterPartialApply,
     /// Reconstructing remote create-only admission failed. No mutation or match

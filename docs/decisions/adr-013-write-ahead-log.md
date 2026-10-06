@@ -49,3 +49,10 @@ complete CRC failures and unknown or malformed payloads now refuse recovery with
 Current readers fence unsupported WAL headers and upgrade known legacy headers before append; only
 incomplete final writes or zero padding are repaired. Older binaries that ignored the header still
 require the documented backup/clean-flush rollback precautions.
+
+## Later outcome — 2026-10-06
+
+[ADR-198](adr-198-wal-is-replaced-not-truncated.md): the log is reset and created by renaming a
+complete empty log into place. The earlier truncate-then-write-header left a window, once per
+flush, in which a crash produced a log shorter than its header and a node that refused to start.
+Such a file now opens as an empty log.

@@ -1,7 +1,7 @@
 use super::{
     bulk_body_rejection, bulk_query_rejection, bulk_rejection, error_item, fail_item, info,
     instrument, item_inner_mut, parse_bulk_request, pending_item, shard_error_status, succeed_item,
-    Arc, BulkActionKind, BulkItem, BulkItemError, BulkParams, BulkResponse, Bytes, BytesRejection,
+    Arc, BulkActionKind, BulkItem, BulkParams, BulkResponse, Bytes, BytesRejection,
     ClusterAppState, HeaderMap, Instant, IntoResponse, Json, ParsedBulkItem, Query, QueryRejection,
     Response, ShardError, State, StatusCode,
 };
@@ -129,18 +129,7 @@ fn cluster_bulk_inner(state: &Arc<ClusterAppState>, items: Vec<ParsedBulkItem>) 
             }
             Err(ShardError::PartiallyApplied {
                 applied, failed, ..
-            }) => {
-                accepted += 1;
-                succeed_item(&mut response, StatusCode::OK, source.version, "partial");
-                let inner = item_inner_mut(&mut response);
-                inner.error = Some(BulkItemError {
-                    error_type: "partial_write",
-                    reason: format!(
-                        "applied on {applied:?}, pending on {failed:?}; durably logged — \
-                         POST /_cluster/resync converges it"
-                    ),
-                });
-            }
+            }) => fail_partial_item(&mut response, item.action, &applied, &failed),
             Err(error) => {
                 let status = shard_error_status(&error);
                 fail_item(
@@ -178,4 +167,50 @@ fn cluster_bulk_inner(state: &Arc<ClusterAppState>, items: Vec<ParsedBulkItem>) 
         items: responses,
     })
     .into_response()
+}
+
+/// An item that not every shard took is a failed item (ADR-194): it is not counted as
+/// accepted, carries no version, and tells the caller how to retry it.
+fn fail_partial_item(
+    response: &mut BulkItem,
+    action: BulkActionKind,
+    applied: &[usize],
+    failed: &[usize],
+) {
+    fail_item(
+        response,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "partial_write",
+        super::partial_write_guidance(action == BulkActionKind::Create, applied, failed),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_partial_item_is_a_failed_item_with_retry_guidance() {
+        for (action, retry) in [
+            (
+                BulkActionKind::Index,
+                "retry this idempotent index operation",
+            ),
+            (
+                BulkActionKind::Create,
+                "as an index operation (without op_type=create)",
+            ),
+        ] {
+            let mut item = pending_item(action, 7);
+            fail_partial_item(&mut item, action, &[0], &[1]);
+            let inner = item_inner_mut(&mut item);
+            assert_eq!(inner.status, 503);
+            assert!(inner.version.is_none() && inner.result.is_none());
+            let error = inner.error.as_ref().expect("the item failed");
+            assert_eq!(error.error_type, "partial_write");
+            assert!(error.reason.contains(retry), "{}", error.reason);
+            assert!(error.reason.contains("/_cluster/resync"));
+            assert!(!error.reason.contains("durably logged"), "{}", error.reason);
+        }
+    }
 }

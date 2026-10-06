@@ -35,10 +35,11 @@ use super::{ClusterRankedError, ShardError};
 impl ShardError {
     /// HTTP `(status, error kind)` for the cluster write/admin/vocab surface.
     ///
-    /// `PartiallyApplied` maps to 200 for totality only: it is not a failure of
-    /// the request (the mutation is durably logged and queued for repair), and
-    /// the write handlers surface it as a 200 `partial` result *before* reaching
-    /// a generic error response — a retry hint here would invite a double-log.
+    /// `PartiallyApplied` is a retryable failure (ADR-194): some target shard does
+    /// not hold the write, and the repair is queued only in this coordinator's
+    /// memory. The document handlers render it with their own `partial` body
+    /// before reaching a generic error response; this row keeps every other
+    /// caller from reporting it as success.
     #[must_use]
     pub fn write_http_class(&self) -> (u16, &'static str) {
         match self {
@@ -60,7 +61,8 @@ impl ShardError {
             ShardError::SourceUnavailable(_) => (502, "source_unavailable"),
             ShardError::DuplicateLogicalId(_) => (409, "logical_id_conflict"),
             ShardError::EnrichmentLimit { .. } => (413, "rank_enrichment_limit"),
-            ShardError::PartiallyApplied { .. } => (200, "partially_applied"),
+            ShardError::PartiallyApplied { .. } => (503, "partially_applied"),
+            ShardError::EarlierWriteUnconverged { .. } => (503, "earlier_write_unconverged"),
             // ADR-113 totality row: a missing pin is the same stale-cursor
             // conflict the read surface reports.
             ShardError::PitNotFound(_) => (409, "stale_cursor"),
@@ -119,7 +121,8 @@ impl ClusterRankedError {
                 | ShardError::Log(_)
                 | ShardError::ControlPlane(_)
                 | ShardError::DuplicateLogicalId(_)
-                | ShardError::PartiallyApplied { .. },
+                | ShardError::PartiallyApplied { .. }
+                | ShardError::EarlierWriteUnconverged { .. },
             ) => (503, "cluster_unavailable", "error"),
         }
     }
@@ -215,13 +218,34 @@ mod tests {
     }
 
     #[test]
-    fn partially_applied_is_the_totality_200() {
+    fn a_create_blocked_by_an_earlier_write_is_retryable_and_not_called_partial() {
+        let error = ShardError::EarlierWriteUnconverged {
+            logical: 1,
+            pending: vec![2],
+            detail: "x".into(),
+        };
+        assert_eq!(error.write_http_class(), (503, "earlier_write_unconverged"));
+        let text = error.to_string();
+        assert!(text.contains("not applied or queued"), "{text}");
+        assert!(text.contains("send it again"), "{text}");
+        // Converging the earlier write does not perform this one, so resync is not offered.
+        assert!(!text.contains("resync"), "{text}");
+    }
+
+    #[test]
+    fn partially_applied_is_a_retryable_failure_on_the_write_surface() {
         let error = ShardError::PartiallyApplied {
             logical: 1,
             applied: vec![0],
             failed: vec![1],
             detail: "x".into(),
         };
-        assert_eq!(error.write_http_class(), (200, "partially_applied"));
+        assert_eq!(error.write_http_class(), (503, "partially_applied"));
+        let text = error.to_string();
+        assert!(text.contains("retry"), "{text}");
+        assert!(
+            !text.contains("durably logged") && !text.contains("reopen"),
+            "{text}"
+        );
     }
 }

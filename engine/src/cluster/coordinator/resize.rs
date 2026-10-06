@@ -120,7 +120,7 @@ impl ClusterEngine {
             // the durable commit (checkpoint is idempotent — a clean one is cheap) + on-disk dir
             // set, so a retry HEALS rather than masks either failure seam.
             if self.data_dir.is_some() {
-                self.checkpoint()?;
+                self.checkpoint_quiesced()?;
                 self.remove_shard_dirs_at_or_above(new_num_shards);
             }
             return Ok(0);
@@ -161,7 +161,7 @@ impl ClusterEngine {
         // matters: the orphan dirs are still referenced by the OLD manifest until `checkpoint`
         // commits the new one, so deleting them earlier would break crash-recovery to the old K.
         if self.data_dir.is_some() {
-            self.checkpoint()?;
+            self.checkpoint_quiesced()?;
             self.remove_shard_dirs_at_or_above(new_num_shards);
         }
         Ok(rebuilt)

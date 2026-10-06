@@ -285,3 +285,133 @@ fn bench_fsync_cost() {
         let _ = std::fs::remove_file(&path);
     }
 }
+
+/// What `Wal::open` writes at the start of a log.
+fn header_bytes() -> Vec<u8> {
+    let mut header = WAL_MAGIC.to_vec();
+    header.extend_from_slice(&WAL_VERSION.to_le_bytes());
+    header
+}
+
+/// A reset replaces the log with a new file; it does not truncate the one in place. A
+/// truncate leaves a moment at which the file holds no header, and a crash in that moment
+/// left a log the next start refused. The new file takes appends after its header.
+#[test]
+fn reset_publishes_a_new_log_and_appends_follow_its_header() {
+    let path = scratch_path("reset_replaces");
+    let mut wal = Wal::open(&path, false).unwrap();
+    wal.append_insert(1, 1, "wireless mouse", &[]).unwrap();
+    wal.sync().unwrap();
+    #[cfg(unix)]
+    let before = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap());
+
+    wal.reset().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), header_bytes());
+    assert_eq!(wal.size_bytes(), WAL_HEADER_SIZE as u64);
+    assert_eq!(wal.pending_entries(), 0);
+    #[cfg(unix)]
+    assert_ne!(
+        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&path).unwrap()),
+        before,
+        "the log must be replaced, not truncated in place"
+    );
+
+    // Twice, so the handle a reset leaves behind is itself reset.
+    wal.reset().unwrap();
+    wal.append_insert(2, 1, "mechanical keyboard", &[]).unwrap();
+    wal.sync().unwrap();
+    assert!(std::fs::read(&path).unwrap().starts_with(&header_bytes()));
+    assert_eq!(wal.size_bytes(), std::fs::metadata(&path).unwrap().len());
+    drop(wal);
+
+    let recovered = Wal::recover(&path).unwrap();
+    assert_eq!(
+        recovered.entries.len(),
+        1,
+        "only the record after the reset"
+    );
+    assert!(matches!(
+        &recovered.entries[0],
+        WalEntry::Insert { logical: 2, .. }
+    ));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A crash between the old truncate and the header write left `wal.log` with fewer than
+/// eight bytes, and a first start could do the same. Such a file never held a record, so
+/// it opens as an empty log instead of stopping the node.
+#[test]
+fn a_log_whose_header_was_interrupted_opens_empty() {
+    let header = header_bytes();
+    // The interrupted header may be an earlier release's: v3 is `PWAL\x03\0\0\0`.
+    let earlier = Wal::header(3);
+    let cases = (0..WAL_HEADER_SIZE)
+        .map(|written| (written, &header[..written]))
+        .chain((5..WAL_HEADER_SIZE).map(|written| (written + 100, &earlier[..written])));
+    for (written, prefix) in cases {
+        let path = scratch_path(&format!("interrupted_header_{written}"));
+        std::fs::write(&path, prefix).unwrap();
+        let recovered =
+            Wal::recover(&path).unwrap_or_else(|error| panic!("{written} header bytes: {error}"));
+        assert!(recovered.entries.is_empty());
+        let mut wal =
+            Wal::open(&path, false).unwrap_or_else(|error| panic!("{written} bytes: {error}"));
+        assert_eq!(std::fs::read(&path).unwrap(), header, "{written} bytes");
+        wal.append_insert(9, 1, "wireless mouse", &[]).unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+        assert_eq!(Wal::recover(&path).unwrap().entries.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Only a prefix of the header is read that way. Any other short file, and any file with a
+/// full but wrong header, is still refused: it is not something this code wrote.
+#[test]
+fn a_short_file_that_is_not_a_header_prefix_is_refused() {
+    let path = scratch_path("not_a_header");
+    let refused: [&[u8]; 7] = [
+        b"XYZ",
+        b"PWAX",
+        b"PXAL\x03\x00\x00\x00",
+        // A header prefix of a format this reader does not support: a later one, version
+        // zero, and version bytes no header has. The full header would be refused too.
+        b"PWAL\x08\x00\x00",
+        b"PWAL\x00",
+        b"PWAL\x07\x01",
+        b"PWAL\x07\x00\x00\x01",
+    ];
+    for content in refused {
+        std::fs::write(&path, content).unwrap();
+        assert!(Wal::recover(&path).is_err(), "{content:?}");
+        assert!(Wal::open(&path, false).is_err(), "{content:?}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            content,
+            "a refused file is not rewritten"
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A reset that cannot build its replacement has not touched the log: every record is
+/// still there and the WAL keeps taking writes.
+#[test]
+fn a_reset_that_cannot_build_its_replacement_leaves_the_log_in_use() {
+    let path = scratch_path("reset_blocked");
+    let blocker = Wal::replacement_path(&path);
+    let _ = std::fs::remove_dir_all(&blocker);
+    let mut wal = Wal::open(&path, false).unwrap();
+    wal.append_insert(1, 1, "wireless mouse", &[]).unwrap();
+    // A directory where the replacement would be written.
+    std::fs::create_dir(&blocker).unwrap();
+    wal.reset()
+        .expect_err("the replacement cannot be created over a directory");
+    wal.append_insert(2, 1, "mechanical keyboard", &[])
+        .expect("the log is as it was, so it still takes writes");
+    wal.sync().unwrap();
+    drop(wal);
+    assert_eq!(Wal::recover(&path).unwrap().entries.len(), 2);
+    let _ = std::fs::remove_dir(&blocker);
+    let _ = std::fs::remove_file(&path);
+}

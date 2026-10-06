@@ -23,8 +23,8 @@ Standalone response:
 
 | Status | Meaning |
 |---|---|
-| `green` | Single-node durability is healthy, or every cluster position answers with no queued repair |
-| `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync |
+| `green` | Single-node durability is healthy, or every cluster position answers with no queued repair and every replica in sync |
+| `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync, or a replica is outside the in-sync set so reads cannot fail over to it (ADR-195) |
 | `red` | Single-node WAL/persistence failure, or a required cluster shard/control/topology check failed |
 
 Cluster health uses a deliberately smaller native payload:
@@ -35,11 +35,14 @@ Cluster health uses a deliberately smaller native payload:
   "mode": "cluster",
   "timed_out": false,
   "shards": 8,
-  "pending_repairs": 0
+  "pending_repairs": 0,
+  "out_of_sync_replicas": 0
 }
 ```
 
-A yellow or red response also includes `reason`. Detailed shard/control-plane errors are logged but
+`out_of_sync_replicas` counts the replicas reads may not fail over to: a replicated write to them
+failed, or they were not proven equal to their primary when the coordinator connected. It is 0 on
+a cluster without replicas. A yellow or red response also includes `reason`. Detailed shard/control-plane errors are logged but
 the unauthenticated response uses a stable generic red reason.
 
 The route is a strict, bodyless GET/HEAD with a 64 KiB extraction ceiling. It rejects unknown query

@@ -1,6 +1,7 @@
 use super::*;
 
 mod bench;
+mod checkpoint;
 mod harness;
 mod upsert_repair;
 mod visibility;
