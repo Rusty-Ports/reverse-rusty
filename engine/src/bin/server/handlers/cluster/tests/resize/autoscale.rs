@@ -15,6 +15,24 @@ fn corpus(n: u64) -> Vec<(u64, String)> {
         .collect()
 }
 
+/// A three-shard cluster that holds `queries` as selective rows. They are written after the
+/// feature space is frozen, so none of their terms holds a top-64 bit and each row lives on
+/// its anchor's position alone. Built from so small a corpus instead, every term would be
+/// among the 64 most common, every row a replicated pair, and no split would relieve a shard.
+fn selective_cluster(queries: &[(u64, String)]) -> ClusterEngine {
+    let config = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), &config, &[])
+        .expect("cluster");
+    for (id, dsl) in queries {
+        cluster.add_query(*id, dsl).expect("add");
+    }
+    cluster
+}
+
 fn titles(n: u64) -> Vec<String> {
     (1..=n)
         .map(|i| format!("zzanchor{i} vintage lamp"))
@@ -37,7 +55,7 @@ fn matches(state: &Arc<ClusterAppState>, titles: &[String]) -> Vec<Vec<u64>> {
 async fn a_persistent_recommendation_grows_once_then_cools_down() {
     let queries = corpus(60);
     let probe = titles(60);
-    let state = test_state(&queries);
+    let state = state_from_cluster(selective_cluster(&queries));
     let before = matches(&state, &probe);
     let start_shards = state.cluster.read().num_shards();
 
@@ -129,27 +147,13 @@ async fn a_persistent_recommendation_grows_once_then_cools_down() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_automatic_commit_is_retried_until_it_heals() {
     let queries = corpus(60);
-    let base = test_state(&queries);
-    let initial = base.cluster.read().control_state().expect("state");
-    drop(base);
-    let state = {
-        let config = ClusterConfig {
-            num_shards: 3,
-            include_broad: true,
-            ..ClusterConfig::default()
-        };
-        let cluster = ClusterEngine::build(
-            Normalizer::default_vocab().expect("vocab"),
-            &config,
-            &queries,
-        )
-        .expect("cluster")
-        .with_control_plane(Box::new(super::retry::FailResizeProposals {
+    let initial = selective_cluster(&queries).control_state().expect("state");
+    let state = state_from_cluster(selective_cluster(&queries).with_control_plane(Box::new(
+        super::retry::FailResizeProposals {
             inner: InMemoryControlPlane::new(initial),
             remaining: AtomicUsize::new(1),
-        }));
-        state_from_cluster(cluster)
-    };
+        },
+    )));
     let start_shards = state.cluster.read().num_shards();
 
     // max_shards equals the first target, so after the failed swap the governor would only
