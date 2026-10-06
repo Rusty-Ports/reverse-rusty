@@ -82,3 +82,8 @@ and dispatch independent of Tokio's shared blocking pool. The supervisor test pr
 receiver does not stop an admitted worker. ADR-047's core fault-injection tests continue to prove
 successful convergence, retry retention while a shard remains failed, same-id freshness, delete
 reservation release, and the durable-log recovery backstop.
+
+**Outcome update (2026-10-06).** `write_serial` is now `write_admission`, a reader-writer lock
+([ADR-206](adr-206-coordinator-writes-share-admission.md)). A resync pass takes it alone, so its
+ordering against document and bulk writes is what it was: no write runs during a pass. The
+manager timeout bounds the wait for it as before.

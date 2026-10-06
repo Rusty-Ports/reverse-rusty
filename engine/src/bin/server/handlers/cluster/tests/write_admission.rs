@@ -1,4 +1,6 @@
-//! Cluster writes wait on blocking threads under bounded admission (ADR-183).
+//! Cluster writes wait on blocking threads under bounded admission (ADR-183), share that
+//! admission with each other, and leave it to whole-cluster operations when one needs it alone
+//! (ADR-206).
 
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::thread::JoinHandle;
@@ -7,20 +9,38 @@ use std::time::Duration;
 use super::*;
 use crate::state::MAX_QUEUED_CLUSTER_WRITES;
 
-/// Hold `write_serial` on a helper thread until the returned sender is used or dropped. Tests drop
-/// it before asserting: a panic that unwound past a held serializer would drop the runtime first,
-/// and a runtime drop waits forever for the blocking writers queued behind it.
-fn hold_write_serial(state: &Arc<ClusterAppState>) -> (JoinHandle<()>, SyncSender<()>) {
+/// Which side of write admission a helper thread holds.
+#[derive(Clone, Copy)]
+enum Held {
+    /// As an ordinary write in flight holds it.
+    Shared,
+    /// As a whole-cluster operation holds it: a checkpoint, a backup, a resize, a job.
+    Alone,
+}
+
+/// Hold write admission on a helper thread until the returned sender is used or dropped. Tests
+/// drop it before asserting: a panic that unwound past held admission would drop the runtime
+/// first, and a runtime drop waits forever for the blocking writers queued behind it.
+fn hold_admission(state: &Arc<ClusterAppState>, held: Held) -> (JoinHandle<()>, SyncSender<()>) {
     let holder_state = Arc::clone(state);
     let (locked_sender, locked_receiver) = sync_channel(1);
     let (release_sender, release_receiver) = sync_channel::<()>(1);
     let holder = std::thread::spawn(move || {
-        let _writes = holder_state.write_serial.lock();
-        locked_sender.send(()).expect("signal the held serializer");
+        let (_shared, _alone);
+        match held {
+            Held::Shared => _shared = holder_state.write_admission.read(),
+            Held::Alone => _alone = holder_state.write_admission.write(),
+        }
+        locked_sender.send(()).expect("signal held admission");
         let _ = release_receiver.recv();
     });
-    locked_receiver.recv().expect("serializer held");
+    locked_receiver.recv().expect("admission held");
     (holder, release_sender)
+}
+
+/// Hold write admission the way a whole-cluster operation does, so that writes wait.
+fn hold_write_serial(state: &Arc<ClusterAppState>) -> (JoinHandle<()>, SyncSender<()>) {
+    hold_admission(state, Held::Alone)
 }
 
 fn multi_thread_runtime() -> tokio::runtime::Runtime {
@@ -49,7 +69,7 @@ fn spawn_put(
     })
 }
 
-/// A write waiting on `write_serial` must wait on a blocking thread, never on an async worker: on
+/// A write waiting for admission must wait on a blocking thread, never on an async worker: on
 /// a single-threaded runtime a parked worker stalls every other request (and, with remote shards,
 /// the RPCs the serializer's holder needs to finish).
 #[test]
@@ -196,4 +216,186 @@ fn a_non_waiting_flush_reports_an_ongoing_flush_without_queueing() {
         body["error"]["type"], "flush_in_progress_exception",
         "{body}"
     );
+}
+
+/// Two writes do not wait for each other. With one write in flight (its shared admission held
+/// here), a second write to another id is applied; before ADR-206 it queued behind the first
+/// for as long as the first took, including a full write deadline on a dead remote shard.
+#[test]
+fn a_write_does_not_wait_for_another_write() {
+    let state = test_state(&seed());
+    let (holder, release) = hold_admission(&state, Held::Shared);
+    let run_state = Arc::clone(&state);
+    let outcome = multi_thread_runtime().block_on(async move {
+        let put = tokio::time::timeout(Duration::from_secs(5), spawn_put(&run_state, 30)).await;
+        let delete = tokio::time::timeout(
+            Duration::from_secs(5),
+            send(&run_state, req_empty("DELETE", "/_doc/1")),
+        )
+        .await;
+        let bulk = tokio::time::timeout(
+            Duration::from_secs(5),
+            send(
+                &run_state,
+                Request::post("/_bulk")
+                    .header("content-type", "application/x-ndjson")
+                    .body(Body::from(
+                        "{\"index\":{\"_id\":31}}\n{\"query\":\"1998 acme\"}\n",
+                    ))
+                    .expect("request"),
+            ),
+        )
+        .await;
+        // Release before leaving the runtime: a write that did wait is parked on a blocking
+        // thread, and the runtime does not shut down until that thread is done.
+        drop(release);
+        (put, delete, bulk)
+    });
+    holder.join().expect("holder");
+    let (put, delete, bulk) = outcome;
+    let (status, body) = put
+        .expect("a write must not wait for another write")
+        .expect("put task");
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = delete.expect("a delete must not wait for another write");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = bulk.expect("a bulk batch must not wait for another write");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["errors"], false, "{body}");
+}
+
+/// A write still waits for an operation that needs the corpus still, and is applied once that
+/// operation is done.
+#[test]
+fn a_write_waits_for_an_operation_that_holds_admission_alone() {
+    let state = test_state(&seed());
+    let (holder, release) = hold_admission(&state, Held::Alone);
+    let run_state = Arc::clone(&state);
+    let (early, late) = multi_thread_runtime().block_on(async move {
+        let mut put = spawn_put(&run_state, 40);
+        let early = tokio::time::timeout(Duration::from_millis(200), &mut put)
+            .await
+            .is_ok();
+        drop(release);
+        let late = tokio::time::timeout(Duration::from_secs(10), put).await;
+        (early, late)
+    });
+    holder.join().expect("holder");
+    assert!(
+        !early,
+        "the write ran beside an operation that needs it out"
+    );
+    let (status, body) = late
+        .expect("the write runs once admission is free")
+        .expect("put");
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// A search that asks for sources does not take write admission. It keeps its stable view from
+/// the cluster's own mutation barrier, so it no longer waits behind a backup, a resize or an
+/// exhaustive job that holds admission for its whole run. All three enriched surfaces answer
+/// while admission is held alone.
+#[test]
+fn a_search_with_sources_does_not_wait_for_write_admission() {
+    let state = test_state(&seed());
+    let (holder, release) = hold_admission(&state, Held::Alone);
+    let run_state = Arc::clone(&state);
+    let answers = multi_thread_runtime().block_on(async move {
+        let mut answers = Vec::new();
+        for (path, body) in [
+            (
+                "/v2/_search",
+                serde_json::json!({ "document": { "title": "1994 acme" } }),
+            ),
+            (
+                "/v2/_mpercolate",
+                serde_json::json!({ "documents": [{ "title": "1994 acme" }] }),
+            ),
+            (
+                "/_search",
+                serde_json::json!({
+                    "document": { "title": "1994 acme" },
+                    "include_broad": true,
+                    "_source": true
+                }),
+            ),
+        ] {
+            let answer = tokio::time::timeout(
+                Duration::from_secs(5),
+                send(&run_state, req("POST", path, &body)),
+            )
+            .await;
+            answers.push((path, answer));
+        }
+        // Release before leaving the runtime, as above.
+        drop(release);
+        answers
+    });
+    holder.join().expect("holder");
+    for (path, answer) in answers {
+        let (status, body) = answer.unwrap_or_else(|_| panic!("{path} waited for write admission"));
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+}
+
+type MakeRequest = fn() -> Request<Body>;
+
+/// Every operation that needs the corpus still waits for a write in flight, and runs once the
+/// write is done. A write shares admission; each of these takes it alone.
+#[test]
+fn an_operation_that_needs_the_corpus_still_waits_for_a_write_in_flight() {
+    let operations: [(&str, MakeRequest); 6] = [
+        ("flush", || req_empty("POST", "/_flush")),
+        ("checkpoint", || req_empty("POST", "/_checkpoint")),
+        ("replace the vocabulary", || {
+            req("PUT", "/_vocab", &serde_json::json!({}))
+        }),
+        ("learn and apply a vocabulary", || {
+            req_empty("POST", "/_vocab/learn_and_apply?min_count=2")
+        }),
+        ("import aliases", || {
+            req(
+                "POST",
+                "/_vocab/aliases/import",
+                &serde_json::json!({
+                    "synonyms_set": [{ "id": "zz-rule", "synonyms": "zzcouch, zzsofa" }]
+                }),
+            )
+        }),
+        ("learn and apply aliases", || {
+            req_empty("POST", "/_vocab/aliases/learn_and_apply?min_count=2")
+        }),
+    ];
+    for (name, request) in operations {
+        let state = test_state(&seed());
+        let (holder, release) = hold_admission(&state, Held::Shared);
+        let run_state = Arc::clone(&state);
+        let (early, late) = multi_thread_runtime().block_on(async move {
+            let task_state = Arc::clone(&run_state);
+            let mut operation = tokio::spawn(async move { send_raw(&task_state, request()).await });
+            let early = tokio::time::timeout(Duration::from_millis(200), &mut operation).await;
+            drop(release);
+            match early {
+                Ok(answer) => (true, Ok(answer)),
+                Err(_) => (
+                    false,
+                    tokio::time::timeout(Duration::from_secs(20), operation).await,
+                ),
+            }
+        });
+        holder.join().expect("holder");
+        let (status, _, bytes) = late
+            .unwrap_or_else(|_| panic!("{name} never ran"))
+            .expect("operation task");
+        assert!(
+            !early,
+            "{name} ran beside a write in flight: {status} {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(
+            status.is_success(),
+            "{name}: {status} {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
 }

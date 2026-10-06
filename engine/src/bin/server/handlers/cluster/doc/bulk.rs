@@ -33,7 +33,7 @@ pub(crate) async fn cluster_bulk_route(
             return bulk_rejection(&state.prom, error.status, error.error_type, error.reason);
         }
     };
-    // The batch holds `write_serial` and makes remote write RPCs, so it runs on a blocking thread,
+    // The batch holds `write_admission` and makes remote write RPCs, so it runs on a blocking thread,
     // never on an async worker (see `run_cluster_write`).
     let permit = match super::super::admit_cluster_write(&state).await {
         Ok(permit) => permit,
@@ -67,9 +67,10 @@ fn cluster_bulk_inner(state: &Arc<ClusterAppState>, items: Vec<ParsedBulkItem>) 
     let mut responses: Vec<BulkItem> = Vec::with_capacity(items.len());
     let mut accepted = 0usize;
 
-    // One writer guard across the batch (the Mutex<Engine> analogue), so two
-    // concurrent bulks don't interleave their per-item apply order.
-    let _write = state.write_serial.lock();
+    // The batch is an ordinary write: it shares admission with other writes for as long as
+    // it runs. Two batches that run at once interleave their items; each item is applied
+    // whole, and the cluster orders writes to one id by its log (ADR-177).
+    let _write = state.write_admission.read();
     let cluster = state.cluster.read();
     for item in items {
         let source = match item.source {

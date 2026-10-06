@@ -464,10 +464,9 @@ async fn cluster_v2_mpercolate_inner(
             deadline,
         };
         if mutation_fenced {
-            // As on `/v2/_search`, source-enriched requests acquire both
-            // mutation fences before entering Rayon so matching and the union
+            // As on `/v2/_search`, a source-enriched request acquires the
+            // mutation-frozen view before entering Rayon so matching and the union
             // winner fetch cannot observe different same-ID versions.
-            let _write_guard = cluster_state.write_serial.lock();
             let cluster = cluster_state.cluster.read();
             let stable_view = cluster.consistent_read_view();
             cluster_state

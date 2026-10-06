@@ -183,7 +183,7 @@ async fn execute_checkpoint(
     let work_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let _writer = work_state.write_serial.lock();
+        let _writer = work_state.write_admission.write();
         let cluster = work_state.cluster.read();
         let durable = cluster.is_durable();
         let shards_checkpointed = if durable || cluster.is_remote() {

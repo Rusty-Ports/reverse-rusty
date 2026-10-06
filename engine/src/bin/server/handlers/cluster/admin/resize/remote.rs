@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{Mutex, RwLockWriteGuard};
 
 use reverse_rusty::cluster::{NodeDescriptor, RemoteResizeRequest};
 
@@ -32,7 +32,7 @@ pub(super) fn intent_operation_id(operation_id: &str) -> u64 {
 pub(super) fn remote_resize_worker(
     _running: tokio::sync::OwnedSemaphorePermit,
     state: &ClusterAppState,
-    writes: MutexGuard<'_, ()>,
+    writes: RwLockWriteGuard<'_, ()>,
     gate: &Mutex<ResizeStart>,
     started_sender: tokio::sync::oneshot::Sender<()>,
     record: &WorkerRecordGuard,

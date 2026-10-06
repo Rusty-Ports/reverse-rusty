@@ -400,7 +400,7 @@ async fn cluster_create_job_inner(
             move |sink, deadline| {
                 // Freeze coordinator writes and placement for the complete
                 // shard sequence, yielding one coherent execution view.
-                let _writes = lock_cluster_writes(&state_for_job.write_serial, sink, deadline)?;
+                let _writes = lock_cluster_writes(&state_for_job.write_admission, sink, deadline)?;
                 let cluster = state_for_job.cluster.read();
                 cluster
                     .try_percolate_filtered_all(
@@ -426,10 +426,10 @@ async fn cluster_create_job_inner(
 }
 
 fn lock_cluster_writes<'a>(
-    lock: &'a parking_lot::Mutex<()>,
+    lock: &'a parking_lot::RwLock<()>,
     sink: &mut dyn reverse_rusty::ChunkSink,
     deadline: Instant,
-) -> Result<parking_lot::MutexGuard<'a, ()>, String> {
+) -> Result<parking_lot::RwLockWriteGuard<'a, ()>, String> {
     const POLL: Duration = Duration::from_millis(10);
     loop {
         sink.check_cancelled().map_err(|error| error.to_string())?;
@@ -437,7 +437,7 @@ fn lock_cluster_writes<'a>(
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| "job deadline exceeded while waiting for cluster writes".to_string())?;
-        if let Some(guard) = lock.try_lock_for(remaining.min(POLL)) {
+        if let Some(guard) = lock.try_write_for(remaining.min(POLL)) {
             return Ok(guard);
         }
     }

@@ -739,11 +739,11 @@ async fn percolate_blocking(
             };
 
             if source_fetch.is_some() {
-                // Source waiters must not occupy the shared Rayon pool. Acquire
-                // both the HTTP write funnel and the core mutation-frozen view on
-                // this blocking thread before entering the pool. The core fence
-                // also covers direct `ClusterEngine` mutations.
-                let _write_guard = state_inner.write_serial.lock();
+                // Source waiters must not occupy the shared Rayon pool. Acquire the
+                // mutation-frozen view on this blocking thread before entering the pool.
+                // It excludes every mutation, served or direct, and every checkpoint,
+                // flush and backup (ADR-197), so the request takes no write admission
+                // and does not wait for a whole bulk batch, a job or a resize (ADR-206).
                 let cluster = state_inner.cluster.read();
                 let stable_view = cluster.consistent_read_view();
                 run_pool(Some(&stable_view))

@@ -4,10 +4,11 @@
 //! `Mutex<Engine>` for serialized writes and an `ArcSwap<EngineSnapshot>` for
 //! lock-free reads. [`ClusterAppState`] is the coordinator-mode analogue (ADR-070):
 //! an `RwLock<ClusterEngine>` whose READ side serves both percolates and ordinary
-//! writes (cluster reads are `&self` lock-free; writes are `&self`, internally
-//! ordered by the cluster log, and serialized across requests by `write_serial` —
-//! the `Mutex<Engine>` analogue), while the WRITE side is taken only by the
-//! `&mut self` blue/green vocabulary/resize paths. Descriptor mutations and
+//! writes (cluster reads are `&self` lock-free; writes are `&self` and the cluster
+//! orders them itself, by its log and a lock per logical id), while the WRITE side is
+//! taken only by the `&mut self` blue/green vocabulary/resize paths. Ordinary writes
+//! share `write_admission`; an operation that needs every write out of the way takes
+//! it exclusively (ADR-206). Descriptor mutations and
 //! topology movement coordinate separately through `topology_guard`.
 //! [`RequestCtx`] is the seam that lets one auth / request-id middleware serve both
 //! backends. [`request_id_middleware`] stamps an `x-request-id` header and tracks
@@ -55,9 +56,10 @@ pub(crate) const MAX_CONCURRENT_CLUSTER_HANDOFFS: usize = 1;
 /// duplicate calls cannot accumulate detached workers; automatic reconcile
 /// and rebalance retain their own conflict-aware engine scheduling.
 pub(crate) const MAX_CONCURRENT_CLUSTER_REASSIGNS: usize = 1;
-/// Cluster writes (PUT, DELETE, bulk, flush) admitted onto blocking threads at once. They run one
-/// at a time behind `write_serial`, so this bounds how many blocking threads queued writes can
-/// hold, including writes whose clients have disconnected.
+/// Cluster writes (PUT, DELETE, bulk, flush) admitted onto blocking threads at once. It is how
+/// many writes can run at the same time (ADR-206), and it bounds how many blocking threads
+/// writes can hold while a whole-cluster operation keeps them waiting, including writes whose
+/// clients have disconnected.
 pub(crate) const MAX_QUEUED_CLUSTER_WRITES: usize = 32;
 /// Standalone writes (PUT, DELETE, bulk, flush) admitted onto blocking threads at once. They run
 /// one at a time behind the engine mutex, so this bounds how many blocking threads queued writes
@@ -258,17 +260,29 @@ pub(crate) enum ClusterRebalanceTopology {
 /// Coordinator-mode state (ADR-070): the cluster analogue of [`AppState`].
 pub(crate) struct ClusterAppState {
     /// Read lock for percolates AND ordinary writes (both `&self`); write lock only
-    /// for the `&mut self` vocabulary rebuilds — so reads are never blocked by
-    /// writes, only (briefly) by a vocab change.
+    /// for the `&mut self` vocabulary rebuilds. A read that returns ids only never waits
+    /// for a write. A read that also returns sources or an explanation takes the
+    /// cluster's mutation-frozen view, so it waits for the writes in flight and runs
+    /// alone (`ClusterEngine::consistent_read_view`).
     pub(crate) cluster: RwLock<ClusterEngine>,
     /// Excludes descriptor mutation from in-flight topology movement. Movement
     /// operations take a shared guard (so their own conflict-aware concurrency
     /// remains available); registration, deregistration, and resize take the
-    /// exclusive side. Separate from `write_serial`, so ingestion keeps flowing.
+    /// exclusive side. Separate from `write_admission`, so ingestion keeps flowing.
     pub(crate) topology_guard: RwLock<()>,
-    /// Serializes mutating requests (the `Mutex<Engine>` analogue), so concurrent
-    /// bulk batches don't interleave their per-item apply order. Reads never take it.
-    pub(crate) write_serial: Mutex<()>,
+    /// Admission for anything that changes the corpus (ADR-206).
+    ///
+    /// - **Shared:** an ordinary write (PUT, DELETE, a bulk batch). Writes run beside each
+    ///   other; the cluster orders them itself (its log, and a lock per logical id held
+    ///   across the append and the complete shard fan-out, ADR-177).
+    /// - **Exclusive:** an operation that needs every write finished and none started:
+    ///   flush, checkpoint, backup, a vocabulary change, resync, resize, an exhaustive job,
+    ///   and shutdown.
+    /// - **Not taken by reads.** A read that needs a stable view takes the cluster's own
+    ///   (`ClusterEngine::consistent_read_view`).
+    ///
+    /// Take it before the `cluster` lock, never after.
+    pub(crate) write_admission: RwLock<()>,
     /// Admission for cluster writes run on blocking threads (ADR-183). A permit is taken before
     /// the worker starts and held until it finishes, so a disconnected client can never leave more
     /// than [`MAX_QUEUED_CLUSTER_WRITES`] detached writers holding blocking threads.
@@ -279,7 +293,7 @@ pub(crate) struct ClusterAppState {
     /// the same `wait_if_ongoing` reason as [`AppState::flush_serial`].
     pub(crate) flush_serial: Mutex<()>,
     /// One admitted checkpoint or backup at a time. Both operations serialize
-    /// behind `write_serial`; sharing this owned permit prevents disconnected
+    /// behind `write_admission`; sharing this owned permit prevents disconnected
     /// requests from accumulating blocking workers behind the same durability
     /// boundary.
     pub(crate) durability_permits: std::sync::Arc<tokio::sync::Semaphore>,

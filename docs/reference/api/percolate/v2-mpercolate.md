@@ -60,7 +60,7 @@ Semantics and bounds:
 - **ES/OS boundary:** this native endpoint deliberately keeps a JSON `documents[]` envelope and one
   shared option set, not the alternating NDJSON metadata/search lines or independent per-search
   failures of Elasticsearch/OpenSearch `_msearch` (ADR-128). Source-enriched cluster batches hold
-  one mutation-frozen read view across matching and union fetch; source-free batches stay
-  concurrent.
+  one mutation-frozen read view across matching and union fetch, so they run one at a time and
+  wait for the writes in flight (ADR-206); source-free batches stay concurrent.
 - **Auth boundary:** when a bearer token is configured, this POST currently requires it even with
   `--auth-protect-reads=false`; unlike `/v2/_search`, it is not on the read-via-POST allowlist.

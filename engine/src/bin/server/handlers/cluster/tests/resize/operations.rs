@@ -473,7 +473,7 @@ async fn a_remote_resize_frees_health_admission_but_stays_joinable_by_shutdown()
         .await
     });
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !state.write_serial.is_locked() {
+    while !state.write_admission.is_locked_exclusive() {
         assert!(
             std::time::Instant::now() < deadline,
             "the worker never took the write guard"

@@ -323,11 +323,11 @@ pub(crate) async fn cluster_resync(
     let completion = match supervise_cluster_resync_worker(move || {
         let _permit = permit;
         let writes = if no_wait {
-            worker_state.write_serial.try_lock()
+            worker_state.write_admission.try_write()
         } else {
             deadline
                 .checked_duration_since(Instant::now())
-                .and_then(|budget| worker_state.write_serial.try_lock_for(budget))
+                .and_then(|budget| worker_state.write_admission.try_write_for(budget))
         };
         let Some(_writes) = writes else {
             return ClusterResyncWorkerOutcome::NotStarted;

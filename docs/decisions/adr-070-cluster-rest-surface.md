@@ -108,3 +108,11 @@ Its apply funnel tombstoned the id on every shard and then inserted it, so an un
 between the passes saw neither version. [ADR-185](adr-185-reader-atomic-cluster-upsert.md) replaces
 that funnel with an atomic per-shard replace plus an optimistic fence for upserts that move the
 query, which is what makes the cluster honor ADR-067's "never both, never neither" for readers.
+
+**Outcome update (2026-10-06).** The concurrency model in item 2 is superseded by
+[ADR-206](adr-206-coordinator-writes-share-admission.md). The writer-serialization mutex is now a
+reader-writer admission lock: writes share it and run beside each other, so two bulk batches sent
+at the same time interleave their items, and whole-cluster operations take it alone. "Reads are
+never blocked by writes" had stopped being true before that: since ADR-126 a search that returns
+sources waits for the writes in flight, and it also took the writer mutex. It no longer takes
+that lock; it still waits for writes in flight.

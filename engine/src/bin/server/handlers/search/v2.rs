@@ -697,9 +697,9 @@ async fn cluster_v2_search_inner(
         };
         let result = if mutation_fenced {
             // Do not occupy a shared Rayon worker while waiting for the
-            // request/write and direct-mutation fences. Once acquired, match,
-            // winner fetch, and explanation stay inside one coherent view.
-            let _write_guard = cluster_state.write_serial.lock();
+            // mutation-frozen view. Once acquired, match, winner fetch, and
+            // explanation stay inside one coherent view. The view excludes every
+            // mutation, so the request takes no write admission (ADR-206).
             let cluster = cluster_state.cluster.read();
             let stable_view = cluster.consistent_read_view();
             cluster_state.pool.install(|| {

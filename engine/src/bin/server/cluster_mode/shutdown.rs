@@ -20,11 +20,11 @@ use crate::state::{
 /// disconnect. Taking each boundary's full capacity therefore joins every detached worker before
 /// the shutdown flush and checkpoint, and retaining the permits stops a late draining request from
 /// starting more work. In particular, a detached resize or write may be waiting for
-/// `write_serial`; quiescing only that lock would let the shutdown checkpoint win it first and the
+/// `write_admission`; quiescing only that lock would let the shutdown checkpoint win it first and the
 /// work land after cleanup.
 pub(crate) async fn quiesce_detached_work(state: &ClusterAppState) -> Vec<OwnedSemaphorePermit> {
     // A remote resize returns its corpus-administration slot for health probes once it holds the
-    // topology guard, and releases `write_serial` once its write fence is up; its own permit
+    // topology guard, and releases `write_admission` once its write fence is up; its own permit
     // covers the copy and cutover through their terminal result.
     let boundaries: [(&str, &Arc<Semaphore>, usize); 7] = [
         (

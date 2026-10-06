@@ -358,7 +358,7 @@ pub(crate) async fn run(
     let state = Arc::new(ClusterAppState {
         cluster: RwLock::new(cluster),
         topology_guard: RwLock::new(()),
-        write_serial: Mutex::new(()),
+        write_admission: RwLock::new(()),
         write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_QUEUED_CLUSTER_WRITES,
         )),
@@ -513,7 +513,7 @@ pub(crate) async fn run(
     // attaches segments instead of replaying a long log tail. In-memory clusters
     // flush only (checkpoint is a no-op there anyway).
     {
-        let _w = state.write_serial.lock();
+        let _w = state.write_admission.write();
         let cluster = state.cluster.read();
         if let Err(e) = cluster.flush() {
             error!(error = %e, "shutdown flush failed");

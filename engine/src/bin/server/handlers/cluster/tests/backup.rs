@@ -91,7 +91,8 @@ async fn dropped_cluster_request_keeps_admission_until_blocking_backup_finishes(
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _writer = held_state.write_serial.lock();
+        // A write in flight: it shares admission, and the backup needs it alone.
+        let _writer = held_state.write_admission.read();
         locked_tx.send(()).expect("report held writer");
         release_rx.recv().expect("release held writer");
     });
@@ -150,7 +151,8 @@ async fn detached_cluster_backup_failure_is_reported_and_counted() {
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        let _writer = held_state.write_serial.lock();
+        // A write in flight: it shares admission, and the backup needs it alone.
+        let _writer = held_state.write_admission.read();
         locked_tx.send(()).expect("report held writer");
         release_rx.recv().expect("release held writer");
     });

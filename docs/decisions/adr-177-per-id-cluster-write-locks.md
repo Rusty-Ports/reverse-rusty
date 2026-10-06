@@ -73,3 +73,9 @@ before taking the ID lock could replay an old upsert after a newer successful wr
 its repair entry, making the live result differ from durable reopen. `resync` now snapshots IDs
 and takes the current payload only while holding that ID's lock. The regression failed before
 this correction and passes afterward; the pass remains bounded to its initial ID snapshot.
+
+**Outcome update (2026-10-06).** "The serving layer retains its admission policy" meant that the
+served coordinator still ran one write at a time behind its own mutex, so the gain measured here
+did not reach an HTTP client. [ADR-206](adr-206-coordinator-writes-share-admission.md) makes
+served writes share admission, and they now reach the per-id locks concurrently. The served path
+has its own concurrency tests there.

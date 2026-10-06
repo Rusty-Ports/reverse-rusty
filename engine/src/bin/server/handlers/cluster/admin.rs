@@ -272,7 +272,7 @@ pub(crate) async fn cluster_flush_route(
         Err(response) => return *response,
     };
     let force = params.force_requested();
-    // Flush admission, `write_serial`, and the remote flush RPCs all wait, so they run on a
+    // Flush admission, `write_admission`, and the remote flush RPCs all wait, so they run on a
     // blocking thread, never on an async worker (see `run_cluster_write`).
     if !params.wait_if_ongoing() {
         // Report a flush already in progress instead of queueing for write admission behind it.
@@ -287,7 +287,7 @@ pub(crate) async fn cluster_flush_route(
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let _flush = acquire_flush(&worker_state.flush_serial, params, &worker_state.prom)?;
-                let _w = worker_state.write_serial.lock();
+                let _w = worker_state.write_admission.write();
                 let cluster = worker_state.cluster.read();
                 Ok::<_, Box<Response>>((cluster.num_shards(), cluster.flush()))
             })
@@ -376,7 +376,7 @@ pub(crate) async fn cluster_backup(
     let dest = prepared.path;
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let _writer = work_state.write_serial.lock();
+        let _writer = work_state.write_admission.write();
         let cluster = work_state.cluster.read();
         cluster.backup_to(&dest).map(|()| cluster.epoch())
     });
