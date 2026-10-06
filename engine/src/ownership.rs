@@ -38,7 +38,8 @@ pub enum PlacementMode {
     Standalone = 0,
     /// The row exists only at the sorted positions stored with it.
     Selective = 1,
-    /// Class-B pair placement: the row is always-visible at every position.
+    /// The row is always-visible at every position: a class-B pair or phrase proxy, or a
+    /// class-C plan a cluster rebuild kept in default reads (ADR-203).
     ReplicatedAlwaysVisible = 2,
     /// Class-C/D placement: the row is evaluated only by the broad evaluator.
     ReplicatedBroad = 3,

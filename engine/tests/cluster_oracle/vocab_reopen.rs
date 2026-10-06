@@ -31,7 +31,7 @@ fn stamp_cluster_segments_as_legacy(
 /// immediately after `placement_generation`; v7 appends compiler semantics +
 /// the source-file column, and v8 the 8-byte feature-model fingerprint (ADR-184),
 /// before the trailing CRC.
-fn downgrade_cluster_manifest_to_v6(
+pub(crate) fn downgrade_cluster_manifest_to_v6(
     path: &std::path::Path,
     manifest: &reverse_rusty::storage::ClusterManifest,
 ) {

@@ -227,7 +227,12 @@ impl Segment {
         knobs: CompileKnobs,
     ) -> Option<AddedCompiled> {
         let mut plan = build_signatures(ex, dict, knobs.hot_anchor_threshold);
-        if knobs.keep_visible {
+        // A row is kept in the main lane when a single-node rebuild says so (ADR-187), and
+        // when a cluster placed it always-visible: its coordinator promises that every shard
+        // a title probes can return it without the broad lane (ADR-203).
+        if knobs.keep_visible
+            || placement.mode() == crate::ownership::PlacementMode::ReplicatedAlwaysVisible
+        {
             plan.pin_visible();
         }
         if rejects_class_d(plan.class, ex, knobs.accept_class_d) {

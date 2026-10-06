@@ -47,9 +47,12 @@ use crate::segment::PlacedQuery;
 use crate::tagdict::TagId;
 use crate::vocab::Vocab;
 
-use super::{into_shard, placement_of, replica_dir, shard_dir, ClusterEngine, Target};
+use super::{into_shard, replica_dir, shard_dir, ClusterEngine, Target};
 
 mod control;
+mod visibility;
+
+use visibility::{rebuild_placement_of, was_default_visible};
 
 type RebuildExtractedQuery = (
     u64,
@@ -60,6 +63,8 @@ type RebuildExtractedQuery = (
     Vec<(String, String)>,
     Vec<TagId>,
     crate::rank::RankValues,
+    // Whether a default read could return the row before this rebuild (ADR-203).
+    bool,
 );
 
 impl ClusterEngine {
@@ -253,7 +258,7 @@ impl ClusterEngine {
         let same_normalizer = Arc::ptr_eq(&new_norm, &self.norm);
         let new_dict = if same_normalizer && !append_missing_features {
             let dict = Arc::clone(&self.dict);
-            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, _placement) in
+            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, placement) in
                 live
             {
                 let ast = crate::dsl::parse_for_recovery(&text).map_err(|error| {
@@ -275,6 +280,7 @@ impl ClusterEngine {
                     raw_tags,
                     tag_ids,
                     rank,
+                    was_default_visible(&placement),
                 ));
             }
             dict
@@ -320,7 +326,7 @@ impl ClusterEngine {
             }
 
             lc.clear();
-            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, _placement) in
+            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, placement) in
                 live
             {
                 let ast = crate::dsl::parse_for_recovery(&text).map_err(|error| {
@@ -342,12 +348,13 @@ impl ClusterEngine {
                     raw_tags,
                     tag_ids,
                     rank,
+                    was_default_visible(&placement),
                 ));
             }
             Arc::new(dict)
         } else {
             let mut dict = Dict::new();
-            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, _placement) in
+            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, placement) in
                 live
             {
                 let ast = crate::dsl::parse_for_recovery(&text).map_err(|error| {
@@ -369,6 +376,7 @@ impl ClusterEngine {
                     raw_tags,
                     tag_ids,
                     rank,
+                    was_default_visible(&placement),
                 ));
             }
             dict.finalize_mask();
@@ -383,7 +391,7 @@ impl ClusterEngine {
                 .or(self.vocab.as_deref())
                 .map(|v| v.resolve_equivalences(&new_norm, &dict));
             if let Some(equiv) = equiv {
-                for (_, ex, _, _, _, _, _, _) in &mut extracted {
+                for (_, ex, _, _, _, _, _, _, _) in &mut extracted {
                     ex.expand_equivalences(&equiv);
                 }
                 dict.set_equivalences(equiv);
@@ -399,18 +407,24 @@ impl ClusterEngine {
         let num_shards = new_ring.num_shards();
         let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
         let mut accepted_ids = Vec::new();
-        for (logical, ex, text, version, source_generation, raw_tags, tag_ids, rank) in extracted {
+        for (logical, ex, text, version, source_generation, raw_tags, tag_ids, rank, was_visible) in
+            extracted
+        {
             // Re-placing ALREADY-STORED queries: a stored class-D was accepted when it was
             // added, so a rebuild (resize / set_vocab) must never drop it via the current knob
             // (mirrors the single-node ADR-068 vocab recompile, which passes accept=true
             // unconditionally). The empty-forbidden guard in `placement_of` still rejects the
             // never-stored empty query, so passing `true` cannot resurrect one.
-            let target = placement_of(
+            //
+            // And a row that default reads could return must stay where they can (ADR-203):
+            // `rebuild_placement_of` keeps it always-visible when today's plan would put it
+            // in the opt-in broad lane.
+            let target = rebuild_placement_of(
                 &new_dict,
                 &new_ring,
                 &ex,
-                true,
                 self.per_shard.hot_anchor_threshold,
+                was_visible,
             );
             let placement = target.placement(new_generation, num_shards as u32)?;
             if !matches!(&target, Target::Reject) {

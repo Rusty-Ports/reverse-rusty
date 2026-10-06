@@ -14,6 +14,8 @@
 //! - **D** (no anchorable feature): the broad lane → every shard, under the
 //!   universal signature, when `accept_class_d` is on (the always-candidate lane,
 //!   ADR-068); rejected and stored nowhere otherwise.
+//! - **C that a rebuild kept in default reads** (ADR-203, `resize/visibility.rs`): every
+//!   shard, always-visible, in each shard's main lane.
 //!
 //! The broad lane (class C / B-arity-2 / accepted D) is **replicated to every
 //! shard** (ADR-080, graduating ADR-027's shard-0 stand-in for §7's "replicate the

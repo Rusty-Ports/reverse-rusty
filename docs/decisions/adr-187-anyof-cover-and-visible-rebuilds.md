@@ -85,6 +85,10 @@ anchor, or that default reads were already returning.
   and re-ranks the top-64 mask over the live corpus, so it can still move a default-visible query
   into the replicated broad lane. Keeping it visible needs the mask preserved across that rebuild
   first; that is tracked with the mask-stability work, not here.
+- **Outcome update (2026-10-06).** Cluster rebuilds are covered by
+  [ADR-203](adr-203-cluster-rebuilds-keep-visible-queries.md). It did not need the mask
+  preserved: a visible row whose new plan is class C is replicated always-visible, and each shard
+  stores it in the main lane with the same `pin_visible` step.
 
 ## Proven
 

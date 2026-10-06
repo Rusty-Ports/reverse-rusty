@@ -194,9 +194,11 @@ Since ADR-105 the classification answers TWO independent questions — **who can
 | **H** | **θ-hot anchor** (frequency ≥ `hot_anchor_threshold`, *no* top-64 mask bit — the ADR-104 rank-cliff population) | **default-visible** — probed on every request | **hot index**, columnar batch (per-title inline on the scalar path) |
 
 A stored query does not leave the default-visible cell on its own. Compaction keeps its cover when
-a re-plan would be opt-in (ADR-056), and a single-node rebuild (a vocabulary change, a
-compiler-semantics migration) stores such a query's top-64 signatures in the main lane instead of
-the broad lane (ADR-187). Only a new write of the query takes the lane its current plan gives it.
+a re-plan would be opt-in (ADR-056), and a rebuild (a vocabulary change, a compiler-semantics
+migration, a cluster resize) stores such a query's top-64 signatures in the main lane instead of
+the broad lane: ADR-187 on the single-node engine, and ADR-203 on a cluster, where the query is
+also replicated to every position. Only a new write of the query takes the lane its current plan
+gives it.
 
 ### 4.1 The two-axis placement rule (ADR-105 — an architecture invariant)
 

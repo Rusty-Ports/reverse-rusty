@@ -26,6 +26,7 @@ mod pit;
 mod placement;
 mod ranked_batch;
 mod ranking;
+mod rebuild_visibility;
 mod replication;
 mod resize;
 mod upsert_visibility;
