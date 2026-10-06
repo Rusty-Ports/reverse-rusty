@@ -123,8 +123,11 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   fails before mutation. A remote partial apply returns retryable 503 `"result": "partial"` with
   the applied and pending positions. Repeat the idempotent DELETE, or use `POST /_cluster/resync`
   while the same coordinator still owns its in-memory repair queue (ADR-125).
-- **Per-request `include_broad`** is honored on compatibility and v2 search/batch surfaces. It adds
-  class C and accepted D; class H remains default-visible.
+- **Scope.** The compatibility `/_search` and `/_mpercolate` take a per-request `include_broad`;
+  `/v2/_search`, `/v2/_mpercolate` and exhaustive jobs take `query_scope` (`standard` or
+  `with_broad`) and reject `include_broad` as an unknown field. A request that names neither
+  uses the coordinator's `--include-broad` default on every one of them (ADR-201). The broad
+  scope adds class C and accepted D; class H remains default-visible.
 - **`rank` works (ADR-075)** — the same block as single-node, scored at the shards against the shared
   tag space and merged `(score desc, _id asc)` with `from`/`size` + `_score`. One cluster-specific
   boundary: a **post-freeze (live-added) `priority` tag scores 0** — priority reads the tag's value

@@ -33,7 +33,8 @@ The full native shape remains available:
 
 One `document` is required. `result_mode` defaults to `"all"` and no other value is supported;
 `sink` defaults to the HTTP `"ndjson_stream"` and may explicitly name `"ndjson_stream"` or the
-historic `"grpc_stream"` alias. `query_scope` defaults to `"standard"`; `rank` and `filter` are
+historic `"grpc_stream"` alias. `query_scope` defaults to the server's (`"with_broad"` when it was started with
+`--include-broad`, otherwise `"standard"`; ADR-201); `rank` and `filter` are
 optional. The JSON request schema and its typed nested objects are strict: unknown fields,
 duplicate schema controls, explicit nulls, malformed JSON, and wrong types are structured 400
 errors. Missing/wrong JSON content type is 415, and the endpoint rejects a body larger than 1 MiB
@@ -88,8 +89,8 @@ while the record is retained. Repeating the same effective request returns the s
 with `reused=true`; defaults and unordered collections are canonicalized first. When omitted, the
 server generates and returns one; a retry made before receiving that generated value starts a
 different job, so clients that need retry safety should supply their own stable key. For example,
-omitted versus explicit
-`query_scope: "standard"`, default priority/default timeout, reordered filter values or effective
+an omitted `query_scope` versus the server's default named explicitly, default priority/default
+timeout, reordered filter values or effective
 boosts, and the accepted `grpc_stream`/`ndjson_stream` spellings are equivalent. Reusing an event
 id for different execution semantics returns `409 event_id_conflict`. Canonicalization uses stable
 raw tag key/value groups and a last-write-wins boost map, so interning a previously unknown tag

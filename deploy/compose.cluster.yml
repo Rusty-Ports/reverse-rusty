@@ -148,9 +148,10 @@ services:
       --control-endpoint https://control2:50061
       --route-by-assignments
       --grpc-tls-ca /certs/ca.crt
-    # --include-broad makes broad-lane queries match by DEFAULT; broad is also a
-    # per-request flag (`"include_broad": true` in the _search body), so leave it off
-    # here unless every request should include broad. To accept negation-only
+    # --include-broad makes broad-lane queries match by DEFAULT on every search surface
+    # (_search, _mpercolate, the v2 routes and exhaustive jobs). A request can also ask for
+    # itself: `"include_broad": true` on _search/_mpercolate, `"query_scope": "with_broad"`
+    # on v2 and jobs. Leave it off here unless every request should include broad. To accept negation-only
     # (class-D) queries (e.g. `-refurbished`), add `--accept-class-d` to THIS coordinator
     # command: it is the sole gate — remote shards are coordinator-gated storage and
     # accept whatever the coordinator places, no per-shard flag (cluster-deployment.md §3).

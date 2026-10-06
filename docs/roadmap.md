@@ -376,6 +376,12 @@ change, and acceptance boundary; promotion changes its priority, not its documen
 - **CORS policy.** Browser tools cannot call the API across origins today. Add an explicit
   configurable `CorsLayer`, default it to no cross-origin access, document credential handling, and
   test preflight behavior with authentication enabled.
+- **Effective scope on every response.** v2 responses and job status echo `query_scope`, but the
+  compatibility `/_search` and `/_mpercolate` responses do not say which scope ran, the job
+  completion frame does not repeat it, and single-node `GET /_settings` does not show the
+  server's `--include-broad` default (the coordinator's does). Add a response header on the
+  compatibility routes so their bodies stay unchanged, the scope in the completion frame, and
+  the default in single-node settings.
 - **Thread-pool introspection.** Search admission is bounded but operators cannot see queue
   pressure directly. Expose active, queued, rejected, and completed work through fixed-cardinality
   metrics and an operator endpoint, then verify the counters under saturation.

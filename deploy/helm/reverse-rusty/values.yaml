@@ -101,8 +101,10 @@ coordinator:
   # The Deployment therefore uses Recreate so upgrades stop the old lease holder
   # before starting its replacement.
   replicas: 1
-  # Broad (class-C) queries match by default when true; also a per-request flag in the
-  # _search body, so leave off unless every request should include broad.
+  # Broad (class-C) queries match by default when true, on every search surface (_search,
+  # _mpercolate, the v2 routes and exhaustive jobs). A request can also ask for itself
+  # (`include_broad` on _search/_mpercolate, `query_scope: with_broad` on v2 and jobs), so
+  # leave off unless every request should include broad.
   includeBroad: false
   # Accept negation-only (class-D) queries (e.g. `-refurbished`). The coordinator is the
   # sole gate; remote shards accept whatever it places (no per-shard flag, ADR-080/082).

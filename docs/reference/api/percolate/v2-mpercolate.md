@@ -31,8 +31,9 @@ Response: `{took, took_ms, complete, query_scope, responses: [{timed_out, status
 
 Semantics and bounds:
 
-- **Shared options.** `query_scope`, `size`, `track_total_hits_up_to`, `rank`, `filter`,
-  `include_source`, and `timeout_ms` apply to every slot (per-document options are a named 400;
+- **Shared options.** `query_scope` (default: the server's, `"with_broad"` when it was started
+  with `--include-broad`, otherwise `"standard"`), `size`, `track_total_hits_up_to`, `rank`,
+  `filter`, `include_source`, and `timeout_ms` apply to every slot (per-document options are a named 400;
   heterogeneous-K callers split batches). Numeric `track_total_hits`, Boolean `_source`, and
   time-value `timeout` are mutually-exclusive ES/OS aliases for the corresponding native controls.
   `allow_partial_search_results: false` aliases native `allow_partial_results: false`; `true` is a

@@ -325,8 +325,9 @@ async fn v2_mpercolate_inner(
     body: V2MPercolateBody,
 ) -> Result<Json<V2MPercolateResponse>, Reject> {
     let started = Instant::now();
-    let requested_scope = body.query_scope.unwrap_or_default();
-    let prepared = match prepare_batch(body) {
+    let default_scope = state.default_query_scope();
+    let requested_scope = body.query_scope.unwrap_or(default_scope);
+    let prepared = match prepare_batch(body, default_scope) {
         Ok(prepared) => prepared,
         Err(failure) => return Err(prepare_failure(&state.prom, failure, requested_scope)),
     };
@@ -396,8 +397,9 @@ async fn cluster_v2_mpercolate_inner(
     body: V2MPercolateBody,
 ) -> Result<Json<V2MPercolateResponse>, Reject> {
     let started = Instant::now();
-    let requested_scope = body.query_scope.unwrap_or_default();
-    let prepared = match prepare_batch(body) {
+    let default_scope = state.default_query_scope();
+    let requested_scope = body.query_scope.unwrap_or(default_scope);
+    let prepared = match prepare_batch(body, default_scope) {
         Ok(prepared) => prepared,
         Err(failure) => return Err(prepare_failure(&state.prom, failure, requested_scope)),
     };

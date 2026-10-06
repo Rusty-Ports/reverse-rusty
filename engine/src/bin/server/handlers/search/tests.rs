@@ -168,6 +168,7 @@ fn v2_batch_body(value: serde_json::Value) -> V2MPercolateBody {
 
 mod basic;
 mod batch;
+mod default_scope;
 mod execution;
 mod filtered;
 mod mpercolate_contract;

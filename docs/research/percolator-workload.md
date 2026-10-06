@@ -115,8 +115,9 @@ overrides **`.` `#` `/` → `split`** (defaults already split the rest). The num
 empty by default, so year typing is position-insensitive end to end. `.`→split is load-bearing: the
 reference matcher tolerates trailing `.`/`,` on a token, so keeping `.` would turn `item.`-style title
 tokens into distinct features — a real FN; splitting makes decimals like `9.5` ≈ `{9, 5}` instead, an
-FP-only loosening the precision stage re-filters. Run with the **broad lane enabled** (`--include-broad`
-or per-request `include_broad`) when class-C and accepted class-D rows belong in the requested scope.
+FP-only loosening the precision stage re-filters. Run with the **broad lane enabled** (`--include-broad`,
+or per request: `include_broad` on the compatibility routes, `query_scope: "with_broad"` on v2 and
+exhaustive jobs) when class-C and accepted class-D rows belong in the requested scope.
 With broad disabled they are excluded by the documented visibility contract, not lost silently.
 Raise `ParseLimits` to envelope the corpus (side-listing anything still rejected).
 
