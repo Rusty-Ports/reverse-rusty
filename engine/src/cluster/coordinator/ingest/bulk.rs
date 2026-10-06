@@ -57,8 +57,8 @@ impl ClusterEngine {
             .map(|(i, (l, t))| (*l, 1, t.clone(), tags.get(i).cloned().unwrap_or_default()))
             .collect();
         // A load that stops part-way must be remembered by the shards, not by this process
-        // (ADR-196): mark them all before the first bucket, clear the marks after the last.
-        self.mark_bulk_load_begun()?;
+        // (ADR-196): `bucket_and_ingest` marks them all before the first bucket, and the
+        // marks are cleared below, after the last.
         self.bucket_and_ingest(&entries)?;
         // These bulk adds bypassed the log (they go straight to base segments), so on a
         // durable cluster a checkpoint commits them into the coordinator manifest's
@@ -186,6 +186,10 @@ impl ClusterEngine {
         // may already have landed. Retrying ingest on the still-empty cluster may
         // replace this directory with the same corpus and continue.
         self.replace_logical_ids(accepted_ids)?;
+        // Everything above only read the corpus: a load refused there (a duplicate id, a
+        // query that cannot be placed) touched no shard and must leave no mark, or a
+        // corrected file could not be loaded without resetting the shards.
+        self.mark_bulk_load_begun()?;
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
                 if let Err(error) = self.shards[s].ingest_extracted(&bucket) {

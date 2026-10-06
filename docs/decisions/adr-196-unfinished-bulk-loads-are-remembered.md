@@ -24,22 +24,29 @@ on.
 
 ## Decision
 
-1. **The shards carry a mark for the duration of a bulk load.** Before the first bucket is
-   sent, `ClusterEngine::ingest` marks every shard as holding a bulk load in progress
-   (`SetBulkLoadState`). After the last bucket has landed (and, on a durable in-process
-   cluster, after the checkpoint that commits it) it clears the marks. A shard node keeps the
-   mark on disk, in the slot's directory, before it answers, so it survives a restart of the
-   node as well as of the coordinator.
-2. **A coordinator refuses a cluster that carries a mark.** Both remote builders ask every
+1. **The shards carry a mark for the duration of a bulk load.** Once the corpus has been
+   validated and bucketed, and before the first bucket is sent, `ClusterEngine::ingest` marks
+   every shard as holding a bulk load in progress (`SetBulkLoadState`). After the last bucket
+   has landed (and, on a durable in-process cluster, after the checkpoint that commits it) it
+   clears the marks. A shard node keeps the mark on disk, in the slot's directory, before it
+   answers, so it survives a restart of the node as well as of the coordinator. A load that
+   is refused while the corpus is only being read (a duplicate id, a query that cannot be
+   placed) has touched no shard and leaves no mark.
+2. **Every copy has to take the load.** A replicated position marks its primary and every
+   replica. A replica that refuses its bucket is dropped from the in-sync set while the load
+   goes on; clearing the marks then fails for that position and clears none of them, so the
+   load is reported unfinished and the replica keeps the record that it holds less than its
+   primary.
+3. **A coordinator refuses a cluster that carries a mark.** Both remote builders ask every
    shard (and every replica) for its mark (`BulkLoadState`) once the cluster is assembled, and
    fail with a configuration error that names the first marked position and says the load did
    not complete. The server therefore does not start, on the first restart or on any later
    one, until the shard nodes' data is reset and the corpus is loaded again.
-3. **A load that cannot be marked does not start.** If any shard cannot be marked, nothing
+4. **A load that cannot be marked does not start.** If any shard cannot be marked, nothing
    has been loaded yet: the marks already set are taken back and the load fails. A node that
    predates the mark answers `UNIMPLEMENTED`, which is reported as a configuration error naming
    the node and asking for an upgrade.
-4. **A node that predates the mark reads as unmarked.** It cannot hold one, so a coordinator
+5. **A node that predates the mark reads as unmarked.** It cannot hold one, so a coordinator
    can still attach to it.
 
 In-process shards record nothing: they stop with their coordinator, whose own checkpoint
@@ -85,7 +92,8 @@ decides whether a bulk load happened.
   cannot mark one shard does not start and takes back the marks it set on the others; a load
   with a shard down does not start and runs once the shard is back; a mark on the last shard
   alone refuses the cluster; a node that predates the mark can be attached and is not loaded
-  in bulk.
+  in bulk; a load refused for a duplicate id leaves no mark and the corrected corpus loads;
+  a load whose replica refused its bucket fails and the next coordinator refuses the cluster.
 - `cluster/server/tests/bulk_load.rs`: a slot is unmarked until told; the mark is per hosted
   slot; a durable node remembers it across a restart and forgets it once cleared.
 

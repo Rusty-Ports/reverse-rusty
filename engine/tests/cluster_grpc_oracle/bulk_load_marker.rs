@@ -309,6 +309,79 @@ fn grpc_a_mark_on_any_shard_refuses_the_cluster() {
     assert!(message.contains("shard position 1"), "{message}");
 }
 
+/// A load refused before any shard is written leaves no mark. Here the corpus names one id
+/// twice, which is found while the buckets are built: correcting the file must be enough,
+/// without resetting shards that were never touched.
+#[test]
+fn grpc_a_load_refused_before_any_shard_write_leaves_no_mark() {
+    let fixture = Fixture::start("badfile");
+    let first = fixture.connect().expect("connect the empty cluster");
+    let mut twice = fixture.queries.clone();
+    twice.push(twice[0].clone());
+    first.ingest(&twice).expect_err("one id is named twice");
+    assert_eq!(first.unfinished_bulk_load().expect("marks"), None);
+    drop(first);
+
+    let second = fixture
+        .connect()
+        .expect("an untouched cluster is not refused");
+    second
+        .ingest(&fixture.queries)
+        .expect("the corrected corpus loads");
+    assert_eq!(second.unfinished_bulk_load().expect("marks"), None);
+}
+
+/// A replica that refuses its bucket is dropped from the in-sync set and the load goes on,
+/// so the primary ends up complete and the replica does not. The load is then not complete
+/// on every copy: it fails, the marks stay, and the next coordinator refuses the cluster
+/// where it would otherwise presume the replica held what its primary holds.
+#[test]
+fn grpc_a_load_a_replica_missed_is_not_complete() {
+    let fixture = Fixture::start("replica");
+    let groups = vec![ShardGroup {
+        primary: fixture.nodes[0].endpoint(),
+        replicas: vec![fixture.nodes[1].endpoint()],
+    }];
+    let connect = || {
+        ClusterEngine::connect_replicated(
+            Arc::clone(&fixture.norm),
+            Arc::clone(&fixture.dict),
+            empty_tag_dict(),
+            &ClusterConfig {
+                num_shards: 1,
+                include_broad: true,
+                ..ClusterConfig::default()
+            },
+            &groups,
+            fixture.client.handle(),
+        )
+    };
+    let first = connect().expect("connect the empty replicated position");
+    // The replica hosts shard 0 of this layout; fence that slot so it refuses its bucket.
+    let fencer = RemoteShard::connect(
+        &fixture.nodes[1].endpoint(),
+        fixture.client.handle().clone(),
+        fixture.dict.fingerprint(),
+        empty_tag_dict().fingerprint(),
+        0,
+    )
+    .expect("connect a fencer to the replica");
+    fencer.fence(1).expect("fence the replica");
+    first
+        .ingest(&fixture.queries)
+        .expect_err("the replica did not take the load");
+    assert!(
+        first.num_queries().expect("count") > 0,
+        "precondition: the primary took the load"
+    );
+    assert_eq!(first.unfinished_bulk_load().expect("marks"), Some(0));
+    drop(first);
+    fencer.unfence(1).expect("the replica is healthy again");
+
+    let message = refusal(connect());
+    assert!(message.contains("did not complete"), "{message}");
+}
+
 /// A node that predates the mark cannot record a load in progress, so it must not be loaded
 /// in bulk: if that load stopped part-way, nothing would remember it. Such a node can still
 /// be attached (it cannot hold a mark, so its answer reads as "none").
