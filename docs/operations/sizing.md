@@ -102,9 +102,11 @@ Steady state is not the peak:
 - compaction copies every segment in its merge range onto the heap (also the mmap-backed ones,
   and in their in-memory form, whose maps and columns are larger than the files), builds the
   merged segment in memory beside them, and reads the file it wrote back to checksum it, all
-  while the old segments still serve. On a durable engine the commit that follows also
-  rebuilds the complete source store file in heap buffers, so the peak does not shrink with
-  the merge range. No multiplier of the segment files predicts it; measure it.
+  while the old segments still serve. That part grows with the merge range. A durable
+  standalone engine then also rebuilds the complete source store file in heap buffers when it
+  commits the merge, a cost that does not depend on the range. A cluster shard does not: it
+  writes its source store at a flush or checkpoint. No multiplier of the segment files
+  predicts the total; measure it.
   A full merge makes that range the whole engine: `POST /_compact`, or
   `POST /_forcemerge?max_num_segments=1` (a bare `POST /_forcemerge` only runs the merge
   policy, which may merge nothing). Both are standalone routes; a coordinator answers 501.

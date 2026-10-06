@@ -13,7 +13,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 
 - The sizing guide now says what compaction, a flush and a resident-source open hold on the heap
   (its inputs and output together for a compaction, and the whole source store file for every
-  flush and every durable compaction commit), which requests run a full merge, that the default
+  flush and every standalone compaction commit), which requests run a full merge, that the default
   profile is `retain_source=true`, and that the throughput captures need the segment working set
   in the page cache on a durable node. It gives no multiplier for the compaction peak: measure it.
 - Two claims were wrong and are corrected where they appeared (roadmap, ADR-020 outcome, the
