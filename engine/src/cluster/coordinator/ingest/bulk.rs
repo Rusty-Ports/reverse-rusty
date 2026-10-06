@@ -77,13 +77,20 @@ impl ClusterEngine {
     fn mark_bulk_load_begun(&self) -> Result<(), ShardError> {
         for (position, shard) in self.shards.iter().enumerate() {
             if let Err(error) = shard.set_bulk_load_incomplete(true) {
-                for marked in &self.shards[..=position] {
-                    drop(marked.set_bulk_load_incomplete(false));
-                }
+                self.take_back_bulk_load_marks(position + 1);
                 return Err(error);
             }
         }
         Ok(())
+    }
+
+    /// Clear the marks of the first `marked` shards after a load that never wrote to one.
+    /// Best effort: a mark that cannot be cleared stays, and the next coordinator refuses
+    /// the cluster, which is the safe side.
+    fn take_back_bulk_load_marks(&self, marked: usize) {
+        for shard in &self.shards[..marked] {
+            drop(shard.set_bulk_load_incomplete(false));
+        }
     }
 
     /// Clear the marks once every bucket has landed. A shard whose mark cannot be cleared
@@ -180,16 +187,22 @@ impl ClusterEngine {
             }
         }
         super::super::logical_ids::sort_and_check_unique(&mut accepted_ids)?;
+        // Everything above only read the corpus: a load refused there (a duplicate id, a
+        // query that cannot be placed) touched no shard and must leave no mark, or a
+        // corrected file could not be loaded without resetting the shards. The shards are
+        // marked before the ids are reserved: a load that cannot be marked does not start,
+        // and must not leave the ids of a corpus it never loaded reserved either.
+        self.mark_bulk_load_begun()?;
         // Reserve the complete semantic corpus BEFORE the first shard mutation.
         // If a remote bulk write fails part-way, retaining these reservations is
         // fail-closed: an incremental Add cannot coexist with a physical row that
         // may already have landed. Retrying ingest on the still-empty cluster may
         // replace this directory with the same corpus and continue.
-        self.replace_logical_ids(accepted_ids)?;
-        // Everything above only read the corpus: a load refused there (a duplicate id, a
-        // query that cannot be placed) touched no shard and must leave no mark, or a
-        // corrected file could not be loaded without resetting the shards.
-        self.mark_bulk_load_begun()?;
+        if let Err(error) = self.replace_logical_ids(accepted_ids) {
+            // Still nothing loaded.
+            self.take_back_bulk_load_marks(self.shards.len());
+            return Err(error);
+        }
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
                 if let Err(error) = self.shards[s].ingest_extracted(&bucket) {

@@ -280,8 +280,24 @@ fn grpc_a_load_that_cannot_mark_every_shard_takes_its_marks_back() {
         "shard 0's mark was taken back"
     );
     assert_eq!(first.num_queries().expect("count"), 0, "nothing was loaded");
-    drop(first);
-    connect().expect("an empty, unmarked cluster is not refused");
+    // Nor are the ids of the corpus it never loaded reserved: a create for one of them is
+    // not turned away as a duplicate. (One routed to the old node fails for its own reason.)
+    let created: Vec<_> = fixture
+        .queries
+        .iter()
+        .take(40)
+        .map(|(id, dsl)| first.add_query(*id, dsl))
+        .collect();
+    assert!(
+        !created
+            .iter()
+            .any(|result| matches!(result, Err(ShardError::DuplicateLogicalId(_)))),
+        "an id of the unloaded corpus was still reserved"
+    );
+    assert!(
+        created.iter().any(Result::is_ok),
+        "precondition: some of them route to the real node and are stored"
+    );
 }
 
 /// One mark anywhere is enough: here only the last shard carries one, as when a coordinator
