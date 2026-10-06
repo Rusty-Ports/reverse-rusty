@@ -9,7 +9,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-10-05 — Data-plane handlers wait off the runtime
+## 2026-10-06 — Data-plane handlers wait off the runtime
 
 - Fix the server becoming unresponsive, `/_health` included, when writes queued behind
   maintenance: standalone `PUT`/`DELETE /_doc`, `/_bulk` and `/_flush` waited for the engine mutex
