@@ -21,6 +21,21 @@ reverse chronological and describe outcomes, not the current architecture or fut
   whenever a vocabulary rebuild or resize held or queued for the exclusive cluster lock.
 - A standalone write whose client disconnects after admission still completes and is published;
   shutdown waits for such writes before its final flush.
+## 2026-10-05 — No commit around an in-memory segment
+
+- Fix loss of acknowledged writes on the single-node engine after a transient storage error: a
+  flush that could not write its segment kept the rows in memory and in the WAL, but the next
+  successful flush, bulk batch or compaction committed a manifest without them and reset the WAL,
+  so a restart came back without those rows. After a failed vocabulary rebuild the same sequence
+  lost every query in the store except the ones written since. Every commit now writes such a
+  segment to disk first, or does not happen
+  ([ADR-190](decisions/adr-190-no-commit-around-in-memory-segments.md)).
+- An explicit flush commits a segment left in memory even when there is nothing new to seal.
+- Fix a restart deleting the wrong query for library callers: `Engine::tombstone` logs a memtable
+  position, which named a different row at replay when an earlier flush had failed. It now
+  returns an error until the next commit; deletes by logical id were never affected.
+- The first bulk batch on an engine with such a segment is no longer refused once the segment can
+  be written. `persistence_healthy` still stays false until the engine is reopened.
 
 ## 2026-10-05 — Dropped shards await recovery
 

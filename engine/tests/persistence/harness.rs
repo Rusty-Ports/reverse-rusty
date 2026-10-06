@@ -51,3 +51,52 @@ pub(crate) fn match_ids(engine: &Engine, title: &str) -> Vec<u64> {
     out.sort_unstable();
     out
 }
+
+/// Where a durable write can be made to fail.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StorageFailure {
+    /// `segments/` is read-only: the segment file cannot be written.
+    SegmentWrite,
+    /// The data directory itself is read-only: the segment is written, but the
+    /// source sidecar and manifest that would commit it cannot be.
+    Commit,
+}
+
+#[cfg(unix)]
+impl StorageFailure {
+    fn blocked_dir(self, dir: &std::path::Path) -> std::path::PathBuf {
+        match self {
+            StorageFailure::SegmentWrite => dir.join("segments"),
+            StorageFailure::Commit => dir.to_path_buf(),
+        }
+    }
+
+    /// Make the directory read-only; returns the permissions to restore.
+    pub(crate) fn block(self, dir: &std::path::Path) -> std::fs::Permissions {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir.join("segments")).expect("segments dir");
+        let blocked = self.blocked_dir(dir);
+        let original = std::fs::metadata(&blocked).unwrap().permissions();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        original
+    }
+
+    pub(crate) fn unblock(self, dir: &std::path::Path, original: std::fs::Permissions) {
+        std::fs::set_permissions(self.blocked_dir(dir), original).unwrap();
+    }
+}
+
+/// Make only the manifest write fail: a directory sits where the manifest's
+/// temporary file is created. The segment file and the source sidecar are
+/// still written, so this is the failure "everything is on disk and nothing
+/// lists it". Returns the path to pass to [`unblock_manifest_write`].
+pub(crate) fn block_manifest_write(dir: &std::path::Path) -> PathBuf {
+    let in_the_way = dir.join("manifest.manifest.tmp");
+    std::fs::create_dir_all(&in_the_way).expect("block the manifest write");
+    in_the_way
+}
+
+pub(crate) fn unblock_manifest_write(in_the_way: &std::path::Path) {
+    std::fs::remove_dir_all(in_the_way).expect("unblock the manifest write");
+}
