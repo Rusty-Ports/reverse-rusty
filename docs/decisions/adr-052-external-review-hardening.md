@@ -76,3 +76,8 @@
   [ADR-012](adr-012-mmap-segment-format.md) / [ADR-032](adr-032-per-shard-durable-segments.md)
   (segment format + corrupt-segment-fails-loud — #5), [ADR-026](adr-026-broad-lane-batch-evaluation.md)
   (`max_percolate_batch` — #3), [ADR-011](adr-011-cache-line-blocked-bloom.md) (frozen hash tables — #6)
+
+## Later outcome — 2026-10-06
+
+Item #6 says to "bound load with the request-concurrency limit". That limit was 256 per route,
+not per server, until [ADR-199](adr-199-one-request-pool.md).

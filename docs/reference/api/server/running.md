@@ -67,6 +67,22 @@ cargo run --release --bin server -- \
 The server handles SIGINT/SIGTERM gracefully — it drains in-flight requests, flushes the memtable,
 and syncs the WAL before exiting.
 
+### Request admission
+
+A server, standalone or coordinator, works on at most **256 requests at once** across all of its
+routes ([ADR-199](../../../decisions/adr-199-one-request-pool.md)). One more waits for a slot; it
+is not refused, and its body is not read while it waits.
+
+- Document writes (`PUT`/`DELETE /_doc/{id}`, `POST /_bulk`, `/_flush`) may hold 64 of the 256
+  slots. They run one at a time, and while a compaction, backup or vocabulary rebuild holds the
+  lock they all wait; the bound keeps those waiting writes from taking the slots searches use.
+- `/_health` takes no slot (it admits eight requests itself and answers 429 beyond that), and
+  `/_metrics` has eight slots of its own, so a saturated server can still be probed and scraped.
+- A request without a valid token, where one is required, is refused before it takes a slot.
+
+The numbers are not configurable. `--max-concurrent-searches` separately bounds how many searches
+occupy the match pool.
+
 ### Ranking profile file
 
 `--ranking-profiles-file` or `RR_RANKING_PROFILES_FILE` loads an immutable registry before the
