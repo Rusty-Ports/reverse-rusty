@@ -18,6 +18,14 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - A standalone `GET /_settings` reports `include_broad` beside `settings` (an added field), as a
   coordinator's already did.
 
+## 2026-10-06 — A faster checksum for every durable file
+
+- The CRC-32 that checks the manifest, segments, the source sidecar, the WAL, the translog and
+  the control store is now table-driven, eight bytes per step, where it worked one bit at a
+  time. The checksums are identical, so every existing file verifies unchanged. On the capture
+  machine it runs at about 2,200 MB/s against 495 MB/s. Every commit checksums what it writes
+  under the write lock, and every open checksums what it reads.
+
 ## 2026-10-06 — A guide to getting every candidate
 
 - New [recall-first integration](reference/integration.md) page, linked from the README, the

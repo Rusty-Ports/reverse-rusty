@@ -60,14 +60,50 @@ pub(crate) fn validate_sidecar_basename(name: &str) -> io::Result<()> {
 
 // ---- shared low-level binary primitives (used by the codec submodules) ----
 
-/// Simple CRC-32 using the standard polynomial. Used for WAL entry integrity;
-/// segment files use atomic rename (write-to-tmp + rename) for integrity.
+/// CRC-32 (the standard reflected polynomial, as in zlib and Ethernet) of `data`. Every
+/// durable file is checked with it: the manifest, segments, the source sidecar, the WAL, the
+/// translog and the control store.
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = Crc32::new();
-    for &b in data {
-        crc.update(b);
-    }
+    crc.update_slice(data);
     crc.finish()
+}
+
+/// The reflected CRC-32 polynomial.
+const CRC32_POLYNOMIAL: u32 = 0xEDB8_8320;
+
+/// Lookup tables for eight bytes at a time. `CRC32_TABLES[0]` is the classic one-byte
+/// table; `CRC32_TABLES[k][b]` is the effect of byte `b` followed by `k` zero bytes.
+const CRC32_TABLES: [[u32; 256]; 8] = crc32_tables();
+
+const fn crc32_tables() -> [[u32; 256]; 8] {
+    let mut tables = [[0u32; 256]; 8];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut crc = byte as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ CRC32_POLYNOMIAL
+            } else {
+                crc >> 1
+            };
+            bit += 1;
+        }
+        tables[0][byte] = crc;
+        byte += 1;
+    }
+    let mut table = 1;
+    while table < 8 {
+        let mut byte = 0;
+        while byte < 256 {
+            let previous = tables[table - 1][byte];
+            tables[table][byte] = (previous >> 8) ^ tables[0][(previous & 0xFF) as usize];
+            byte += 1;
+        }
+        table += 1;
+    }
+    tables
 }
 
 /// Incremental form lets recovery recognize a complete payload even when its
@@ -81,13 +117,25 @@ impl Crc32 {
 
     #[inline]
     fn update(&mut self, byte: u8) {
-        self.0 ^= u32::from(byte);
-        for _ in 0..8 {
-            if self.0 & 1 != 0 {
-                self.0 = (self.0 >> 1) ^ 0xEDB8_8320;
-            } else {
-                self.0 >>= 1;
-            }
+        self.0 = CRC32_TABLES[0][((self.0 ^ u32::from(byte)) & 0xFF) as usize] ^ (self.0 >> 8);
+    }
+
+    /// The same result as [`update`](Self::update) on each byte in turn, eight bytes per step.
+    fn update_slice(&mut self, data: &[u8]) {
+        let mut chunks = data.chunks_exact(8);
+        for chunk in &mut chunks {
+            let low = self.0 ^ u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            self.0 = CRC32_TABLES[7][(low & 0xFF) as usize]
+                ^ CRC32_TABLES[6][((low >> 8) & 0xFF) as usize]
+                ^ CRC32_TABLES[5][((low >> 16) & 0xFF) as usize]
+                ^ CRC32_TABLES[4][(low >> 24) as usize]
+                ^ CRC32_TABLES[3][usize::from(chunk[4])]
+                ^ CRC32_TABLES[2][usize::from(chunk[5])]
+                ^ CRC32_TABLES[1][usize::from(chunk[6])]
+                ^ CRC32_TABLES[0][usize::from(chunk[7])];
+        }
+        for &byte in chunks.remainder() {
+            self.update(byte);
         }
     }
 
@@ -149,7 +197,82 @@ fn read_u64_at(data: &[u8], off: usize) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{directory_of, Path};
+    use super::{crc32, directory_of, Crc32, Path, CRC32_POLYNOMIAL};
+
+    /// The definition, one bit at a time: what every file on disk was checksummed with
+    /// before the tables, and what the tables must reproduce exactly.
+    fn bitwise_crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ CRC32_POLYNOMIAL
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn crc32_is_the_standard_checksum() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32(b""), 0);
+    }
+
+    /// Checksums written by earlier releases must still verify, so the table-driven
+    /// checksum has to equal the bitwise one for every length and alignment, including the
+    /// tail shorter than eight bytes.
+    #[test]
+    fn the_tables_reproduce_the_bitwise_checksum() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut bytes = Vec::with_capacity(4_100);
+        for _ in 0..4_100 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            bytes.push((state >> 56) as u8);
+        }
+        for len in (0..=300).chain([1_023, 1_024, 1_025, 4_096, 4_099, 4_100]) {
+            for start in 0..(4_100 - len).min(9) {
+                let data = &bytes[start..start + len];
+                assert_eq!(crc32(data), bitwise_crc32(data), "len {len} start {start}");
+            }
+        }
+    }
+
+    /// Not a gate: prints the throughput of the bitwise definition and of the tables.
+    /// `cargo test --release --lib storage::tests::crc32_throughput -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, run by hand in release mode"]
+    fn crc32_throughput() {
+        let data: Vec<u8> = (0..64 * 1024 * 1024u32)
+            .map(|n| (n * 31 + 7) as u8)
+            .collect();
+        let megabytes = data.len() as f64 / (1024.0 * 1024.0);
+        let started = std::time::Instant::now();
+        let reference = bitwise_crc32(&data);
+        let bitwise = megabytes / started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
+        let tabled = crc32(&data);
+        let tables = megabytes / started.elapsed().as_secs_f64();
+        assert_eq!(reference, tabled);
+        println!("bitwise {bitwise:.0} MB/s, tables {tables:.0} MB/s");
+    }
+
+    /// Recovery feeds bytes one at a time and checks the running value; that path and the
+    /// whole-slice path must agree at every prefix.
+    #[test]
+    fn one_byte_at_a_time_agrees_with_the_slice_at_every_prefix() {
+        let data: Vec<u8> = (0..200u32).map(|n| (n * 37 + 11) as u8).collect();
+        let mut running = Crc32::new();
+        for (index, &byte) in data.iter().enumerate() {
+            running.update(byte);
+            assert_eq!(running.finish(), crc32(&data[..=index]), "prefix {index}");
+        }
+    }
 
     /// `Path::parent` of a bare file name is the empty path, which cannot be opened. The
     /// rename had already happened by then, so the caller saw an error for a file that was
