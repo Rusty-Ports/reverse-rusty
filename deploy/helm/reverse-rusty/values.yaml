@@ -53,6 +53,9 @@ shard:
   maxSegments: 8
   # Memtable entries before an automatic flush.
   memtableFlushThreshold: 100000
+  # Broad-lane kill switches (ADR-026). False changes cost, never results.
+  broadColumnar: true
+  broadMaterialize: true
 
 ports:
   shardGrpc: 50051

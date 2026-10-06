@@ -279,7 +279,8 @@ jobs:
                    --set auth.create=true --set auth.value=y
           validate --set rankingProfiles.configMapName=rr-ranking-profiles
           validate --set shard.walSyncOnWrite=true --set shard.retainSource=false \
-                   --set shard.maxSegments=4 --set shard.memtableFlushThreshold=2000000
+                   --set shard.maxSegments=4 --set shard.memtableFlushThreshold=2000000 \
+                   --set shard.broadColumnar=false --set shard.broadMaterialize=false
           # ADR-192: the shard-local values must reach `shardserver` as it parses them.
           rendered="$(helm template rr deploy/helm/reverse-rusty -n rrns \
               --set shard.walSyncOnWrite=true --set shard.memtableFlushThreshold=2000000)"

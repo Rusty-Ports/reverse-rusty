@@ -53,12 +53,16 @@ disk are `shardserver` flags:
 | `--memtable-flush-threshold N` | 100000 | Memtable entries before an automatic flush |
 | `--hot-anchor-threshold N` | 0 | Class-H threshold (ADR-105); run the coordinator's value |
 | `--tag-segment-skipping <true\|false>` | true | ADR-174 kill switch; run the coordinator's value |
+| `--broad-columnar <true\|false>` | true | Columnar broad evaluator; `false` is the kill switch (identical results) |
+| `--broad-materialize <true\|false>` | true | Pure-anchor materialization fast path; `false` verifies instead (identical results) |
 
 They apply to every slot on the node and are not stored with the data, so a restart with a
 different flag changes them. The node prints its sync policy at startup and exports
 `reverse_rusty_shard_translog_sync_on_write{shard}` on `/_metrics`. The coordinator's flags of
 the same names never reach a remote shard: it **refuses** `--wal-sync-on-write` (it stores no
 shard data, so the flag would promise durability it cannot provide) and warns about the rest.
+On `server` the Boolean flags take a value too (`--retain-source false`, `--broad-columnar false`,
+`--broad-materialize false`).
 `--data-dir` makes
 an **in-process** cluster durable (build once, reopen on restart — `--load-file` is skipped with a
 warning when the reopened cluster is already populated). A **remote** coordinator is stateless and

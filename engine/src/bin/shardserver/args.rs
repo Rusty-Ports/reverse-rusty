@@ -158,6 +158,17 @@ pub(crate) fn parse(args: &[String]) -> Result<ShardServerArgs, String> {
                 out.engine.retain_source = parsed(args, i, "--retain-source", "true or false")?;
                 i += 1;
             }
+            // The broad-lane kill switches (ADR-026): false falls back to the inline per-title
+            // probe, or to verifying pure-anchor queries, with identical results.
+            "--broad-columnar" => {
+                out.engine.broad_columnar = parsed(args, i, "--broad-columnar", "true or false")?;
+                i += 1;
+            }
+            "--broad-materialize" => {
+                out.engine.broad_materialize =
+                    parsed(args, i, "--broad-materialize", "true or false")?;
+                i += 1;
+            }
             "--max-grpc-result-bytes" => {
                 if let Some(v) = args.get(i + 1) {
                     out.max_grpc_result_bytes = v
@@ -259,6 +270,10 @@ mod tests {
             "7",
             "--tag-segment-skipping",
             "false",
+            "--broad-columnar",
+            "false",
+            "--broad-materialize",
+            "false",
         ]))
         .expect("valid arguments");
         assert!(parsed.pending);
@@ -274,6 +289,8 @@ mod tests {
         assert!(!engine.retain_source);
         assert_eq!(engine.hot_anchor_threshold, 7);
         assert!(!engine.tag_segment_skipping);
+        assert!(!engine.broad_columnar);
+        assert!(!engine.broad_materialize);
     }
 
     #[test]
@@ -287,6 +304,8 @@ mod tests {
             defaults.memtable_flush_threshold
         );
         assert_eq!(engine.retain_source, defaults.retain_source);
+        assert_eq!(engine.broad_columnar, defaults.broad_columnar);
+        assert_eq!(engine.broad_materialize, defaults.broad_materialize);
     }
 
     #[test]
@@ -295,6 +314,8 @@ mod tests {
             &["--wal-sync-on-write"][..],
             &["--wal-sync-on-write", "yes"],
             &["--retain-source", "0"],
+            &["--broad-columnar"],
+            &["--broad-materialize", "off"],
             &["--max-segments", "many"],
             &["--memtable-flush-threshold"],
         ] {

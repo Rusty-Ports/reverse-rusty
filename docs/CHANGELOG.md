@@ -9,6 +9,20 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Boolean server flags that could not be set to false
+
+- Fix `--retain-source`, `--broad-columnar` and `--broad-materialize` on `server`: each was a
+  switch that only set `true`, its default, so it could never be turned off and passing `false`
+  was a startup error. The documented low-memory `retain_source=false` profile could not be
+  selected on the shipped binary. All three now take a value (`--retain-source false`), like
+  `--tag-segment-skipping`. A bare `--retain-source` with no value, which did nothing, is now an
+  error.
+- `shardserver` takes `--broad-columnar <true|false>` and `--broad-materialize <true|false>`
+  beside `--retain-source`; a remote coordinator warns that its own copies do not reach the
+  shards. Helm: `shard.broadColumnar`, `shard.broadMaterialize`. Compose:
+  `RR_SHARD_RETAIN_SOURCE`.
+- `server --retain-source false` without `--data-dir` warns that the setting saves nothing.
+
 ## 2026-10-06 — Shard-local engine settings
 
 - Fix the remote topology having no way to turn on power-loss durability: `shardserver` built

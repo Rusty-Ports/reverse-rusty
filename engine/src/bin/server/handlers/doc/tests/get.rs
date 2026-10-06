@@ -179,3 +179,50 @@ async fn get_doc_does_not_report_a_live_row_as_missing_when_its_source_is_unavai
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `--retain-source false` keeps source text on disk and reads it on demand. A durable node
+/// in that mode serves `_source` for a flushed query, and for the same query after a restart.
+#[tokio::test]
+async fn source_is_served_from_disk_when_it_is_not_retained() {
+    let dir = std::env::temp_dir().join(format!("rr-lazy-source-{}", uuid::Uuid::new_v4()));
+    let config = reverse_rusty::config::EngineConfig {
+        data_dir: Some(dir.clone()),
+        retain_source: false,
+        ..reverse_rusty::config::EngineConfig::default()
+    };
+    let source_of = |state: Arc<AppState>| async move {
+        let get = Request::builder()
+            .uri("/_doc/7")
+            .body(Body::empty())
+            .expect("GET request");
+        let (status, bytes) = route_doc(&state, get).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("GET json");
+        body["_source"]["query"].clone()
+    };
+    {
+        let engine =
+            Engine::with_config(Normalizer::default_vocab().expect("vocab"), config.clone());
+        let state = state_with_engine(engine);
+        let (status, _) = route_put_json(
+            &state,
+            "/_doc/7",
+            &serde_json::json!({"query": "acme chrome", "version": 3}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        {
+            let mut engine = state.engine.lock();
+            engine.flush();
+            assert!(engine.persistence_healthy());
+            assert!(!engine.config().retain_source);
+        }
+        state.publish_snapshot();
+        assert_eq!(source_of(Arc::clone(&state)).await, "acme chrome");
+    }
+    let engine = Engine::open(Normalizer::default_vocab().expect("vocab"), config)
+        .expect("reopen the durable engine");
+    let state = state_with_engine(engine);
+    assert_eq!(source_of(state).await, "acme chrome", "after a restart");
+    let _ = std::fs::remove_dir_all(&dir);
+}
