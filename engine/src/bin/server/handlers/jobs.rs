@@ -319,7 +319,6 @@ fn create_job_inner(
         .map_err(start_error)
 }
 
-#[allow(clippy::unused_async)] // Axum handlers are asynchronous entry points.
 pub(crate) async fn cluster_create_job_route(
     State(state): State<Arc<ClusterAppState>>,
     params: Result<Query<CreateJobParams>, QueryRejection>,
@@ -327,27 +326,37 @@ pub(crate) async fn cluster_create_job_route(
 ) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
     let Query(params) = params.map_err(|error| query_rejection(&error))?;
     let Json(body) = body.map_err(|error| body_rejection(&error))?;
-    cluster_create_job_inner(&state, body, params)
+    cluster_create_job_inner(&state, body, params).await
 }
 
-fn cluster_create_job_inner(
+async fn cluster_create_job_inner(
     state: &Arc<ClusterAppState>,
     body: CreateJobBody,
     params: CreateJobParams,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
     let prepared = prepare(&state.exhaustive_jobs, body, params)?;
-    let program = {
-        let cluster = state.cluster.read();
-        match prepared.rank.as_ref() {
-            Some(spec) => {
+    // The compile reads the cluster under its lock, on a blocking thread (ADR-191).
+    let program = match prepared.rank.clone() {
+        Some(spec) => {
+            let worker_state = Arc::clone(state);
+            let compiled = crate::handlers::cluster::read_cluster(state, move |cluster| {
                 let compiled = cluster
-                    .compile_rank_program_with_profiles(spec, &state.rank_profiles)
+                    .compile_rank_program_with_profiles(&spec, &worker_state.rank_profiles)
                     .map_err(|error| rank_program_error(&error))?;
-                validate_resolved_boosts(spec, &compiled)?;
-                Some(compiled)
-            }
-            None => None,
+                validate_resolved_boosts(&spec, &compiled)?;
+                Ok(compiled)
+            })
+            .await
+            .map_err(|error| {
+                ApiError::response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    format!("job creation could not read the cluster: {error}"),
+                )
+            })?;
+            Some(compiled?)
         }
+        None => None,
     };
     let fingerprint = request_fingerprint(
         &prepared.title,

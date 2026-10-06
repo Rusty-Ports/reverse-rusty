@@ -74,6 +74,29 @@ pub(crate) async fn run_cluster_write<T: Send + 'static>(
     })
 }
 
+/// Run a brief read of the cluster engine on a blocking thread, never on an async worker
+/// (ADR-191). `cluster.read()` waits whenever a vocabulary rebuild or a resize holds, or is
+/// queued for, the exclusive lock, and that can last as long as an O(corpus) rebuild. The permit
+/// is awaited, so queued readers wait as futures, and it is owned by the worker, so a request
+/// that disconnects keeps its slot until its thread is free again.
+pub(crate) async fn read_cluster<T: Send + 'static>(
+    state: &std::sync::Arc<crate::state::ClusterAppState>,
+    work: impl FnOnce(&reverse_rusty::cluster::ClusterEngine) -> T + Send + 'static,
+) -> Result<T, ShardError> {
+    let permit = std::sync::Arc::clone(&state.read_permits)
+        .acquire_owned()
+        .await
+        .map_err(|_| ShardError::Protocol("cluster read admission is closed".into()))?;
+    let state = std::sync::Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let cluster = state.cluster.read();
+        work(&cluster)
+    })
+    .await
+    .map_err(|error| ShardError::Protocol(format!("cluster read worker failed: {error}")))
+}
+
 pub(crate) use admin::{
     cluster_backup, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_compact,
     cluster_flush_route, cluster_gc, cluster_handoff, cluster_health, cluster_metrics,

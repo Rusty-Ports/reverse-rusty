@@ -90,19 +90,31 @@ struct ClusterRootResponse {
 }
 
 /// GET / — cluster-mode root.
-pub(crate) async fn cluster_root(State(state): State<Arc<ClusterAppState>>) -> impl IntoResponse {
-    let cluster = state.cluster.read();
+pub(crate) async fn cluster_root(State(state): State<Arc<ClusterAppState>>) -> Response {
+    let layout = super::read_cluster(&state, |cluster| {
+        (
+            cluster.num_shards(),
+            cluster.replication_factor(),
+            cluster.is_durable(),
+        )
+    })
+    .await;
+    let (shards, replication_factor, durable) = match layout {
+        Ok(layout) => layout,
+        Err(error) => return shard_error_response("cluster layout read failed", &error),
+    };
     Json(ClusterRootResponse {
         name: "reverse-rusty",
         cluster_name: "reverse-rusty",
         cluster_uuid: "_na_",
         version: ApiVersion::current(),
         mode: "cluster",
-        shards: cluster.num_shards(),
-        replication_factor: cluster.replication_factor(),
-        durable: cluster.is_durable(),
+        shards,
+        replication_factor,
+        durable,
         tagline: "you know, for matching",
     })
+    .into_response()
 }
 
 #[derive(Serialize)]

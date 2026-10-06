@@ -406,6 +406,9 @@ pub(crate) async fn run(
         write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_QUEUED_CLUSTER_WRITES,
         )),
+        read_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_QUEUED_CLUSTER_READS,
+        )),
         flush_serial: Mutex::new(()),
         durability_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,

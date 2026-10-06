@@ -9,6 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Data-plane handlers wait off the runtime
+
+- Fix the server becoming unresponsive, `/_health` included, when writes queued behind
+  maintenance: standalone `PUT`/`DELETE /_doc`, `/_bulk` and `/_flush` waited for the engine mutex
+  on async workers, so during a compaction, backup or vocabulary rebuild as many waiting writes as
+  there are CPUs stopped every other request. They now wait, and run, on blocking threads under a
+  32-permit admission ([ADR-191](decisions/adr-191-data-plane-handlers-wait-off-the-runtime.md)).
+- The same for the coordinator's brief cluster reads (`GET`/`HEAD /_doc`, `GET /`, the
+  `/v2/_search` and `/v2/_mpercolate` compile step, job creation), which waited on a worker
+  whenever a vocabulary rebuild or resize held or queued for the exclusive cluster lock.
+- A standalone write whose client disconnects after admission still completes and is published;
+  shutdown waits for such writes before its final flush.
 ## 2026-10-06 — First read after a shard restart, and wider test margins
 
 - Fix a read failing with a transport error right after a shard node restarted: the coordinator

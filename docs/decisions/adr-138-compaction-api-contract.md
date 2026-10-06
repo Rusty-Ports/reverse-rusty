@@ -57,3 +57,10 @@
   pre-selection flush behavior, strict controls/body/method/413 handling, shard/timing/report
   fields, publication after a dropped admitted request, cluster 501 parity, and injected
   durable-write rollback with both source segments still readable.
+
+- **Later outcome — 2026-10-05 ([ADR-191](adr-191-data-plane-handlers-wait-off-the-runtime.md)):**
+  the claim that published read snapshots remain available during a compaction held only while
+  few writes arrived. The compaction itself ran off the runtime, but each standalone PUT, DELETE,
+  bulk or flush queued behind it waited for the engine mutex on an async worker, and as many
+  waiting writes as there are workers stopped reads and `/_health` too. Those handlers now wait
+  on blocking threads under bounded admission.

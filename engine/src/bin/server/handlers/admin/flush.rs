@@ -208,17 +208,44 @@ pub(crate) async fn flush_route(
         Err(response) => return *response,
     };
     let force = params.force_requested();
-    let _flush = match acquire_flush(&state.flush_serial, params, &state.prom) {
-        Ok(guard) => guard,
-        Err(response) => return *response,
+    // Flush admission and the engine mutex both wait, and the flush seals a segment, so all of
+    // it runs on a blocking thread under write admission, never on an async worker (ADR-191).
+    if !params.wait_if_ongoing() {
+        // Report a flush already in progress instead of queueing for write admission behind it.
+        // The worker re-checks under the lock, so a flush that starts meanwhile is still refused.
+        if let Err(response) = acquire_flush(&state.flush_serial, params, &state.prom) {
+            return *response;
+        }
+    }
+    let flushed = match crate::state::admit_write(&state).await {
+        Ok(permit) => {
+            let worker_state = Arc::clone(&state);
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let _flush = acquire_flush(&worker_state.flush_serial, params, &worker_state.prom)?;
+                let mut engine = worker_state.engine.lock();
+                engine.flush();
+                worker_state.publish_snapshot_from_locked_engine(&engine);
+                Ok::<_, FlushRejection>((engine.metrics(), engine.persistence_healthy()))
+            })
+            .await
+            .map_err(crate::state::WriteWorkerError::Worker)
+        }
+        Err(closed) => Err(closed),
     };
-
-    let (metrics, persistence_healthy) = {
-        let mut engine = state.engine.lock();
-        engine.flush();
-        (engine.metrics(), engine.persistence_healthy())
+    let (metrics, persistence_healthy) = match flushed {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(response)) => return *response,
+        Err(worker) => {
+            error!(force, error = %worker, "flush worker failed");
+            return flush_rejection(
+                &state.prom,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "write_worker_failed",
+                format!("flush request did not complete: {worker}"),
+            );
+        }
     };
-    state.publish_snapshot();
 
     let (status, code, successful_shards) = if persistence_healthy {
         (StatusCode::OK, "200", 1)

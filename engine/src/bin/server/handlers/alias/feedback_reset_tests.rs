@@ -64,6 +64,9 @@ fn test_state() -> Arc<AppState> {
     Arc::new(AppState {
         engine: Mutex::new(engine),
         flush_serial: Mutex::new(()),
+        write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_QUEUED_WRITES,
+        )),
         backup_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),

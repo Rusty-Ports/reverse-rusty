@@ -79,7 +79,10 @@ The rebuild is `O(corpus)` and temporarily needs blue and green state. One share
 slot admits it alongside stats and vocabulary work. After admission, one independently supervised
 OS thread acquires exclusive topology, REST-write, and cluster guards, rebuilds the corpus, swaps
 the ring/shards, commits control state, checkpoints when durable, and reads the final version. Tokio
-request workers never wait on those blocking locks or perform the rebuild.
+request workers never wait on those blocking locks or perform the rebuild. Requests that arrive
+during it wait off the runtime too: document writes, point reads, `GET /` and the ranked-search
+compile step queue on blocking threads under bounded admission (ADR-183, ADR-191), so health
+checks and requests that need no cluster lock keep being served.
 
 Supported query controls:
 
