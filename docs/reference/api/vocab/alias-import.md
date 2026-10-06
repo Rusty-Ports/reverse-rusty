@@ -47,6 +47,11 @@ synchronously live.
 An imported expressible single-token or multi-word group activates because the file is an operator
 declaration. An unexpressible or mixed-feature-kind group remains a candidate.
 
+Activation never removes a match. After `wireless mouse => cordless mouse`, a stored query
+`wireless mouse` matches `cordless mouse` titles and still matches `wireless optical mouse` and
+`mouse, wireless`: a title that carries every word of a form carries the form (ADR-205). A quoted
+`"wireless mouse"` keeps requiring adjacency, and a negated form rejects only the form written out.
+
 ```json
 { "took": 37, "took_ms": 37.42, "acknowledged": true, "result": "updated",
   "rules": 2, "activated": 2, "recompiled": 1280,

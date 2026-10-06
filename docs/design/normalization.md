@@ -138,8 +138,11 @@ predicates exist, `match_phrase_views` also writes reusable position-arc buffers
 
 Multi-word aliases are asymmetric by design (ADR-061). On the query side they collapse to an entity
 that equivalence expansion can widen. On the title side they are additive, and an overlapping scan
-adds nested alias entities to `P(T)`. With no active multi-word alias, the flat title paths are
-identical.
+adds nested alias entities to `P(T)`. `P(T)` also gets a form's entity when the title holds every
+word of the form anywhere, under whatever the word compiles to as a token of its own: itself, a
+synonym's canonical, a number typed or not (ADR-205). That keeps every match a query had before the alias, because the query used to require
+exactly those words. `N(T)`, which negation reads, and the positions quoted phrases read keep the
+adjacent form only. With no active multi-word alias, the flat title paths are identical.
 
 ---
 

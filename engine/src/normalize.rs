@@ -28,6 +28,8 @@ mod core;
 mod fingerprint;
 
 #[cfg(test)]
+mod alias_words_tests;
+#[cfg(test)]
 mod tests;
 
 /// Independent parse-union oracle for the ADR-061 positive view `P(T)` (the matcher's
@@ -257,6 +259,10 @@ pub struct NormScratch {
     phrase_emitted: Vec<bool>,
     /// Per-token "consumed by a phrase" flags, sized to `tokens.len()`.
     token_consumed: Vec<bool>,
+    /// The alias forms whose words the current title has shown so far, with the words seen
+    /// (ADR-205). Taken out for the duration of the positive view's all-tokens pass and put
+    /// back.
+    alias_words_seen: Vec<(u32, u64)>,
     /// Feature-name builder (`"term:"`/`"year:"` + value) handed to the helper emitters.
     scratch: String,
     /// Reused difference array for linear positioned-graph coverage. Entry `i`

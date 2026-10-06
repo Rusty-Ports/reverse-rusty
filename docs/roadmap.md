@@ -317,7 +317,6 @@ and aspects-aware modes, and real-corpus evidence that aspects reduce broad work
 **Problem.** Several shipped seams still have optional recall, feature-quality, or performance
 refinements:
 
-- preserve the scattered-component reading when a multi-word alias activates;
 - emit both joined and split forms for selected punctuation folds;
 - propose high-confidence edit-distance-one aliases for rare misspellings;
 - type common item-number forms such as `#866` and `#BDC-85` as one selective feature;

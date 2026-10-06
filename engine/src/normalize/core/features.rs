@@ -123,7 +123,17 @@ impl Normalizer {
                 // phrase. The raw-token pass below also retains the lexical reading of every
                 // cleaned component, and the second `emit` leaves `lc` holding the text used
                 // by the overlap pass and token scan.
+                // ADR-205: this pass consumes nothing, so it emits a feature for every token
+                // of the title. Note which alias forms' words those features are. `seen` is
+                // the scratch's buffer, taken out because `emit` borrows the scratch while
+                // the closure runs.
+                let words = self.alias_words.as_ref();
+                let mut seen = std::mem::take(&mut sc.alias_words_seen);
+                seen.clear();
                 self.emit(text, lc, sc, Side::Title, true, &mut |name, _kind| {
+                    if let Some(words) = words {
+                        words.observe(name, &mut seen);
+                    }
                     pos.push(dict.get_or_synthetic(name));
                 });
                 // The `"term:<token>"` builder is reused on `sc.name` (the second `emit` has
@@ -141,6 +151,13 @@ impl Normalizer {
                     pos.push(dict.get_or_synthetic(name));
                 }
                 ov.collect_into(lc, dict, pos);
+                // A form all of whose words the title carries, wherever they stand, is in
+                // the positive view like a form written out (ADR-205). Only this view: the
+                // canonical one, which negation reads, keeps the adjacent reading.
+                if let Some(words) = words {
+                    words.complete_into(&seen, dict, pos);
+                }
+                sc.alias_words_seen = seen;
                 pos.sort_unstable();
                 pos.dedup();
             }

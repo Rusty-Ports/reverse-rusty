@@ -66,7 +66,10 @@ surface forms treated as the same entity (e.g. `[["ns", "north star"], ["pkg", "
 title bearing any form. Expansion only grows a query's match set, so it is **false-negative-safe** —
 a wrong/uncertain equivalence can only add bounded false positives, never drop a true match. Each form
 should resolve to a single entity (glue a multi-token form as a phrase first); a form that doesn't is
-skipped. Applying the change recompiles existing queries through the expansion.
+skipped. Applying the change recompiles existing queries through the expansion. The phrase that
+glues a form is a separate rule with its own effect: a declared collapse phrase makes a query that
+spells the form out require the words adjacent. To relate a multi-word form without that, put the
+group in the alias registry: a title that carries the form's words apart still matches (ADR-205).
 
 **Declaring punctuation rules (ADR-058).** The optional `punctuation` block reclassifies how individual
 characters are handled in byte-cleaning. Each rule is `{"ch": "<char>", "class": "<fold|split|keep|marker>"}`:

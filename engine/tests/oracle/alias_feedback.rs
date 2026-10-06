@@ -222,3 +222,80 @@ fn disjoint_population_candidate_does_not_validate() {
     );
     assert!(row.overlap < 0.1, "overlap near zero; got {}", row.overlap);
 }
+
+/// A pair with a multi-word form, activated through feedback (ADR-205). The stored query
+/// that spells the form out keeps every title it matched, with the form's words apart or
+/// reordered, and gains the titles that use the other form.
+#[test]
+fn activating_a_multiword_pair_keeps_what_the_spelled_out_query_matched() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "zz north star ctxa".into()),
+        (2, "zzns ctxa".into()),
+        (3, "ctxa".into()),
+    ];
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+
+    // File the pair as a candidate, as discovery would.
+    let mut vocab = eng.vocab().cloned().unwrap_or_default();
+    vocab.record_distributional_candidates(
+        &[reverse_rusty::vocab::DiscoveredPair {
+            forms: vec!["zz north star".into(), "zzns".into()],
+            similarity: 0.9,
+            cooccurrence_rate: 0.0,
+        }],
+        &Normalizer::default_vocab().expect("vocab"),
+        &reverse_rusty::dict::Dict::new(),
+    );
+    eng.set_vocab(vocab).expect("set_vocab");
+    eng.recompile_stale_segments();
+    let forms = {
+        let mut forms = vec!["zz north star".to_string(), "zzns".to_string()];
+        forms.sort();
+        forms
+    };
+    assert!(
+        eng.aliases()
+            .expect("vocab")
+            .entries()
+            .iter()
+            .any(|entry| entry.forms == forms && entry.status == AliasStatus::Candidate),
+        "premise: the pair is a candidate"
+    );
+
+    let titles = [
+        "zz north star ctxa",
+        "zz north polar star ctxa",
+        "star ctxa zz north",
+        "zzns ctxa",
+    ];
+    let mut s = MatchScratch::new();
+    let before: Vec<HashSet<u64>> = titles
+        .iter()
+        .map(|title| matched(&mut eng, &mut s, title).into_iter().collect())
+        .collect();
+    assert!(before[1].contains(&1) && before[2].contains(&1));
+    assert!(!before[3].contains(&1), "a candidate changes no match");
+
+    let evidence = FeedbackEvidence {
+        overlap: 0.9,
+        titles_a: 60,
+        titles_b: 60,
+        queries_sampled: 10,
+    };
+    let applied = eng
+        .apply_alias_feedback(&[(forms, evidence)], true)
+        .expect("activate");
+    assert_eq!(applied.activated, 1);
+
+    for (title, before) in titles.iter().zip(&before) {
+        let after: HashSet<u64> = matched(&mut eng, &mut s, title).into_iter().collect();
+        assert!(
+            after.is_superset(before),
+            "activation removed {:?} from the matches of {title:?}",
+            before.difference(&after).collect::<Vec<_>>()
+        );
+    }
+    assert!(matched(&mut eng, &mut s, "zzns ctxa").contains(&1));
+    assert!(matched(&mut eng, &mut s, "zz north star ctxa").contains(&2));
+}

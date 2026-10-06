@@ -233,17 +233,60 @@ impl NormalizerBuilder {
             &self.number_context,
         );
 
-        Ok(Normalizer {
+        let alias_patterns: Vec<(String, String)> = self
+            .phrase_patterns
+            .iter()
+            .zip(&self.phrase_entries)
+            .filter(|(_, entry)| entry.mode == PhraseMode::Alias)
+            .map(|(pattern, entry)| (pattern.clone(), entry.feature.clone()))
+            .collect();
+        let mut norm = Normalizer {
             automaton,
             phrase_entries: self.phrase_entries,
             phrase_overlap,
             has_multiword_aliases,
+            alias_words: None,
             synonyms: self.synonyms,
             syn_index: self.syn_index,
             punct: self.punct,
             number_context: self.number_context,
             fingerprint,
-        })
+        };
+        // ADR-205: under which feature names a title carries each word of each alias form:
+        // whatever the normalizer emits for the word as a token of its own. A title emits
+        // one of them for each of its tokens, whatever stands around the token.
+        let (mut lc, mut sc) = (String::new(), super::NormScratch::new());
+        let forms = alias_patterns
+            .into_iter()
+            .map(|(pattern, entity)| {
+                let words = pattern
+                    .split(' ')
+                    .map(|word| {
+                        // Alone, and after a marker: a number is typed by what stands
+                        // before it, and a title may carry it either way.
+                        let mut names: Vec<String> = Vec::new();
+                        for text in [word.to_string(), format!("# {word}")] {
+                            norm.emit(
+                                &text,
+                                &mut lc,
+                                &mut sc,
+                                super::Side::Title,
+                                false,
+                                &mut |name, _kind| {
+                                    if !names.iter().any(|seen| seen == name) {
+                                        names.push(name.to_string());
+                                    }
+                                },
+                            );
+                        }
+                        names
+                    })
+                    .collect();
+                (entity, words)
+            })
+            .collect();
+        norm.alias_words = super::core::AliasWords::new(forms);
+        Ok(norm)
     }
 }
 

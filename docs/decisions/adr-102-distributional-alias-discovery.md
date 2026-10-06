@@ -141,3 +141,8 @@
 in the single-node manifest (v8). The metadata-only seam now commits it with a vocabulary-only
 manifest write, and the discover-and-record response reports `persisted: true` on a durable engine;
 the "no vocab blob" statement above describes the pre-v8 format.
+
+**Outcome update (2026-10-06).** "Never a false negative, in any case" did not hold for a pair
+with a multi-word form: until [ADR-205](adr-205-a-title-with-every-word-carries-the-form.md), activating one removed the titles that carry the form's words
+apart or reordered from a query that spelled the form out. It holds now, and the discovery
+oracle covers such a pair.

@@ -9,6 +9,24 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Activating a multi-word alias no longer removes matches
+
+- A title that carries every word of a multi-word alias form, wherever the words stand, now
+  carries the form ([ADR-205](decisions/adr-205-a-title-with-every-word-carries-the-form.md)).
+  Importing `wireless mouse => cordless mouse` used to remove `wireless optical mouse` and
+  `mouse, wireless` from the matches of the stored query `wireless mouse`, which had matched them
+  before the alias. Every activation path was affected: synonym import, an edited registry, and
+  feedback activation, on a single node and on a cluster.
+- A negated form still rejects only the form written out, and a quoted form still requires
+  adjacency.
+- **Wider than before:** a query that names another form of the alias (`ny catalog`) also matches
+  a title with the words of `new york` apart. An alias made of very common words adds candidates.
+- Nothing stored changes: no recompile, no migration and no upgrade order. The rule is applied
+  to titles, and costs one lookup per title token while a multi-word alias is active.
+- The reference documents and four ADRs said activation only widens. That is now true for
+  multi-word forms; the at-scale test that claimed it could not fail and is replaced by one that
+  rewrites real generated queries.
+
 ## 2026-10-06 — The vocabulary learner no longer narrows by default
 
 - **Behaviour change.** `POST /_vocab/learn_and_apply` with no mode, and the `learn_and_apply`

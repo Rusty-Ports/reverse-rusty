@@ -163,6 +163,8 @@ fn multiword_alias_two_view_differential() {
         (7, "(ny,chicago) closing".into()), // any-of with an alias form
         (8, "brooklyn".into()),
         (9, "\"new york\" office".into()), // quoted alias path keeps adjacency
+        (10, "(new york,brooklyn) office".into()), // a form as a group member keeps its words
+        (11, "office -(new york,chicago)".into()), // a negated form rejects the form alone
     ];
     let titles: Vec<String> = [
         "new york catalog opening day",
@@ -178,6 +180,12 @@ fn multiword_alias_two_view_differential() {
         "new  york catalog", // whitespace run: P(T) overlap scan still matches the alias
         "ny office",
         "new vintage york office",
+        // The form's words apart and reordered: q2 and q6 spell a form out and keep them.
+        "new vintage york inventory",
+        "york inventory new",
+        "city subway york new",
+        "york office", // one word of the form is not the form
+        "new office",
     ]
     .iter()
     .map(ToString::to_string)
@@ -189,6 +197,98 @@ fn multiword_alias_two_view_differential() {
         ny_ref_vocab(),
     );
     oracle.assert_matches(&titles, "alias/two-view");
+}
+
+/// A vocabulary in which a word of an alias form is also a synonym for the alias's entity.
+/// The word alone then names the entity, as it did before the alias; the form's other word
+/// alone does not, because a title carries a form only when it carries every word of it
+/// (ADR-205).
+#[test]
+fn a_form_word_that_names_the_entity_differential() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "wireless mouse".into()),
+        (2, "mouse".into()),
+        (3, "(wireless mouse,trackball) usb".into()),
+        (4, "cordless mouse pad".into()),
+        (5, "usb -(wireless mouse,trackball)".into()),
+    ];
+    let titles: Vec<String> = [
+        "wireless mouse",
+        "mouse",
+        "wireless",
+        "cordless mouse",
+        "cordless optical mouse pad",
+        "wireless optical mouse",
+        "usb mouse",
+        "usb cordless mouse",
+        "usb trackball",
+        "usb wireless",
+        "mouse pad cordless",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let mut vocab = reverse_rusty::vocab::Vocab::new();
+    vocab.add_synonym(
+        "wireless",
+        "term:wireless_mouse",
+        reverse_rusty::dict::FeatureKind::Generic,
+    );
+    let ref_vocab = RefVocab::default_vocab()
+        .synonym("wireless", "term:wireless_mouse")
+        .phrase("wireless mouse", "term:wireless_mouse", PhraseMode::Alias)
+        .phrase("cordless mouse", "term:cordless_mouse", PhraseMode::Alias)
+        .equivalence(&["wireless mouse", "cordless mouse"]);
+    let oracle = RefOracle::build_with_vocab_and_alias_import(
+        &queries,
+        vocab,
+        "wireless mouse => cordless mouse",
+        ref_vocab,
+    );
+    oracle.assert_matches(&titles, "alias/a-word-names-the-entity");
+}
+
+/// A word of an alias form that titles write through a synonym. The title carries the word
+/// under the synonym's canonical, so `refurbished heavy unit` carries the form `refurb unit`
+/// although it has neither the token `refurb` nor the two words together (ADR-205).
+#[test]
+fn a_form_word_written_through_a_synonym_differential() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "refurb unit shelf".into()),
+        (2, "ru shelf".into()),
+        (3, "refurbished shelf".into()),
+        (4, "shelf -(refurb unit,zzother)".into()),
+        (5, "\"refurb unit\" shelf".into()),
+    ];
+    let titles: Vec<String> = [
+        "refurbished heavy unit shelf",
+        "refurb unit shelf",
+        "unit shelf refurb",
+        "ru shelf",
+        "refurbished shelf",
+        "unit shelf",
+        "refurbished unit shelf",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let mut vocab = reverse_rusty::vocab::Vocab::new();
+    vocab.add_synonym(
+        "refurb",
+        "term:refurbished",
+        reverse_rusty::dict::FeatureKind::Generic,
+    );
+    let ref_vocab = RefVocab::default_vocab()
+        .synonym("refurb", "term:refurbished")
+        .phrase("refurb unit", "term:refurb_unit", PhraseMode::Alias)
+        .equivalence(&["refurb unit", "ru"]);
+    let oracle = RefOracle::build_with_vocab_and_alias_import(
+        &queries,
+        vocab,
+        "ru => refurb unit",
+        ref_vocab,
+    );
+    oracle.assert_matches(&titles, "alias/a-word-through-a-synonym");
 }
 
 /// A randomized at-scale alias corpus combining the overlapping forms (`ny` / `new york` /

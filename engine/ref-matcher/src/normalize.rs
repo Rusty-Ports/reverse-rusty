@@ -413,7 +413,8 @@ pub fn match_features(vocab: &RefVocab, text: &str) -> Vec<Feature> {
 /// The two semantic title views (ADR-061): `neg` = canonical `N(T)` (forbidden checks), `pos` =
 /// the maximal flat positive superset `P(T) ⊇ N(T)` (flat retrieval + required + any-of).
 /// Phrase-aware callers build their candidate-only graph-label probe separately. With no active
-/// multi-word alias the two are identical. Translation of `core.rs::match_features_dual`.
+/// multi-word alias the two are identical. Written from the rules `core.rs::match_features_dual`
+/// implements, with plain scans in place of its automata and indexes.
 #[must_use]
 pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<Feature>) {
     let mut neg = emit(vocab, text, Side::Title, false);
@@ -439,6 +440,26 @@ pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<F
     }
     for idx in phrases::scan_overlapping(&lc, &vocab.phrases) {
         pos.push(Feature::raw(vocab.phrases[idx].feature.clone()));
+    }
+
+    // A title that carries every word of a multi-word alias form carries the form, wherever
+    // the words stand (ADR-205). A word is carried as its own token, or under whatever the
+    // word analyzes to by itself (a synonym's canonical, a typed number). Judged against the
+    // view as it stands here, so one form's entity never counts as a word of another form.
+    let carried = pos.clone();
+    for phrase in &vocab.phrases {
+        if phrase.mode != PhraseMode::Alias {
+            continue;
+        }
+        let every_word = phrase.tokens.iter().all(|word| {
+            carried.contains(&Feature::term(word))
+                || emit(vocab, word, Side::Title, false)
+                    .iter()
+                    .any(|feature| carried.contains(feature))
+        });
+        if every_word {
+            pos.push(Feature::raw(phrase.feature.clone()));
+        }
     }
 
     pos.sort();

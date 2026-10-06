@@ -221,3 +221,70 @@ fn candidates_ride_the_vocab_document_across_reopen() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A candidate with a multi-word form, activated by the operator (ADR-205): the stored
+/// query that spells the form out keeps the titles that have its words apart or
+/// reordered, and gains the titles that use the other form.
+#[test]
+fn operator_activation_of_a_multiword_candidate_loses_no_match() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "zz north star lamp".into()),
+        (2, "zzns lamp".into()),
+        (3, "(zz north star, zzother) shade".into()),
+    ];
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+    let mut s = MatchScratch::new();
+
+    let mut vocab = eng.vocab().cloned().unwrap_or_default();
+    vocab.record_distributional_candidates(
+        &[reverse_rusty::vocab::DiscoveredPair {
+            forms: vec!["zz north star".into(), "zzns".into()],
+            similarity: 0.9,
+            cooccurrence_rate: 0.0,
+        }],
+        &Normalizer::default_vocab().expect("vocab"),
+        &reverse_rusty::dict::Dict::new(),
+    );
+    eng.set_vocab(vocab).expect("set_vocab");
+    eng.recompile_stale_segments();
+
+    let titles = [
+        "zz north star lamp",
+        "zz north polar star lamp",
+        "lamp star north zz",
+        "zzns lamp",
+        "zz north polar star shade",
+        "zzns shade",
+    ];
+    let before: Vec<HashSet<u64>> = titles
+        .iter()
+        .map(|title| matched(&mut eng, &mut s, title))
+        .collect();
+    assert!(before[1].contains(&1) && before[2].contains(&1) && before[4].contains(&3));
+
+    let forms = {
+        let mut forms = vec!["zz north star".to_string(), "zzns".to_string()];
+        forms.sort();
+        forms
+    };
+    let mut vocab = eng.vocab().expect("vocab").clone();
+    assert!(
+        vocab.aliases_mut().activate(&forms),
+        "activate the candidate"
+    );
+    eng.set_vocab(vocab).expect("set_vocab");
+    eng.recompile_stale_segments();
+
+    for (title, before) in titles.iter().zip(&before) {
+        let after = matched(&mut eng, &mut s, title);
+        assert!(
+            after.is_superset(before),
+            "activation removed {:?} from the matches of {title:?}",
+            before.difference(&after).collect::<Vec<_>>()
+        );
+    }
+    assert!(matched(&mut eng, &mut s, "zzns lamp").contains(&1));
+    assert!(matched(&mut eng, &mut s, "zz north star lamp").contains(&2));
+    assert!(matched(&mut eng, &mut s, "zzns shade").contains(&3));
+}

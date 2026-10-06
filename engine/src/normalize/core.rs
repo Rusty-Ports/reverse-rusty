@@ -15,8 +15,10 @@ use crate::dict::{Dict, FeatureId, FeatureKind};
 use daachorse::DoubleArrayAhoCorasick;
 
 mod alias_overlap;
+mod alias_words;
 mod helpers;
 pub(super) use alias_overlap::PhraseOverlap;
+pub(super) use alias_words::AliasWords;
 pub use helpers::fold_diacritic;
 use helpers::{as_year, collapse_ws_runs_in_place, emit_generic, parse_number};
 
@@ -63,6 +65,9 @@ pub struct Normalizer {
     /// Kept separate from `phrase_overlap`: ordinary vocabulary phrases must
     /// not activate ADR-061's distinct flat positive view.
     pub(super) has_multiword_aliases: bool,
+    /// The words of every multi-word alias form (ADR-205). `Some` exactly when
+    /// `has_multiword_aliases`.
+    pub(super) alias_words: Option<AliasWords>,
 
     /// single-token synonyms -> (canonical feature, kind).
     pub(super) synonyms: Vec<(String, String, FeatureKind)>,

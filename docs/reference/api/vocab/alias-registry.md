@@ -17,6 +17,12 @@ matching through the false-negative-safe equivalence path.
 | Distributionally discovered group, of any kind | `candidate` |
 | Mixed-feature-kind or otherwise unexpressible group | `candidate`; it cannot affect matching |
 
+Activating a group never removes a match from a stored query. A title that carries every word of
+a multi-word form, wherever the words stand, carries the form: a stored `wireless mouse` keeps
+matching `wireless optical mouse` and `mouse, wireless` after `wireless mouse ≡ cordless mouse`
+is activated (ADR-205). The same holds for a query that names another form of the group, so an
+alias made of very common words adds candidates.
+
 Multi-word aliases are implemented, not deferred: ADR-061 supplies query-side collapse plus the
 two title feature views, and ADR-076 makes cluster routing positive-view-aware. Import,
 learn-and-apply, and an edited registry installed through `PUT /_vocab` work in single-node and

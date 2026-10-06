@@ -226,3 +226,11 @@
   nested/overlapping phrases handled and forbidden clauses staying recall-correct, at zero false
   negatives. The default (no active multi-word alias) path is byte-identical. The matcher gains a second
   per-title feature view — a reusable seam for any future "positive superset vs canonical set" need.
+
+**Outcome update (2026-10-06).** The "semantics of activation" consequence above, that a query
+containing the alias text stops matching the scattered-components reading, no longer holds.
+[ADR-205](adr-205-a-title-with-every-word-carries-the-form.md) keeps that reading on the title side: a title that carries every word of a form carries the
+form's entity in its positive view. The query-side distributivity sketched above was tried
+first and set aside; ADR-205 says why. The testing note's "FN-safety sweep vs the
+original-semantics oracle" did not exercise the case when it was written: no generated query
+contained the alias text. The sweep that does is `tests/oracle/alias_components.rs`.

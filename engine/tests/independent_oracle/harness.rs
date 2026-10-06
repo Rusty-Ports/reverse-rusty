@@ -78,6 +78,23 @@ impl RefOracle {
         Self::from_parts(eng, reference, queries)
     }
 
+    /// [`build_with_alias_import`](Self::build_with_alias_import) on an engine that already
+    /// has a vocabulary (synonyms, phrases), for alias forms that interact with it.
+    pub fn build_with_vocab_and_alias_import(
+        queries: &[(u64, String)],
+        vocab: reverse_rusty::vocab::Vocab,
+        solr: &str,
+        ref_vocab: RefVocab,
+    ) -> Self {
+        let mut eng = Engine::with_vocab(vocab, reverse_rusty::config::EngineConfig::default())
+            .expect("engine with vocabulary");
+        eng.build_from_queries(queries);
+        eng.import_alias_synonyms(solr)
+            .expect("import + apply aliases");
+        let reference = RefMatcher::build(queries, ref_vocab);
+        Self::from_parts(eng, reference, queries)
+    }
+
     fn from_parts(eng: Engine, reference: RefMatcher, queries: &[(u64, String)]) -> Self {
         let dsl = queries.iter().map(|(id, q)| (*id, q.clone())).collect();
         RefOracle {
