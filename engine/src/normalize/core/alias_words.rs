@@ -71,18 +71,15 @@ pub(in crate::normalize) struct AliasScratch {
     entered: FastSet<u64>,
     /// The same names in the order they entered; each is visited once.
     queue: Vec<u64>,
-    /// The forms that are done with, by [`DONE`], or waiting for a name, by [`WAITING`].
-    looked: FastMap<u64, u8>,
+    /// The forms whose entity is in the view.
+    done: FastSet<u64>,
+    /// The (form, unit) pairs noted in `waiting`, so that each is noted once.
+    noted: FastSet<u64>,
     /// Name -> the forms found waiting on a unit the view may yet get under that name.
     waiting: FastMap<u64, Vec<u32>>,
     /// Which token positions of the form under examination the view reaches.
     reach: Vec<bool>,
 }
-
-/// The form is in the view; nothing is left to look at.
-const DONE: u8 = 1;
-/// The form is noted under every name that could still complete it.
-const WAITING: u8 = 2;
 
 impl AliasWords {
     pub(in crate::normalize) fn new(specs: Vec<FormSpec>) -> Option<Self> {
@@ -135,23 +132,34 @@ impl AliasWords {
         let mut keyed: FastMap<u64, Vec<u32>> = fast_map();
         for (index, form) in forms.iter().enumerate() {
             let index = u32::try_from(index).ok()?;
-            let over = |gap: u32| {
-                let mut names: Vec<u64> = form
-                    .units
+            // What each gap costs: how widely shared the names of the units over it are.
+            // One sweep, so a form of two thousand tokens is no harder than two thousand
+            // forms of one.
+            let mut change = vec![0i64; form.len as usize + 1];
+            for unit in &form.units {
+                let cost: i64 = unit
+                    .names
                     .iter()
-                    .filter(|unit| unit.from <= gap && gap < unit.to)
-                    .flat_map(|unit| unit.names.iter().copied())
-                    .collect();
-                names.sort_unstable();
-                names.dedup();
-                names
-            };
-            let key = (0..form.len).map(over).min_by_key(|names| {
-                names
-                    .iter()
-                    .map(|name| u64::from(shared.get(name).copied().unwrap_or(0)))
-                    .sum::<u64>()
-            })?;
+                    .map(|name| i64::from(shared.get(name).copied().unwrap_or(0)))
+                    .sum();
+                change[unit.from as usize] += cost;
+                change[unit.to as usize] -= cost;
+            }
+            let (mut key_gap, mut least, mut running) = (0u32, i64::MAX, 0i64);
+            for gap in 0..form.len {
+                running += change[gap as usize];
+                if running < least {
+                    (key_gap, least) = (gap, running);
+                }
+            }
+            let mut key: Vec<u64> = form
+                .units
+                .iter()
+                .filter(|unit| unit.from <= key_gap && key_gap < unit.to)
+                .flat_map(|unit| unit.names.iter().copied())
+                .collect();
+            key.sort_unstable();
+            key.dedup();
             for name in key {
                 keyed.entry(name).or_default().push(index);
             }
@@ -223,7 +231,8 @@ impl AliasWords {
         }
         scratch.queue.clear();
         scratch.entered.clear();
-        scratch.looked.clear();
+        scratch.done.clear();
+        scratch.noted.clear();
         scratch.waiting.clear();
         examined
     }
@@ -253,8 +262,8 @@ impl AliasWords {
     }
 
     /// Put the form's entity in the view if the view holds some parse of the form. If it
-    /// does not, note the form under every name the completion could still supply for a
-    /// piece that is missing.
+    /// does not, note the form under what the completion could still supply to take the
+    /// view further into it.
     fn examine(
         &self,
         form: u32,
@@ -268,26 +277,34 @@ impl AliasWords {
             names,
             entered,
             queue,
-            looked,
+            done,
+            noted,
             waiting,
             reach,
         } = scratch;
-        let state = looked.get(&u64::from(form)).copied();
-        if state == Some(DONE) {
+        if done.contains(&u64::from(form)) {
             return;
         }
         let candidate = &self.forms[form as usize];
         let has = |name: &u64| names.binary_search(name).is_ok() || entered.contains(name);
+        // How far into the form the view reads. The units are in order of where they start,
+        // so the walk stops at the first one that starts beyond what has been reached: a
+        // long form of which the title has little costs little.
         reach.clear();
         reach.resize(candidate.len as usize + 1, false);
         reach[0] = true;
+        let mut furthest = 0u32;
         for unit in &candidate.units {
+            if unit.from > furthest {
+                break;
+            }
             if reach[unit.from as usize] && !reach[unit.to as usize] && unit.names.iter().any(has) {
                 reach[unit.to as usize] = true;
+                furthest = furthest.max(unit.to);
             }
         }
         if reach[candidate.len as usize] {
-            looked.insert(u64::from(form), DONE);
+            done.insert(u64::from(form));
             out.push(dict.get_or_synthetic(&candidate.entity));
             // The entity is in the view, and with it every name a query takes for it. A
             // name the title already carries has had its forms examined.
@@ -300,25 +317,31 @@ impl AliasWords {
             }
             return;
         }
-        if state == Some(WAITING) {
-            // Already noted under every name that could still arrive: pieces only ever
-            // enter the view, so the missing ones are among those missing at the first look.
-            return;
-        }
-        let mut noted = false;
-        for unit in &candidate.units {
-            if unit.names.iter().any(has) {
+        // Only a piece that starts no further than the view has got to can take it further.
+        // Note the form under each such piece that is missing and that the completion could
+        // still supply, once. When one arrives the form is looked at again, from wherever
+        // the view has got to by then.
+        for (at, unit) in candidate.units.iter().enumerate() {
+            if unit.from > furthest {
+                break;
+            }
+            if reach[unit.to as usize] {
                 continue;
             }
+            let pair = (u64::from(form) << 32) | at as u64;
+            if noted.contains(&pair) {
+                continue;
+            }
+            let mut any = false;
             for &name in &unit.names {
                 if self.can_supply(name, dict) {
                     waiting.entry(name).or_default().push(form);
-                    noted = true;
+                    any = true;
                 }
             }
-        }
-        if noted {
-            looked.insert(u64::from(form), WAITING);
+            if any {
+                noted.insert(pair);
+            }
         }
     }
 
@@ -343,7 +366,8 @@ impl AliasScratch {
     fn is_clear(&self) -> bool {
         self.entered.is_empty()
             && self.queue.is_empty()
-            && self.looked.is_empty()
+            && self.done.is_empty()
+            && self.noted.is_empty()
             && self.waiting.is_empty()
     }
 
@@ -354,7 +378,8 @@ impl AliasScratch {
     pub(in crate::normalize) fn held(&self) -> usize {
         self.entered.capacity()
             + self.queue.capacity()
-            + self.looked.capacity()
+            + self.done.capacity()
+            + self.noted.capacity()
             + self.waiting.capacity()
     }
 }

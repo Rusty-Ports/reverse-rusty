@@ -569,3 +569,27 @@ fn resolve_equivalences_unions_overlapping_groups() {
         "aaa and ccc share the merged group (transitive via bbb)"
     );
 }
+
+#[test]
+fn equivalent_names_keep_every_name_of_a_shared_id() {
+    // Against a dictionary that has interned neither, these two names get one synthetic
+    // id. The compiler takes them for one feature; the title side, which goes by name,
+    // must be told both (ADR-205).
+    let (first, second) = ("term:zzterm63356", "term:zzterm98791");
+    let dict = Dict::new();
+    assert_eq!(dict.get_or_synthetic(first), dict.get_or_synthetic(second));
+    let mut vocab = Vocab::new();
+    vocab.add_equivalence(&["zzterm63356", "zzterm98791", "synonym"]);
+    let norm = vocab.to_normalizer().expect("normalizer");
+    let mut dict = Dict::new();
+    let equivalences = vocab.resolve_equivalences(&norm, &dict);
+    dict.set_equivalences(equivalences);
+    let hash = crate::dict::name_hash;
+    for name in [first, second, "term:synonym"] {
+        let class = dict.equivalent_names(hash(name)).expect("a class");
+        for member in [first, second, "term:synonym"] {
+            assert!(class.contains(&hash(member)), "{name} lacks {member}");
+        }
+    }
+    assert!(dict.equivalent_names(hash("term:other")).is_none());
+}

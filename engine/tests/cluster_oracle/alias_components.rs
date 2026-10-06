@@ -207,3 +207,62 @@ fn a_cluster_keeps_every_match_across_a_chain_of_imports() {
         }
     }
 }
+
+#[test]
+fn equivalents_survive_two_names_that_share_a_synthetic_id() {
+    // A cluster's dictionary is frozen, so a name it has not seen gets a synthetic id, and
+    // two names can get the same one. These two do. Both are members of one group with
+    // `synonym`, and the title side has to know every name of the class, not one per id.
+    let (first, second) = ("zzterm63356", "zzterm98791");
+    let dict = reverse_rusty::dict::Dict::new();
+    assert_eq!(
+        dict.get_or_synthetic(&format!("term:{first}")),
+        dict.get_or_synthetic(&format!("term:{second}")),
+        "the test needs two names with one synthetic id"
+    );
+    let queries: Vec<(u64, String)> = vec![
+        (1, format!("{first} deal")),
+        (2, format!("{second} deal")),
+        (3, "special".into()),
+    ];
+    let titles = [
+        "synonym deal".to_string(),
+        "deal synonym".to_string(),
+        format!("{first} deal"),
+        format!("deal {second}"),
+        "deal".to_string(),
+    ];
+    let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+    for &num_shards in &[1usize, 3] {
+        let cfg = ClusterConfig {
+            num_shards,
+            include_broad: true,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("build");
+        for (id, dsl) in &queries {
+            cluster.add_query(*id, dsl).expect("add");
+        }
+        cluster
+            .import_alias_synonyms(&format!("{first}, {second}, synonym"))
+            .expect("import");
+        let before = reads(&cluster, &titles, true);
+        assert!(
+            before[0].contains(&1) && before[0].contains(&2),
+            "K={num_shards}"
+        );
+
+        cluster
+            .import_alias_synonyms(&format!("special => {first} deal\nextra => {second} deal"))
+            .expect("import");
+        let after = reads(&cluster, &titles, true);
+        for ((title, before), after) in titles.iter().zip(&before).zip(&after) {
+            let lost: Vec<&u64> = before.difference(after).collect();
+            assert!(
+                lost.is_empty(),
+                "K={num_shards}: the second import removed {lost:?} from {title:?}"
+            );
+        }
+        assert!(after[0].contains(&3), "K={num_shards}");
+    }
+}

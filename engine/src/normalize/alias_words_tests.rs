@@ -332,6 +332,29 @@ fn a_phrase_inside_a_form_counts_as_a_piece() {
         );
     }
 
+    // When `catalog` is a word of many forms, the long form is keyed on its first words,
+    // and a title that has those only as `big apple` still reaches it: the key holds the
+    // phrase over that stretch as well as the words.
+    let vocab = alias_vocab(
+        "new york => big apple\nnyc => new york catalog\nzc1 => zza catalog\n\
+         zc2 => zzb catalog\nzc3 => zzc catalog\nzc4 => zzd catalog",
+        &[],
+    );
+    let norm = vocab.to_normalizer().expect("normalizer");
+    let words = norm.alias_words.as_ref().expect("alias words");
+    assert_eq!(words.forms_keyed_on("term:catalog"), 0);
+    assert_eq!(words.forms_keyed_on("term:new_york"), 1);
+    assert!(positive_under(
+        &vocab,
+        "big seasonal apple catalog",
+        "term:new_york_catalog"
+    ));
+    assert!(!positive_under(
+        &vocab,
+        "big catalog",
+        "term:new_york_catalog"
+    ));
+
     // A phrase that is not an alias is a piece too, where it stands whole.
     let mut vocab = crate::vocab::Vocab::new();
     vocab.add_phrase(&["north", "star"], "entity:north_star", FeatureKind::Entity);
@@ -356,6 +379,43 @@ fn a_phrase_inside_a_form_counts_as_a_piece() {
         "term:north_star_lamp"
     ));
     assert!(!positive_under(&vocab, "lamp", "term:north_star_lamp"));
+}
+
+#[test]
+fn the_pieces_of_a_reading_join_end_to_end() {
+    // Two phrases inside a form that overlap each other: `za zb` and `zb zc zd` in
+    // `za zb zc zd`. A reading uses one or the other, with the words that are left. A title
+    // that has both phrases, each under its other name, has no reading: the two do not
+    // join, and it has none of the words.
+    let vocab = alias_vocab("zp => za zb\nzq => zb zc zd\nzlong => za zb zc zd", &[]);
+    let entity = "term:za_zb_zc_zd";
+    assert!(positive_under(&vocab, "zp zc zd", entity));
+    assert!(positive_under(&vocab, "zd zc zp", entity));
+    assert!(positive_under(&vocab, "za zq", entity));
+    assert!(positive_under(&vocab, "zd zc zb za", entity));
+    assert!(!positive_under(&vocab, "zp zq", entity));
+    assert!(!positive_under(&vocab, "zq zp zc", entity));
+    assert!(!positive_under(&vocab, "zp zd", entity));
+}
+
+#[test]
+fn a_very_long_form_is_built_and_carried_like_any_other() {
+    // Nothing bounds the length of an alias form. Two thousand tokens are read in one scan
+    // for the phrases inside them, and a title of which the form has little costs little.
+    let tokens: Vec<String> = (0..2_000).map(|at| format!("zw{at}")).collect();
+    let long = tokens.join(" ");
+    let norm = build(|b| {
+        b.add_phrase(&["zw10", "zw11"], "entity:pair", FeatureKind::Entity);
+        b.add_alias_form(&long);
+    });
+    let entity = format!("term:{}", tokens.join("_"));
+    let mut shuffled = tokens.clone();
+    shuffled.reverse();
+    assert!(positive_has(&norm, &shuffled.join(" "), &entity));
+    let mut missing = shuffled.clone();
+    missing.retain(|token| token != "zw1500");
+    assert!(!positive_has(&norm, &missing.join(" "), &entity));
+    assert!(!positive_has(&norm, "zw0 zw1 zw2", &entity));
 }
 
 #[test]

@@ -65,7 +65,9 @@ holds every word.
    still holds nothing outside its fingerprint. The equivalents are read where the compiler
    reads them: `Vocab::resolve_equivalences` now resolves each class by feature name as well
    as by feature id, and the two are installed on the dictionary together. A title is widened
-   through the classes of whatever dictionary it is matched against.
+   through the classes of whatever dictionary it is matched against. Two names that share a
+   feature id (a synthetic id is a hash, ADR-046) are one feature to the compiler, and the
+   class by name keeps both.
 4. **One place.** Every title path builds its positive view in `match_features_dual` when a
    multi-word alias is active. Every feature enters that view through one function, which also
    notes the feature's name. When the view is complete, the forms it holds a reading of add
@@ -77,8 +79,11 @@ holds every word.
    `wireless`, or that gets `wireless` from a form `wire less`; a title that names a model
    looks at that model's form. A name enters the view once, from the title or from a
    completed form, and one thing is done with it: the forms keyed on it are examined, and so
-   are the forms an earlier look found waiting on it. A form that lacks a piece only another
-   form can supply waits on it, and is noted once. What the completion remembers for a title
+   are the forms an earlier look found waiting on it. An examination walks into the form only
+   as far as the view reads it, and a form that then lacks a piece only another form can
+   supply waits on that piece, noted once. Nothing bounds the length of an alias form, so
+   building one is a single scan of its text for the phrases inside it, and choosing its key
+   is one sweep. What the completion remembers for a title
    is empty until the title touches a form, so a scratch made for one title (cluster routing
    makes one per request) costs nothing to size or clear, whatever the number of forms. A
    title's names are reduced to the distinct ones first and compared by a 64-bit hash, so
@@ -153,8 +158,10 @@ test pins the present behaviour (`a_form_that_cuts_through_an_earlier_phrase_can
   the canonical view, and restored by an overlapping phrase; not for a missing word, and not
   through an unrelated phrase; the canonical view is unchanged; a piece counts under what a
   query takes it for, through classes that share a member, and not when the dictionary holds
-  no such class; a phrase inside a form is a piece, alias or not; no multi-word alias, no
-  change.
+  no such class; a phrase inside a form is a piece, alias or not, and is part of the form's
+  key; two phrases that overlap inside a form do not join into a reading; a form of two
+  thousand tokens is built and carried like any other; no multi-word alias, no change.
+- `vocab/tests.rs`: the class by name keeps every name of an id two names share.
 - `normalize/alias_words_tests/completion.rs` counts the work: a title with the shared word
   of five thousand forms examines none; a chain of two thousand forms is examined once each;
   a word repeated fifty thousand times is looked at once; an entity that ten thousand forms
@@ -174,13 +181,15 @@ test pins the present behaviour (`a_form_that_cuts_through_an_earlier_phrase_can
   `nycat => ny catalog`), a form over a single-word alias or a declared equivalence, and a
   form that contains an earlier alias (`new york => big apple`, then `nyc => new york
   catalog`, in either order) remove no match; and the shape under "What remains" is pinned.
-- `tests/independent_oracle/aliases.rs`: the engine equals the independent reference matcher,
-  which applies the rule with plain loops and shares no code with the engine, with no false
-  negative and no false positive, on fixed and randomized corpora, including words carried
-  through equivalences, forms that contain a phrase, and a number typed by its context.
+- `tests/independent_oracle/alias_forms.rs` and `aliases.rs`: the engine equals the
+  independent reference matcher, which applies the rule with plain loops and shares no code
+  with the engine, with no false negative and no false positive, on fixed and randomized
+  corpora, including words carried through equivalences, forms that contain a phrase or two
+  overlapping ones, and a number typed by its context.
 - `tests/cluster_oracle/alias_components.rs`: the same through a cluster rebuild and live
   writes, and through chains of imports, at one, three and eight shards, in both scopes,
-  equal to a single engine.
+  equal to a single engine; and a group whose members share a synthetic id in the cluster's
+  frozen dictionary.
 - `tests/oracle/alias_feedback.rs` and `alias_discovery.rs`: a pair with a multi-word form,
   activated by feedback and by the operator.
 

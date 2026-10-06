@@ -240,18 +240,6 @@ impl NormalizerBuilder {
             .filter(|(_, entry)| entry.mode == PhraseMode::Alias)
             .map(|(pattern, entry)| (pattern.clone(), entry.feature.clone()))
             .collect();
-        // Every phrase, of any mode, by its pattern: what a stretch of a form's text
-        // compiled to in a query before the form existed.
-        let phrase_features: std::collections::HashMap<String, String> =
-            if alias_patterns.is_empty() {
-                std::collections::HashMap::new()
-            } else {
-                self.phrase_patterns
-                    .iter()
-                    .zip(&self.phrase_entries)
-                    .map(|(pattern, entry)| (pattern.clone(), entry.feature.clone()))
-                    .collect()
-            };
         let mut norm = Normalizer {
             automaton,
             phrase_entries: self.phrase_entries,
@@ -296,20 +284,28 @@ impl NormalizerBuilder {
                     });
                 }
                 // A phrase the vocabulary has for several of the words, short of the form
-                // itself: a query compiled those words to the phrase's feature.
-                for from in 0..words.len() {
-                    for to in from + 2..=words.len() {
-                        if from == 0 && to == words.len() {
-                            continue;
-                        }
-                        if let Some(feature) = phrase_features.get(&words[from..to].join(" ")) {
+                // itself: a query compiled those words to the phrase's feature. The
+                // occurrences are read off the pattern in one scan.
+                if let Some(overlap) = norm.phrase_overlap.as_ref() {
+                    let mut starts: Vec<usize> = Vec::with_capacity(words.len());
+                    let mut at = 0;
+                    for word in &words {
+                        starts.push(at);
+                        at += word.len() + 1;
+                    }
+                    overlap.occurrences(&pattern, &mut |start, tokens, feature| {
+                        let Ok(from) = starts.binary_search(&start) else {
+                            return;
+                        };
+                        let to = from + tokens as usize;
+                        if to - from >= 2 && to <= words.len() && to - from < words.len() {
                             units.push(super::core::UnitSpec {
                                 from,
                                 to,
-                                names: vec![feature.clone()],
+                                names: vec![feature.to_string()],
                             });
                         }
-                    }
+                    });
                 }
                 super::core::FormSpec {
                     entity,

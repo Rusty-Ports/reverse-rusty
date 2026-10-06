@@ -46,7 +46,8 @@ impl Normalizer {
 
     /// [`compile_features_readonly`](Self::compile_features_readonly) with each feature's
     /// name, as its [`name_hash`]: what an equivalence group's form resolves to, for both the
-    /// compiler and the title side (ADR-205). Sorted and distinct by feature.
+    /// compiler and the title side (ADR-205). Sorted and distinct; two names that share a
+    /// feature id are both kept.
     pub(crate) fn compile_named_readonly(
         &self,
         text: &str,
@@ -59,7 +60,7 @@ impl Normalizer {
             named.push((dict.get_or_synthetic(name), name_hash(name)));
         });
         named.sort_unstable();
-        named.dedup_by_key(|(feature, _)| *feature);
+        named.dedup();
         named
     }
 

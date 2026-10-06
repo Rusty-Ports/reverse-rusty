@@ -100,6 +100,25 @@ impl PhraseOverlap {
         }
     }
 
+    /// Hand `visit` every word-boundary-aligned phrase occurrence in the single-spaced
+    /// `text`: the byte offset it starts at, the number of tokens it spans, and its feature
+    /// name. One scan, so the work follows the text and what occurs in it.
+    pub(in crate::normalize) fn occurrences(
+        &self,
+        text: &str,
+        visit: &mut dyn FnMut(usize, u32, &str),
+    ) {
+        let bytes = text.as_bytes();
+        for m in self.automaton.find_overlapping_iter(text) {
+            let (s, e) = (m.start(), m.end());
+            let ok_start = s == 0 || bytes[s - 1] == b' ';
+            let ok_end = e == text.len() || bytes[e] == b' ';
+            if ok_start && ok_end {
+                visit(s, self.token_lens[m.value()], &self.entries[m.value()].0);
+            }
+        }
+    }
+
     /// Emit the entity name of every word-boundary-aligned overlapping phrase match in `text`.
     fn scan_overlapping(&self, text: &str, add: &mut dyn FnMut(&str)) {
         let bytes = text.as_bytes();
