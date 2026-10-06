@@ -192,7 +192,7 @@ live updates : 50,000 in ~0.065 s  ≈ 750,000 updates/sec/core   visibility: im
 
 That is the memtable append alone. A server publishes a snapshot after every write and holds it,
 which makes each write copy the feature dictionary and the memtable: with that included, a single
-write costs 0.3 to 2.5 ms at 200k queries and 1.6 to 3.7 ms at 1M on the 2026-10-06 capture (see
+write costs 0.3 to 2.5 ms at 200k queries and 1.5 to 3.7 ms at 1M on the 2026-10-06 capture (see
 [`benchmark-results.txt`](benchmark-results.txt) and ADR-016's dated outcome).
 
 The shipped durable path is log-first, applies the new version/tombstone, and publishes a new

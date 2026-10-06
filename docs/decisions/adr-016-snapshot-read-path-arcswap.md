@@ -58,10 +58,10 @@ shared and `Arc::make_mut` copies them: the whole feature dictionary and the who
 write, under the engine mutex.
 
 Measured with the snapshot held (`snapbench`, Apple M4 Max, 2026-10-06): a PUT and publish costs
-0.3 ms on a 200k-query corpus with an empty memtable and 2.5 ms with 99,000 rows in it; at 1M
-queries, 1.6 ms and 3.7 ms. That is a few hundred to a few thousand single writes per second,
+0.3 ms on a 200k-query corpus with an empty memtable and 2.5 ms with 100,000 rows in it; at 1M
+queries, 1.5 ms and 3.7 ms. That is a few hundred to a few thousand single writes per second,
 and it grows with the vocabulary and the memtable. An upsert or delete that tombstones a row of
-an in-memory base segment copies that whole segment (26 ms and 22 ms at 1M); on mmap segments it
+an in-memory base segment copies that whole segment (27 ms and 23 ms at 1M); on mmap segments it
 copies the liveness overlay only. The full capture is in
 [`benchmark-results.txt`](../performance/benchmark-results.txt).
 

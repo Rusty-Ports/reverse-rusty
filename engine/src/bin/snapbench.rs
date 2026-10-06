@@ -48,21 +48,27 @@ fn main() {
     let norm = Normalizer::default_vocab().expect("default vocabulary");
     // With a data directory the base segments are mmap-backed, as on a server started with
     // `--data-dir`; without one they are in-memory segments, which a write that tombstones a
-    // base row copies whole.
-    let data_dir = args.get(3).map(std::path::PathBuf::from);
-    let mut eng = match &data_dir {
-        Some(dir) => {
-            let _ = std::fs::remove_dir_all(dir);
-            Engine::with_config(
-                norm,
-                reverse_rusty::config::EngineConfig {
-                    data_dir: Some(dir.clone()),
-                    ..Default::default()
-                },
-            )
+    // base row copies whole. The engine's files go in a subdirectory this run creates and
+    // removes; nothing else under the given directory is touched.
+    let data_dir = args.get(3).map(|parent| {
+        let owned = std::path::Path::new(parent).join(format!("snapbench-{}", std::process::id()));
+        if owned.exists() {
+            eprintln!("refusing to reuse {}", owned.display());
+            std::process::exit(2);
         }
-        None => Engine::new(norm),
-    };
+        std::fs::create_dir_all(&owned).expect("create the benchmark's data directory");
+        owned
+    });
+    let mut eng = Engine::with_config(
+        norm,
+        reverse_rusty::config::EngineConfig {
+            data_dir: data_dir.clone(),
+            // No automatic flush: each leg measures the memtable size it names, whatever the
+            // iteration count.
+            memtable_flush_threshold: usize::MAX,
+            ..Default::default()
+        },
+    );
     let tb = Instant::now();
     eng.build_from_queries(&data.queries);
     eprintln!(
@@ -70,6 +76,11 @@ fn main() {
         eng.num_queries(),
         tb.elapsed().as_secs_f64()
     );
+
+    if data_dir.is_some() && !(eng.persistence_healthy() && eng.num_segments() > 1) {
+        eprintln!("the durable engine did not build: its storage is not healthy");
+        std::process::exit(2);
+    }
 
     println!("================ SNAPSHOT PUBLISH COST ================");
     println!("corpus              : {} queries", eng.num_queries());
@@ -107,18 +118,14 @@ fn main() {
     let t = Instant::now();
     for i in 0..iters {
         let logical = 10_000_000 + i as u64;
-        eng.insert_live(
-            "1994 north star wireless mouse limited pro -damaged",
-            logical,
-            1,
-        );
+        put(&mut eng, logical);
         std::hint::black_box(eng.snapshot());
     }
     report("PUT + publish (snapshot dropped)", t, iters);
     let t = Instant::now();
     for i in 0..iters {
         let logical = 10_000_000 + i as u64; // delete the ones we just inserted
-        let _ = eng.delete_by_logical_id(logical);
+        eng.delete_by_logical_id(logical).expect("delete");
         std::hint::black_box(eng.snapshot());
     }
     report("DELETE + publish (snapshot dropped)", t, iters);
@@ -128,7 +135,7 @@ fn main() {
     // dict and memtable are shared with it, and `Arc::make_mut` copies them (RR-016).
     println!("--- published snapshot held, as the server holds it ---");
     let mut published = Arc::new(eng.snapshot());
-    for memtable_rows in [0usize, 10_000, 50_000, 99_000] {
+    for memtable_rows in [0usize, 10_000, 50_000, 100_000] {
         if memtable_rows > 0 {
             // Fill the memtable to this many live rows without paying the copy per row.
             drop(std::mem::replace(
@@ -137,21 +144,13 @@ fn main() {
             ));
             let have = eng.metrics().memtable_entries;
             for i in have..memtable_rows {
-                eng.insert_live(
-                    "1994 north star wireless mouse limited pro -damaged",
-                    30_000_000 + i as u64,
-                    1,
-                );
+                put(&mut eng, 30_000_000 + i as u64);
             }
             published = Arc::new(eng.snapshot());
         }
         let t = Instant::now();
         for i in 0..iters {
-            eng.insert_live(
-                "1994 north star wireless mouse limited pro -damaged",
-                40_000_000 + (memtable_rows * 1_000 + i) as u64,
-                1,
-            );
+            put(&mut eng, 40_000_000 + (memtable_rows * 1_000 + i) as u64);
             published = Arc::new(eng.snapshot());
         }
         report(
@@ -172,13 +171,14 @@ fn main() {
     let (replaced, deleted) = base_ids.split_at(iters.min(base_ids.len() / 2));
     let t = Instant::now();
     for id in replaced {
-        let _ = eng.try_upsert_live("1994 north star wireless mouse limited pro", *id, 2);
+        eng.try_upsert_live("1994 north star wireless mouse limited pro", *id, 2)
+            .expect("upsert");
         published = Arc::new(eng.snapshot());
     }
     report("UPSERT of a base row + publish", t, replaced.len());
     let t = Instant::now();
     for id in deleted {
-        let _ = eng.delete_by_logical_id(*id);
+        eng.delete_by_logical_id(*id).expect("delete");
         published = Arc::new(eng.snapshot());
     }
     report("DELETE of a base row + publish", t, deleted.len());
@@ -188,11 +188,7 @@ fn main() {
     let pinned = Arc::clone(&published);
     let t = Instant::now();
     for i in 0..iters {
-        eng.insert_live(
-            "1994 north star wireless mouse limited pro -damaged",
-            50_000_000 + i as u64,
-            1,
-        );
+        put(&mut eng, 50_000_000 + i as u64);
         published = Arc::new(eng.snapshot());
     }
     report("PUT + publish, one PIT open", t, iters);
@@ -213,7 +209,7 @@ fn main() {
                 )
             })
             .collect();
-        eng.bulk_ingest(&batch);
+        eng.try_bulk_ingest(&batch).expect("bulk load");
         std::hint::black_box(eng.snapshot());
     }
     let per_bulk = t.elapsed().as_secs_f64() / bulk_iters as f64;
@@ -223,15 +219,25 @@ fn main() {
         bulk_n as f64 / per_bulk
     );
 
-    if let Some(dir) = &data_dir {
+    if let Some(owned) = &data_dir {
         drop(eng);
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(owned);
     }
     println!("======================================================");
     println!(
         "ideal: snapshot()/PUT/DELETE publish should be ~independent of corpus size\n\
          (O(delta), not O(total)). Re-run at multiple --num_queries to see scaling."
     );
+}
+
+/// One live insert of a new id. A write that fails would make the timing meaningless.
+fn put(eng: &mut Engine, logical: u64) {
+    eng.try_insert_live(
+        "1994 north star wireless mouse limited pro -damaged",
+        logical,
+        1,
+    )
+    .expect("insert");
 }
 
 fn report(label: &str, started: Instant, ops: usize) {
