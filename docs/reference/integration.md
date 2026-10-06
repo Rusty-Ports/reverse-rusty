@@ -78,9 +78,13 @@ When the result is larger than a page, use one of these, in this order of prefer
    exact total and a checksum, and works on every topology including a remote coordinator. Treat
    the result as complete only after the completion record.
 2. **A point in time with a cursor**, [`POST /v2/_pit`](api/percolate/pit.md). Send the first
-   `/v2/_search` with `"pit": {"id": ...}`, then repeat the same request with the `next_cursor`
-   of each response as `"cursor"` until none is returned. Pages come from one frozen snapshot,
-   with no gaps and no repeats. Not available on a coordinator with remote shards (501).
+   `/v2/_search` with `"pit": {"id": ...}`. For each later page send the same document, scope,
+   rank and filter with `"cursor"` set to the previous response's `next_cursor` **in place of**
+   `pit` (the two together are a 400), until a response has no `next_cursor`. Pages come from
+   one frozen snapshot, with no gaps and no repeats. Ask for ids only (`"_source": false`): a
+   point in time freezes the matches, not their stored text, so a page whose hit was deleted
+   meanwhile fails with `source_unavailable` if it asks for sources. Not available on a
+   coordinator with remote shards (501).
 3. **One request large enough to hold everything**: `/_search` with `size` at least
    `hits.total`. On a standalone server one request reads one snapshot, so the set is
    consistent. On a coordinator the shards are generally read at slightly different moments,
