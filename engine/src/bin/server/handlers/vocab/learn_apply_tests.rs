@@ -168,9 +168,14 @@ async fn own_corpus_learning_applies_synchronously_and_is_observable() {
     let engine = state.engine.lock();
     assert_matches(&engine, "vertex package", 1);
     assert!(!engine.has_stale_segments());
-    assert!(engine
-        .vocab()
-        .is_some_and(|vocab| vocab.synonyms().iter().any(|entry| entry.token == "pkg")));
+    // Installed as an equivalence (ADR-202), not as a collapse synonym.
+    assert!(engine.vocab().is_some_and(|vocab| {
+        vocab.synonyms().is_empty()
+            && vocab
+                .equivalences()
+                .iter()
+                .any(|group| group.iter().any(|form| form == "pkg"))
+    }));
     drop(engine);
     assert!(
         state.snapshot.load().vocab().is_some(),
@@ -272,6 +277,10 @@ async fn learning_controls_are_strict_and_bounded() {
         "/_vocab/learn_and_apply?corpus_phrases=true&npmi_iterations=0",
         "/_vocab/learn_and_apply?corpus_phrases=true&npmi_iterations=9",
         "/_vocab/learn_and_apply?learn_equivalences=maybe",
+        "/_vocab/learn_and_apply?anyof_mode=maybe",
+        // The two controls for one question, disagreeing.
+        "/_vocab/learn_and_apply?anyof_mode=collapse&learn_equivalences=true",
+        "/_vocab/learn_and_apply?anyof_mode=expansion&learn_equivalences=false",
     ] {
         let (status, headers, bytes) = send(
             &state,
@@ -433,4 +442,45 @@ async fn durable_commit_failure_is_live_but_not_acknowledged() {
 
     drop(state);
     std::fs::remove_dir_all(root).expect("remove temp root");
+}
+
+/// Collapse is still available, and only when the request asks for it by either control.
+/// With neither, the learned relationship is installed as an equivalence (ADR-202).
+#[tokio::test]
+async fn collapse_rules_are_installed_only_on_request() {
+    for (uri, collapse) in [
+        ("/_vocab/learn_and_apply", false),
+        ("/_vocab/learn_and_apply?anyof_mode=expansion", false),
+        ("/_vocab/learn_and_apply?learn_equivalences=true", false),
+        (
+            "/_vocab/learn_and_apply?anyof_mode=expansion&learn_equivalences=true",
+            false,
+        ),
+        ("/_vocab/learn_and_apply?anyof_mode=collapse", true),
+        ("/_vocab/learn_and_apply?learn_equivalences=false", true),
+    ] {
+        let state = memory_state();
+        let (status, _, bytes) = send(
+            &state,
+            Method::POST,
+            uri,
+            Body::empty(),
+            VOCAB_LEARN_APPLY_BODY_LIMIT,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{uri}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let engine = state.engine.lock();
+        let vocab = engine.vocab().expect("a vocabulary was installed");
+        assert_eq!(!vocab.synonyms().is_empty(), collapse, "{uri}: synonyms");
+        assert_eq!(
+            vocab.equivalences().is_empty(),
+            collapse,
+            "{uri}: equivalences"
+        );
+    }
 }

@@ -33,13 +33,29 @@ Controls are strict query parameters:
 - `corpus_phrases=true` also self-derives entity phrases from the live text via NPMI corpus phrase
   induction (ADR-053). Only then may `npmi_min_count` (default 3, minimum 1), `npmi_tau` (default
   0.30, finite and within `[-1, 1]`), and `npmi_iterations` (default 2, range `1..=8`) be sent.
-- `learn_equivalences=true` learns any-of relationships as widening equivalence groups (ADR-054)
-  instead of collapse synonyms. It can be combined with phrase induction.
+- `anyof_mode` says how a learned any-of relationship is applied (ADR-202). `expansion`, the
+  default, installs equivalence groups (ADR-054): a query that names one member also accepts the
+  others. `collapse` installs collapse synonyms and phrases (ADR-015). Either can be combined
+  with phrase induction. `learn_equivalences=true|false` is the older spelling of
+  `expansion|collapse`; sending both with different meanings is a 400.
 
-Any-of equivalence expansion is structurally monotone: it can add matches but not remove them.
+Expansion is structurally monotone: it can add matches but not remove them. A form that does
+not resolve to one feature (a multi-word member with no phrase) is skipped; use the
+[alias routes](alias-learn-and-apply.md) for multi-word relationships.
+
+> **`anyof_mode=collapse` can remove matches that stored queries had.** A collapse rule
+> rewrites both the title and the query to one canonical feature. After learning `pkg` → `new`,
+> the query `widget -new` also refuses titles that say `pkg`. After learning `new in box` as a
+> phrase, the title `widget new in box` no longer matches `box widget`. Ask for collapse only
+> when the stored queries are meant to be read under the new rules.
+
 Induced phrases preserve component emissions and the lossless cover for the active feature model,
 but a query written in the induced phrase form can intentionally tighten to adjacency; phrase
-induction is therefore opt-in. With neither opt-in, behavior is any-of synonym learning only.
+induction is therefore opt-in. With no control, behavior is any-of learning by expansion only.
+
+Collapse rules installed by an earlier call stay installed. `GET /_vocab` lists them under
+`synonyms`, and under `phrases` without `additive`; remove the ones that are not wanted and
+`PUT /_vocab`.
 
 ```bash
 curl -X POST 'localhost:9200/_vocab/learn_and_apply?corpus_phrases=true&npmi_min_count=3'

@@ -2,7 +2,7 @@
 
 > [Vocabulary & alias APIs](../vocab.md) · [REST API hub](../../api.md)
 
-Send raw query text to discover synonym relationships from any-of groups. Returns the learned
+Send raw query text to discover relationships between the forms of any-of groups. Returns the learned
 vocabulary without applying it — review and then `PUT /_vocab` to use it. This is a native
 review-first API: Elasticsearch manages named Solr-rule synonym sets and OpenSearch configures
 synonyms through analyzer token filters, but neither surface learns this vocabulary document from a
@@ -19,24 +19,30 @@ curl -X POST localhost:9200/_vocab/learn \
 
 ```json
 {
-  "synonyms": [
-    {"token": "pkg", "canonical": "term:package", "kind": "generic"}
-  ],
+  "synonyms": [],
   "phrases": [],
-  "equivalences": [],
+  "equivalences": [["package", "pkg"]],
   "punctuation": [],
   "aliases": {"entries": []}
 }
 ```
 
-The `min_count` parameter (default: 2) controls how many times a synonym pair must appear across
+By default a learned relationship is reported as an **equivalence group**, applied by expansion
+(ADR-054, ADR-202): a query that names one member also accepts the others, and no stored query
+loses a match. Add `"anyof_mode": "collapse"` to preview collapse synonyms and phrases instead
+(`{"token": "pkg", "canonical": "term:package", "kind": "generic"}`); those rewrite both sides to
+one feature and can remove matches stored queries had, as the
+[apply route](learn-and-apply.md) explains. The preview and the apply route take the same
+control, so a preview shows what applying would install.
+
+The `min_count` parameter (default: 2) controls how many times a pair must appear across
 different queries before it is included. It must be at least 1; higher values reduce noise. Query
 IDs must be unique, because a repeated ID is not evidence from a different query. See
 [`dsl.md`](../../dsl.md#vocabulary) for how vocabulary affects matching.
 
 **Opt-in NPMI corpus phrase induction (ADR-053).** Add `"corpus_phrases": true` to ALSO induce
 multi-token entity **phrases** (e.g. `north star` → `north_star`) from the supplied query text via NPMI
-collocation mining, on top of the any-of synonyms. Phrases only — never aliases. They are applied
+collocation mining, on top of the any-of relationships. Phrases only — never aliases. They are applied
 **additively** (a match emits the phrase feature AND keeps the component features), so a query
 referencing a component never loses a candidate — important because this is a recall-first
 candidate generator. A phrase-*form* query does tighten to requiring the adjacent phrase; for genuine
@@ -44,9 +50,9 @@ entities, which appear adjacent in real titles, that is negligible — but it is
 reviewable. Explicit DSL quotes use the same analyzed adjacency contract; see
 [`dsl.md#quoted-phrases`](../../dsl.md#quoted-phrases) and ADR-120. Tunable:
 `npmi_min_count` (min adjacent co-occurrence, default 3), `npmi_tau` (binding-strength threshold,
-default 0.30), `npmi_iterations` (bigram→trigram passes, default 2). Absent ⇒ any-of learning only,
-exactly as before. Add `"learn_equivalences": true` to instead learn the any-of groups as
-**equivalence groups** applied via FN-safe expansion (ADR-054) rather than collapse synonyms.
+default 0.30), `npmi_iterations` (bigram→trigram passes, default 2). Absent ⇒ any-of learning only.
+`"learn_equivalences": true|false` is the older spelling of `"anyof_mode": "expansion"|"collapse"`;
+sending both with different meanings is a 400.
 
 ```bash
 curl -X POST localhost:9200/_vocab/learn \

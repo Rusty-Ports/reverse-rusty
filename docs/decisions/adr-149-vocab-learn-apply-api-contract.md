@@ -83,3 +83,11 @@ fail-loud durable degradation with coherent snapshot publication. Coordinator te
 response identity, admission behavior, validation, metrics, installed vocabulary, and matching
 outcome over a real in-process multi-shard cluster. Existing standalone and cluster differential
 oracles continue to prove synonym, phrase, and equivalence behavior after learn-and-apply.
+
+## Later outcome — 2026-10-06
+
+The route's default changed ([ADR-202](adr-202-the-default-learner-expands.md)): with no mode it
+installs equivalences, and `anyof_mode=collapse` asks for the collapse rules this ADR describes
+as the default. `learn_equivalences` remains as an alias. The "safe under symmetry" argument
+under "Safety and proof" covers the lossless cover under the new vocabulary, not the matches of
+queries stored before it.

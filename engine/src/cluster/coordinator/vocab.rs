@@ -141,18 +141,19 @@ impl ClusterEngine {
         Ok(rebuilt)
     }
 
-    /// Learn alias/synonym rules from the cluster's OWN live corpus (ADR-015 any-of
-    /// learning) and apply them (ADR-046 mechanism 2). A synonym appearing in at least
-    /// `min_count` any-of groups (e.g. `(new,pkg)` ⇒ `pkg → new`) is merged UNDER
-    /// the current vocabulary — a previously *declared* alias wins over a learned one —
-    /// and the cluster is rebuilt via [`Self::set_vocab`]. Returns the number of queries
+    /// Learn relationships from the cluster's OWN live corpus and apply them (ADR-046
+    /// mechanism 2). A pair of forms seen together in at least `min_count` any-of groups
+    /// (e.g. `(new,pkg)`) becomes an equivalence applied by expansion (ADR-054, ADR-202): no
+    /// stored query loses a match. It is merged UNDER the current vocabulary — a previously
+    /// *declared* rule wins over a learned one — and the cluster is rebuilt via
+    /// [`Self::set_vocab`]. Returns the number of queries
     /// rebuilt. Refuses a non-local cluster (the gather can't enumerate a remote shard).
     ///
     /// On-demand: a future step can drive this from compaction's "improve" phase (the
     /// LSM-shaped background re-materialize); this is the explicit trigger.
     ///
-    /// A thin wrapper over [`learn_and_apply_with`](Self::learn_and_apply_with) with NPMI
-    /// corpus phrase induction disabled — behaviorally unchanged.
+    /// A thin wrapper over [`learn_and_apply_with`](Self::learn_and_apply_with) with the
+    /// default configuration: expansion, no NPMI phrase induction.
     pub fn learn_and_apply(&mut self, min_count: usize) -> Result<usize, ShardError> {
         self.learn_and_apply_with(&CorpusLearnConfig {
             anyof_min_count: min_count,

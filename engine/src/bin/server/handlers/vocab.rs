@@ -42,7 +42,7 @@ pub(crate) fn build_corpus_config(
     npmi_tau: Option<f64>,
     npmi_min_count: Option<usize>,
     npmi_iterations: Option<usize>,
-    learn_equivalences: bool,
+    anyof_mode: reverse_rusty::vocab::AnyOfLearnMode,
 ) -> reverse_rusty::vocab::CorpusLearnConfig {
     let d = reverse_rusty::vocab::CorpusLearnConfig::default();
     reverse_rusty::vocab::CorpusLearnConfig {
@@ -51,9 +51,88 @@ pub(crate) fn build_corpus_config(
         npmi_tau: npmi_tau.unwrap_or(d.npmi_tau),
         npmi_min_count: npmi_min_count.unwrap_or(d.npmi_min_count),
         npmi_iterations: npmi_iterations.unwrap_or(d.npmi_iterations),
-        learn_equivalences,
+        anyof_mode,
+    }
+}
+
+/// `anyof_mode` as a request control: how what the any-of groups teach is applied.
+#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AnyOfModeParam {
+    Expansion,
+    Collapse,
+}
+
+/// The any-of mode a learn request asks for (ADR-202): `anyof_mode`, or the older
+/// `learn_equivalences` boolean it replaces (`true` is expansion, `false` is collapse), or
+/// expansion when the request names neither. A request that sends both and has them
+/// disagree is refused, not guessed at.
+pub(crate) fn resolve_anyof_mode(
+    anyof_mode: Option<AnyOfModeParam>,
+    learn_equivalences: Option<bool>,
+) -> Result<reverse_rusty::vocab::AnyOfLearnMode, String> {
+    use reverse_rusty::vocab::AnyOfLearnMode;
+    let named = anyof_mode.map(|mode| match mode {
+        AnyOfModeParam::Expansion => AnyOfLearnMode::Expansion,
+        AnyOfModeParam::Collapse => AnyOfLearnMode::Collapse,
+    });
+    let from_flag = learn_equivalences.map(|expansion| {
+        if expansion {
+            AnyOfLearnMode::Expansion
+        } else {
+            AnyOfLearnMode::Collapse
+        }
+    });
+    match (named, from_flag) {
+        (Some(named), Some(flag)) if named != flag => Err(
+            "`anyof_mode` and `learn_equivalences` disagree; send `anyof_mode` alone".to_string(),
+        ),
+        (Some(mode), _) | (None, Some(mode)) => Ok(mode),
+        (None, None) => Ok(AnyOfLearnMode::default()),
     }
 }
 
 #[cfg(test)]
 mod read_tests;
+
+#[cfg(test)]
+mod anyof_mode_tests {
+    use super::{resolve_anyof_mode, AnyOfModeParam};
+    use reverse_rusty::vocab::AnyOfLearnMode;
+
+    #[test]
+    fn a_request_that_names_no_mode_learns_by_expansion() {
+        assert_eq!(
+            resolve_anyof_mode(None, None),
+            Ok(AnyOfLearnMode::Expansion)
+        );
+    }
+
+    #[test]
+    fn either_control_selects_the_mode_and_a_disagreement_is_refused() {
+        use AnyOfModeParam::{Collapse, Expansion};
+        assert_eq!(
+            resolve_anyof_mode(Some(Collapse), None),
+            Ok(AnyOfLearnMode::Collapse)
+        );
+        assert_eq!(
+            resolve_anyof_mode(Some(Expansion), None),
+            Ok(AnyOfLearnMode::Expansion)
+        );
+        // The older boolean: true asked for equivalences, false for collapse synonyms.
+        assert_eq!(
+            resolve_anyof_mode(None, Some(true)),
+            Ok(AnyOfLearnMode::Expansion)
+        );
+        assert_eq!(
+            resolve_anyof_mode(None, Some(false)),
+            Ok(AnyOfLearnMode::Collapse)
+        );
+        assert_eq!(
+            resolve_anyof_mode(Some(Collapse), Some(false)),
+            Ok(AnyOfLearnMode::Collapse)
+        );
+        assert!(resolve_anyof_mode(Some(Collapse), Some(true)).is_err());
+        assert!(resolve_anyof_mode(Some(Expansion), Some(false)).is_err());
+    }
+}

@@ -67,16 +67,14 @@ async fn vocabulary_learning_uses_the_strict_caller_corpus_contract_in_cluster_m
         "no-store"
     );
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("learned vocab");
-    assert_eq!(body["synonyms"].as_array().expect("synonyms").len(), 1);
-    assert_eq!(body["synonyms"][0]["token"], "pkg");
-    assert!(
-        body["synonyms"]
-            .as_array()
-            .expect("synonyms")
-            .iter()
-            .all(|entry| entry["token"] != "uniquor"),
-        "the dry run must not substitute the cluster's stored corpus"
+    // The default applies what it learns by expansion (ADR-202). One group, from the
+    // caller's corpus only: nothing from the cluster's stored queries.
+    assert_eq!(
+        body["equivalences"],
+        serde_json::json!([["package", "pkg"]]),
+        "the dry run must not substitute the cluster's stored corpus: {body}"
     );
+    assert!(body["synonyms"].as_array().is_none_or(Vec::is_empty));
 
     let (status, headers, bytes) =
         send_raw(&state, req("POST", "/_vocab/learn", &serde_json::json!({}))).await;
@@ -149,9 +147,13 @@ async fn learn_and_apply_is_mode_consistent_bounded_and_off_runtime() {
 
     {
         let cluster = state.cluster.read();
-        assert!(cluster
-            .vocab()
-            .is_some_and(|vocab| vocab.synonyms().iter().any(|entry| entry.token == "pkg")));
+        assert!(cluster.vocab().is_some_and(|vocab| {
+            vocab.synonyms().is_empty()
+                && vocab
+                    .equivalences()
+                    .iter()
+                    .any(|group| group.iter().any(|form| form == "pkg"))
+        }));
         assert!(cluster
             .percolate("vertex package")
             .expect("percolate")

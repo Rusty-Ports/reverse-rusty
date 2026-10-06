@@ -23,7 +23,7 @@ use crate::metrics::PrometheusMetrics;
 use crate::state::{AppState, RequestCtx};
 
 use super::learn::validate_learn_controls;
-use super::{build_corpus_config, default_min_count};
+use super::{build_corpus_config, default_min_count, resolve_anyof_mode, AnyOfModeParam};
 
 /// The operation is bodyless, so it must not inherit the bulk-ingest ceiling.
 pub(crate) const VOCAB_LEARN_APPLY_BODY_LIMIT: usize = 64 * 1024;
@@ -45,9 +45,13 @@ struct LearnApplyParams {
     npmi_min_count: Option<usize>,
     #[serde(default)]
     npmi_iterations: Option<usize>,
-    /// Learn any-of groups as widening equivalences instead of collapse synonyms.
+    /// How what the any-of groups teach is applied: `expansion` (the default) or
+    /// `collapse` (ADR-202).
     #[serde(default)]
-    learn_equivalences: bool,
+    anyof_mode: Option<AnyOfModeParam>,
+    /// The boolean `anyof_mode` replaces: `true` is expansion, `false` is collapse.
+    #[serde(default)]
+    learn_equivalences: Option<bool>,
 }
 
 impl LearnApplyParams {
@@ -59,13 +63,14 @@ impl LearnApplyParams {
             self.npmi_min_count,
             self.npmi_iterations,
         )?;
+        let anyof_mode = resolve_anyof_mode(self.anyof_mode, self.learn_equivalences)?;
         Ok(build_corpus_config(
             self.min_count,
             self.corpus_phrases,
             self.npmi_tau,
             self.npmi_min_count,
             self.npmi_iterations,
-            self.learn_equivalences,
+            anyof_mode,
         ))
     }
 }

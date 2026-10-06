@@ -31,6 +31,7 @@ mod degenerate;
 mod equivalence;
 mod filtered;
 mod hot;
+mod learn_default;
 mod messy;
 mod reanchor;
 mod segments;

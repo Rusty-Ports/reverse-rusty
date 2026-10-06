@@ -185,9 +185,10 @@ fn recompile_stale_segments_absorbs_declared_alias() {
 
 #[test]
 fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
-    // Engine::learn_and_apply learns `pkg → new` from the corpus's any-of groups
-    // (ADR-015) and recompiles (ADR-046) so a query phrased with the abbreviation
-    // matches a title with the canonical form — zero false negatives.
+    // Engine::learn_and_apply learns from the corpus's any-of groups that `pkg` and `new`
+    // are interchangeable, applies it by expansion (ADR-202) and recompiles (ADR-046), so a
+    // query phrased with the abbreviation matches a title with the other form — zero false
+    // negatives.
     let mut engine = Engine::new(make_norm());
     let mut qs: Vec<(u64, String)> = vec![(1, "vertex pkg".into())];
     for i in 0..4u64 {
@@ -211,9 +212,10 @@ fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
         "after learning pkg→new, a new title matches the pkg-phrased query"
     );
     assert!(
-        engine
-            .vocab()
-            .is_some_and(|v| v.synonyms().iter().any(|s| s.token == "pkg")),
-        "the learned pkg→new synonym is recorded"
+        engine.vocab().is_some_and(|v| v.synonyms().is_empty()
+            && v.equivalences()
+                .iter()
+                .any(|group| group.iter().any(|form| form == "pkg"))),
+        "the learned pkg ≡ new equivalence is recorded, and no collapse synonym"
     );
 }

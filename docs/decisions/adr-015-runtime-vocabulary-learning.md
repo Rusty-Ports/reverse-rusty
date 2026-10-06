@@ -25,3 +25,10 @@
 **Outcome update (2026-10-01).** A durable store now records its vocabulary in its manifest
 ([ADR-184](adr-184-recorded-feature-model.md)); `--vocab-file` seeds a new store rather than being
 the restart source.
+
+## Later outcome — 2026-10-06
+
+Collapse is no longer what the learner does by default.
+[ADR-202](adr-202-the-default-learner-expands.md): a learned any-of relationship is applied by
+expansion unless the caller asks for `anyof_mode=collapse`, because a collapse rule can remove
+matches that stored queries had (a negation widens; a phrase swallows its words).

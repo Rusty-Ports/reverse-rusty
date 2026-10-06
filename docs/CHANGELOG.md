@@ -9,6 +9,20 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — The vocabulary learner no longer narrows by default
+
+- **Behaviour change.** `POST /_vocab/learn_and_apply` with no mode, and the `learn_and_apply`
+  library calls, now apply what any-of groups teach by **expansion**
+  ([ADR-202](decisions/adr-202-the-default-learner-expands.md)): a learned pair becomes an
+  equivalence group, and no stored query loses a match. They used to install collapse synonyms
+  and phrases without review, which can remove matches: after learning `pkg` → `new`, the query
+  `widget -new` stopped matching `widget pkg`.
+- New control `anyof_mode=expansion|collapse` on `learn_and_apply` (query parameter) and on
+  `POST /_vocab/learn` (body field), so a preview shows what applying would install. Send
+  `anyof_mode=collapse` for the previous behaviour. `learn_equivalences` still works as the
+  older spelling; the two disagreeing is a 400.
+- Collapse rules installed earlier stay installed; `GET /_vocab` lists them.
+
 ## 2026-10-06 — A cluster rebuild no longer hides a query
 
 - A cluster vocabulary change (including an alias activation), an in-process resize, and the

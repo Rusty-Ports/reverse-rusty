@@ -195,8 +195,7 @@ pub fn learn_anyof_groups(
 /// learner with opt-in NPMI corpus phrase induction (ADR-053) and opt-in equivalence
 /// (alias) learning via expansion (ADR-054).
 ///
-/// The default disables both opt-ins, so the result is byte-identical to
-/// [`learn_from_queries`] alone — every existing caller and oracle is unaffected.
+/// The default applies what any-of groups teach by expansion and induces no phrases.
 #[derive(Debug, Clone)]
 pub struct CorpusLearnConfig {
     /// Minimum any-of occurrences for a rule to be learned (the bare `min_count` of
@@ -212,9 +211,25 @@ pub struct CorpusLearnConfig {
     pub npmi_min_count: usize,
     /// Bigram -> trigram growth passes.
     pub npmi_iterations: usize,
-    /// Learn any-of groups as **equivalence groups** applied via FN-safe expansion
-    /// (ADR-054) instead of collapse synonyms (the default). Off by default.
-    pub learn_equivalences: bool,
+    /// How what the any-of groups teach is applied. [`AnyOfLearnMode::Expansion`] by
+    /// default (ADR-202).
+    pub anyof_mode: AnyOfLearnMode,
+}
+
+/// How a relationship learned from any-of co-occurrence is applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AnyOfLearnMode {
+    /// As **equivalence groups** applied by expansion (ADR-054): a query that names one
+    /// member also accepts the others. A stored query keeps every match it had; it can only
+    /// gain some. A form that does not resolve to exactly one feature (a multi-word member
+    /// with no phrase) is skipped.
+    #[default]
+    Expansion,
+    /// As **collapse** synonyms and phrases (ADR-015): both the title and the query are
+    /// rewritten to one canonical feature. This changes what a stored query means and can
+    /// remove matches it had: a query that excludes one member starts excluding the others,
+    /// and a learned phrase swallows the words it is made of. Only on request.
+    Collapse,
 }
 
 impl Default for CorpusLearnConfig {
@@ -225,7 +240,7 @@ impl Default for CorpusLearnConfig {
             npmi_tau: 0.30,
             npmi_min_count: 3,
             npmi_iterations: 2,
-            learn_equivalences: false,
+            anyof_mode: AnyOfLearnMode::default(),
         }
     }
 }
@@ -279,24 +294,25 @@ pub fn learn_equivalences_from_queries(
     groups
 }
 
-/// Learn a vocabulary from a query corpus. By default this is the ADR-015 any-of synonym
-/// learner; with `cfg.learn_equivalences` the any-of groups are learned as **equivalence
-/// groups** (expansion, ADR-054) instead of collapse synonyms; and with `cfg.corpus_phrases`
-/// NPMI-induced entity phrases ([`crate::corpus::learn_phrases_from_text`], ADR-053) are
-/// merged on top.
+/// Learn a vocabulary from a query corpus. What the any-of groups teach becomes
+/// **equivalence groups** (expansion, ADR-054) by default, or collapse synonyms and phrases
+/// (ADR-015) when `cfg.anyof_mode` asks for them; with `cfg.corpus_phrases`, NPMI-induced
+/// entity phrases ([`crate::corpus::learn_phrases_from_text`], ADR-053) are merged on top.
 ///
-/// With both opt-ins off this returns exactly `learn_from_queries(corpus, cfg.anyof_min_count)`.
+/// In collapse mode without phrase induction this returns exactly
+/// `learn_from_queries(corpus, cfg.anyof_min_count)`.
 pub fn learn_vocab_from_corpus(corpus: &[(u64, String)], cfg: &CorpusLearnConfig) -> Vocab {
-    let mut vocab = if cfg.learn_equivalences {
-        // Expansion mode: any-of co-occurrence becomes equivalence groups, not synonyms.
-        let mut v = Vocab::new();
-        for grp in learn_equivalences_from_queries(corpus, cfg.anyof_min_count) {
-            let refs: Vec<&str> = grp.iter().map(String::as_str).collect();
-            v.add_equivalence(&refs);
+    let mut vocab = match cfg.anyof_mode {
+        AnyOfLearnMode::Expansion => {
+            // Any-of co-occurrence becomes equivalence groups, not synonyms.
+            let mut v = Vocab::new();
+            for grp in learn_equivalences_from_queries(corpus, cfg.anyof_min_count) {
+                let refs: Vec<&str> = grp.iter().map(String::as_str).collect();
+                v.add_equivalence(&refs);
+            }
+            v
         }
-        v
-    } else {
-        learn_from_queries(corpus, cfg.anyof_min_count)
+        AnyOfLearnMode::Collapse => learn_from_queries(corpus, cfg.anyof_min_count),
     };
     if cfg.corpus_phrases {
         let phrases = crate::corpus::learn_phrases_from_text(

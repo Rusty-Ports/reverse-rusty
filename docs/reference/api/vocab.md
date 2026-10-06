@@ -10,7 +10,7 @@ Read, replace, learn, and govern the feature vocabulary and alias registry.
 |---|---|---|
 | [`GET\|HEAD /_vocab`](vocab/get-vocab.md) | Return the round-trippable active vocabulary or bodyless metadata. | Single-node and coordinator modes |
 | [`PUT /_vocab`](vocab/replace-vocab.md) | Replace and synchronously activate a complete vocabulary. | Local engine/in-process cluster; remote coordinator refuses normalizer divergence |
-| [`POST /_vocab/learn`](vocab/learn-vocab.md) | Compute review-first synonyms and optional corpus phrases from supplied query text. | Single-node and coordinator compute modes |
+| [`POST /_vocab/learn`](vocab/learn-vocab.md) | Compute review-first equivalences (or, on request, collapse synonyms) and optional corpus phrases from supplied query text. | Single-node and coordinator compute modes |
 | [`POST /_vocab/learn_and_apply`](vocab/learn-and-apply.md) | Learn from stored queries and synchronously activate the result. | Local engine/in-process cluster |
 
 ## Governed aliases

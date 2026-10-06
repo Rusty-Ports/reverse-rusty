@@ -161,14 +161,17 @@ impl Engine {
         recompiled
     }
 
-    /// Learn alias/synonym rules from this engine's live corpus (ADR-015 any-of learning)
-    /// and apply them (ADR-046 mechanism 2): a synonym appearing in at least `min_count`
-    /// any-of groups (e.g. `(new,pkg)` ⇒ `pkg → new`) is merged UNDER the current
-    /// vocabulary (a previously set alias wins) and the index is recompiled so the change
-    /// takes effect immediately. Returns the number of queries recompiled.
+    /// Learn relationships from this engine's live corpus and apply them (ADR-046
+    /// mechanism 2): a pair of forms seen together in at least `min_count` any-of groups
+    /// (e.g. `(new,pkg)`) becomes an equivalence applied by expansion (ADR-054, ADR-202), so
+    /// a query that names one form also accepts the other and no stored query loses a
+    /// match. It is merged UNDER the current vocabulary (a previously set rule wins) and the
+    /// index is recompiled so the change takes effect immediately. Returns the number of
+    /// queries recompiled.
     ///
-    /// A thin wrapper over [`learn_and_apply_with`](Self::learn_and_apply_with) with NPMI
-    /// corpus phrase induction disabled — behaviorally unchanged.
+    /// A thin wrapper over [`learn_and_apply_with`](Self::learn_and_apply_with) with the
+    /// default configuration: expansion, no NPMI phrase induction. Collapse synonyms
+    /// (ADR-015) are available there with `AnyOfLearnMode::Collapse`.
     pub fn learn_and_apply(
         &mut self,
         min_count: usize,
@@ -183,10 +186,12 @@ impl Engine {
     /// phrase induction** when `cfg.corpus_phrases` is set (ADR-053): multi-token entities
     /// induced from the live query text (e.g. `north star`) are merged UNDER the current
     /// vocabulary (a declared alias/phrase wins on a token collision) and the index is
-    /// recompiled. With `corpus_phrases = false` this is identical to
-    /// `learn_and_apply(cfg.anyof_min_count)`. Phrases only — never aliases — so the
-    /// same-normalizer gluing is lossless-cover safe (zero false negatives). Returns the
-    /// number of queries recompiled.
+    /// recompiled. With the default mode and `corpus_phrases = false` this is identical to
+    /// `learn_and_apply(cfg.anyof_min_count)`. Induced phrases are phrases only — never
+    /// aliases — so the same-normalizer gluing is lossless-cover safe (zero false
+    /// negatives). `cfg.anyof_mode` says how any-of relationships are applied: by expansion
+    /// (the default), or as collapse synonyms, which can remove matches stored queries had
+    /// (ADR-202). Returns the number of queries recompiled.
     pub fn learn_and_apply_with(
         &mut self,
         cfg: &crate::vocab::CorpusLearnConfig,

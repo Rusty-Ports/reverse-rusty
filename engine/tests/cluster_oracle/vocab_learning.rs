@@ -107,10 +107,11 @@ fn declared_alias_makes_both_surface_forms_match() {
 
 #[test]
 fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
-    // ADR-046 mechanism (2) auto-learning (ADR-015): the cluster learns a synonym from its
-    // OWN corpus's any-of groups — `(new,pkg)` seen ≥ min_count ⇒ `pkg → new` — and
-    // applies it. A query phrased with the abbreviation then matches a title written with
-    // the canonical form (zero FN). The learned rule merges under the current vocabulary.
+    // ADR-046 mechanism (2) auto-learning: the cluster learns from its OWN corpus's any-of
+    // groups that `pkg` and `new` are interchangeable (`(new,pkg)` seen ≥ min_count) and
+    // applies it by expansion (ADR-202). A query phrased with the abbreviation then matches
+    // a title written with the other form (zero FN). The learned rule merges under the
+    // current vocabulary.
     let (mut queries, _titles) = build_corpus();
     let q_rc = 8_300_001u64;
     queries.push((q_rc, "1994 vertex pkg".into())); // a query phrased with the abbreviation
@@ -149,12 +150,14 @@ fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
             .contains(&q_rc),
         "the abbreviation form still matches after learning"
     );
-    // The learned synonym is recorded + introspectable on the cluster.
+    // The learned relationship is recorded + introspectable on the cluster: as an
+    // equivalence, not as a collapse synonym.
     assert!(
-        cluster
-            .vocab()
-            .is_some_and(|v| v.synonyms().iter().any(|s| s.token == "pkg")),
-        "the learned pkg→new synonym is recorded in the cluster vocab"
+        cluster.vocab().is_some_and(|v| v.synonyms().is_empty()
+            && v.equivalences()
+                .iter()
+                .any(|group| group.iter().any(|form| form == "pkg"))),
+        "the learned pkg ≡ new equivalence is recorded in the cluster vocab"
     );
 }
 

@@ -98,3 +98,10 @@
 - **Outcome update (2026-10-06).** It holds on a cluster too:
   [ADR-203](adr-203-cluster-rebuilds-keep-visible-queries.md) keeps a stored default-visible
   query visible through a cluster rebuild.
+
+## Later outcome — 2026-10-06
+
+Expansion is now the learner's default ([ADR-202](adr-202-the-default-learner-expands.md)); this
+ADR had left collapse as the default and expansion as the opt-in. Where the context calls
+collapse safe under symmetry, that is the lossless cover under one vocabulary. It is not safety
+for queries written before the rule: collapse can remove matches they had.

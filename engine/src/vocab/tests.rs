@@ -440,6 +440,7 @@ fn corpus_learn_default_off_equals_anyof_only() {
         .collect();
     let cfg = CorpusLearnConfig {
         anyof_min_count: 2,
+        anyof_mode: AnyOfLearnMode::Collapse,
         ..Default::default()
     };
     let composed = learn_vocab_from_corpus(&queries, &cfg);
@@ -447,7 +448,7 @@ fn corpus_learn_default_off_equals_anyof_only() {
     assert_eq!(
         composed.to_json().unwrap(),
         anyof_only.to_json().unwrap(),
-        "with corpus_phrases off the composer must equal any-of learning alone"
+        "in collapse mode with corpus_phrases off the composer must equal any-of learning alone"
     );
 }
 
@@ -509,7 +510,7 @@ fn corpus_learn_equivalences_mode_emits_groups_not_synonyms() {
         .collect();
     let cfg = CorpusLearnConfig {
         anyof_min_count: 2,
-        learn_equivalences: true,
+        anyof_mode: AnyOfLearnMode::Expansion,
         ..Default::default()
     };
     let v = learn_vocab_from_corpus(&queries, &cfg);

@@ -152,7 +152,7 @@ fn wrong_equivalence_never_causes_false_negatives() {
     }
 }
 
-/// The learned source end-to-end (ADR-054): `learn_and_apply_with(learn_equivalences=true)`
+/// The learned source end-to-end (ADR-054): `learn_and_apply_with` in expansion mode
 /// turns the corpus's any-of groups into an equivalence applied via expansion, so a query
 /// phrased with one form then matches a title bearing the other.
 #[test]
@@ -181,7 +181,7 @@ fn learned_equivalence_via_expansion_matches_both_forms() {
 
     let cfg = CorpusLearnConfig {
         anyof_min_count: 2,
-        learn_equivalences: true,
+        anyof_mode: reverse_rusty::vocab::AnyOfLearnMode::Expansion,
         ..Default::default()
     };
     eng.learn_and_apply_with(&cfg)
