@@ -59,6 +59,14 @@ pub(crate) const MAX_CONCURRENT_CLUSTER_REASSIGNS: usize = 1;
 /// at a time behind `write_serial`, so this bounds how many blocking threads queued writes can
 /// hold, including writes whose clients have disconnected.
 pub(crate) const MAX_QUEUED_CLUSTER_WRITES: usize = 32;
+/// Standalone writes (PUT, DELETE, bulk, flush) admitted onto blocking threads at once. They run
+/// one at a time behind the engine mutex, so this bounds how many blocking threads queued writes
+/// can hold, including writes whose clients have disconnected.
+pub(crate) const MAX_QUEUED_WRITES: usize = 32;
+/// Brief cluster-lock reads (GET/HEAD `_doc`, `GET /`, the v2 and job compile steps) admitted
+/// onto blocking threads at once. They wait only while a vocabulary rebuild or resize holds or
+/// is queued for the exclusive cluster lock; this bounds the threads parked behind one.
+pub(crate) const MAX_QUEUED_CLUSTER_READS: usize = 64;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
 pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
@@ -74,6 +82,10 @@ pub(crate) struct AppState {
     /// `wait_if_ongoing=false` can reject only a competing flush, matching the
     /// ES/OpenSearch control instead of conflating it with any writer.
     pub(crate) flush_serial: Mutex<()>,
+    /// Admission for PUT, DELETE, bulk and flush (ADR-191). The permit is awaited on the
+    /// async side and then owned by the blocking worker, so queued writers wait as futures
+    /// and the engine mutex is only ever waited on from a blocking thread.
+    pub(crate) write_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// One admitted backup at a time. The owned permit moves into the blocking
     /// closure so a disconnected request cannot release admission while its
     /// backup is still waiting on or holding the engine writer lock.
@@ -116,6 +128,74 @@ pub(crate) struct AppState {
     /// for cursor pagination. In-memory only — dies with the process by design.
     pub(crate) pits: Mutex<reverse_rusty::PitRegistry<Arc<EngineSnapshot>>>,
     pub(crate) pit_config: reverse_rusty::PitConfig,
+}
+
+/// Why an admitted standalone write produced no result.
+#[derive(Debug)]
+pub(crate) enum WriteWorkerError {
+    /// Write admission is closed: the server is shutting down.
+    AdmissionClosed,
+    /// The blocking worker panicked or was cancelled by a runtime shutdown.
+    Worker(tokio::task::JoinError),
+}
+
+impl std::fmt::Display for WriteWorkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteWorkerError::AdmissionClosed => f.write_str("write admission is closed"),
+            WriteWorkerError::Worker(error) => write!(f, "write worker failed: {error}"),
+        }
+    }
+}
+
+/// Admit one standalone write onto a blocking thread (ADR-191). The permit is awaited, so a
+/// request cancelled while it waits starts nothing; the caller moves the permit into the worker,
+/// so the capacity stays taken until the write finishes, even if its client has disconnected.
+pub(crate) async fn admit_write(
+    state: &AppState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, WriteWorkerError> {
+    Arc::clone(&state.write_permits)
+        .acquire_owned()
+        .await
+        .map_err(|_| WriteWorkerError::AdmissionClosed)
+}
+
+/// Run a standalone mutation on a blocking thread, never on an async worker (ADR-191).
+///
+/// The engine mutex is held for a whole compaction, backup or vocabulary rebuild. A request
+/// that waited for it on an async worker would park that worker, and as many waiting writes
+/// as there are workers would stop the server from answering anything, `/_health` included.
+/// Here the wait happens on a blocking thread and the queue ahead of it is a semaphore.
+///
+/// The snapshot is published by the worker, under the same lock as the write: the mutation
+/// and its read view are one commit, and a request dropped after admission still publishes
+/// what it wrote.
+pub(crate) async fn run_engine_write<T: Send + 'static>(
+    state: &Arc<AppState>,
+    work: impl FnOnce(&mut Engine) -> T + Send + 'static,
+) -> Result<T, WriteWorkerError> {
+    let permit = admit_write(state).await?;
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let mut engine = state.engine.lock();
+        let outcome = work(&mut engine);
+        state.publish_snapshot_from_locked_engine(&engine);
+        outcome
+    })
+    .await
+    .map_err(WriteWorkerError::Worker)
+}
+
+/// Take every write permit: wait for each write that outlived its request, then keep
+/// admission closed while the caller runs its shutdown flush, so no late write lands after it.
+pub(crate) async fn quiesce_writes(
+    state: &AppState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
+    let capacity = u32::try_from(MAX_QUEUED_WRITES).unwrap_or(u32::MAX);
+    Arc::clone(&state.write_permits)
+        .acquire_many_owned(capacity)
+        .await
 }
 
 impl AppState {
@@ -193,6 +273,8 @@ pub(crate) struct ClusterAppState {
     /// the worker starts and held until it finishes, so a disconnected client can never leave more
     /// than [`MAX_QUEUED_CLUSTER_WRITES`] detached writers holding blocking threads.
     pub(crate) write_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Admission for brief cluster-lock reads that run on blocking threads (ADR-191).
+    pub(crate) read_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Explicit-flush admission, separate from the general write serializer for
     /// the same `wait_if_ongoing` reason as [`AppState::flush_serial`].
     pub(crate) flush_serial: Mutex<()>,

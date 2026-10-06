@@ -440,6 +440,9 @@ async fn main() {
     let state = Arc::new(AppState {
         engine: Mutex::new(engine),
         flush_serial: Mutex::new(()),
+        write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_QUEUED_WRITES,
+        )),
         backup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),
@@ -664,6 +667,10 @@ async fn main() {
         drain_timeout = drain_timeout,
         "connection drain complete, running shutdown sequence"
     );
+
+    // A write whose client disconnected is still owned by its blocking worker (ADR-191). Take
+    // every write permit first, so none of them lands after the final flush.
+    let _writes_quiesced = crate::state::quiesce_writes(&state).await.ok();
 
     // Flush memtable and log final metrics.
     {

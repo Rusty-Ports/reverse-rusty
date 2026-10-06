@@ -25,6 +25,58 @@ reverse chronological and describe outcomes, not the current architecture or fut
   `reverse_rusty_shard_translog_sync_on_write{shard}`.
 - Helm: `shard.walSyncOnWrite`, `shard.retainSource`, `shard.maxSegments`,
   `shard.memtableFlushThreshold`. Compose: `RR_SHARD_WAL_SYNC_ON_WRITE`.
+## 2026-10-06 — Data-plane handlers wait off the runtime
+
+- Fix the server becoming unresponsive, `/_health` included, when writes queued behind
+  maintenance: standalone `PUT`/`DELETE /_doc`, `/_bulk` and `/_flush` waited for the engine mutex
+  on async workers, so during a compaction, backup or vocabulary rebuild as many waiting writes as
+  there are CPUs stopped every other request. They now wait, and run, on blocking threads under a
+  32-permit admission ([ADR-191](decisions/adr-191-data-plane-handlers-wait-off-the-runtime.md)).
+- The same for the coordinator's brief cluster reads (`GET`/`HEAD /_doc`, `GET /`, the
+  `/v2/_search` and `/v2/_mpercolate` compile step, job creation), which waited on a worker
+  whenever a vocabulary rebuild or resize held or queued for the exclusive cluster lock.
+- A standalone write whose client disconnects after admission still completes and is published;
+  shutdown waits for such writes before its final flush.
+## 2026-10-06 — First read after a shard restart, and wider test margins
+
+- Fix a read failing with a transport error right after a shard node restarted: the coordinator
+  could write the request to its old connection before noticing the close, and that failure was
+  not classified as retryable. An idempotent read whose connection was lost is now retried
+  (ADR-085, later outcome). Writes still never retry.
+- Widen four wall-clock bounds in the tests (a 10 ms and two 100 ms margins, and one of 750 ms)
+  to at least an order of magnitude by slowing the path each test must beat. Each still fails
+  against a build that ignores its deadline or timeout.
+- `docs/testing.md` records what to do when the gate goes red, and the two test shapes behind
+  most of the intermittent failures.
+
+## 2026-10-06 — Three flaky gate tests
+
+- Fix three tests that failed the gate intermittently, on `main` as well as on branches:
+  - the shard node's exhaustive-stream admission test relied on its first stream staying open,
+    but that stream matched nothing (its queries are opt-in and it read without the broad lane),
+    so it finished at once and the test raced it. It now reads a stream longer than the response
+    queue and checks that it did;
+  - a job whose stream is dropped with the completion record still queued could fail with
+    either "consumer disconnected" or "completion frame was not consumed", depending on which
+    side noticed first. Both paths now report that the completion was not consumed;
+  - the control-plane wiring tests waited for one node to name a leader and then read through a
+    follower that might not know it yet. They now wait until every node names the same leader.
+
+## 2026-10-05 — No commit around an in-memory segment
+
+- Fix loss of acknowledged writes on the single-node engine after a transient storage error: a
+  flush that could not write its segment kept the rows in memory and in the WAL, but the next
+  successful flush, bulk batch or compaction committed a manifest without them and reset the WAL,
+  so a restart came back without those rows. After a failed vocabulary rebuild the same sequence
+  lost every query in the store except the ones written since. Every commit now writes such a
+  segment to disk first, or does not happen
+  ([ADR-190](decisions/adr-190-no-commit-around-in-memory-segments.md)).
+- An explicit flush commits a segment left in memory even when there is nothing new to seal.
+- Fix a restart deleting the wrong query for library callers: `Engine::tombstone` logs a memtable
+  position, which named a different row at replay when an earlier flush had failed. It now
+  returns an error until the next commit; deletes by logical id were never affected.
+- The first bulk batch on an engine with such a segment is no longer refused once the segment can
+  be written. `persistence_healthy` still stays false until the engine is reopened.
 
 ## 2026-10-05 — Dropped shards await recovery
 

@@ -93,3 +93,11 @@ byte-identical on the in-process path.
   distributed tracing / correlation IDs, control-plane RPC metrics, a per-call deadline on the long
   recovery RPCs (keepalive-guarded for now), and mTLS / per-node identity / cert hot-reload (the
   [ADR-071](adr-071-grpc-tls-auth.md) post-v1 items).
+- **Later outcome — 2026-10-06:** the retry classifier covered `UNAVAILABLE` and tonic's
+  "Service was not ready", but not a request written to a connection the peer had already closed.
+  After a shard node restarts, the coordinator still holds its old connection until it notices the
+  close, and a read issued in that window failed with `UNKNOWN` "transport error" (broken pipe)
+  instead of being retried: the first read after a restart could error. A status whose cause is a
+  lost connection (broken pipe, reset, aborted, not connected, unexpected end) is now transient
+  too. Only idempotent reads retry, as before; a status sent by the server has no local cause and
+  is never matched.

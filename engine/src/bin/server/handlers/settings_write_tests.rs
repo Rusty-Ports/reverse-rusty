@@ -38,6 +38,9 @@ fn test_state() -> (Arc<AppState>, EngineConfig) {
         Arc::new(AppState {
             engine: Mutex::new(engine),
             flush_serial: Mutex::new(()),
+            write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                crate::state::MAX_QUEUED_WRITES,
+            )),
             backup_permits: Arc::new(tokio::sync::Semaphore::new(
                 crate::state::MAX_CONCURRENT_BACKUPS,
             )),
@@ -275,7 +278,13 @@ async fn admission_and_engine_lock_waits_are_bounded_off_runtime() {
         json_request("/_settings?timeout=25ms", r#"{"max_segments":18}"#),
     )
     .await;
-    assert!(started.elapsed() < Duration::from_millis(150));
+    // The permit is held until after this request, so only its 25 ms timeout can end the
+    // wait. The bound is generous on purpose: it separates "timed out" from "never did".
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "admission wait lasted {:?}",
+        started.elapsed()
+    );
     assert_error(
         status,
         &headers,
@@ -287,10 +296,13 @@ async fn admission_and_engine_lock_waits_are_bounded_off_runtime() {
 
     let lock_state = Arc::clone(&state);
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    // Hold the engine lock until told to let go (or for 10 s, far past the bound below), so
+    // the request can only finish early by honoring its timeout.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let blocker = std::thread::spawn(move || {
         let _engine = lock_state.engine.lock();
         locked_tx.send(()).expect("announce held lock");
-        std::thread::sleep(Duration::from_millis(250));
+        let _ = release_rx.recv_timeout(Duration::from_secs(10));
     });
     locked_rx
         .recv_timeout(Duration::from_secs(1))
@@ -301,9 +313,12 @@ async fn admission_and_engine_lock_waits_are_bounded_off_runtime() {
         json_request("/_settings?timeout=25ms", r#"{"max_segments":19}"#),
     )
     .await;
+    let waited = started.elapsed();
+    // Release the lock before asserting, so a failure cannot leave the holder parked.
+    drop(release_tx);
     assert!(
-        started.elapsed() < Duration::from_millis(150),
-        "engine-lock waiting escaped spawn_blocking and stalled Tokio"
+        waited < Duration::from_secs(1),
+        "engine-lock waiting escaped spawn_blocking and stalled Tokio: {waited:?}"
     );
     assert_error(
         status,

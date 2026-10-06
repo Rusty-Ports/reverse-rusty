@@ -25,6 +25,7 @@ use super::controls::parse_time_value;
 use super::resolve::resolve_percolate;
 use super::DocBody;
 
+mod cluster_compile;
 mod delivery;
 mod mpercolate;
 mod page;
@@ -639,57 +640,34 @@ async fn cluster_v2_search_inner(
             }
         },
     };
-    // One brief read-lock scope (the existing compile pattern — sync, never
-    // across an await): compile + PIT pre-check + fingerprint. The stale gate
-    // runs BEFORE the fingerprint so a rebuilt normalizer cannot mis-classify
-    // a dead cursor as a client mismatch; the kernel re-gates inside the
-    // blocking closure, so the gap between here and there stays fail-closed.
-    let (program, mint) = {
-        let cluster = state.cluster.read();
-        let program = match cluster.compile_rank_program_with_profiles(&rank, &state.rank_profiles)
-        {
-            Ok(program) => program,
-            Err(error) => {
-                record_outcome(&state.prom, "validation", options.query_scope);
-                return Err(rank_program_error(&error));
-            }
-        };
-        let mint = match pit {
-            None => None,
-            Some(pit) => {
-                if let Err(error) = cluster.check_pit(pit, Instant::now()) {
-                    let (status, kind, outcome) = error.v2_http_class();
-                    record_outcome(&state.prom, outcome, options.query_scope);
-                    return Err(ApiError::response(
-                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                        kind,
-                        error.to_string(),
-                    ));
-                }
-                let fingerprint = crate::pit::request_fingerprint(
-                    cluster.normalizer(),
-                    cluster.dict(),
-                    &title,
-                    options.query_scope,
-                    &rank,
-                    &filter,
-                );
-                if let Some(expected) = expected_fingerprint {
-                    if fingerprint != expected {
-                        record_outcome(&state.prom, "cursor_mismatch", options.query_scope);
-                        return Err(crate::pit::cursor_mismatch_response());
-                    }
-                }
-                Some(page::MintCtx { pit, fingerprint })
-            }
-        };
-        (program, mint)
+    // One deadline for the whole request: the compile step waits too.
+    let deadline = Instant::now().checked_add(timeout);
+    let compile = cluster_compile::compile(
+        &state,
+        cluster_compile::CompileRequest {
+            rank,
+            pit,
+            expected_fingerprint,
+            title: title.clone(),
+            filter: filter.clone(),
+            scope: options.query_scope,
+        },
+    );
+    let Some(compiled) = cluster_compile::within_deadline(deadline, compile).await else {
+        return Err(cluster_compile::timed_out(
+            &state,
+            started,
+            options,
+            timeout,
+            "v2_search",
+        ));
     };
+    let (program, mint) = compiled?;
     let options = reverse_rusty::TopKOptions {
         search_after,
         ..options
     };
-    let Some(deadline) = Instant::now().checked_add(timeout) else {
+    let Some(deadline) = deadline else {
         record_outcome(&state.prom, "validation", options.query_scope);
         return Err(validation("timeout is too large"));
     };

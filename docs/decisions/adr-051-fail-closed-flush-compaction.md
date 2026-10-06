@@ -87,3 +87,9 @@
   this extends with `Compaction`), ADR-013 (WAL — the flush backstop), ADR-012 (segment format +
   manifest commit point), ADR-032/039 (cluster reseal + translog), ADR-046 (vocab recompile),
   [ingestion-and-updates.md](../design/ingestion-and-updates.md)
+- **Later outcome — 2026-10-05 ([ADR-190](adr-190-no-commit-around-in-memory-segments.md)):** the
+  fallback was safe for the operation that failed but not for the commits after it. A later
+  successful flush, bulk batch or compaction committed a manifest that left the in-memory segment
+  out and then reset the WAL, losing its rows at the next restart (for a failed vocabulary
+  rebuild, the whole corpus). Every single-node commit now writes such a segment to disk first,
+  or does not happen. The sticky `persistence_healthy` latch is unchanged.

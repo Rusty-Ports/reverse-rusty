@@ -22,6 +22,17 @@ impl Engine {
     /// config, runs `maybe_compact` after the flush.
     pub fn flush(&mut self) {
         if self.memtable.is_empty() {
+            // Nothing new to seal, but an earlier flush may have left a segment the manifest
+            // does not list: one still in memory (ADR-051), or one on disk whose commit
+            // failed. Commit it now (ADR-190), so a flush makes the engine durable again
+            // without waiting for the next write.
+            if self.owns_manifest
+                && !self.base_segments_are_committed()
+                && self.commit_sources_and_manifest()
+            {
+                self.checkpoint_wal();
+                self.reset_wal_if_safe();
+            }
             return;
         }
         let entries = self.memtable.len();

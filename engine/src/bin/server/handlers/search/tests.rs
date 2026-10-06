@@ -43,6 +43,9 @@ fn state_with(eng: Engine, include_broad: bool) -> Arc<AppState> {
     Arc::new(AppState {
         engine: parking_lot::Mutex::new(eng),
         flush_serial: parking_lot::Mutex::new(()),
+        write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_QUEUED_WRITES,
+        )),
         backup_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),

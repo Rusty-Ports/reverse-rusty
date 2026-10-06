@@ -104,6 +104,13 @@ enum PutEngineOutcome {
     RejectedClassD,
 }
 
+/// What the write worker did with a PUT.
+enum PutWrite {
+    /// `op_type=create` found the id live; nothing was written.
+    Conflict,
+    Applied(Result<PutEngineOutcome, reverse_rusty::WriteError>),
+}
+
 // -- GET /_doc/{id}
 pub(crate) const QUERY_INDEX: &str = "queries";
 
