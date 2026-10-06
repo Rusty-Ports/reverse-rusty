@@ -9,6 +9,19 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Three flaky gate tests
+
+- Fix three tests that failed the gate intermittently, on `main` as well as on branches:
+  - the shard node's exhaustive-stream admission test relied on its first stream staying open,
+    but that stream matched nothing (its queries are opt-in and it read without the broad lane),
+    so it finished at once and the test raced it. It now reads a stream longer than the response
+    queue and checks that it did;
+  - a job whose stream is dropped with the completion record still queued could fail with
+    either "consumer disconnected" or "completion frame was not consumed", depending on which
+    side noticed first. Both paths now report that the completion was not consumed;
+  - the control-plane wiring tests waited for one node to name a leader and then read through a
+    follower that might not know it yet. They now wait until every node names the same leader.
+
 ## 2026-10-05 — No commit around an in-memory segment
 
 - Fix loss of acknowledged writes on the single-node engine after a transient storage error: a
