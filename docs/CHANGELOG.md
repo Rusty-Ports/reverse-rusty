@@ -12,10 +12,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
 ## 2026-10-06 — Sizing and memory documentation corrected
 
 - The sizing guide now says what compaction, a flush and a resident-source open hold on the heap
-  (about three times the merge range for a compaction, the whole source store file for every
-  flush), which requests run a full merge (the whole engine as the merge range), that the default
+  (its inputs and output together for a compaction, and the whole source store file for every
+  flush and every durable compaction commit), which requests run a full merge, that the default
   profile is `retain_source=true`, and that the throughput captures need the segment working set
-  in the page cache on a durable node.
+  in the page cache on a durable node. It gives no multiplier for the compaction peak: measure it.
 - Two claims were wrong and are corrected where they appeared (roadmap, ADR-020 outcome, the
   capture notes and a code comment): aliveness is one byte per row, not bit-packed; and the
   dictionary does not saturate in the captures, where its cost per query is flat and its total

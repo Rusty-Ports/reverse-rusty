@@ -99,9 +99,12 @@ operator-managed; see [`deployment-modes.md`](deployment-modes.md).
 
 Steady state is not the peak:
 
-- compaction copies every segment in its merge range onto the heap (also the mmap-backed ones),
-  builds the merged segment in memory beside them, and reads the file it wrote back to checksum
-  it: plan for about three times the merge range, in memory, while the old segments still serve.
+- compaction copies every segment in its merge range onto the heap (also the mmap-backed ones,
+  and in their in-memory form, whose maps and columns are larger than the files), builds the
+  merged segment in memory beside them, and reads the file it wrote back to checksum it, all
+  while the old segments still serve. On a durable engine the commit that follows also
+  rebuilds the complete source store file in heap buffers, so the peak does not shrink with
+  the merge range. No multiplier of the segment files predicts it; measure it.
   A full merge makes that range the whole engine: `POST /_compact`, or
   `POST /_forcemerge?max_num_segments=1` (a bare `POST /_forcemerge` only runs the merge
   policy, which may merge nothing). Both are standalone routes; a coordinator answers 501.
@@ -116,8 +119,8 @@ Steady state is not the peak:
 - open PITs retain snapshots and may keep unlinked mmap segments alive;
 - ingest bursts grow the memtable before its flush threshold.
 
-Two-times steady-state memory/disk is a useful **starting reserve**, not a guarantee, and a forced
-merge of one large engine or shard exceeds it. Large source stores can make disk the dominant
+Two-times steady-state memory/disk is a useful **starting reserve**, not a guarantee: a compaction
+of a large engine or shard can exceed it. Large source stores can make disk the dominant
 dimension, and the largest compaction/rebuild unit determines the temporary copy; sharding divides
 that unit. Measure the peak of a full merge (`POST /_forcemerge?max_num_segments=1` on a
 standalone engine holding one shard's share of the data), a vocabulary rebuild, a resize, and a
