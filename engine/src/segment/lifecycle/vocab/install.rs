@@ -124,6 +124,17 @@ impl Engine {
             norm = Arc::new(vocab.to_normalizer()?);
         }
         vocab.intern_equivalence_forms(&norm, &mut proposed_dict);
+        // The recompile that follows compiles every stored query read-only. Give every name
+        // the new normalizer produces for them its dense id first (ADR-204): a name left
+        // synthetic there would get a second, dense id from the next insert that uses it,
+        // and the recompiled queries would stop matching.
+        super::intern_live_names(&mut proposed_dict, &norm, &live, |logical, compiled| {
+            compiled.map(|_| ()).map_err(|error| {
+                crate::error::NormalizerError::new(format!(
+                    "stored query for logical id {logical} cannot be rebuilt: {error}"
+                ))
+            })
+        })?;
         let equiv = vocab.resolve_equivalences(&norm, &proposed_dict);
         proposed_dict.set_equivalences(equiv);
         // Every later commit records this vocabulary (ADR-184); one that could not be recorded

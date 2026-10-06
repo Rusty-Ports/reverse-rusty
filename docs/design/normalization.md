@@ -131,6 +131,10 @@ predicates exist, `match_phrase_views` also writes reusable position-arc buffers
   the 64 highest-frequency features used by the exact verifier's common mask.
 - Read-only paths resolve an absent name to a deterministic synthetic ID. A collision may
   over-retrieve, but cannot remove a true candidate.
+- A name must keep one of the two ids. A cluster's dictionary is frozen, so a name absent from
+  it stays synthetic everywhere. A single-node dictionary grows with every insert, so a rebuild
+  that compiles read-only (a vocabulary change, a compiler migration) first interns every name
+  the current normalizer produces for the stored queries (ADR-204).
 - `FeatureKind` is descriptive vocabulary metadata: `year`, `brand`, `entity`, `category`, `flag`,
   or `generic`. Candidate choice is frequency-based; it does not contain category-specific rules.
 - Active equivalences widen a positive requirement to an any-of group. Expansion can add matches,
