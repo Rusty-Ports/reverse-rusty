@@ -191,13 +191,21 @@ fn corpus_over_threshold_recommends_split() {
     let (cluster, titles) = build();
     let baseline = sweep(&cluster, &titles, true);
 
-    // Split pressure measures the SELECTIVE (non-replicated) per-shard load (ADR-080): the
-    // replicated broad lane (class C + D) is on every shard and splitting won't shrink it, so the
-    // autoscaler discounts it. Pick a threshold just below the busiest shard's SELECTIVE load.
+    // Split pressure measures the SELECTIVE (non-replicated) per-shard load (ADR-080): a row
+    // stored on every shard is not shrunk by a split, so the autoscaler discounts it. That is
+    // the broad lane (class C + D) and the replicated always-visible rows, counted by placement
+    // (ADR-203). Pick a threshold just below the busiest shard's SELECTIVE load.
     let counts = cluster.shard_query_counts().expect("counts");
     let cc = cluster.class_counts().expect("class counts");
     let num_shards = cluster.num_shards() as u64;
-    let replicated = ((cc[2] + cc[3]) / num_shards) as usize;
+    let replicated = cluster
+        .collect_load(&enabled())
+        .expect("load")
+        .replicated_corpus;
+    assert!(
+        replicated as u64 >= (cc[2] + cc[3]) / num_shards,
+        "the broad lane is part of the replicated share"
+    );
     let selective: Vec<usize> = counts
         .iter()
         .map(|&c| c.saturating_sub(replicated))

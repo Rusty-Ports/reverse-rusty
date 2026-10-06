@@ -24,6 +24,7 @@ mod class_d;
 mod core;
 mod flush;
 mod hot;
+mod kept_visible;
 mod ranked;
 mod replication;
 mod resize;

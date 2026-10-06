@@ -9,6 +9,24 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — A cluster rebuild no longer hides a query
+
+- A cluster vocabulary change (including an alias activation), an in-process resize, and the
+  compiler migration a durable cluster runs on open each re-plan every stored query. A query that
+  reads with the broad lane off were returning could be re-planned as class C and moved to the
+  opt-in broad lane, so it stopped being returned although nothing about it had changed. On a
+  three-shard cluster, activating `pkg ≡ package` removed the stored query `widget pkg` from the
+  default read of the title `widget pkg`.
+- Such a query is now replicated to every position and kept in each shard's main lane
+  ([ADR-203](decisions/adr-203-cluster-rebuilds-keep-visible-queries.md)). The single-node engine
+  has done the same since ADR-187. Reads that ask for the broad lane are unchanged. A query that
+  was opt-in stays where its plan puts it, and a new write of the same text is placed by its plan.
+- A kept query costs a copy on every position and a place on a very common term's main posting.
+- The resize recommendation counts the rows stored on every position by their placement, where
+  it counted classes C and D. Kept queries, top-64 pairs and phrase proxies are replicated class-B
+  rows, and adding shards does not shrink them, so on an in-process cluster they no longer count
+  toward a split.
+
 ## 2026-10-06 — Every search response says which scope ran
 
 - `/_search` and `/_mpercolate` responses carry the header `x-rr-query-scope: standard` or

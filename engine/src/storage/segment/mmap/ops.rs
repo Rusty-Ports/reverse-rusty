@@ -378,6 +378,14 @@ impl MmapSegment {
         self.alive_counter
     }
 
+    /// Entries stored at every position of their cluster (tombstoned ones included, like
+    /// [`Self::class_counts`]).
+    pub fn replicated_rows(&self) -> u64 {
+        (0..self.len() as u32)
+            .filter(|&local| self.placement(local).mode.is_replicated())
+            .count() as u64
+    }
+
     /// Tally entries by cost class into `c` (`[A, B, C, D]`), reading the persisted
     /// per-entry class bytes. Counts ALL entries (including tombstoned), matching
     /// [`Segment::class_counts`](crate::segment::Segment::class_counts) so introspection

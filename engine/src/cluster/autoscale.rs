@@ -129,12 +129,13 @@ pub struct LoadSnapshot {
     pub assignments: Vec<ShardAssignment>,
     /// Per-shard physical query count, index-aligned with position `0..num_shards`.
     pub shard_corpus: Vec<usize>,
-    /// The REPLICATED broad lane held on EVERY shard (the same size on each, ADR-080): class C +
-    /// class D, copied to every shard regardless of `num_shards`. Split pressure discounts it —
-    /// splitting never shrinks the replicated lane, so counting it would make every shard look hot
-    /// and recommend growing without bound. (Class-B-arity-2 is also replicated but lives in the
-    /// always-probed main index, mixed into class B — a small residual not yet discounted, the
-    /// deferred broad-main-index follow-on.)
+    /// The rows held on EVERY shard (the same size on each), copied to every shard regardless of
+    /// `num_shards`: the broad lane (class C + class D, ADR-080) and the replicated
+    /// always-visible rows (top-64 pairs, phrase proxies, and class-C plans a rebuild kept in
+    /// default reads, ADR-203). Split pressure discounts it — splitting never shrinks it, so
+    /// counting it would make every shard look hot and recommend growing without bound. An
+    /// in-process shard counts these rows by placement. A remote shard counts classes C and D,
+    /// so its replicated class-B rows are a residual not yet discounted.
     pub replicated_corpus: usize,
     /// Ring shard count (`shard_corpus.len()` mirrors this).
     pub num_shards: u32,

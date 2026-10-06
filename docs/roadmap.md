@@ -262,7 +262,9 @@ serving it or roll back to the previous one.
 
 **Direction.** Keep compatible minor changes within the existing epoch machinery; rebuild major
 changes into a parallel index from canonical sources, validate it against the independent oracle,
-then atomically swap the serving epoch.
+then atomically swap the serving epoch. A rebuild from sources must carry each stored query's
+default visibility with it (ADR-187, ADR-203); the remote corpus export carries no placement today,
+so a cross-process vocabulary change has to add it.
 
 **Completion.** Rollback retains the previous complete index, and the blue/green swap is
 result-equivalent across crash and reopen.

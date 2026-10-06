@@ -329,6 +329,10 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().class_counts()
     }
 
+    fn replicated_rows(&self) -> Result<u64, ShardError> {
+        self.current.load().replicated_rows()
+    }
+
     fn validate_ownership(
         &self,
         position: u32,

@@ -100,6 +100,7 @@ upper bound. A title with many eligible features can route more widely.
 | Class H arity-1 / any-of | same selective ring placement as A/B | default-visible hot lane |
 | Class B top-64 arity-2 pair | every position | default-visible main lane |
 | Class B required-phrase proxy | every position | default-visible positioned main lane |
+| Class C, kept visible by a rebuild (ADR-203) | every position | default-visible main lane |
 | Class C | every position | opt-in broad lane |
 | Class D with `accept_class_d=true` and a real negative predicate | every position | opt-in universal broad lane |
 | Class D otherwise | nowhere | rejected |
@@ -108,6 +109,11 @@ Replicating a top-64 pair is necessary because neither individual feature is a l
 ring key. Required-phrase candidate labels are also replicated: positioned graph labels need not
 appear in ordinary flat routing. Replication is a placement decision; ADR-109 ownership still permits
 only one logical emitter.
+
+A rebuild (a vocabulary change, an in-process resize, the compiler migration on open) re-plans every
+stored row. A row that default reads returned and whose new plan is class C is not sent to the opt-in
+broad lane: it is replicated always-visible, and each shard stores its top-64 signatures in the main
+lane (ADR-203). A new write of the same text is placed by its plan and is opt-in.
 
 Class H is deliberately placement-identical to A. The θ threshold can move work between the
 default-visible main and hot indexes but cannot move a query to another logical position or change
@@ -432,8 +438,11 @@ growing to the ceiling. The server loop executes an accepted operation through t
 admission path with the observed placement generation as a precondition (ADR-179). Remote
 shard-count changes and scale-out remain decisions for an external operator.
 
-Adding positions does not reduce the replicated C/D corpus per node unless physical placement changes,
-so `collect_load` subtracts the replicated broad share when assessing selective split pressure.
+Adding positions does not reduce the replicated corpus per node: the broad C/D lane and the
+replicated always-visible rows (top-64 pairs, phrase proxies, and rows a rebuild kept visible).
+`collect_load` subtracts that share when assessing selective split pressure. An in-process shard
+counts its replicated rows by placement; a remote shard counts classes C and D, so its replicated
+class-B rows are still counted as splittable.
 
 ---
 

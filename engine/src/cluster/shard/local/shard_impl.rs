@@ -300,6 +300,10 @@ impl Shard for LocalShard {
         Ok(self.snapshot.load().class_counts())
     }
 
+    fn replicated_rows(&self) -> Result<u64, ShardError> {
+        Ok(self.snapshot.load().replicated_rows())
+    }
+
     fn validate_ownership(
         &self,
         position: u32,

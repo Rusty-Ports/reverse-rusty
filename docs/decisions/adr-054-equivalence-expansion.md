@@ -95,3 +95,6 @@
   [ADR-187](adr-187-anyof-cover-and-visible-rebuilds.md) anchors such a query on the any-of group
   and keeps a stored default-visible query visible through the rebuild, so the claim now holds in
   both `include_broad` modes on the single-node engine.
+- **Outcome update (2026-10-06).** It holds on a cluster too:
+  [ADR-203](adr-203-cluster-rebuilds-keep-visible-queries.md) keeps a stored default-visible
+  query visible through a cluster rebuild.

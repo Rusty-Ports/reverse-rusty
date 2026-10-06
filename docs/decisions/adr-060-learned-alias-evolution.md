@@ -119,3 +119,5 @@
   activation could still remove a query from default reads by leaving it only a top-64 anchor;
   see [ADR-187](adr-187-anyof-cover-and-visible-rebuilds.md), which closes that on the single-node
   engine.
+- **Outcome update (2026-10-06).** [ADR-203](adr-203-cluster-rebuilds-keep-visible-queries.md)
+  closes it on a cluster.
