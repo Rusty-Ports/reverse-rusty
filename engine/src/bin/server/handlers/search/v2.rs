@@ -696,20 +696,18 @@ async fn cluster_v2_search_inner(
             deadline,
         };
         let result = if mutation_fenced {
-            // Take the mutation-frozen view on this blocking thread and stay on it: match,
-            // winner fetch and explanation run inside one coherent view. The view excludes
-            // every mutation, so the request takes no write admission (ADR-206). It must
-            // not enter the search pool while it holds the cluster lock (see `pool` on
-            // `ClusterAppState`); such requests run one at a time, so this is one thread.
-            let cluster = cluster_state.cluster.read();
-            let stable_view = cluster.consistent_read_view();
-            delivery::cluster_delivery(
-                &stable_view,
-                mint.as_ref().map(|mint| mint.pit),
-                &program,
-                &filter,
-                &spec,
-            )
+            // Match, winner fetch and explanation run inside one mutation-frozen view. The
+            // view excludes every mutation, so the request takes no write admission
+            // (ADR-206). It enters the search pool before it takes the cluster lock.
+            cluster_state.run_with_stable_view(|stable_view| {
+                delivery::cluster_delivery(
+                    stable_view,
+                    mint.as_ref().map(|mint| mint.pit),
+                    &program,
+                    &filter,
+                    &spec,
+                )
+            })
         } else {
             // Source-free top-K retains the fully concurrent path.
             let cluster = cluster_state.cluster.read();
@@ -728,8 +726,8 @@ async fn cluster_v2_search_inner(
             result
         })
     };
-    // Fenced requests hold the cluster lock for their whole run and stay on the
-    // driver's blocking thread; source-free requests run in the search pool.
+    // Fenced requests wait for their turn on the driver's blocking thread and enter the
+    // search pool themselves; source-free requests are installed in it by the driver.
     delivery::drive(
         state,
         started,

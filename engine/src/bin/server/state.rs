@@ -332,8 +332,14 @@ pub(crate) struct ClusterAppState {
     /// **Never wait for this pool while holding the `cluster` lock.** With a writer queued
     /// behind the holder, the workers wait for the writer, the writer for the holder, and the
     /// holder for a worker. A request that needs the lock across its whole run (a search
-    /// that returns sources) runs on its own blocking thread instead (ADR-206).
+    /// that returns sources) enters the pool first and takes the lock inside it; see
+    /// [`ClusterAppState::run_with_stable_view`] (ADR-206).
     pub(crate) pool: rayon::ThreadPool,
+    /// One search that returns sources at a time enters the search pool. Such searches
+    /// exclude each other anyway (the mutation-frozen view is exclusive); taking a turn
+    /// before entering keeps the ones that wait on blocking threads, so that at most one
+    /// pool worker is ever parked on their behalf.
+    pub(crate) stable_view_turn: Mutex<()>,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
     /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,
     /// and the permit is moved INTO the closure — released when the blocking work
@@ -358,6 +364,29 @@ pub(crate) struct ClusterAppState {
     pub(crate) pit_config: reverse_rusty::PitConfig,
     /// Retained resize operations and the latest autoscaler observation (ADR-179).
     pub(crate) resize_operations: Arc<crate::resize_ops::ResizeOperations>,
+}
+
+impl ClusterAppState {
+    /// Run `work` in the search pool under the cluster's mutation-frozen view: the path of a
+    /// search that returns sources or an explanation (ADR-206). Call it from a blocking
+    /// thread that holds no lock.
+    ///
+    /// The order matters. The request takes its turn, then a pool worker, and only then, on
+    /// that worker, the cluster lock and the view. It never holds the cluster lock while it
+    /// waits for a worker, which is what would let a queued vocabulary rebuild or resize
+    /// stall the pool it is waiting for. The work runs inside the pool, so it stays within
+    /// the configured thread budget.
+    pub(crate) fn run_with_stable_view<T: Send>(
+        &self,
+        work: impl FnOnce(&reverse_rusty::cluster::ClusterReadView<'_>) -> T + Send,
+    ) -> T {
+        let _turn = self.stable_view_turn.lock();
+        self.pool.install(|| {
+            let cluster = self.cluster.read();
+            let stable_view = cluster.consistent_read_view();
+            work(&stable_view)
+        })
+    }
 }
 
 /// What the request-scoped middleware needs from either backend's state — the seam

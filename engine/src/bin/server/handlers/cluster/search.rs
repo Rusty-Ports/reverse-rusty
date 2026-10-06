@@ -739,15 +739,12 @@ async fn percolate_blocking(
             };
 
             if source_fetch.is_some() {
-                // Take the mutation-frozen view on this blocking thread and stay on it. It
+                // A request that returns sources runs under the mutation-frozen view. It
                 // excludes every mutation, served or direct, and every checkpoint, flush
                 // and backup (ADR-197), so the request takes no write admission and does
-                // not wait for a whole bulk batch, a job or a resize (ADR-206). It must not
-                // enter the search pool while it holds the cluster lock (see `pool` on
-                // `ClusterAppState`); such requests run one at a time.
-                let cluster = state_inner.cluster.read();
-                let stable_view = cluster.consistent_read_view();
-                run(Some(&stable_view))
+                // not wait for a whole bulk batch, a job or a resize (ADR-206). It enters
+                // the search pool before it takes the cluster lock.
+                state_inner.run_with_stable_view(|stable_view| run(Some(stable_view)))
             } else {
                 state_inner.pool.install(|| run(None))
             }

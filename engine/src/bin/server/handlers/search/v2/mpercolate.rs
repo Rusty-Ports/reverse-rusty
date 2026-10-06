@@ -464,13 +464,12 @@ async fn cluster_v2_mpercolate_inner(
             deadline,
         };
         if mutation_fenced {
-            // As on `/v2/_search`, a source-enriched request takes the mutation-frozen
-            // view on this blocking thread, so matching and the union winner fetch cannot
-            // observe different same-ID versions, and stays out of the search pool while
-            // it holds the cluster lock.
-            let cluster = cluster_state.cluster.read();
-            let stable_view = cluster.consistent_read_view();
-            cluster_batch_delivery(&stable_view, &program, &filter, &spec)
+            // As on `/v2/_search`, a source-enriched request runs under the
+            // mutation-frozen view, so matching and the union winner fetch cannot observe
+            // different same-ID versions.
+            cluster_state.run_with_stable_view(|stable_view| {
+                cluster_batch_delivery(stable_view, &program, &filter, &spec)
+            })
         } else {
             // Source-free bounded batches retain the fully concurrent path.
             let cluster = cluster_state.cluster.read();
