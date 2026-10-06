@@ -145,6 +145,10 @@ curl -X POST localhost:9200/_search -H 'Content-Type: application/json' \
   -d '{"document": {"title": "Dell XPS 15 Laptop 16GB RAM 512GB SSD New"}}'
 ```
 
+Using it as the recall stage of a matcher? Read
+[`docs/reference/integration.md`](docs/reference/integration.md) first: by default a response
+leaves out broad-lane queries and everything beyond the first page.
+
 Full endpoint and flag reference: [`docs/reference/api.md`](docs/reference/api.md). Query language:
 [`docs/reference/dsl.md`](docs/reference/dsl.md). The four documented deployment modes
 (single-node, in-process cluster, Compose, and Helm), their bring-up commands, and their constraints:

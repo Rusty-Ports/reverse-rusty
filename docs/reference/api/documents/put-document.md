@@ -79,6 +79,11 @@ bearing none of its forbidden terms, and — like every broad-lane query — onl
 the broad lane. A query with no positive *and* no forbidden terms (effectively empty) is rejected
 regardless.
 
+A query whose only anchor is a very common term (cost class C) is accepted and stored like any
+other, and is also matched only on requests that include the broad lane. The response does not
+say which class a query was stored in; see
+[recall-first integration](../../integration.md#1-choose-the-scope).
+
 ### Per-query metadata tags (ADR-049)
 
 A stored query may carry **structured tags** — `(key, value)` metadata used to *narrow* percolated

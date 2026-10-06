@@ -63,6 +63,8 @@ Four levels, each giving *just enough* to decide whether to go deeper:
 - [`reference/api.md`](reference/api.md) — the REST API **area hub**: choose a compact category
   catalog under [`reference/api/`](reference/api/), then open the focused contract page for the
   method and path you need.
+- [`reference/integration.md`](reference/integration.md) — recall-first integration: which
+  scope to ask for, how to get every candidate and not one page of them, and what not to page.
 - [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
 - [`reference/ranking.md`](reference/ranking.md) — the canonical ranking-profile contract: scoring,
   profile JSON, fixed feature semantics, admission bounds, startup settings, and behavior across all
