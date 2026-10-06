@@ -119,6 +119,79 @@ async fn non_transient_error_is_not_retried() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
+/// What the client gets when a request is written to a connection the server has closed:
+/// tonic's UNKNOWN "transport error" with the I/O error underneath.
+fn lost_connection(kind: std::io::ErrorKind) -> tonic::Status {
+    #[derive(Debug)]
+    struct Transport(std::io::Error);
+    impl std::fmt::Display for Transport {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("transport error")
+        }
+    }
+    impl std::error::Error for Transport {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    tonic::Status::from_error(Box::new(Transport(std::io::Error::new(
+        kind,
+        "peer went away",
+    ))))
+}
+
+/// The first read after a shard node restarts can be written to the old, closed connection.
+/// It is an idempotent read on a lost connection, so it is retried, and the retry reconnects.
+#[tokio::test]
+async fn retry_recovers_an_idempotent_read_after_a_lost_connection() {
+    let calls = AtomicU32::new(0);
+    let (res, attempts, timed_out) = run_with_retry(
+        || {
+            let n = calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if n == 0 {
+                    Err::<u32, _>(lost_connection(std::io::ErrorKind::BrokenPipe))
+                } else {
+                    Ok(42u32)
+                }
+            }
+        },
+        None,
+        2,
+    )
+    .await;
+    assert_eq!(res.ok(), Some(42));
+    assert_eq!(attempts, 1);
+    assert!(!timed_out);
+}
+
+#[test]
+fn a_lost_connection_is_transient_and_other_local_failures_are_not() {
+    use std::io::ErrorKind;
+    for kind in [
+        ErrorKind::BrokenPipe,
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::NotConnected,
+        ErrorKind::UnexpectedEof,
+    ] {
+        let status = lost_connection(kind);
+        assert_eq!(status.code(), tonic::Code::Unknown, "{kind:?}");
+        assert!(
+            is_transient(&status),
+            "{kind:?} means the connection is gone"
+        );
+    }
+    // A local failure that is not a lost connection (a bad certificate, say) is not retried.
+    assert!(!is_transient(&lost_connection(ErrorKind::InvalidData)));
+    assert!(!is_transient(&lost_connection(ErrorKind::PermissionDenied)));
+    // A status the server sent has no local cause, whatever its text says.
+    assert!(!is_transient(&tonic::Status::unknown("transport error")));
+    assert!(!is_transient(&tonic::Status::internal(
+        "Broken pipe (os error 32)"
+    )));
+}
+
 #[tokio::test]
 async fn writes_pass_zero_retries_and_fail_loud_on_transient() {
     // max_retries = 0 (the write path) → a transient error is NOT retried.

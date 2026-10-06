@@ -458,9 +458,11 @@ where
     }
 }
 
-/// Whether a gRPC status is worth retrying — only `Unavailable` (a transient connect /
-/// server-restarting / load-shed signal). Conservative on purpose: codes like
-/// `ResourceExhausted` or `Internal` are not retried, to avoid amplifying overload.
+/// Whether a gRPC status is worth retrying: `Unavailable` (a transient connect /
+/// server-restarting / load-shed signal), or a request that was written to a connection the
+/// peer had already closed. Conservative on purpose: codes like `ResourceExhausted` or a
+/// server's own `Internal` are not retried, to avoid amplifying overload. Only idempotent
+/// reads are ever retried; a write passes zero retries whatever this returns.
 fn is_transient(status: &tonic::Status) -> bool {
     match status.code() {
         // Connection refused/reset, server load-shedding, or a GOAWAY mid-RPC.
@@ -469,9 +471,34 @@ fn is_transient(status: &tonic::Status) -> bool {
         // connect refused — the most common downed-shard failure) to UNKNOWN with a
         // "Service was not ready: …" message. Treat THAT transport signal as transient, but
         // not arbitrary application-level UNKNOWNs.
-        tonic::Code::Unknown => status.message().contains("not ready"),
-        _ => false,
+        tonic::Code::Unknown if status.message().contains("not ready") => true,
+        _ => connection_was_lost(status),
     }
+}
+
+/// Whether the status was caused by losing the connection under the request. After a shard
+/// node restarts, the client still holds its old connection until it notices the close; a
+/// read issued in that window is written to a dead socket. tonic reports that as UNKNOWN
+/// "transport error", with the I/O error as its cause, so the cause is what is checked. A
+/// status that arrived from the server has no local cause and is never matched.
+fn connection_was_lost(status: &tonic::Status) -> bool {
+    use std::error::Error;
+    use std::io::ErrorKind;
+    let mut cause = status.source();
+    while let Some(error) = cause {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                ErrorKind::BrokenPipe
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::NotConnected
+                    | ErrorKind::UnexpectedEof
+            );
+        }
+        cause = error.source();
+    }
+    false
 }
 
 /// Exponential backoff for retry attempt `n` (1-based): 50ms, 100ms, 200ms, … capped at 1s.
