@@ -140,39 +140,6 @@ fn a_restart_keeps_a_query_inserted_before_the_first_finalize_visible() {
     }
 }
 
-/// Where a seal can fail.
-#[derive(Clone, Copy, Debug)]
-enum SealFailure {
-    /// `segments/` is read-only: the segment file cannot be written.
-    SegmentWrite,
-    /// The data directory itself is read-only: the segment is written, but the
-    /// source sidecar and manifest that would commit it cannot be.
-    Commit,
-}
-
-impl SealFailure {
-    fn blocked_dir(self, dir: &std::path::Path) -> std::path::PathBuf {
-        match self {
-            SealFailure::SegmentWrite => dir.join("segments"),
-            SealFailure::Commit => dir.to_path_buf(),
-        }
-    }
-
-    /// Make the directory read-only; returns the permissions to restore.
-    fn block(self, dir: &std::path::Path) -> std::fs::Permissions {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::create_dir_all(dir.join("segments")).expect("segments dir");
-        let blocked = self.blocked_dir(dir);
-        let original = std::fs::metadata(&blocked).unwrap().permissions();
-        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
-        original
-    }
-
-    fn unblock(self, dir: &std::path::Path, original: std::fs::Permissions) {
-        std::fs::set_permissions(self.blocked_dir(dir), original).unwrap();
-    }
-}
-
 fn first_batch() -> Vec<(u64, String)> {
     (0..200u64)
         .map(|i| (1_000 + i, format!("rareword filler{i}")))
@@ -184,7 +151,7 @@ fn first_batch() -> Vec<(u64, String)> {
 /// the memtable, so a retry seals it and nothing is lost.
 #[test]
 fn a_failed_seal_fails_the_batch_and_changes_nothing() {
-    for failure in [SealFailure::SegmentWrite, SealFailure::Commit] {
+    for failure in [StorageFailure::SegmentWrite, StorageFailure::Commit] {
         let dir = test_dir("mask_failed_seal");
         let config = manual_config(&dir);
         {
@@ -237,7 +204,7 @@ fn a_failed_seal_fails_the_batch_and_changes_nothing() {
 /// survives a later write, flush and restart.
 #[test]
 fn a_failed_seal_loses_no_acknowledged_query() {
-    for failure in [SealFailure::SegmentWrite, SealFailure::Commit] {
+    for failure in [StorageFailure::SegmentWrite, StorageFailure::Commit] {
         let dir = test_dir("mask_failed_seal_then_flush");
         let config = manual_config(&dir);
         {
@@ -283,41 +250,41 @@ fn an_engine_without_a_wal_is_not_sealed() {
     assert_eq!(reads(&engine, "rareword title").0, vec![1]);
 }
 
-/// A failed ordinary flush leaves its rows in an in-memory segment that no
-/// manifest lists. Before the mask exists those rows are in the same position
-/// as memtable rows, so the first batch must not assign the mask over them: it
-/// is refused, and a restart brings every acknowledged query back, visible.
+/// A flush that could not write its segment leaves rows in an in-memory
+/// segment, compiled without a mask and durable only as WAL text, exactly like
+/// memtable rows. The first batch must not assign the mask over them. While
+/// that segment still cannot be written the batch is refused; once it can, the
+/// batch commits it to disk first (ADR-190), so its rows keep the class they
+/// were given and stay default-visible across a restart.
 #[test]
-fn the_first_batch_is_refused_while_a_failed_flush_has_unpersisted_rows() {
+fn the_first_batch_commits_what_a_failed_flush_left_in_memory() {
     let dir = test_dir("mask_after_failed_flush");
     let config = manual_config(&dir);
     {
         let mut engine = Engine::with_config(make_norm(), config.clone());
         engine.insert_live("rareword", 1, 1);
-        let original = SealFailure::SegmentWrite.block(&dir);
+        let original = StorageFailure::SegmentWrite.block(&dir);
         engine.flush(); // fails: row 1 falls back to an in-memory segment
-        SealFailure::SegmentWrite.unblock(&dir, original);
-        engine.insert_live("otherword", 2, 1);
-
+        let refused = engine.try_bulk_ingest(&first_batch());
+        StorageFailure::SegmentWrite.unblock(&dir, original);
         assert!(
-            engine.try_bulk_ingest(&first_batch()).is_err(),
+            refused.is_err(),
             "the mask must not be assigned over rows that are only in the WAL"
         );
         assert!(!engine.dict().is_finalized());
         assert_eq!(reads(&engine, "rareword title").0, vec![1]);
+
+        engine.insert_live("otherword", 2, 1);
+        assert_eq!(engine.bulk_ingest(&first_batch()).ingested, 200);
+        assert!(engine.dict().is_finalized());
+        assert_eq!(reads(&engine, "rareword title").0, vec![1]);
         assert_eq!(reads(&engine, "otherword title").0, vec![2]);
     }
-    let mut engine = Engine::open(make_norm(), config.clone()).expect("reopen");
-    assert_eq!(reads(&engine, "rareword title").0, vec![1], "recovered");
-    assert_eq!(reads(&engine, "otherword title").0, vec![2], "recovered");
-    // After the restart the rows are memtable rows again, and the batch seals them.
-    assert_eq!(engine.bulk_ingest(&first_batch()).ingested, 200);
-    drop(engine);
-    let engine = Engine::open(make_norm(), config).expect("second reopen");
+    let engine = Engine::open(make_norm(), config).expect("reopen");
     assert_eq!(
         reads(&engine, "rareword title").0,
         vec![1],
-        "still default-visible after the mask was assigned and another restart"
+        "still default-visible after the mask was assigned and a restart"
     );
     assert_eq!(reads(&engine, "otherword title").0, vec![2]);
     drop(engine);

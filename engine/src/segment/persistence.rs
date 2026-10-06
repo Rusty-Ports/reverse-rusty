@@ -243,17 +243,6 @@ impl Engine {
         }
     }
 
-    /// Whether a base segment of this durable engine exists only in memory: a flush whose
-    /// segment write failed fell back to it (ADR-051). No manifest lists such a segment, so
-    /// its rows are durable only as WAL frames.
-    pub(in crate::segment) fn has_unpersisted_base_segment(&self) -> bool {
-        self.config.data_dir.is_some()
-            && self
-                .segments
-                .iter()
-                .any(|segment| matches!(segment.as_ref(), BaseSegment::Memory(_)))
-    }
-
     /// Reset the WAL after a successful flush + manifest write. Only call when
     /// both the checkpoint and manifest have been persisted, so no data is lost.
     pub(in crate::segment) fn reset_wal_if_safe(&mut self) {
@@ -317,6 +306,12 @@ impl Engine {
                     .to_string(),
                 error: format!("{} stale segment(s)", self.stale_segment_count()),
             });
+            return false;
+        }
+        // ADR-190: the manifest lists on-disk segments only, and its WAL watermark says every
+        // mutation up to it is in them. A base segment still served from memory (ADR-051)
+        // would make that false for its rows, so it goes to disk first or nothing commits.
+        if !self.persist_fallback_segments() {
             return false;
         }
         if let Some(ref dir) = self.config.data_dir {
@@ -435,10 +430,9 @@ impl Engine {
             }
             self.committed_wal_watermark = watermark;
         }
-        // Publish the exact generation order the manifest reader will reconstruct.
-        // Memory fallbacks are deliberately absent from `segment_files`; filtering
-        // them here keeps later positional WAL ordinals aligned even if the live
-        // vector contains an uncommitted fallback before a durable segment.
+        // Publish the exact generation order the manifest reader will reconstruct. A
+        // durable engine has no in-memory base segment at this point (ADR-190); the
+        // filter keeps the two lists aligned by construction all the same.
         self.committed_segment_generations = self
             .segments
             .iter()
@@ -550,6 +544,7 @@ impl Engine {
     }
 }
 
+mod fallback;
 mod feature_model;
 mod seal;
 mod sources;
