@@ -14,6 +14,7 @@ Candidate retrieval, lossless signature cover, exact verification, broad-query h
 | [019](../adr-019-query-family-factoring-declined.md) | Query-family factoring | Declines a shared-prefix DAG because it targets a non-bottleneck at high format and rebuild cost. | **Declined** |
 | [025](../adr-025-query-complexity-limits.md) | Query-complexity limits | Enforces front-door policy limits while keeping durable recovery governed by format ceilings. | Accepted |
 | [026](../adr-026-broad-lane-batch-evaluation.md) | Columnar broad-lane evaluation | Evaluates broad queries once per title batch through bitmap algebra while preserving scalar results. | Accepted |
+| [187](../adr-187-anyof-cover-and-visible-rebuilds.md) | Any-of cover and visible rebuilds | Anchors a top-64-required query on an any-of group with no top-64 member, keyed to the frozen mask, and keeps a default-visible query visible through every single-node rebuild. | Accepted |
 
 ---
 

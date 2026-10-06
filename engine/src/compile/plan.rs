@@ -23,19 +23,65 @@ fn phrase_proxy_plan(ex: &Extracted, dict: &Dict) -> Option<AnchorPlan> {
         .iter()
         .map(phrase_proxy)
         .filter(|group| !group.is_empty())
-        .min_by_key(|group| {
-            group
-                .iter()
-                .map(|&feature| dict.freq(feature))
-                .max()
-                .unwrap_or(u32::MAX)
-        })?;
+        .min_by_key(|group| worst_freq(group, dict))?;
     Some(AnchorPlan {
         main_anchors: best.into_iter().map(|feature| vec![feature]).collect(),
         broad_anchors: Vec::new(),
         hot_anchors: Vec::new(),
         class: CostClass::B,
         would_be_hot: false,
+    })
+}
+
+/// The frequency of a group's most frequent member: how fat its worst posting is.
+fn worst_freq(group: &[FeatureId], dict: &Dict) -> u32 {
+    group
+        .iter()
+        .map(|&feature| dict.freq(feature))
+        .max()
+        .unwrap_or(u32::MAX)
+}
+
+/// The default-visible cover an any-of group provides: one arity-1 anchor per
+/// member of the most selective group that has **no top-64 member**. `None` when
+/// every group has one.
+///
+/// Lossless for any query that carries the group: a satisfying title bears at
+/// least one member, and the main and hot indexes are probed arity-1 with every
+/// title feature. Whether a group qualifies is read from the frozen mask alone,
+/// so the visible/opt-in decision does not depend on live frequencies; they
+/// only choose among qualifying groups, and decide main lane vs hot tier.
+fn anyof_cover(ex: &Extracted, dict: &Dict, theta: u32) -> Option<AnchorPlan> {
+    let best = ex
+        .anyof
+        .iter()
+        .filter(|group| !group.iter().any(|&feature| is_hot(dict, feature)))
+        .min_by_key(|group| worst_freq(group, dict))?;
+    let worst = best.iter().map(|&f| dict.freq(f)).max().unwrap_or(0);
+    let anchors: Vec<Vec<FeatureId>> = best.iter().map(|&feature| vec![feature]).collect();
+    Some(if theta != 0 && worst >= theta {
+        // A θ-hot member: the WHOLE group anchors in the hot index (a query lives
+        // in exactly one index per segment, the dedup/counts invariant; ADR-105
+        // D5), which is probed on every request like the main lane.
+        AnchorPlan {
+            main_anchors: Vec::new(),
+            broad_anchors: Vec::new(),
+            hot_anchors: anchors,
+            class: CostClass::H,
+            would_be_hot: false,
+        }
+    } else {
+        AnchorPlan {
+            main_anchors: anchors,
+            broad_anchors: Vec::new(),
+            hot_anchors: Vec::new(),
+            class: CostClass::B,
+            // Observe-first counter for the Broad-Query Cost Program: a group on
+            // the main lane whose worst member already exceeds the default
+            // hot-anchor threshold would reclassify to the hot tier. Meaningful
+            // only while θ is OFF (θ on ⇒ such a group IS class H).
+            would_be_hot: theta == 0 && worst >= crate::config::DEFAULT_HOT_ANCHOR_THETA,
+        }
     })
 }
 
@@ -108,75 +154,29 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict, theta: u32) -> AnchorPlan {
     }
 
     if ex.required.is_empty() {
-        // required empty: cover via the most-selective any-of group.
-        // choose the group whose worst (most frequent) member is least frequent.
-        // `anyof` is non-empty here (the both-empty case returned class D above),
-        // but handle None defensively rather than panicking on the hot build path.
-        let Some(best) = ex
-            .anyof
-            .iter()
-            .min_by_key(|g| g.iter().map(|&f| dict.freq(f)).max().unwrap_or(u32::MAX))
-        else {
-            broad_anchors.push(Vec::new());
-            return AnchorPlan {
-                main_anchors,
-                broad_anchors,
-                hot_anchors,
-                class: CostClass::D,
-                would_be_hot: false,
-            };
-        };
-        let worst = best.iter().map(|&f| dict.freq(f)).max().unwrap_or(0);
-        if best.iter().any(|&f| is_hot(dict, f)) {
-            // ≥1 top-64 member -> the opt-in broad lane, exactly as before. The
-            // C boundary is mask-keyed and θ-invariant: θ never moves visibility.
-            // It is NOT invariant across compiles of one body, though. `best` is
-            // chosen by live frequency, and nothing is top-64 before the first
-            // mask finalize, so equal bodies can land on either side of it —
-            // which is why dedup joins compare visibility (ADR-186).
-            for &f in best {
-                broad_anchors.push(vec![f]);
-            }
-            AnchorPlan {
-                main_anchors,
-                broad_anchors,
-                hot_anchors,
-                class: CostClass::C,
-                would_be_hot: false,
-            }
-        } else if theta != 0 && worst >= theta {
-            // No top-64 member but a θ-hot one: the WHOLE group anchors in the
-            // hot index (one arity-1 anchor per member — a query lives in exactly
-            // one index per segment, the dedup/counts invariant; ADR-105 D5).
-            // Lossless: a matching title bears ≥1 member, every member is a hot
-            // anchor, and the hot index is probed arity-1 with every title
-            // feature on every request.
-            for &f in best {
-                hot_anchors.push(vec![f]);
-            }
-            AnchorPlan {
-                main_anchors,
-                broad_anchors,
-                hot_anchors,
-                class: CostClass::H,
-                would_be_hot: false,
-            }
+        // No required feature: cover via an any-of group. A group with no top-64
+        // member keeps the query default-visible.
+        if let Some(plan) = anyof_cover(ex, dict, theta) {
+            return plan;
+        }
+        // Every group has a top-64 member: only a top-64 anchor is available, so
+        // the query goes to the opt-in broad lane, anchored on the group whose
+        // worst (most frequent) member is least frequent. `anyof` is non-empty
+        // here (the both-empty case returned class D above), but handle None
+        // defensively rather than panicking on the hot build path.
+        let class = if let Some(best) = ex.anyof.iter().min_by_key(|g| worst_freq(g, dict)) {
+            broad_anchors.extend(best.iter().map(|&f| vec![f]));
+            CostClass::C
         } else {
-            // Observe-first counter for the Broad-Query Cost Program: a group kept
-            // on the main lane whose worst member's frequency already exceeds the
-            // default hot-anchor threshold would reclassify to the hot tier.
-            // Meaningful only while θ is OFF (θ on ⇒ such a group IS class H).
-            let would_be_hot = theta == 0 && worst >= crate::config::DEFAULT_HOT_ANCHOR_THETA;
-            for &f in best {
-                main_anchors.push(vec![f]);
-            }
-            AnchorPlan {
-                main_anchors,
-                broad_anchors,
-                hot_anchors,
-                class: CostClass::B,
-                would_be_hot,
-            }
+            broad_anchors.push(Vec::new());
+            CostClass::D
+        };
+        AnchorPlan {
+            main_anchors,
+            broad_anchors,
+            hot_anchors,
+            class,
+            would_be_hot: false,
         }
     } else {
         // required features sorted rarest-first
@@ -208,7 +208,12 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict, theta: u32) -> AnchorPlan {
                 if let Some(plan) = phrase_proxy_plan(ex, dict) {
                     return plan;
                 }
-                // Single hot required feature and no phrase proxy -> broad lane.
+                // So does an any-of group with no top-64 member: the title must
+                // carry one of its members as well as `r1`.
+                if let Some(plan) = anyof_cover(ex, dict, theta) {
+                    return plan;
+                }
+                // Only a top-64 anchor is available -> broad lane.
                 broad_anchors.push(vec![r1]);
                 AnchorPlan {
                     main_anchors,

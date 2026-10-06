@@ -86,10 +86,14 @@ const FORMAT_VERSION_PHRASE_PREDICATE: u32 = 10;
 /// instead of rejecting each emitted feature independently. Version 5 removes
 /// built-in domain analysis and makes numeric contexts entirely caller-defined.
 /// Version 6 preserves pre-dedup semantic any-of group and shortest-member term
-/// counts for deterministic CPU ranking.
+/// counts for deterministic CPU ranking. Version 7 changes which signature cover
+/// a body gets, not what it matches: an any-of group with no top-64 member now
+/// anchors a query whose only required feature is top-64, and is preferred over
+/// a group that has one, so the stored cover, class and cluster placement of
+/// such rows must be re-derived (ADR-187).
 /// This lives in the format's old reserved header word so
 /// recovery can source-rebuild every older materialization before serving it.
-pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 6;
+pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 7;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -187,6 +191,7 @@ mod tests {
                     accept_class_d: true,
                     hot_anchor_threshold: 0,
                     dedup_bodies: true,
+                    keep_visible: false,
                 },
             )
             .expect("accepted query");
@@ -224,6 +229,7 @@ mod tests {
                     accept_class_d: true,
                     hot_anchor_threshold: 0,
                     dedup_bodies: true,
+                    keep_visible: false,
                 },
             )
             .expect("accepted query");
@@ -259,6 +265,7 @@ mod tests {
                     accept_class_d: true,
                     hot_anchor_threshold: 0,
                     dedup_bodies: true,
+                    keep_visible: false,
                 },
             )
             .expect("accepted query");
@@ -294,6 +301,7 @@ mod tests {
                     accept_class_d: true,
                     hot_anchor_threshold: 0,
                     dedup_bodies: true,
+                    keep_visible: false,
                 },
             )
             .expect("accepted query");

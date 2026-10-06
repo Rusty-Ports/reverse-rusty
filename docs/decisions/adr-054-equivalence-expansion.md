@@ -88,3 +88,10 @@
   declared by operators or learned from the corpus's any-of groups — closing the alias half of
   Tier-2 self-tuning (the phrase half is [ADR-053](adr-053-corpus-phrase-vocab-source.md)). The
   zero-false-negative contract is preserved structurally, and the default path is byte-identical.
+
+- **Outcome update (2026-10-05).** "The query's match set can only grow" was true of what a query
+  *accepts*, but not of what a default read *returned*: moving a required feature into an any-of
+  group could leave a top-64 feature as the only anchor and send the query to the opt-in lane.
+  [ADR-187](adr-187-anyof-cover-and-visible-rebuilds.md) anchors such a query on the any-of group
+  and keeps a stored default-visible query visible through the rebuild, so the claim now holds in
+  both `include_broad` modes on the single-node engine.

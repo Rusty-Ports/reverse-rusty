@@ -74,6 +74,7 @@ fn v6_rejects_priority_column_count_mismatch() {
                 accept_class_d: false,
                 hot_anchor_threshold: 0,
                 dedup_bodies: true,
+                keep_visible: false,
             },
         )
         .expect("accepted query");
