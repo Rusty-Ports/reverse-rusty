@@ -72,7 +72,7 @@ pub(super) fn fence(
         crate::ownership::PlacementGeneration(req.placement_generation),
         req.num_shards,
     )?;
-    let (slot, st) = server.loaded_slot(req.shard_id)?;
+    let (slot, st) = server.loaded_slot_awaiting_recovery_ok(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
             "Fence dict-fingerprint mismatch (divergent feature space)",
@@ -104,7 +104,7 @@ pub(super) fn unfence(
         crate::ownership::PlacementGeneration(req.placement_generation),
         req.num_shards,
     )?;
-    let (slot, st) = server.loaded_slot(req.shard_id)?;
+    let (slot, st) = server.loaded_slot_awaiting_recovery_ok(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
             "Unfence dict-fingerprint mismatch (divergent feature space)",

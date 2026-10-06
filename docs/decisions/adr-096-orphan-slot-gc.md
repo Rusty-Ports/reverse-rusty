@@ -95,3 +95,9 @@ transport, assignment-routed topology validation, shared reconcile/GC admission,
 supervised completion, final state/timing attestation, sanitized failures, and a stronger completion
 predicate that includes skipped nodes/positions and deferred trash deletion. The keep-set and
 drop-guard decision above is unchanged.
+
+**Later outcome (2026-10-05).** A dropped slot left no trace on the node, so a coordinator with a
+stale topology could re-adopt the shard and read an empty slot without error.
+[ADR-189](adr-189-dropped-shards-await-recovery.md) makes the node remember each drop: a slot
+re-created for a dropped shard serves nothing until a peer recovery fills it.
+
