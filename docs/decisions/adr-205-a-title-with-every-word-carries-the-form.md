@@ -36,11 +36,12 @@ on a cluster. To the system that consumes the candidates the lost matches are fa
 **The positive title view holds a multi-word alias form's entity whenever it holds every word
 of the form, wherever the words stand.**
 
-1. **What counts as holding a word.** A word counts when the title emits a feature the word
-   compiles to as a token of its own: the word itself, a synonym's canonical, a number typed
-   as a year or left plain. A title that says `refurbished unit` therefore carries the form
-   `refurb unit` when `refurb` is a synonym of `refurbished`, and `unit #1995` carries
-   `1995 unit`.
+1. **What counts as holding a word.** The view holds `term:<token>` for every cleaned token
+   of the title, whatever its context makes of the token, so a word written in the title
+   counts. So does whatever the word compiles to as a token of its own: a synonym's canonical,
+   a year. A title that says `refurbished unit` therefore carries the form `refurb unit` when
+   `refurb` is a synonym of `refurbished`, and `unit #1995` carries `1995 unit`. The words are
+   looked for in the complete view, including what an overlapping phrase contributes.
 2. **Only the positive view.** The canonical view, which negation reads, keeps the adjacent
    reading: `inventory -(new york, boston)` rejects `new york inventory` and still accepts a
    title that has the two words apart. A quoted `"new york"` is checked against positions and
@@ -49,19 +50,23 @@ of the form, wherever the words stand.**
    feature-model fingerprint and the compiler-semantics version are as they were. The rule
    takes effect for every stored query at once, in both server modes.
 4. **One place.** Every title path builds its positive view in `match_features_dual` when a
-   multi-word alias is active. That view already runs a pass that consumes nothing and so emits
-   a feature for every token of the title. The normalizer keeps an index from feature name to
-   the alias words the name stands for, consulted once for each feature of that pass; a form
-   all of whose words were seen adds its entity. With no multi-word alias the path is not
-   taken.
+   multi-word alias is active. Every feature enters that view through one function, which also
+   notes the feature's name. When the view is complete, the forms whose words it holds add
+   their entities. With no multi-word alias nothing is noted and the path is not taken.
+5. **A form is examined only when the title carries its rarest word.** Each form is keyed on
+   the one of its words that the fewest forms share. Ten thousand forms `wireless <model>` cost
+   a title that says `wireless` nothing; a title that names a model looks at that model's
+   form. Names are compared by a 64-bit hash, so a title's names are kept without strings; a
+   collision could only add a candidate.
 
 **Why no match is lost.** Take a title that matched a query before the alias, and a form the
 query spells out. Before the alias the query required, for each word of the form, the feature
-the word compiled to there. If that feature was the word's own (itself, its synonym canonical,
-its typed or untyped number), the title emits it, and the rule counts the word. If the word had
-been consumed by another phrase, the title carries that phrase's entity, so it has the phrase's
-tokens side by side, among them the word, which the all-tokens pass emits. Every word of the
-form is counted, the view gets the entity, and the entity satisfies the rewritten query.
+the word compiled to there. If that feature was a synonym's canonical or a year, it is what the
+word compiles to alone, the title holds it, and the rule counts the word. Otherwise the feature
+came from a token equal to the word (a plain term, a number its context left untyped) or from
+a phrase whose tokens include the word; either way the title has the word as a token, and the
+view holds `term:<word>`. Every word of the form is counted, the view gets the entity, and the
+entity satisfies the rewritten query.
 
 ## Alternatives considered
 
@@ -88,22 +93,27 @@ form is counted, the view gets the entity, and the entity satisfies the rewritte
   alias (`ny catalog`) now also matches a title that has the words of `new york` apart
   (`new seasonal york catalog`). The engine is a recall-first candidate generator and the
   consumer's own matcher decides; an alias form made of very common words will add candidates.
-- A title pays one map lookup per token while a multi-word alias is active, and nothing
-  otherwise.
+- While a multi-word alias is active a title pays one hash and one lookup per feature of its
+  positive view, and nothing otherwise. On 200,000 generated queries with three aliases active
+  that was about 0.2 µs on a 1.9 µs title (Apple M4 Max, release build); classes and candidates
+  per title were identical to `main`.
 - No migration and no upgrade order: stored rows, the manifest and the wire formats are
   unchanged. During a rolling upgrade a node on the old binary answers as before.
 
 ## Proven
 
 - `normalize/alias_words_tests.rs`: the positive view gets the entity for words apart,
-  reordered, written through a synonym, typed by their context, and consumed by another phrase
-  in the canonical view; not for a missing word; the canonical view is unchanged; forms that
-  share an entity and nested forms; no multi-word alias, no change.
+  reordered, written through a synonym, typed by their context, consumed by another phrase in
+  the canonical view, and restored by an overlapping phrase; not for a missing word, and not
+  through an unrelated phrase; the canonical view is unchanged; forms that share an entity,
+  nested forms and a repeated word; five thousand forms that share a word are keyed on the
+  other one; no multi-word alias, no change.
 - `tests/oracle/alias_components.rs`: every match a query set had before `wireless mouse =>
   cordless mouse` and `ny => new york` survives activation, over titles with the words
   adjacent, apart and reordered; the alias matches; one word of a form does not; quoted and
   negated forms keep their results; the engine equals a brute-force evaluation of every stored
   query; a form over an existing additive or collapse phrase; a number typed by its context;
+  a later alias whose form overlaps an earlier one removes no match;
   queries written under the alias keep the class and default visibility they have on `main`;
   and the same at scale on generated queries the aliases rewrite, against the no-alias brute
   force.

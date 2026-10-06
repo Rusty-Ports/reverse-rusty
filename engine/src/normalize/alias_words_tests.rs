@@ -148,6 +148,81 @@ fn a_word_another_phrase_consumed_still_counts() {
 }
 
 #[test]
+fn a_word_restored_by_an_overlapping_phrase_still_counts() {
+    // `new york` is a declared phrase whose entity is the word `ny`. With `new york city` an
+    // alias form too, the longer form wins the parse and `new york` is found only by the
+    // overlapping scan. Its entity is in the positive view all the same, so `ny` is carried.
+    let before = build(|b| {
+        b.add_phrase(&["new", "york"], "term:ny", FeatureKind::Generic);
+        b.add_alias_form("ny catalog");
+    });
+    let after = build(|b| {
+        b.add_phrase(&["new", "york"], "term:ny", FeatureKind::Generic);
+        b.add_alias_form("ny catalog");
+        b.add_alias_form("new york city");
+    });
+    for norm in [&before, &after] {
+        assert!(positive_has(
+            norm,
+            "new york city catalog",
+            "term:ny_catalog"
+        ));
+        assert!(positive_has(norm, "catalog of new york", "term:ny_catalog"));
+    }
+}
+
+#[test]
+fn a_word_is_not_carried_through_an_unrelated_phrase() {
+    // `#` is kept as a token here and `# refurb` is a phrase of its own. Nothing about that
+    // phrase makes a title that says `marked` carry the word `refurb`.
+    let norm = build(|b| {
+        b.set_punct_class('#', super::PunctClass::Keep);
+        b.add_phrase(&["#", "refurb"], "term:marked", FeatureKind::Generic);
+        b.add_alias_form("refurb unit");
+    });
+    assert!(positive_has(&norm, "unit refurb", "term:refurb_unit"));
+    assert!(!positive_has(&norm, "marked unit", "term:refurb_unit"));
+}
+
+#[test]
+fn forms_that_share_a_word_are_keyed_on_the_other_one() {
+    // Thousands of forms `wireless <model>`: a title that says `wireless` must not have to
+    // look at any of them, and one that names a model looks at that model's form.
+    let norm = build(|b| {
+        for model in 0..5_000 {
+            b.add_alias_form(&format!("wireless zzmodel{model}"));
+        }
+    });
+    let words = norm.alias_words.as_ref().expect("alias words");
+    assert_eq!(words.forms_keyed_on("term:wireless"), 0);
+    assert_eq!(words.forms_keyed_on("term:zzmodel7"), 1);
+    assert!(positive_has(
+        &norm,
+        "zzmodel7 optical wireless",
+        "term:wireless_zzmodel7"
+    ));
+    assert!(!positive_has(
+        &norm,
+        "zzmodel7 optical wireless",
+        "term:wireless_zzmodel8"
+    ));
+    assert!(!positive_has(&norm, "wireless", "term:wireless_zzmodel7"));
+
+    // A key word that titles carry under two names is keyed under both.
+    let norm = build(|b| {
+        b.add_synonym("refurb", "term:refurbished", FeatureKind::Generic);
+        for other in ["refurb", "big", "small", "old"] {
+            b.add_alias_form(&format!("{other} unit"));
+        }
+    });
+    let words = norm.alias_words.as_ref().expect("alias words");
+    assert_eq!(words.forms_keyed_on("term:unit"), 0);
+    assert_eq!(words.forms_keyed_on("term:refurb"), 1);
+    assert_eq!(words.forms_keyed_on("term:refurbished"), 1);
+    assert!(positive_has(&norm, "unit, refurbished", "term:refurb_unit"));
+}
+
+#[test]
 fn a_repeated_word_is_one_word() {
     let norm = build(|b| b.add_alias_form("tick tick boom"));
     assert!(positive_has(&norm, "boom tick", "term:tick_tick_boom"));

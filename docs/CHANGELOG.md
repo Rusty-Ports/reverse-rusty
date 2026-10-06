@@ -22,7 +22,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **Wider than before:** a query that names another form of the alias (`ny catalog`) also matches
   a title with the words of `new york` apart. An alias made of very common words adds candidates.
 - Nothing stored changes: no recompile, no migration and no upgrade order. The rule is applied
-  to titles, and costs one lookup per title token while a multi-word alias is active.
+  to titles and costs a few lookups per title while a multi-word alias is active.
 - The reference documents and four ADRs said activation only widens. That is now true for
   multi-word forms; the at-scale test that claimed it could not fail and is replaced by one that
   rewrites real generated queries.

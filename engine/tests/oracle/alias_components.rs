@@ -469,3 +469,32 @@ fn the_words_of_a_form_keep_one_identity_across_a_later_insert() {
     let after = matches_of(&mut eng, &titles);
     assert_nothing_lost(&titles, &before, &after);
 }
+
+/// A later alias must not undo an earlier one. `new york` is a declared phrase for `ny`, and
+/// `ny catalog` an alias form: a title that says `new york city catalog` carries it. Once
+/// `new york city` is an alias form too it wins the title's parse, and the phrase is found
+/// only by the overlapping scan; the words of `ny catalog` are still all in the positive
+/// view.
+#[test]
+fn a_later_overlapping_alias_removes_no_match() {
+    let mut vocab = Vocab::new();
+    vocab.add_phrase(&["new", "york"], "term:ny", FeatureKind::Generic);
+    let mut eng = Engine::with_vocab(vocab, EngineConfig::default()).expect("engine");
+    eng.build_from_queries(&owned(&[(1, "ny catalog"), (2, "new york catalog")]));
+    let titles = [
+        "new york city catalog",
+        "ny catalog",
+        "catalog of new york",
+        "nycat",
+    ];
+
+    eng.import_alias_synonyms("nycat => ny catalog")
+        .expect("import");
+    let before = matches_of(&mut eng, &titles);
+    assert!(before[0].contains(&1) && before[0].contains(&2));
+
+    eng.import_alias_synonyms("nyc => new york city")
+        .expect("import");
+    let after = matches_of(&mut eng, &titles);
+    assert_nothing_lost(&titles, &before, &after);
+}

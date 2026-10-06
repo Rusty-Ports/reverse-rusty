@@ -259,10 +259,10 @@ pub struct NormScratch {
     phrase_emitted: Vec<bool>,
     /// Per-token "consumed by a phrase" flags, sized to `tokens.len()`.
     token_consumed: Vec<bool>,
-    /// The alias forms whose words the current title has shown so far, with the words seen
-    /// (ADR-205). Taken out for the duration of the positive view's all-tokens pass and put
-    /// back.
-    alias_words_seen: Vec<(u32, u64)>,
+    /// Every feature name of the current title's positive view, as
+    /// [`name_hash`](core::name_hash) values (ADR-205). Taken out while the view is built
+    /// and put back.
+    alias_names: Vec<u64>,
     /// Feature-name builder (`"term:"`/`"year:"` + value) handed to the helper emitters.
     scratch: String,
     /// Reused difference array for linear positioned-graph coverage. Entry `i`

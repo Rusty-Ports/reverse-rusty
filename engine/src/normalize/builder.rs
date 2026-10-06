@@ -252,9 +252,7 @@ impl NormalizerBuilder {
             number_context: self.number_context,
             fingerprint,
         };
-        // ADR-205: under which feature names a title carries each word of each alias form:
-        // whatever the normalizer emits for the word as a token of its own. A title emits
-        // one of them for each of its tokens, whatever stands around the token.
+        // ADR-205: under which feature names a title carries each word of each alias form.
         let (mut lc, mut sc) = (String::new(), super::NormScratch::new());
         let forms = alias_patterns
             .into_iter()
@@ -262,23 +260,22 @@ impl NormalizerBuilder {
                 let words = pattern
                     .split(' ')
                     .map(|word| {
-                        // Alone, and after a marker: a number is typed by what stands
-                        // before it, and a title may carry it either way.
-                        let mut names: Vec<String> = Vec::new();
-                        for text in [word.to_string(), format!("# {word}")] {
-                            norm.emit(
-                                &text,
-                                &mut lc,
-                                &mut sc,
-                                super::Side::Title,
-                                false,
-                                &mut |name, _kind| {
-                                    if !names.iter().any(|seen| seen == name) {
-                                        names.push(name.to_string());
-                                    }
-                                },
-                            );
-                        }
+                        // The token itself, which the positive view holds as `term:<token>`
+                        // for every token of a title whatever its context makes of it, and
+                        // what the word compiles to alone (a synonym's canonical, a year).
+                        let mut names = vec![format!("term:{word}")];
+                        norm.emit(
+                            word,
+                            &mut lc,
+                            &mut sc,
+                            super::Side::Title,
+                            false,
+                            &mut |name, _kind| {
+                                if !names.iter().any(|seen| seen == name) {
+                                    names.push(name.to_string());
+                                }
+                            },
+                        );
                         names
                     })
                     .collect();
