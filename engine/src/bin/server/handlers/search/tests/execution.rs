@@ -54,7 +54,7 @@ async fn search_honors_per_request_include_broad() {
 /// HTTP status (Err).
 // Reads the ES-convention `_id` field on hits (clippy::used_underscore_binding).
 #[allow(clippy::used_underscore_binding)]
-async fn search_ids(
+pub(super) async fn search_ids(
     state: &Arc<AppState>,
     body: serde_json::Value,
 ) -> Result<Vec<u64>, axum::http::StatusCode> {

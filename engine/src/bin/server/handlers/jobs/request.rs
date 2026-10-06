@@ -302,6 +302,7 @@ pub(super) fn prepare(
     jobs: &ExhaustiveJobs,
     body: CreateJobBody,
     params: CreateJobParams,
+    default_scope: reverse_rusty::QueryScope,
 ) -> Result<PreparedJob, (StatusCode, Json<ApiError>)> {
     reject_unsupported_async_controls(&body, &params)?;
     let event_id = body
@@ -371,7 +372,7 @@ pub(super) fn prepare(
     let timeout = jobs.bounded_timeout(requested_timeout).map_err(|()| {
         validation("timeout must be non-zero and no larger than the server job timeout")
     })?;
-    let scope = body.query_scope.unwrap_or_default();
+    let scope = body.query_scope.unwrap_or(default_scope);
     let rank = body.rank.map(RankBody::into_spec);
     Ok(PreparedJob {
         event_id,

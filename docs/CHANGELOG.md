@@ -9,6 +9,19 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — `--include-broad` applies on every search surface
+
+- **Behaviour change for servers started with `--include-broad`.** `/v2/_search`,
+  `/v2/_mpercolate` and exhaustive jobs now evaluate a request that names no `query_scope` in
+  the server's default scope, as `/_search` and `/_mpercolate` always have
+  ([ADR-201](decisions/adr-201-server-default-scope-on-every-surface.md)). They used to fall
+  back to `standard`, so a consumer that relied on the server flag and moved to one of them
+  silently lost every class C and accepted class D candidate. A request that names a scope gets
+  it, and a server without the flag is unchanged.
+- The flag's help text, the server reference, the coordinator reference and the Helm and
+  Compose comments now say which surfaces it governs. The coordinator reference no longer says
+  `include_broad` is a v2 request field; it is rejected there.
+
 ## 2026-10-06 — A merge no longer rewrites the stored documents
 
 - A standalone commit that changed no stored document now selects the source sidecar it already

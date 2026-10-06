@@ -71,7 +71,8 @@ response; a deadline returns a structured 408 instead of partial hits. `took_ms`
 higher-precision extension. Native v2 keeps numeric `_id` and does not synthesize an `_index`,
 because stored queries are logical IDs rather than resources in a caller-selected index.
 
-Defaults are `result_mode="top_k"`, `query_scope="standard"`, `size=100`, `static_v1` ranking with
+Defaults are `result_mode="top_k"`, `query_scope` as the server was started (`"standard"`, or
+`"with_broad"` with `--include-broad`; ADR-201), `size=100`, `static_v1` ranking with
 typed `priority`,
 `track_total_hits_up_to=10000`, `include_source=true`, `explain=false`,
 `allow_partial_results=false`, and `timeout_ms=5000`. Hard limits are `size <= 10000` and

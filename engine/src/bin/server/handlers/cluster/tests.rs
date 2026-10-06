@@ -434,6 +434,7 @@ mod bulk;
 mod cat_shards;
 mod checkpoint;
 mod crud;
+mod default_scope;
 mod flush;
 mod gc;
 mod handoff;

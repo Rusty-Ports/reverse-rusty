@@ -95,3 +95,8 @@ in memory; all-zero persistent corpora retain old segment versions.
 Distributed top-K ownership/merge, protobuf transport, multi-document ranking, cursor/PIT, exhaustive
 delivery, explicit approximate termination, and competitive candidate pruning remain Increment 3+
 work. Compatibility ranking deliberately remains collect-all and tag-string-semantic.
+
+## Later outcome — 2026-10-06
+
+The default `query_scope=standard` listed here is the default of a server started without
+`--include-broad`; see [ADR-201](adr-201-server-default-scope-on-every-surface.md).

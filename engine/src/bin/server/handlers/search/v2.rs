@@ -254,7 +254,11 @@ impl PrepareFailure {
 /// Parse and validate the public v2 contract once for both local and cluster
 /// serving. Keeping this lowering shared is what makes their defaults and 400s
 /// identical as the delivery implementations evolve independently.
-fn prepare(body: V2SearchBody, params: &V2SearchParams) -> Result<PreparedSearch, PrepareFailure> {
+fn prepare(
+    body: V2SearchBody,
+    params: &V2SearchParams,
+    default_scope: reverse_rusty::QueryScope,
+) -> Result<PreparedSearch, PrepareFailure> {
     if body.page_from.is_some() || body.documents.is_some() || body.query.is_some() {
         return Err(PrepareFailure::Validation(validation(
             "v2 ranked search accepts one `document`; from, documents and query are not supported",
@@ -361,7 +365,7 @@ fn prepare(body: V2SearchBody, params: &V2SearchParams) -> Result<PreparedSearch
         size: size.unwrap_or(reverse_rusty::DEFAULT_TOP_K),
         track_total_hits_up_to: track_total_hits_up_to
             .unwrap_or(reverse_rusty::DEFAULT_TRACK_TOTAL_HITS_UP_TO),
-        query_scope: query_scope.unwrap_or_default(),
+        query_scope: query_scope.unwrap_or(default_scope),
     };
     if options.size > reverse_rusty::MAX_TOP_K {
         return Err(PrepareFailure::Admission(
@@ -507,8 +511,12 @@ async fn v2_search_inner(
     params: V2SearchParams,
 ) -> Result<Json<V2SearchResponse>, Reject> {
     let started = Instant::now();
-    let requested_scope = body.query_scope.or(params.query_scope).unwrap_or_default();
-    let prepared = match prepare(body, &params) {
+    let default_scope = state.default_query_scope();
+    let requested_scope = body
+        .query_scope
+        .or(params.query_scope)
+        .unwrap_or(default_scope);
+    let prepared = match prepare(body, &params, default_scope) {
         Ok(prepared) => prepared,
         Err(failure) => return Err(prepare_failure(&state.prom, failure, requested_scope)),
     };
@@ -603,8 +611,12 @@ async fn cluster_v2_search_inner(
     params: V2SearchParams,
 ) -> Result<Json<V2SearchResponse>, Reject> {
     let started = Instant::now();
-    let requested_scope = body.query_scope.or(params.query_scope).unwrap_or_default();
-    let prepared = match prepare(body, &params) {
+    let default_scope = state.default_query_scope();
+    let requested_scope = body
+        .query_scope
+        .or(params.query_scope)
+        .unwrap_or(default_scope);
+    let prepared = match prepare(body, &params, default_scope) {
         Ok(prepared) => prepared,
         Err(failure) => return Err(prepare_failure(&state.prom, failure, requested_scope)),
     };

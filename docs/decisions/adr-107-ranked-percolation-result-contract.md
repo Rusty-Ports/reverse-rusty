@@ -91,3 +91,10 @@ Deterministic distributed emission ownership, query-then-fetch, distributed titl
 PIT/cursors, exhaustive jobs/streams, and exact competitive pruning remain separate ADR-sized
 increments. ADR-108 adds typed segment/WAL persistence while leaving manifest, protobuf, and
 compatibility response formats unchanged.
+
+## Later outcome — 2026-10-06
+
+The reserved v2 default `query_scope=standard` now follows the server:
+[ADR-201](adr-201-server-default-scope-on-every-surface.md) makes an omitted scope the one
+`--include-broad` selected, on v2 search, v2 batch and exhaustive jobs as on the compatibility
+routes. `include_broad` remains a compatibility-only request field.

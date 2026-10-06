@@ -6,7 +6,10 @@ use super::{
     SlotRows, StatusCode, V2MPercolateBody,
 };
 
-pub(super) fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, PrepareFailure> {
+pub(super) fn prepare_batch(
+    body: V2MPercolateBody,
+    default_scope: reverse_rusty::QueryScope,
+) -> Result<PreparedBatch, PrepareFailure> {
     if body.explain == Some(true) {
         return Err(PrepareFailure::Validation(validation(
             "explain=true is not supported on /v2/_mpercolate; use /v2/_search per document",
@@ -92,7 +95,7 @@ pub(super) fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, Pre
         size: body.size.unwrap_or(reverse_rusty::DEFAULT_TOP_K),
         track_total_hits_up_to: track_total_hits_up_to
             .unwrap_or(reverse_rusty::DEFAULT_TRACK_TOTAL_HITS_UP_TO),
-        query_scope: body.query_scope.unwrap_or_default(),
+        query_scope: body.query_scope.unwrap_or(default_scope),
     };
     if options.size > reverse_rusty::MAX_TOP_K {
         return Err(PrepareFailure::Admission(

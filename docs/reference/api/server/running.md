@@ -31,7 +31,7 @@ Options:
 | `--exhaustive-channel-depth` | 8 | Bounded frames buffered between an exhaustive worker and its stream consumer |
 | `--exhaustive-job-timeout-secs` | 300 | Maximum exhaustive admission-to-terminal lifetime (including worker scheduling); a request may ask for less |
 | `--max-retained-exhaustive-jobs` | 1024 | In-memory job records; oldest terminal records are pruned, while an all-active full registry rejects with 429 |
-| `--include-broad` | false | Include opt-in broad-lane class C and accepted class D queries. Class H is always visible |
+| `--include-broad` | false | Include opt-in broad-lane class C and accepted class D queries in every request that names no scope, on every search surface: `/_search`, `/_mpercolate`, `/v2/_search`, `/v2/_mpercolate` and exhaustive jobs ([ADR-201](../../../decisions/adr-201-server-default-scope-on-every-surface.md)). A request can name its own with `include_broad` (compatibility routes) or `query_scope` (v2 and jobs). Class H is always visible |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
 | `--slow-query-threshold-ms` | 1000 | Log searches exceeding this at `warn` level (0 disables) |
