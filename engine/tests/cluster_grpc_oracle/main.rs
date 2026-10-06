@@ -54,6 +54,7 @@ mod recovery;
 mod recovery_checkpoint;
 mod relocation;
 mod remote_resize;
+mod replica_proof;
 mod replication;
 mod replication_colocation;
 mod routing;

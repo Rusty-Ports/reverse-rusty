@@ -22,7 +22,8 @@ cargo run --release --bin server --features distributed -- --cluster \
 ```
 
 Cluster-mode flags: `--cluster`, `--shards` (in-process K, default 8), `--replication-factor`
-(in-process copies per position), `--shard-endpoint` (repeatable; remote mode). Remote links take
+(in-process copies per position), `--shard-endpoint` (repeatable; remote mode), and
+`--recover-divergent-replicas` (remote mode; see below). Remote links take
 the **mesh security** flags (ADR-071): `--grpc-tls-ca` (PEM CA to verify shard servers — endpoints
 then use `https://`), `--grpc-tls-domain` (SNI/verification override for raw-IP endpoints), and
 `--cluster-token`/`RR_CLUSTER_TOKEN` (the shared mesh secret attached to every gRPC RPC — distinct
@@ -72,6 +73,15 @@ translog — ADR-039); restarting the coordinator reconnects and re-mints the id
 from the same `--load-file`, so the fingerprint handshake holds. Its new boot ID may need to retry
 until the 30-second renewable owner lease expires, then wait for any response bodies/streams
 admitted under the prior owner to drain before taking over a node.
+
+When a remote coordinator connects, it compares each replica's content fingerprint with its
+primary's and trusts a replica for read failover only on an exact match (ADR-195). A replica that
+differs, or cannot attest its content (for example a node that does not retain query sources), is
+left as it is and kept out of the in-sync set: reads never fail over to it, `/_health` is yellow
+and reports `out_of_sync_replicas`. Starting the coordinator with `--recover-divergent-replicas`
+re-recovers each such replica from its primary first. Recovery discards the replica's data, so
+pass it only when the primaries are the good copies, and never after a primary lost its volume.
+In-process clusters rebuild replicas from the primary on every start and refuse the flag.
 
 A resolve-only coordinator takes its shard count and placement generation from the committed
 control document, so it follows a remote resize (ADR-180) without editing `--shards`; every other
@@ -182,8 +192,9 @@ Cluster-only routes are cataloged by responsibility:
 
 `GET /_stats` in cluster mode reports timing and `_shards` plus
 `{shards, replication_factor, total_queries, shard_queries[], class_counts, epoch,
-pending_repairs, has_tagged_queries, durable}`. Counts are the primary physical-row view (including
+pending_repairs, out_of_sync_replicas, has_tagged_queries, durable}`. Counts are the primary physical-row view (including
 tombstones and content-driven multi-position copies), not distinct live logical IDs; a missing
 position fails the whole response (ADR-140). `GET`/`HEAD /_health` validates every serving
-position plus the committed control topology: green is ready, yellow has queued repairs, and red
+position plus the committed control topology: green is ready, yellow has queued repairs or a
+replica outside the in-sync set, and red
 means a required dependency or topology check failed (ADR-144).

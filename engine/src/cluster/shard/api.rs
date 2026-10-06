@@ -582,4 +582,10 @@ pub(crate) trait Shard: Send + Sync {
     /// in-sync set. Default: a no-op (a plain [`LocalShard`]/`RemoteShard` emits nothing
     /// here). The coordinator fans its observer in via `ClusterEngine::set_observer`.
     fn set_event_sink(&self, _sink: EventSink) {}
+
+    /// How many of this position's replicas reads may not fail over to (ADR-195). 0 for a
+    /// position without replicas.
+    fn out_of_sync_replicas(&self) -> usize {
+        0
+    }
 }

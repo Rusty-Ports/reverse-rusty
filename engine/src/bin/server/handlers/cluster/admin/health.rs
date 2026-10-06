@@ -27,6 +27,7 @@ struct ClusterHealth {
     deadline_expired: bool,
     shards: usize,
     pending_repairs: usize,
+    out_of_sync_replicas: usize,
     reason: Option<&'static str>,
 }
 
@@ -37,6 +38,8 @@ struct ClusterHealthResponse {
     timed_out: bool,
     shards: usize,
     pending_repairs: usize,
+    /// Replicas reads cannot fail over to (ADR-195). 0 without replicas.
+    out_of_sync_replicas: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
 }
@@ -140,8 +143,8 @@ async fn collect_once(state: &Arc<ClusterAppState>, deadline: Instant) -> Cluste
         let _permit = permit;
         let cluster = worker_state.cluster.read();
         let shards = cluster.num_shards();
-        let pending_repairs = cluster.pending_repairs();
-        collect_cluster_health(&cluster).map_err(|source| (source, shards, pending_repairs))
+        let degraded = (cluster.pending_repairs(), cluster.out_of_sync_replicas());
+        collect_cluster_health(&cluster).map_err(|source| (source, shards, degraded))
     });
     let Some(probe_budget) = deadline.checked_duration_since(Instant::now()) else {
         return unavailable_fallback(
@@ -153,13 +156,14 @@ async fn collect_once(state: &Arc<ClusterAppState>, deadline: Instant) -> Cluste
     match tokio::time::timeout(probe_budget, worker).await {
         Err(_) => unavailable_fallback(state, "health dependency probe deadline elapsed", true),
         Ok(Ok(Ok(health))) => health,
-        Ok(Ok(Err((source, shards, pending_repairs)))) => {
+        Ok(Ok(Err((source, shards, (pending_repairs, out_of_sync_replicas))))) => {
             warn!(error = %source, "cluster health dependency probe failed");
             ClusterHealth {
                 status: HealthStatus::Red,
                 deadline_expired: false,
                 shards,
                 pending_repairs,
+                out_of_sync_replicas,
                 reason: Some("required shard or control-plane probe failed"),
             }
         }
@@ -205,18 +209,41 @@ fn collect_cluster_health(cluster: &ClusterEngine) -> Result<ClusterHealth, Shar
     }
 
     let pending_repairs = cluster.pending_repairs();
+    let out_of_sync_replicas = cluster.out_of_sync_replicas();
+    let (status, reason) = serving_status(pending_repairs, out_of_sync_replicas);
     Ok(ClusterHealth {
-        status: if pending_repairs > 0 {
-            HealthStatus::Yellow
-        } else {
-            HealthStatus::Green
-        },
+        status,
         deadline_expired: false,
         shards: counts.len(),
         pending_repairs,
-        reason: (pending_repairs > 0)
-            .then_some("partial applies are queued; POST /_cluster/resync converges them"),
+        out_of_sync_replicas,
+        reason,
     })
+}
+
+/// The status of a cluster whose every probe answered. It is yellow while it serves with
+/// something owed: a write some shard has not taken, or a replica that reads cannot fail
+/// over to (ADR-195), which leaves its position with less redundancy than configured.
+fn serving_status(
+    pending_repairs: usize,
+    out_of_sync_replicas: usize,
+) -> (HealthStatus, Option<&'static str>) {
+    if pending_repairs > 0 {
+        (
+            HealthStatus::Yellow,
+            Some("partial applies are queued; POST /_cluster/resync converges them"),
+        )
+    } else if out_of_sync_replicas > 0 {
+        (
+            HealthStatus::Yellow,
+            Some(
+                "a replica is outside the in-sync set, so reads cannot fail over to it; \
+                 recover it from its primary",
+            ),
+        )
+    } else {
+        (HealthStatus::Green, None)
+    }
 }
 
 fn unavailable_fallback(
@@ -225,14 +252,20 @@ fn unavailable_fallback(
     deadline_expired: bool,
 ) -> ClusterHealth {
     warn!(message = log_message, "cluster health unavailable");
-    let (shards, pending_repairs) = state.cluster.try_read().map_or((0, 0), |cluster| {
-        (cluster.num_shards(), cluster.pending_repairs())
-    });
+    let (shards, pending_repairs, out_of_sync_replicas) =
+        state.cluster.try_read().map_or((0, 0, 0), |cluster| {
+            (
+                cluster.num_shards(),
+                cluster.pending_repairs(),
+                cluster.out_of_sync_replicas(),
+            )
+        });
     ClusterHealth {
         status: HealthStatus::Red,
         deadline_expired,
         shards,
         pending_repairs,
+        out_of_sync_replicas,
         reason: Some("required shard or control-plane probe failed"),
     }
 }
@@ -253,6 +286,7 @@ fn cluster_response(current: &ClusterHealth, timed_out: bool, waits_for_status: 
             timed_out,
             shards: current.shards,
             pending_repairs: current.pending_repairs,
+            out_of_sync_replicas: current.out_of_sync_replicas,
             reason: if timed_out {
                 Some(if waits_for_status {
                     "requested health status was not reached before timeout"
@@ -294,6 +328,7 @@ mod tests {
             deadline_expired: false,
             shards: 3,
             pending_repairs: 1,
+            out_of_sync_replicas: 0,
             reason: Some("repair pending"),
         };
         let expired = ClusterHealth {
@@ -301,11 +336,24 @@ mod tests {
             deadline_expired: true,
             shards: 0,
             pending_repairs: 0,
+            out_of_sync_replicas: 0,
             reason: Some("probe deadline elapsed"),
         };
         let reported = timeout_observation(&expired, Some(&last));
         assert_eq!(reported.status, HealthStatus::Yellow);
         assert_eq!(reported.shards, 3);
         assert_eq!(reported.pending_repairs, 1);
+    }
+
+    #[test]
+    fn a_replica_reads_cannot_fail_over_to_makes_the_cluster_yellow() {
+        assert_eq!(serving_status(0, 0), (HealthStatus::Green, None));
+        let (status, reason) = serving_status(0, 2);
+        assert_eq!(status, HealthStatus::Yellow);
+        assert!(reason.expect("a reason").contains("in-sync set"));
+        // A queued repair is named first: it is the one a title can already miss on.
+        let (status, reason) = serving_status(3, 2);
+        assert_eq!(status, HealthStatus::Yellow);
+        assert!(reason.expect("a reason").contains("/_cluster/resync"));
     }
 }
