@@ -5,12 +5,15 @@
 //! (P1-16) flagged that this deep-clones the entire engine on every write,
 //! making writes O(total engine size) rather than O(delta).
 //!
-//! Usage: snapbench [num_queries] [iters]
+//! Usage: snapbench [num_queries] [iters] [data_dir]
 //!
 //! Reports:
 //!   - time per bare `snapshot()` call (the publish cost)
-//!   - time per PUT + publish cycle (insert_live + snapshot)
-//!   - time per DELETE + publish cycle
+//!   - time per PUT + publish and DELETE + publish with the snapshot dropped at once
+//!     (a lower bound: nothing is shared, so nothing is copied)
+//!   - the same with the published snapshot held until the next one replaces it, which
+//!     is how the server runs: per memtable size, for an upsert and a delete of a base
+//!     row, and with one more snapshot pinned
 //!   - time per bulk(1k) + publish cycle
 //!
 //! Build a large sealed engine first (build_from_queries seals into a base
@@ -20,6 +23,7 @@
 use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::segment::Engine;
 use reverse_rusty::Normalizer;
+use std::sync::Arc;
 use std::time::Instant;
 
 fn main() {
@@ -42,7 +46,29 @@ fn main() {
     let data = generate(&cfg);
 
     let norm = Normalizer::default_vocab().expect("default vocabulary");
-    let mut eng = Engine::new(norm);
+    // With a data directory the base segments are mmap-backed, as on a server started with
+    // `--data-dir`; without one they are in-memory segments, which a write that tombstones a
+    // base row copies whole. The engine's files go in a subdirectory this run creates and
+    // removes; nothing else under the given directory is touched.
+    let data_dir = args.get(3).map(|parent| {
+        let owned = std::path::Path::new(parent).join(format!("snapbench-{}", std::process::id()));
+        if owned.exists() {
+            eprintln!("refusing to reuse {}", owned.display());
+            std::process::exit(2);
+        }
+        std::fs::create_dir_all(&owned).expect("create the benchmark's data directory");
+        owned
+    });
+    let mut eng = Engine::with_config(
+        norm,
+        reverse_rusty::config::EngineConfig {
+            data_dir: data_dir.clone(),
+            // No automatic flush: each leg measures the memtable size it names, whatever the
+            // iteration count.
+            memtable_flush_threshold: usize::MAX,
+            ..Default::default()
+        },
+    );
     let tb = Instant::now();
     eng.build_from_queries(&data.queries);
     eprintln!(
@@ -51,9 +77,22 @@ fn main() {
         tb.elapsed().as_secs_f64()
     );
 
+    if data_dir.is_some() && !(eng.persistence_healthy() && eng.num_segments() > 1) {
+        eprintln!("the durable engine did not build: its storage is not healthy");
+        std::process::exit(2);
+    }
+
     println!("================ SNAPSHOT PUBLISH COST ================");
     println!("corpus              : {} queries", eng.num_queries());
     println!("base segments       : {}", eng.num_segments() - 1);
+    println!(
+        "storage             : {}",
+        if data_dir.is_some() {
+            "durable (mmap base segments)"
+        } else {
+            "in-memory"
+        }
+    );
     println!("dict features       : {}", eng.dict_len());
 
     // ---- bare snapshot() (the publish) ----
@@ -72,37 +111,102 @@ fn main() {
         1.0 / per_snap
     );
 
-    // ---- PUT + publish (the audit's "single PUT copies the whole engine") ----
-    let t = Instant::now();
-    for i in 0..iters {
-        let logical = 10_000_000 + i as u64;
-        eng.insert_live(
-            "1994 north star wireless mouse limited pro -damaged",
-            logical,
-            1,
-        );
-        std::hint::black_box(eng.snapshot());
-    }
-    let per_put = t.elapsed().as_secs_f64() / iters as f64;
-    println!(
-        "PUT + publish       : {:.3} ms/op    ({:.0} writes/sec)",
-        per_put * 1e3,
-        1.0 / per_put
-    );
+    // Every write below that inserts takes a new id from here, so no leg rewrites another's.
+    let mut next_id = 10_000_000_000u64;
+    let mut fresh = move || {
+        next_id += 1;
+        next_id
+    };
 
-    // ---- DELETE + publish ----
+    // ---- PUT + publish, with nobody holding the previous snapshot ----
+    // A lower bound, and not how the server runs: the snapshot is dropped at the end of
+    // each statement, so the next write finds the dict and the memtable unshared and
+    // copies nothing.
+    let inserted: Vec<u64> = (0..iters).map(|_| fresh()).collect();
     let t = Instant::now();
-    for i in 0..iters {
-        let logical = 10_000_000 + i as u64; // delete the ones we just inserted
-        let _ = eng.delete_by_logical_id(logical);
+    for logical in &inserted {
+        put(&mut eng, *logical);
         std::hint::black_box(eng.snapshot());
     }
-    let per_del = t.elapsed().as_secs_f64() / iters as f64;
-    println!(
-        "DELETE + publish    : {:.3} ms/op    ({:.0} writes/sec)",
-        per_del * 1e3,
-        1.0 / per_del
+    report("PUT + publish (snapshot dropped)", t, iters);
+    let t = Instant::now();
+    for logical in &inserted {
+        eng.delete_by_logical_id(*logical).expect("delete");
+        std::hint::black_box(eng.snapshot());
+    }
+    report("DELETE + publish (snapshot dropped)", t, iters);
+
+    // ---- The server's path: the published snapshot is held until the next replaces it ----
+    // `AppState` keeps the last snapshot in an `ArcSwap`, so at every write the engine's
+    // dict and memtable are shared with it, and `Arc::make_mut` copies them (RR-016).
+    // Each leg starts from an empty memtable filled to the size it names, so a leg measures
+    // the same workload whatever the iteration count and whatever ran before it.
+    println!("--- published snapshot held, as the server holds it ---");
+    for memtable_rows in [0usize, 10_000, 50_000, 100_000] {
+        let mut published = memtable_of(&mut eng, memtable_rows, &mut fresh);
+        let t = Instant::now();
+        for _ in 0..iters {
+            put(&mut eng, fresh());
+            published = Arc::new(eng.snapshot());
+        }
+        report(
+            &format!(
+                "PUT + publish, memtable {memtable_rows}..{}",
+                memtable_rows + iters
+            ),
+            t,
+            iters,
+        );
+        drop(published);
+    }
+
+    // An upsert that replaces a row in a base segment, and a delete of one, from an empty
+    // memtable: what they add is the copy of the base segment's liveness (an in-memory
+    // segment is copied whole).
+    let base_ids: Vec<u64> = data
+        .queries
+        .iter()
+        .take(2 * iters)
+        .map(|(id, _)| *id)
+        .collect();
+    let (replaced, deleted) = base_ids.split_at(iters.min(base_ids.len() / 2));
+    let mut published = memtable_of(&mut eng, 0, &mut fresh);
+    let t = Instant::now();
+    for id in replaced {
+        eng.try_upsert_live("1994 north star wireless mouse limited pro", *id, 2)
+            .expect("upsert");
+        published = Arc::new(eng.snapshot());
+    }
+    report("UPSERT of a base row + publish", t, replaced.len());
+    drop(published);
+    let mut published = memtable_of(&mut eng, 0, &mut fresh);
+    let t = Instant::now();
+    for id in deleted {
+        eng.delete_by_logical_id(*id).expect("delete");
+        published = Arc::new(eng.snapshot());
+    }
+    report("DELETE of a base row + publish", t, deleted.len());
+    drop(published);
+
+    // A point in time pins one more snapshot. The write path is the same as the 100,000-row
+    // leg above; what changes is that the copy the pin holds is not freed.
+    let mut published = memtable_of(&mut eng, 100_000, &mut fresh);
+    let pinned = Arc::clone(&published);
+    let t = Instant::now();
+    for _ in 0..iters {
+        put(&mut eng, fresh());
+        published = Arc::new(eng.snapshot());
+    }
+    report(
+        &format!(
+            "PUT + publish, one PIT open, memtable 100000..{}",
+            100_000 + iters
+        ),
+        t,
+        iters,
     );
+    drop(pinned);
+    drop(published);
 
     // ---- bulk(1k) + publish ----
     let bulk_n = 1_000usize;
@@ -111,14 +215,14 @@ fn main() {
     for b in 0..bulk_iters {
         let batch: Vec<(u64, String)> = (0..bulk_n)
             .map(|j| {
-                let logical = 20_000_000 + (b * bulk_n + j) as u64;
+                let logical = 20_000_000_000 + (b * bulk_n + j) as u64;
                 (
                     logical,
                     "1994 north star wireless mouse limited pro".to_string(),
                 )
             })
             .collect();
-        eng.bulk_ingest(&batch);
+        eng.try_bulk_ingest(&batch).expect("bulk load");
         std::hint::black_box(eng.snapshot());
     }
     let per_bulk = t.elapsed().as_secs_f64() / bulk_iters as f64;
@@ -128,10 +232,47 @@ fn main() {
         bulk_n as f64 / per_bulk
     );
 
+    if let Some(owned) = &data_dir {
+        drop(eng);
+        let _ = std::fs::remove_dir_all(owned);
+    }
     println!("======================================================");
     println!(
         "ideal: snapshot()/PUT/DELETE publish should be ~independent of corpus size\n\
          (O(delta), not O(total)). Re-run at multiple --num_queries to see scaling."
+    );
+}
+
+/// One live insert of a new id. A write that fails would make the timing meaningless.
+fn put(eng: &mut Engine, logical: u64) {
+    eng.try_insert_live(
+        "1994 north star wireless mouse limited pro -damaged",
+        logical,
+        1,
+    )
+    .expect("insert");
+}
+
+/// Seal whatever the memtable holds, fill a new one with `rows` fresh rows while nothing
+/// shares it (so the fill copies nothing), and publish: the snapshot a server would hold.
+fn memtable_of(
+    eng: &mut Engine,
+    rows: usize,
+    fresh: &mut impl FnMut() -> u64,
+) -> Arc<reverse_rusty::segment::EngineSnapshot> {
+    eng.flush();
+    for _ in 0..rows {
+        put(eng, fresh());
+    }
+    Arc::new(eng.snapshot())
+}
+
+fn report(label: &str, started: Instant, ops: usize) {
+    let per_op = started.elapsed().as_secs_f64() / ops.max(1) as f64;
+    println!(
+        "{label:<52}: {:.3} ms/op    ({:.0} writes/sec)",
+        per_op * 1e3,
+        1.0 / per_op
     );
 }
 

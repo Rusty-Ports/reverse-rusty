@@ -88,10 +88,12 @@ impl Engine {
     /// This is O(number of base segments) pointer copies, *not* O(corpus): the
     /// normalizer, dictionary, each base segment, the memtable, and the query
     /// store are all shared structurally via `Arc` (segments by per-segment
-    /// pointer; the dict/memtable copy-on-write on the next write). Publishing a
-    /// snapshot after every mutation is therefore cheap — the deep-clone-the-whole-
-    /// engine cost the audit flagged (P1-16) is gone. Readers match against the
-    /// snapshot without holding any lock on the engine.
+    /// pointer; the dict/memtable copy-on-write on the next write). Taking a
+    /// snapshot is therefore cheap, and readers match against it without holding
+    /// any lock on the engine. Holding one is not free for the writer: while a
+    /// snapshot shares the dict and the memtable, the next write copies both
+    /// (`Arc::make_mut`), and a server always holds its published snapshot
+    /// (ADR-016, dated outcome).
     pub fn snapshot(&self) -> EngineSnapshot {
         EngineSnapshot {
             norm: Arc::clone(&self.norm),

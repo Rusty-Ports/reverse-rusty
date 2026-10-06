@@ -122,6 +122,28 @@ simple.
 **Completion.** A format and compatibility ADR, mutation-validated differential coverage for the
 agreement fence, and a real-corpus reduction in scanned postings or verifier work.
 
+### Writes proportional to the change
+
+**Problem.** A server holds its published snapshot, which shares the feature dictionary and the
+memtable with the engine, so every single write copies both before it changes them, under the
+engine mutex. Measured on the 2026-10-06 capture, a PUT costs 1.5 to 3.9 ms at 1M queries and
+grows with the vocabulary and the memtable; an upsert or delete of a row in an in-memory base
+segment copies the whole segment. Each open point in time can pin its own copy of both.
+
+**Direction.** Split the dictionary into an immutable shared core, a small delta of features
+interned since the last fold, and chunked copy-on-write columns for the per-feature counters, so
+a clone copies the delta and a few chunk pointers. Keep the memtable as a list of small frozen
+runs plus one active run, which is the only part a write copies. Move base-segment liveness into
+a chunked copy-on-write overlay shared outside the segment. Free the retired snapshot after the
+writer lock is released. Count deep copies per write as a structural, machine-independent number
+and gate on it.
+
+**Completion.** Dense feature ids, the dictionary fingerprint and file bytes, and anchor choice
+are unchanged (a differential test proves split equals monolithic); a single write with a held
+snapshot copies a bounded number of bytes independent of the vocabulary and the memtable, asserted
+structurally in the performance gate; and the write captures in
+[`performance/`](performance/) are re-taken with the snapshot held.
+
 ### Dense representation promotion in the batch evaluator
 
 **Problem.** The broad and hot columnar passes can still spend time iterating postings that are

@@ -128,3 +128,11 @@ deferral.
   ADR-114.
 - `evaluations` rank counters legitimately differ across pages (the scorer runs before the
   boundary check); oracles compare winners + totals only (the ADR-112 rule).
+
+## Later outcome — 2026-10-06
+
+The consequence "a PIT retains ... the pre-publish memtable copy" leaves out the larger part. A
+point in time pins one whole snapshot, and every write makes a new copy of the feature
+dictionary as well as of the memtable (ADR-016, dated outcome). Points in time opened after
+different writes therefore each hold their own dictionary and memtable; the bound is
+`--max-open-pits` times the two together.

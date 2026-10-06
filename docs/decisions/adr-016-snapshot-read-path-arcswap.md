@@ -48,3 +48,24 @@
   infrastructure. Lock-free atomic `Arc` swaps with epoch-based reclamation.
 - **See also:** [ingestion-and-updates.md](../design/ingestion-and-updates.md)
 
+## Later outcome — 2026-10-06
+
+The refinement's result, "PUT + publish dropped from 82 ms to ~2 µs at 1M queries ... flat across
+corpus size", does not describe a running server. `snapbench` dropped each snapshot as soon as it
+was made, so the next write found the dict and the memtable unshared and copied nothing. A
+server holds its published snapshot until the next one replaces it, so every write finds both
+shared and `Arc::make_mut` copies them: the whole feature dictionary and the whole memtable, per
+write, under the engine mutex.
+
+Measured with the snapshot held (`snapbench`, Apple M4 Max, 2026-10-06): a PUT and publish costs
+0.3 ms on a 200k-query corpus with an empty memtable and 2.5 ms with 100,000 rows in it; at 1M
+queries, 1.5 ms and 3.7 to 3.9 ms. That is a few hundred to a few thousand single writes per second,
+and it grows with the vocabulary and the memtable. An upsert or delete that tombstones a row of
+an in-memory base segment copies that whole segment (24 ms and 22 ms at 1M); on mmap segments it
+copies the liveness overlay only. The full capture is in
+[`benchmark-results.txt`](../performance/benchmark-results.txt).
+
+The structural sharing itself stands: a snapshot is still a handful of pointer copies, readers
+are still lock-free, and the 82 ms whole-engine copy is gone. What does not hold is the write
+cost and its flatness. Making a write cost proportional to the change is on the
+[roadmap](../roadmap.md) ("Writes proportional to the change").
