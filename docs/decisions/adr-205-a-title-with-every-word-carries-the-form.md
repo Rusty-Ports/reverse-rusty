@@ -65,7 +65,8 @@ holds every word.
    still holds nothing outside its fingerprint. The equivalents are read where the compiler
    reads them: `Vocab::resolve_equivalences` now resolves each class by feature name as well
    as by feature id, and the two are installed on the dictionary together. A title is widened
-   through the classes of whatever dictionary it is matched against. Two names that share a
+   through the classes of whatever dictionary it is matched against, each class once however
+   many of its members the title carries. Two names that share a
    feature id (a synthetic id is a hash, ADR-046) are one feature to the compiler, and the
    class by name keeps both.
 4. **One place.** Every title path builds its positive view in `match_features_dual` when a
@@ -166,8 +167,9 @@ test pins the present behaviour (`a_form_that_cuts_through_an_earlier_phrase_can
   of five thousand forms examines none; a chain of two thousand forms is examined once each;
   a word repeated fifty thousand times is looked at once; an entity that ten thousand forms
   share as a word wakes none of them; a form that waits on a piece is looked at once when the
-  piece arrives, also when an equivalent brings it; a title that touches no form leaves the
-  completion's scratch unallocated; and nothing of one title is left for the next.
+  piece arrives, also when an equivalent brings it; a class of two thousand names widens a
+  title that carries all of them once; a title that touches no form leaves the completion's
+  scratch unallocated; and nothing of one title is left for the next.
 - `tests/oracle/alias_components.rs`: every match a query set had before `wireless mouse =>
   cordless mouse` and `ny => new york` survives activation, over titles with the words
   adjacent, apart and reordered; the alias matches; one word of a form does not; quoted and

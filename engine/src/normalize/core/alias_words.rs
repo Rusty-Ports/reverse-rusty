@@ -79,6 +79,11 @@ pub(in crate::normalize) struct AliasScratch {
     waiting: FastMap<u64, Vec<u32>>,
     /// Which token positions of the form under examination the view reaches.
     reach: Vec<bool>,
+    /// The equivalence classes of the title's names, each by its first member.
+    classes: Vec<u64>,
+    /// Class (by its first member) -> whether one of its members is a form's entity, so
+    /// that a class is looked through once per title however many pieces ask.
+    supplies: FastMap<u64, bool>,
 }
 
 impl AliasWords {
@@ -204,15 +209,25 @@ impl AliasWords {
         // A title that carries a name carries, for this rule, every name a query treats as
         // the same.
         if dict.has_equivalent_names() {
-            let carried = scratch.names.len();
-            for at in 0..carried {
-                if let Some(class) = dict.equivalent_names(scratch.names[at]) {
-                    scratch.names.extend_from_slice(class);
+            // Each class once, however many of its members the title carries: a class is
+            // told by its first member.
+            let AliasScratch { names, classes, .. } = scratch;
+            classes.clear();
+            classes.extend(
+                names
+                    .iter()
+                    .filter_map(|&name| dict.equivalent_names(name)?.first().copied()),
+            );
+            if !classes.is_empty() {
+                classes.sort_unstable();
+                classes.dedup();
+                for &first in classes.iter() {
+                    if let Some(class) = dict.equivalent_names(first) {
+                        names.extend_from_slice(class);
+                    }
                 }
-            }
-            if scratch.names.len() != carried {
-                scratch.names.sort_unstable();
-                scratch.names.dedup();
+                names.sort_unstable();
+                names.dedup();
             }
         }
         debug_assert!(scratch.is_clear());
@@ -234,6 +249,7 @@ impl AliasWords {
         scratch.done.clear();
         scratch.noted.clear();
         scratch.waiting.clear();
+        scratch.supplies.clear();
         examined
     }
 
@@ -281,6 +297,8 @@ impl AliasWords {
             noted,
             waiting,
             reach,
+            classes: _,
+            supplies,
         } = scratch;
         if done.contains(&u64::from(form)) {
             return;
@@ -334,7 +352,7 @@ impl AliasWords {
             }
             let mut any = false;
             for &name in &unit.names {
-                if self.can_supply(name, dict) {
+                if self.can_supply(name, dict, supplies) {
                     waiting.entry(name).or_default().push(form);
                     any = true;
                 }
@@ -347,11 +365,19 @@ impl AliasWords {
 
     /// Whether the completion could put `name` in a view: it is a form's entity, or a query
     /// takes it for one.
-    fn can_supply(&self, name: u64, dict: &Dict) -> bool {
-        self.entities.contains(&name)
-            || dict
-                .equivalent_names(name)
-                .is_some_and(|class| class.iter().any(|same| self.entities.contains(same)))
+    fn can_supply(&self, name: u64, dict: &Dict, supplies: &mut FastMap<u64, bool>) -> bool {
+        if self.entities.contains(&name) {
+            return true;
+        }
+        let Some(class) = dict.equivalent_names(name) else {
+            return false;
+        };
+        let Some(&first) = class.first() else {
+            return false;
+        };
+        *supplies
+            .entry(first)
+            .or_insert_with(|| class.iter().any(|same| self.entities.contains(same)))
     }
 
     /// How many forms a title that carries `name` has to look at.
@@ -369,11 +395,13 @@ impl AliasScratch {
             && self.done.is_empty()
             && self.noted.is_empty()
             && self.waiting.is_empty()
+            && self.supplies.is_empty()
     }
 
     /// The memory held for what a title's completion remembers, in entries. A title that
     /// touches no form, or only forms that lack a piece nothing can supply, must leave it at
-    /// zero. (`reach` is not counted: it is as long as one form.)
+    /// zero. (`reach` and `classes` are not counted: they are as long as one form and as the
+    /// title's own names.)
     #[cfg(test)]
     pub(in crate::normalize) fn held(&self) -> usize {
         self.entered.capacity()
@@ -381,5 +409,6 @@ impl AliasScratch {
             + self.done.capacity()
             + self.noted.capacity()
             + self.waiting.capacity()
+            + self.supplies.capacity()
     }
 }

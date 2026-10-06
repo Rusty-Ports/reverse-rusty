@@ -357,7 +357,11 @@ fn nothing_of_one_title_is_left_for_the_next() {
 
 /// A dictionary in which the given names are one class to a query.
 fn dict_with_class(names: &[&str]) -> Dict {
-    let class: std::sync::Arc<[u64]> = hashes(names).into();
+    // Sorted, as `Vocab::resolve_equivalences` builds a class.
+    let mut class = hashes(names);
+    class.sort_unstable();
+    class.dedup();
+    let class: std::sync::Arc<[u64]> = class.into();
     let mut by_name = crate::util::fast_map();
     for &name in class.iter() {
         by_name.insert(name, std::sync::Arc::clone(&class));
@@ -401,4 +405,75 @@ fn a_form_waits_for_a_piece_an_equivalent_will_supply() {
     let examined = words.complete_into(&mut scratch, &dict, &mut out);
     assert_eq!(out, ids(&["term:ew"]));
     assert_eq!(examined, 1);
+}
+
+#[test]
+fn a_class_is_added_once_however_many_of_its_members_a_title_carries() {
+    // Two thousand names a query takes for each other, and a title that carries all of
+    // them. The view is widened by the class once, not once per member it carries.
+    let members: Vec<String> = (0..2_000).map(|at| format!("term:zzsame{at}")).collect();
+    let members: Vec<&str> = members.iter().map(String::as_str).collect();
+    let dict = dict_with_class(&members);
+    let words = super::super::core::AliasWords::new(vec![form(
+        "term:zzother_form",
+        &["term:zzother", "term:zzform"],
+    )])
+    .expect("alias words");
+    let mut scratch = super::super::core::AliasScratch::default();
+    let mut out = Vec::new();
+    scratch.names = hashes(&members);
+    let examined = words.complete_into(&mut scratch, &dict, &mut out);
+    assert_eq!(examined, 0);
+    assert!(out.is_empty());
+    assert_eq!(scratch.names.len(), members.len());
+    assert!(
+        scratch.names.capacity() < 4 * members.len(),
+        "the view grew to {} names for a class of {}",
+        scratch.names.capacity(),
+        members.len()
+    );
+
+    // One member is enough to carry the whole class.
+    scratch.names = hashes(&members[..1]);
+    words.complete_into(&mut scratch, &dict, &mut out);
+    assert_eq!(scratch.names.len(), members.len());
+}
+
+#[test]
+fn what_a_class_can_supply_is_decided_afresh_for_each_title() {
+    // `x` is a piece of two forms. In the first dictionary a query takes `x` for a name
+    // that is no form's entity, so nothing can supply it and nothing waits. In the second
+    // the same class also holds `eb`, the entity of a form that completes for this title,
+    // and both forms get `x` from it. One scratch serves both, as it does when a
+    // vocabulary changes under a running server.
+    let words = super::super::core::AliasWords::new(vec![
+        form("term:ew1", &["term:zk1", "term:x"]),
+        form("term:ew2", &["term:zk2", "term:x"]),
+        form("term:ea", &["term:za", "term:zb"]),
+        form("term:eb", &["term:ea", "term:zc"]),
+    ])
+    .expect("alias words");
+    // A class is told by its first member. Take a member that sorts before `eb`, so that
+    // the two classes are told by the same one.
+    let low = (0..10_000)
+        .map(|at| format!("term:zzlow{at}"))
+        .find(|name| crate::dict::name_hash(name) < crate::dict::name_hash("term:eb"))
+        .expect("a name that sorts first");
+    let carried = ["term:za", "term:zb", "term:zc", "term:zk1", "term:zk2"];
+    let mut scratch = super::super::core::AliasScratch::default();
+    let mut out = Vec::new();
+
+    let without = dict_with_class(&["term:x", &low]);
+    scratch.names = hashes(&carried);
+    let examined = words.complete_into(&mut scratch, &without, &mut out);
+    out.sort_unstable();
+    assert_eq!(out, ids(&["term:ea", "term:eb"]));
+    assert_eq!(examined, 4, "each form once");
+
+    let with = dict_with_class(&["term:eb", "term:x", &low]);
+    scratch.names = hashes(&carried);
+    out.clear();
+    words.complete_into(&mut scratch, &with, &mut out);
+    out.sort_unstable();
+    assert_eq!(out, ids(&["term:ea", "term:eb", "term:ew1", "term:ew2"]));
 }
