@@ -767,6 +767,8 @@ pub(crate) async fn run(
                 Err(e) => error!(error = %e, "shutdown checkpoint failed"),
             }
         }
+        // The repair queue is this process's memory (ADR-194): say what stops with it.
+        shutdown::log_unconverged_writes(&cluster);
     }
     info!("shutdown complete");
 }

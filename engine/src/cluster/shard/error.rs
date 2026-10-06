@@ -70,21 +70,20 @@ pub enum ShardError {
     /// [`ControlError`](super::control::ControlError); this is the folded form crossing the
     /// coordinator boundary. The in-memory single-node control plane never produces it.
     ControlPlane(String),
-    /// A selective multi-shard mutation applied to some target shards but FAILED on others (a
-    /// remote shard write errored mid-fan-out — ADR-047). Distinguished from a clean failure
-    /// (`Remote`/`Log`, where nothing applied) so a higher layer can act precisely: the
-    /// mutation IS durably logged (committed), the `applied` shards already hold it, the
-    /// `failed` shards do not yet, and the coordinator has queued the failed shards for repair.
-    /// Call [`ClusterEngine::resync`](crate::cluster::ClusterEngine::resync) to converge them
-    /// (or reopen, whose log replay re-drives every target); do NOT re-`add_query`, which would
-    /// double-log. Never produced by the in-process / RF=1 path (its `LocalShard` writes are
-    /// infallible — an empty failure set yields the normal `Ok` outcome).
+    /// A cluster mutation that not every target shard took: a remote shard write errored during
+    /// the fan-out (ADR-047). `applied` may be empty, since the same error reports a write that
+    /// no shard took. The write is NOT acknowledged (ADR-194). The `failed` shards are queued
+    /// for repair in this coordinator's memory only: a remote coordinator has no durable log, so
+    /// the queue is gone when its process stops. Converge it by retrying the idempotent upsert
+    /// or delete, or with [`ClusterEngine::resync`](crate::cluster::ClusterEngine::resync) on
+    /// this same coordinator. Never produced by the in-process / RF=1 path (its `LocalShard`
+    /// writes are infallible — an empty failure set yields the normal `Ok` outcome).
     PartiallyApplied {
-        /// Logical id of the mutation that partially applied.
+        /// Logical id of the mutation that did not converge.
         logical: u64,
         /// Shards that DID apply it (they already hold the new state).
         applied: Vec<usize>,
-        /// Shards that did NOT (queued for repair; a transient false-negative window).
+        /// Shards that did NOT (queued for repair on this coordinator).
         failed: Vec<usize>,
         /// The first underlying shard error, for context.
         detail: String,
@@ -134,9 +133,9 @@ impl std::fmt::Display for ShardError {
                 detail,
             } => write!(
                 f,
-                "cluster mutation for logical {logical} partially applied: applied on shards \
-                 {applied:?}, FAILED on {failed:?} ({detail}); durably logged — resync or reopen \
-                 to converge"
+                "cluster mutation for logical {logical} is not converged: applied on shards \
+                 {applied:?}, FAILED on {failed:?} ({detail}); retry the idempotent upsert or \
+                 delete, or resync on this coordinator while it stays up"
             ),
         }
     }

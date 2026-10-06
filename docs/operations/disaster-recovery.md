@@ -29,6 +29,7 @@ failure class. "Crash" = the process dies (OOM-kill, SIGKILL, node reboot with t
 | Remote (Compose/Helm), RF=1 | shard pod crash | **0** (per-shard translog + committed segments, including successfully recovered targets; ADR-039/181) | pod restart; reads routing to it `502` meanwhile (fail-loud, ADR-072) |
 | Remote, RF=1 | **shard volume loss** | since the last snapshot **of that shard** | §3.1 below |
 | Remote, RF≥2 | one node lost | **0 for reads** (failover to an in-sync replica, ADR-035); writes need the primary | automatic for reads; replica replacement per [runbook §6](cluster-deployment.md) |
+| Remote | coordinator crash or restart | **0 acked writes** (it holds no data). A write answered 503 `partial` was never acked: until its writer repeats it, it stays missing from the shards that refused it, because the repair queue is the coordinator's memory (ADR-194) | restart; writers repeat their 503s |
 | Remote | control-plane **minority** loss | 0 (quorum holds; durable Raft, ADR-041) | restart the node; it rejoins |
 | Remote | control-plane **majority** loss | cluster-state document: to the last control-volume snapshot (query data is unaffected — it lives on the shards) | §3.2 below |
 | Any | whole-cluster loss | since the last **consistent backup set** | §3.3 below |
@@ -50,7 +51,7 @@ your real RTO.
 |---|---|
 | Shard pod crashed / restarting | [runbook §6 row 1](cluster-deployment.md) — self-restores from its volume |
 | Need to restart everything one by one | [runbook §6 rolling restart](cluster-deployment.md); upgrades → [`rolling-upgrade.md`](rolling-upgrade.md) |
-| Coordinator down/restarted | [runbook §6](cluster-deployment.md) — stateless, reconnects and re-derives |
+| Coordinator down/restarted | [runbook §6](cluster-deployment.md) — stateless, reconnects and re-derives; before a planned restart, drain its repair queue (`POST /_cluster/resync` until `still_pending` is 0) |
 | One control node down | [runbook §6](cluster-deployment.md) — quorum holds, restart it |
 | Replica failover / replacement (RF>1) | [runbook §6 last two rows](cluster-deployment.md) — fresh-volume replicas need explicit peer recovery |
 | Shard **volume** lost (RF=1) | **§3.1 below** |

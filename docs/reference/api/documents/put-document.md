@@ -58,6 +58,14 @@ and recovery. It is **not** Elasticsearch/OpenSearch internal versioning or opti
 it does not auto-increment, and repeated or lower values are legal. The ES/OS query-parameter
 version and sequence-number controls are therefore rejected, not partially emulated.
 
+In coordinator mode against remote shards, a write that some shard refused returns 503 with
+`"result": "partial"`, the positions that applied it and the positions still pending, and no
+`_version`. The document is not stored on every shard, so a title routed to a pending position can
+miss it. Repeat the PUT (it is idempotent), or run [`POST /_cluster/resync`](../cluster/resync.md)
+on the same coordinator; the coordinator's repair queue is in memory and does not survive a
+restart. Repeat a partial `op_type=create` without `op_type=create`. See
+[coordinator mode](../server/coordinator-mode.md) and ADR-194.
+
 If the query fails to parse or has no anchorable features (cost class D), the response includes the
 error — and the **prior version stays live and matchable** (a failed replace never deletes):
 

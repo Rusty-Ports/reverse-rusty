@@ -116,8 +116,9 @@ impl RemoteShard {
             // channel keepalive (configure_endpoint), which breaks the connection.
             CallKind::Unbounded => None,
         };
-        // Only idempotent READS retry; a retried write (ingest/insert/delete) could
-        // double-apply, so writes fail loud and converge via the coordinator's durable log.
+        // Only idempotent READS retry here; a blindly retried write (ingest/insert/delete)
+        // could double-apply. A failed write fails loud, and the coordinator answers its
+        // caller with a failure to retry as an idempotent upsert or delete (ADR-194).
         let max_retries = match kind {
             CallKind::Read => self.transport.read_retries,
             CallKind::Write | CallKind::Unbounded => 0,

@@ -240,7 +240,7 @@ impl ClusterEngine {
         } else {
             Err(ShardError::Protocol(format!(
                 "exhaustive delivery requires a converged cluster, but {pending} \
-                 partial-apply repair(s) are pending; run resync or reopen before retrying"
+                 partial-apply repair(s) are pending; retry those writes or run resync before retrying"
             )))
         }
     }

@@ -1,3 +1,4 @@
+use super::repair::Redrive;
 use super::{
     extract_readonly, placement_of, AddOutcome, ClusterEngine, ClusterMutation, DurabilityOp,
     EngineEvent, Extracted, ShardError, Target,
@@ -68,8 +69,8 @@ impl ClusterEngine {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _logical_guard = self.logical_write_guard(id);
-            if self.contains_logical_id(id) {
-                return Err(ShardError::DuplicateLogicalId(id));
+            if let Some(conflict) = self.create_conflict(id) {
+                return Err(conflict);
             }
         }
         // Reject malformed DSL up front: it carries no replayable mutation, so it must
@@ -132,8 +133,8 @@ impl ClusterEngine {
                     .to_string(),
             ));
         }
-        if self.contains_logical_id(id) {
-            return Err(ShardError::DuplicateLogicalId(id));
+        if let Some(conflict) = self.create_conflict(id) {
+            return Err(conflict);
         }
         let inserted = self.insert_logical_id(id);
         debug_assert!(inserted);
@@ -154,6 +155,29 @@ impl ClusterEngine {
             return Err(e);
         }
         self.apply_add(id, version, dsl, tags, &placement)
+    }
+
+    /// Why a create-only write of `id` is refused, or `None` when the id is free. The caller
+    /// holds the mutation barrier and `id`'s lock.
+    ///
+    /// A reserved id whose last write is still queued for repair is not simply "already there":
+    /// some shard does not hold that write, and whoever sent it was told it failed (ADR-194).
+    /// The repair is re-driven first, so a retried create converges its own earlier attempt, and
+    /// a create after a half-applied delete finishes the delete and then finds the id free.
+    /// While a shard still refuses, the answer is the same retryable failure as before.
+    fn create_conflict(&self, id: u64) -> Option<ShardError> {
+        if !self.contains_logical_id(id) {
+            return None;
+        }
+        // A re-drive is a shard write like any other, and a resize copy refuses those.
+        if let Err(fenced) = self.ensure_resize_write_fence_open() {
+            return Some(fenced);
+        }
+        if let Redrive::StillPending(unconverged) = self.redrive_pending(id) {
+            return Some(unconverged);
+        }
+        self.contains_logical_id(id)
+            .then_some(ShardError::DuplicateLogicalId(id))
     }
 
     /// Atomically replace a query by logical id — ES `index` semantics at the cluster
@@ -285,8 +309,9 @@ impl ClusterEngine {
 
     /// Insert a compiled query on a set of target shards, collecting partial-apply failures
     /// (ADR-047): try EVERY shard rather than bailing on the first error, so a mid-fan-out
-    /// remote failure is queued for repair (keyed by logical id, an idempotent re-insert on the
-    /// failed shards) instead of leaving a silent partial mutation. In-process inserts are
+    /// remote failure is queued for repair (keyed by logical id; the re-drive replaces the id on
+    /// the failed shards, since one of them may have applied the insert before it errored)
+    /// instead of leaving a silent partial mutation. In-process inserts are
     /// infallible ⇒ `failed` stays empty ⇒ byte-identical to a plain loop. On any failure it
     /// queues the repair, emits, and returns the honest error; otherwise it returns `success`.
     /// Shared by the `Selective` (its placement shards) and `Replicated` (every shard, ADR-080)

@@ -100,9 +100,8 @@ pub(crate) use vocab::{
 /// Map a [`ShardError`] onto the HTTP layer via the classification the error
 /// type owns ([`ShardError::write_http_class`] — the write/admin column of the
 /// two-surface table in `cluster/http_status.rs`). `PartiallyApplied` classifies
-/// as a 200 there for totality only: the write handlers surface it as a 200
-/// `partial` result before reaching this generic response, so the caller is
-/// told without being told to retry (a re-PUT would double-log).
+/// as a retryable 503 there (ADR-194); the document handlers render it with
+/// their own `partial` body before reaching this generic response.
 fn shard_error_response(context: &str, e: &ShardError) -> Response {
     let (_, kind) = e.write_http_class();
     let status = shard_error_status(e);

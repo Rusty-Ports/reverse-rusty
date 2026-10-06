@@ -6,9 +6,10 @@ use super::{
 impl ClusterEngine {
     /// Record a partial multi-shard apply (ADR-047): queue the failed shards for repair (keyed by
     /// logical id, so the latest mutation for an id wins), emit a `ClusterPartialApply` durability
-    /// event, and build the honest [`ShardError::PartiallyApplied`] the caller returns. The
-    /// mutation is already durably logged, so this is a liveness gap (a transient false-negative
-    /// window on `failed`), not a lost write — [`Self::resync`] or reopen converges it.
+    /// event, and build the [`ShardError::PartiallyApplied`] the caller returns. The caller is
+    /// told the write failed (ADR-194): the queue is this process's memory, and the coordinator
+    /// that queues repairs, a remote one, has no log to rebuild it from. A retry of the write or
+    /// [`Self::resync`] converges it.
     pub(super) fn note_partial(
         &self,
         mutation: ClusterMutation,
@@ -79,13 +80,11 @@ impl ClusterEngine {
     }
 
     /// Re-drive every queued partial-apply mutation (ADR-047) against its still-failed shards,
-    /// converging a cluster left divergent by a mid-fan-out remote write failure WITHOUT a full
-    /// reopen. Re-driving touches ONLY the failed shards — re-applying an Add there is a clean
-    /// first insert (they never received it) and a Remove is idempotent — so already-converged
-    /// shards are untouched. Idempotent and safe to call repeatedly: a still-unreachable shard
+    /// converging a cluster left divergent by a mid-fan-out remote write failure. Re-driving
+    /// touches ONLY the failed shards, and each re-drive is safe to repeat (see
+    /// [`repair_form`]), so already-converged shards are untouched and a still-unreachable shard
     /// stays queued. A no-op (empty report) on the in-process / RF=1 path, which never queues
-    /// anything. The durable cluster log stays authoritative — a reopen replays it in order, so
-    /// `resync` is a liveness optimization, not the correctness backstop.
+    /// anything.
     pub fn resync(&self) -> ResyncReport {
         // Exhaustive cross-shard reads take the exclusive side of the same
         // barrier. A repair re-drive mutates shard visibility just like a live
@@ -103,13 +102,7 @@ impl ClusterEngine {
         // its ID lock: a successful newer write can clear it while this pass
         // is busy with another ID. Draining payloads here would lose that
         // supersession evidence and later resurrect the older mutation.
-        let pending: Vec<u64> = {
-            let guard = self
-                .pending_repair
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.keys().copied().collect()
-        };
+        let pending = self.pending_repair_ids();
         let mut repaired = 0usize;
         let mut still_pending = 0usize;
         for logical in pending {
@@ -117,74 +110,11 @@ impl ClusterEngine {
             // as live writers. A cleared entry needs no repair; a replacement
             // entry carries the newer failed mutation and its current targets.
             let _logical_guard = self.logical_write_guard(logical);
-            let repair = self
-                .pending_repair
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&logical);
-            let Some(pr) = repair else { continue };
-            let mut still_failed = Vec::new();
-            let mut first_err: Option<ShardError> = None;
-            // An upsert installs before it removes (ADR-185): the shards that store the
-            // new version are re-driven first, and a shard that only tombstones the id
-            // waits until all of them succeeded. Its old copy may be the only one a title
-            // can still reach.
-            let (stores, clears): (Vec<usize>, Vec<usize>) = match &pr.mutation {
-                ClusterMutation::Upsert { placement, .. } => pr
-                    .failed_shards
-                    .iter()
-                    .partition(|&&s| crate::cluster::shard::upsert_stores_at(placement, s as u32)),
-                _ => (pr.failed_shards.clone(), Vec::new()),
-            };
-            for (targets, is_install) in [(&stores, true), (&clears, false)] {
-                if !is_install && !still_failed.is_empty() {
-                    still_failed.extend(targets.iter().copied());
-                    break;
-                }
-                for &s in targets {
-                    if let Err(e) = crate::cluster::shard::apply_mutation(
-                        self.shards[s].as_ref(),
-                        &self.norm,
-                        &self.dict,
-                        &pr.mutation,
-                        Some(s as u32),
-                    ) {
-                        still_failed.push(s);
-                        first_err.get_or_insert(e);
-                    }
-                }
+            match self.redrive_pending(logical) {
+                Redrive::NothingQueued => {}
+                Redrive::Converged => repaired += 1,
+                Redrive::StillPending(_) => still_pending += 1,
             }
-            if still_failed.is_empty() {
-                repaired += 1;
-                // A converged Remove has now deleted the row everywhere, so the
-                // fail-closed reservation retained at the partial-apply point is
-                // releasable — without this, the id would 409 every future
-                // add_query until a coordinator reopen (review finding).
-                if matches!(pr.mutation, ClusterMutation::Remove { .. }) {
-                    self.remove_logical_id(logical);
-                }
-                continue;
-            }
-            still_pending += 1;
-            let detail =
-                first_err.map_or_else(|| "unknown shard error".to_string(), |e| e.to_string());
-            self.emit(EngineEvent::DurabilityFailure {
-                op: DurabilityOp::ClusterPartialApply,
-                detail: format!("resync: logical {logical} still failing on {still_failed:?}"),
-                error: detail,
-            });
-            // Re-queue only the still-failed shards before releasing the ID
-            // lock. No same-ID writer or repair can supersede this work yet.
-            self.pending_repair
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    logical,
-                    PendingRepair {
-                        mutation: pr.mutation,
-                        failed_shards: still_failed,
-                    },
-                );
         }
         ResyncReport {
             repaired,
@@ -192,10 +122,106 @@ impl ClusterEngine {
         }
     }
 
+    /// Re-drive the repair queued for `logical`, if there is one, against the shards it still
+    /// has to reach. The caller holds the mutation barrier and `logical`'s ID lock, as every
+    /// live write of that id does, so no newer write can supersede the entry mid-repair.
+    pub(super) fn redrive_pending(&self, logical: u64) -> Redrive {
+        let repair = self
+            .pending_repair
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&logical);
+        let Some(pr) = repair else {
+            return Redrive::NothingQueued;
+        };
+        let redrive = repair_form(&pr.mutation);
+        let mut reached = Vec::new();
+        let mut still_failed = Vec::new();
+        let mut first_err: Option<ShardError> = None;
+        // An upsert installs before it removes (ADR-185): the shards that store the
+        // new version are re-driven first, and a shard that only tombstones the id
+        // waits until all of them succeeded. Its old copy may be the only one a title
+        // can still reach.
+        let (stores, clears): (Vec<usize>, Vec<usize>) = match &redrive {
+            ClusterMutation::Upsert { placement, .. } => pr
+                .failed_shards
+                .iter()
+                .partition(|&&s| crate::cluster::shard::upsert_stores_at(placement, s as u32)),
+            _ => (pr.failed_shards.clone(), Vec::new()),
+        };
+        for (targets, is_install) in [(&stores, true), (&clears, false)] {
+            if !is_install && !still_failed.is_empty() {
+                still_failed.extend(targets.iter().copied());
+                break;
+            }
+            for &s in targets {
+                match crate::cluster::shard::apply_mutation(
+                    self.shards[s].as_ref(),
+                    &self.norm,
+                    &self.dict,
+                    &redrive,
+                    Some(s as u32),
+                ) {
+                    Ok(()) => reached.push(s),
+                    Err(e) => {
+                        still_failed.push(s);
+                        first_err.get_or_insert(e);
+                    }
+                }
+            }
+        }
+        if still_failed.is_empty() {
+            // A converged Remove has now deleted the row everywhere, so the
+            // fail-closed reservation retained at the partial-apply point is
+            // releasable — without this, the id would 409 every future
+            // add_query until a coordinator reopen (review finding).
+            if matches!(pr.mutation, ClusterMutation::Remove { .. }) {
+                self.remove_logical_id(logical);
+            }
+            return Redrive::Converged;
+        }
+        let detail = first_err.map_or_else(|| "unknown shard error".to_string(), |e| e.to_string());
+        self.emit(EngineEvent::DurabilityFailure {
+            op: DurabilityOp::ClusterPartialApply,
+            detail: format!("resync: logical {logical} still failing on {still_failed:?}"),
+            error: detail.clone(),
+        });
+        // Re-queue only the still-failed shards before the caller releases the ID
+        // lock. No same-ID writer or repair can supersede this work yet.
+        self.pending_repair
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                logical,
+                PendingRepair {
+                    mutation: pr.mutation,
+                    failed_shards: still_failed.clone(),
+                },
+            );
+        Redrive::StillPending(ShardError::PartiallyApplied {
+            logical,
+            applied: reached,
+            failed: still_failed,
+            detail,
+        })
+    }
+
+    /// The logical ids whose last write is still queued for repair, ascending. A coordinator
+    /// that is about to stop reports them, because the queue stops with it (ADR-194).
+    #[must_use]
+    pub fn pending_repair_ids(&self) -> Vec<u64> {
+        self.pending_repair
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect()
+    }
+
     /// Number of mutations currently queued for partial-apply repair (ADR-047): 0 on a healthy
     /// cluster, and always 0 on the in-process / RF=1 path (whose writes never fail). A nonzero
-    /// value means at least one shard is lagging — call [`Self::resync`] (or wait for the next
-    /// autoscaler `tick`) to converge it. Introspection for operators + tests.
+    /// value means at least one shard is lagging: retry those writes or call [`Self::resync`].
+    /// Nothing in the server drains the queue on its own. Introspection for operators + tests.
     #[must_use]
     pub fn pending_repairs(&self) -> usize {
         self.pending_repair
@@ -247,5 +273,40 @@ impl ClusterEngine {
         }
         self.compact_logical_ids();
         Ok(())
+    }
+}
+
+/// What re-driving one logical id's queued repair did.
+pub(super) enum Redrive {
+    /// No repair was queued for the id.
+    NothingQueued,
+    /// Every shard the repair still had to reach now holds it; the entry is gone.
+    Converged,
+    /// Some shard still refuses it. The entry is queued again for those shards, and the error
+    /// names the shards this pass reached and the ones it did not.
+    StillPending(ShardError),
+}
+
+/// The mutation a repair sends for `queued`. A failed shard write is ambiguous: the shard may
+/// have applied it before the error came back. A queued `Add` is therefore re-driven as a
+/// replace of that id on the shard, which stores the row when it never arrived and leaves one
+/// row when it did. A plain second insert would leave two rows for one id, and the shard's
+/// logical-id enumeration refuses that.
+fn repair_form(queued: &ClusterMutation) -> ClusterMutation {
+    match queued {
+        ClusterMutation::Add {
+            logical,
+            version,
+            dsl,
+            tags,
+            placement,
+        } => ClusterMutation::Upsert {
+            logical: *logical,
+            version: *version,
+            dsl: dsl.clone(),
+            tags: tags.clone(),
+            placement: placement.clone(),
+        },
+        other => other.clone(),
     }
 }
