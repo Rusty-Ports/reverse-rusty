@@ -58,13 +58,24 @@ fn wait_until_listening(addr: SocketAddr) {
 }
 
 /// Poll until `planes[0]` reports an elected leader, returning its id (fail-closed on timeout).
+/// Wait until every node names the same leader. Node 0 knowing it is not enough: a follower
+/// learns the leader with its first append, and until then it answers a client with a
+/// forward that names nobody, which the client reports as an error instead of following.
 fn wait_for_leader(planes: &[Arc<RaftControlPlane>]) -> u64 {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(leader) = planes[0].current_leader() {
-            return leader;
+            if planes
+                .iter()
+                .all(|plane| plane.current_leader() == Some(leader))
+            {
+                return leader;
+            }
         }
-        assert!(Instant::now() < deadline, "no control-plane leader elected");
+        assert!(
+            Instant::now() < deadline,
+            "the control plane did not agree on a leader"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
 }

@@ -175,7 +175,12 @@ impl CompletionState {
         } else if gate.deadline.is_none() {
             Some(CompletionInvalid::MissingDeadline)
         } else if disconnected {
-            Some(CompletionInvalid::Disconnected)
+            // The completion record is already queued when this is polled, so a closed
+            // stream here means the record was never dequeued. Dropping the stream closes it
+            // first and drops the queued record a moment later, and that drop reports
+            // `NotConsumed` through `invalidate`. Report the same reason from this side, so
+            // the job's failure does not depend on which of the two is observed first.
+            Some(CompletionInvalid::NotConsumed)
         } else {
             None
         };
@@ -265,7 +270,6 @@ enum CompletionPhase {
 enum CompletionInvalid {
     Cancelled,
     Deadline,
-    Disconnected,
     NotConsumed,
     MissingDeadline,
     ExecutionFailed,
@@ -276,7 +280,6 @@ impl CompletionInvalid {
         ChunkSinkError::new(match self {
             Self::Cancelled => "exhaustive job cancelled",
             Self::Deadline => "exhaustive job deadline exceeded",
-            Self::Disconnected => "exhaustive stream consumer disconnected",
             Self::NotConsumed => "exhaustive completion frame was not consumed",
             Self::MissingDeadline => "exhaustive completion deadline was not initialized",
             Self::ExecutionFailed => "exhaustive job execution failed",
@@ -573,6 +576,34 @@ mod tests {
             error.to_string().contains("not consumed"),
             "the first invalidation cause was overwritten: {error}"
         );
+    }
+
+    /// Dropping the stream closes the channel before it drops the queued completion record.
+    /// A worker that polls in between sees only the closed channel. Whichever side records
+    /// the failure, the reason is the same: the completion was never consumed.
+    #[test]
+    fn a_stream_closed_with_the_completion_queued_is_not_consumed_from_either_side() {
+        // The worker observes the closed channel first; the record is dropped afterwards.
+        let (polled_first, frame) = completion(Instant::now() + Duration::from_secs(1));
+        let error = polled_first
+            .delivery_status(true)
+            .expect_err("a closed stream cannot deliver the completion");
+        assert!(error.to_string().contains("not consumed"), "{error}");
+        drop(frame);
+        match polled_first.resolve_terminal(TerminalRequest::Completed) {
+            TerminalResolution::Failed(Some(detail)) => {
+                assert!(detail.contains("not consumed"), "{detail}");
+            }
+            _ => panic!("an unconsumed completion fails the job"),
+        }
+
+        // The record is dropped first; the worker polls afterwards.
+        let (dropped_first, frame) = completion(Instant::now() + Duration::from_secs(1));
+        drop(frame);
+        let error = dropped_first
+            .delivery_status(true)
+            .expect_err("the dropped completion is invalid");
+        assert!(error.to_string().contains("not consumed"), "{error}");
     }
 
     #[test]

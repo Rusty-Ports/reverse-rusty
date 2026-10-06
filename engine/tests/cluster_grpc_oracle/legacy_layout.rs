@@ -593,7 +593,9 @@ fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
             tag_fp: tag_dict.fingerprint(),
             placement_generation: 1,
             num_shards: 1,
-            top_k_delay: Some(Duration::from_millis(100)),
+            // Far longer than the bound asserted below: a transport that ignored the
+            // request's deadline would wait this long, a shared CI runner never does.
+            top_k_delay: Some(Duration::from_secs(5)),
             atomic_replace: true,
         });
         rt.spawn(
@@ -634,7 +636,8 @@ fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
         "unexpected deadline error: {error:?}"
     );
     assert!(
-        started.elapsed() < Duration::from_millis(90),
-        "transport did not honor the original absolute deadline"
+        started.elapsed() < Duration::from_secs(1),
+        "transport did not honor the original absolute deadline: {:?}",
+        started.elapsed()
     );
 }

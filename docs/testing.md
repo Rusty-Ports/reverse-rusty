@@ -336,7 +336,33 @@ manual dispatch. ADR-151 splits the logical gate across pinned `ubuntu-24.04` ru
    report.
 8. The 10M soak — only when this compatibility workflow is dispatched with `run_soak = true`.
 
-In-progress runs are cancelled when a newer commit lands on the same ref.
+In-progress runs are cancelled when a newer commit lands on the same ref. Every run on `main` is
+on one ref, so re-running an older `main` run cancels the run for the newest commit, and two merges
+closer together than one run leave the first merge's run cancelled. A cancelled run on an older
+`main` commit is not a failure; re-run only the run for the head of `main`.
+
+### When the gate goes red
+
+A red run gets a cause before it gets a re-run, on `main` after a merge as much as on a branch.
+Read `gh run view <id> --log-failed` first:
+
+- **A runner fault** ("the runner has received a shutdown signal", a job cancelled before any step
+  ran) is infrastructure. Re-run it.
+- **A failing test** is a defect in the test or in the product, including when it passes on the
+  next attempt. A test that fails sometimes has an outcome that depends on timing; find what it
+  races, make that deterministic, and run it in a loop under parallel load before calling it fixed.
+  Forcing the race (a short sleep at the point two things compete) shows whether the diagnosis is
+  right when a fast machine will not reproduce it.
+
+Two shapes have caused most of the intermittent failures here, and are worth checking in any new
+test:
+
+- **A test that depends on something still being in progress** (a stream still open, a lock still
+  held) must make that true by construction, and assert it. A stream that "blocks because its
+  queue fills" has to carry more than the queue holds.
+- **A wall-clock bound** should separate "honored the deadline" from "did not" by an order of
+  magnitude. Widen the gap by slowing the path the test must beat (hold the lock until released,
+  give the slow peer seconds), not by loosening what the fast path is allowed.
 
 [`soak.yml`](../.github/workflows/soak.yml) independently schedules the same exact 10M target
 weekly and supports manual dispatch. Schedule delay does not affect correctness; its evidence

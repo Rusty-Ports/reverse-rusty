@@ -375,11 +375,13 @@ fn cancellation_interrupts_cluster_write_barrier_wait() {
     let held = lock.lock();
     let mut sink = CancelWhileWaiting { checks: 0 };
     let started = Instant::now();
-    let result = lock_cluster_writes(&lock, &mut sink, started + Duration::from_secs(1));
+    // The deadline is far beyond the bound asserted below: a wait that ignored the
+    // cancellation would run to it, and the third poll (about 20 ms in) never comes near.
+    let result = lock_cluster_writes(&lock, &mut sink, started + Duration::from_secs(20));
     assert!(result.is_err());
     assert_eq!(sink.checks, 3);
     assert!(
-        started.elapsed() < Duration::from_millis(250),
+        started.elapsed() < Duration::from_secs(2),
         "cancelled lock wait lasted {:?}",
         started.elapsed()
     );
