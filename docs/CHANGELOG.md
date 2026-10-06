@@ -14,7 +14,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - The CRC-32 that checks the manifest, segments, the source sidecar, the WAL, the translog and
   the control store is now table-driven, eight bytes per step, where it worked one bit at a
   time. The checksums are identical, so every existing file verifies unchanged. On the capture
-  machine it runs at about 2,160 MB/s against 495 MB/s. Every commit checksums what it writes
+  machine it runs at about 2,200 MB/s against 495 MB/s. Every commit checksums what it writes
   under the write lock, and every open checksums what it reads.
 
 ## 2026-10-06 — The cost of a single write, measured as the server runs
