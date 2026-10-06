@@ -752,6 +752,14 @@ impl Shard for RemoteShard {
         Ok(reply.count as usize)
     }
 
+    fn set_bulk_load_incomplete(&self, incomplete: bool) -> Result<(), ShardError> {
+        self.set_bulk_load_mark(incomplete)
+    }
+
+    fn bulk_load_incomplete(&self) -> Result<bool, ShardError> {
+        self.bulk_load_mark()
+    }
+
     fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
         self.enumerate_logical_ids()
     }

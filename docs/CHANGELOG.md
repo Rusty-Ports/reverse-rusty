@@ -9,6 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — An interrupted bootstrap is not served
+
+- Fix a remote cluster serving part of its corpus after a `--load-file` bootstrap that stopped
+  part-way: the coordinator exited, was restarted by its supervisor, found the cluster "already
+  populated", skipped the load and served what had landed. The shard nodes now carry a mark
+  from before the first bucket until after the last, kept on disk, and a coordinator that finds
+  one refuses to start and says the load did not complete
+  ([ADR-196](decisions/adr-196-unfinished-bulk-loads-are-remembered.md)). Reset the shard
+  nodes' data and load again.
+- Upgrade shard nodes before a coordinator that bulk-loads: a node that cannot record the mark
+  is not loaded in bulk. Attaching to older nodes is unaffected.
+
 ## 2026-10-06 — Replicas are proven before they are trusted
 
 - Fix a silent miss on the remote replicated topology: every coordinator that connected marked
@@ -90,6 +102,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   `reverse_rusty_shard_translog_sync_on_write{shard}`.
 - Helm: `shard.walSyncOnWrite`, `shard.retainSource`, `shard.maxSegments`,
   `shard.memtableFlushThreshold`. Compose: `RR_SHARD_WAL_SYNC_ON_WRITE`.
+
 ## 2026-10-06 — Data-plane handlers wait off the runtime
 
 - Fix the server becoming unresponsive, `/_health` included, when writes queued behind
@@ -102,6 +115,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   whenever a vocabulary rebuild or resize held or queued for the exclusive cluster lock.
 - A standalone write whose client disconnects after admission still completes and is published;
   shutdown waits for such writes before its final flush.
+
 ## 2026-10-06 — First read after a shard restart, and wider test margins
 
 - Fix a read failing with a transport error right after a shard node restarted: the coordinator
@@ -152,6 +166,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   ([ADR-189](decisions/adr-189-dropped-shards-await-recovery.md)).
 - Moving a shard back to a node that gave it up is unchanged. Re-seeding such a node from scratch
   under the same dictionary and placement generation now requires wiping its data directory.
+
 ## 2026-10-05 — Any-of cover and visibility-preserving rebuilds
 
 - Fix default-read false negatives for queries shaped `<top-64 term> (<variants>)`: a query whose
@@ -167,6 +182,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **Upgrade:** compiler semantics version 7. Single-node stores rebuild from retained source on
   open; cluster data follows the existing compiler-semantics procedure (rebuild through the
   coordinator, or reseed remote shard volumes).
+
 ## 2026-10-05 — The top-64 mask is assigned once
 
 - Fix silent false negatives after a second initial build: `Dict::finalize_mask` re-ranked the
@@ -182,6 +198,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - A store that was restarted with `--load-file` before this fix may hold rows with stale mask
   bits. They are repaired by the next rebuild from source (a vocabulary change, or a
   compiler-semantics migration on open).
+
 ## 2026-10-05 — Memtable deletes survive a commit and a restart
 
 - Fix an acknowledged delete coming back after a restart: deleting a query that was still in the
@@ -189,6 +206,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   the WAL but skipped the delete, because the commit had advanced the WAL watermark past it without
   sealing the memtable. Recovery now always applies a delete to memtable copies and leaves only the
   segment copies to the watermark rule (ADR-066, later outcome).
+
 ## 2026-10-05 — Reader-atomic cluster upsert
 
 - Fix silent false negatives during cluster upserts: `PUT /_doc` and every `_bulk` index item

@@ -588,4 +588,19 @@ pub(crate) trait Shard: Send + Sync {
     fn out_of_sync_replicas(&self) -> usize {
         0
     }
+
+    /// Record (`true`) or clear (`false`) that a bulk load into this shard is in progress
+    /// (ADR-196). A coordinator marks every shard before the first bucket of a bulk load and
+    /// clears the marks after the last one, so a load that stops part-way is remembered by the
+    /// shards and not by the coordinator that stopped. Default: nothing to record. An
+    /// in-process shard lives and dies with its coordinator, whose own checkpoint decides
+    /// whether a bulk load happened.
+    fn set_bulk_load_incomplete(&self, _incomplete: bool) -> Result<(), ShardError> {
+        Ok(())
+    }
+
+    /// Whether a bulk load into this shard began and was never reported complete.
+    fn bulk_load_incomplete(&self) -> Result<bool, ShardError> {
+        Ok(false)
+    }
 }

@@ -328,6 +328,28 @@ impl ShardService for ShardServer {
         retire::unretire(self, request).await
     }
 
+    async fn set_bulk_load_state(
+        &self,
+        request: Request<proto::SetBulkLoadStateRequest>,
+    ) -> Result<Response<proto::BulkLoadStateReply>, Status> {
+        let req = request.into_inner();
+        // The mark lives in the slot's directory: do not write it while a recovery or a drop
+        // is replacing that directory.
+        let _install = self.coordinator_lease.lock_install().await;
+        self.set_bulk_load_incomplete(req.shard_id, req.incomplete)?;
+        Ok(Response::new(proto::BulkLoadStateReply {
+            incomplete: req.incomplete,
+        }))
+    }
+
+    async fn bulk_load_state(
+        &self,
+        request: Request<proto::ShardRef>,
+    ) -> Result<Response<proto::BulkLoadStateReply>, Status> {
+        let incomplete = self.bulk_load_incomplete(request.into_inner().shard_id)?;
+        Ok(Response::new(proto::BulkLoadStateReply { incomplete }))
+    }
+
     async fn stage_ingest(
         &self,
         request: Request<tonic::Streaming<proto::IngestRequest>>,
