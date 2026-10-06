@@ -398,6 +398,12 @@ change, and acceptance boundary; promotion changes its priority, not its documen
 - **CORS policy.** Browser tools cannot call the API across origins today. Add an explicit
   configurable `CorsLayer`, default it to no cross-origin access, document credential handling, and
   test preflight behavior with authentication enabled.
+- **A byte budget for request bodies.** The request limit is per endpoint (ADR-199) and counts
+  requests, not what they hold: the document, bulk and search routes buffer bodies of up to
+  100 MB each, on endpoints that each admit 256. Add a configurable budget for buffered body
+  bytes, give the read routes a body limit that matches their real maximum, and decide whether
+  a request beyond the budget waits or is refused. A budget on bytes is the server-wide bound a
+  shared request pool cannot safely be.
 - **Thread-pool introspection.** Search admission is bounded but operators cannot see queue
   pressure directly. Expose active, queued, rejected, and completed work through fixed-cardinality
   metrics and an operator endpoint, then verify the counters under saturation.

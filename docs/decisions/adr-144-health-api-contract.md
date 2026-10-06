@@ -70,3 +70,9 @@ The endpoint remains deliberately native. ES/OpenSearch clients that require
 `/_cluster/health` allocation fields cannot treat it as a drop-in replacement. A timed-out
 coordinator request can leave a detached blocking probe running until its transport-level bounds
 complete; its stats permit remains held during that work, preventing unbounded fan-out.
+
+## Later outcome — 2026-10-06
+
+The "server-wide request" limit this ADR measures the health surface against is a limit per
+endpoint ([ADR-199](adr-199-request-limit-per-endpoint.md)). `/_health` has never shared slots
+with another route; its own eight permits remain its effective bound.

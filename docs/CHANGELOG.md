@@ -9,6 +9,19 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — The request limit is per endpoint, and the record now says so
+
+- No behaviour change. The 256-request limit has always applied to each endpoint (a route and
+  method) separately, while ADR-062, ADR-099, ADR-144, the threat model and the server
+  reference called it server-wide. The documents are corrected
+  ([ADR-199](decisions/adr-199-request-limit-per-endpoint.md)).
+- The limit stays per endpoint on purpose. One pool shared by every route, and then one pool
+  per class of request, were both built and both stalled: writes waiting behind a compaction,
+  job-status polls waiting for their own stream, and searches and checkpoints waiting for a
+  lock a job holds can each fill a shared pool and keep out the request they are waiting for.
+- Both HTTP routers are now built by functions the tests call, so the limit, its isolation
+  between endpoints and the position of auth are tested on the layer stack that is served.
+
 ## 2026-10-06 — Sizing and memory documentation corrected
 
 - The sizing guide now says what compaction, a flush and a resident-source open hold on the heap
