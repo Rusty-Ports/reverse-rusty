@@ -62,6 +62,7 @@ impl ShardError {
             ShardError::DuplicateLogicalId(_) => (409, "logical_id_conflict"),
             ShardError::EnrichmentLimit { .. } => (413, "rank_enrichment_limit"),
             ShardError::PartiallyApplied { .. } => (503, "partially_applied"),
+            ShardError::EarlierWriteUnconverged { .. } => (503, "earlier_write_unconverged"),
             // ADR-113 totality row: a missing pin is the same stale-cursor
             // conflict the read surface reports.
             ShardError::PitNotFound(_) => (409, "stale_cursor"),
@@ -120,7 +121,8 @@ impl ClusterRankedError {
                 | ShardError::Log(_)
                 | ShardError::ControlPlane(_)
                 | ShardError::DuplicateLogicalId(_)
-                | ShardError::PartiallyApplied { .. },
+                | ShardError::PartiallyApplied { .. }
+                | ShardError::EarlierWriteUnconverged { .. },
             ) => (503, "cluster_unavailable", "error"),
         }
     }
@@ -213,6 +215,21 @@ mod tests {
         assert_eq!(error.write_http_class(), (400, "validation_error"));
         let (status, kind, _) = ClusterRankedError::Shard(error).v2_http_class();
         assert_eq!((status, kind), (501, "pit_unsupported"));
+    }
+
+    #[test]
+    fn a_create_blocked_by_an_earlier_write_is_retryable_and_not_called_partial() {
+        let error = ShardError::EarlierWriteUnconverged {
+            logical: 1,
+            pending: vec![2],
+            detail: "x".into(),
+        };
+        assert_eq!(error.write_http_class(), (503, "earlier_write_unconverged"));
+        let text = error.to_string();
+        assert!(text.contains("not applied or queued"), "{text}");
+        assert!(text.contains("send it again"), "{text}");
+        // Converging the earlier write does not perform this one, so resync is not offered.
+        assert!(!text.contains("resync"), "{text}");
     }
 
     #[test]

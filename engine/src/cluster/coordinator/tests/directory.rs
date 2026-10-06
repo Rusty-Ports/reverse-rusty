@@ -378,7 +378,7 @@ fn resync_releases_reservation_after_repairing_a_remove() {
     assert!(
         matches!(
             cluster.add_query(5, dsl),
-            Err(ShardError::PartiallyApplied { logical: 5, .. })
+            Err(ShardError::EarlierWriteUnconverged { logical: 5, .. })
         ),
         "a partially-removed id must stay reserved"
     );

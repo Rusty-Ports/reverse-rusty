@@ -164,7 +164,9 @@ impl ClusterEngine {
     /// some shard does not hold that write, and whoever sent it was told it failed (ADR-194).
     /// The repair is re-driven first, so a retried create converges its own earlier attempt, and
     /// a create after a half-applied delete finishes the delete and then finds the id free.
-    /// While a shard still refuses, the answer is the same retryable failure as before.
+    /// While a shard still refuses, the answer says that the EARLIER write is unconverged and
+    /// that this create was neither applied nor queued, so nobody takes a later resync of the
+    /// earlier write for this one.
     fn create_conflict(&self, id: u64) -> Option<ShardError> {
         if !self.contains_logical_id(id) {
             return None;
@@ -173,8 +175,12 @@ impl ClusterEngine {
         if let Err(fenced) = self.ensure_resize_write_fence_open() {
             return Some(fenced);
         }
-        if let Redrive::StillPending(unconverged) = self.redrive_pending(id) {
-            return Some(unconverged);
+        if let Redrive::StillPending { pending, detail } = self.redrive_pending(id) {
+            return Some(ShardError::EarlierWriteUnconverged {
+                logical: id,
+                pending,
+                detail,
+            });
         }
         self.contains_logical_id(id)
             .then_some(ShardError::DuplicateLogicalId(id))

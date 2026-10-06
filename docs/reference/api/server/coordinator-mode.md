@@ -86,7 +86,9 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   answer the create with 409).
   `op_type=create` uses the coordinator's atomic logical-id reservation and returns 409 without a
   log frame when the id exists. While an earlier write of that id is still queued for repair, a
-  create first re-drives the repair and answers 503 `partial`, never 409, until it converges. Remote startup reconstructs this membership through bounded shard
+  create first re-drives the repair. Until it converges the create answers 503
+  `earlier_write_unconverged`, never 409: the create itself was not applied or queued, so send
+  it again (a resync finishes only the earlier write). Remote startup reconstructs this membership through bounded shard
   enumeration; an unsupported, failed, or over-limit enumeration keeps create-only writes disabled
   ([details](../../../design/clustering-and-scaling.md#94-remote-admission-reconstruction)). `refresh=false|true|wait_for`
   are accepted under the stronger publish-before-response model; unsupported write parameters fail

@@ -113,7 +113,7 @@ impl ClusterEngine {
             match self.redrive_pending(logical) {
                 Redrive::NothingQueued => {}
                 Redrive::Converged => repaired += 1,
-                Redrive::StillPending(_) => still_pending += 1,
+                Redrive::StillPending { .. } => still_pending += 1,
             }
         }
         ResyncReport {
@@ -135,7 +135,6 @@ impl ClusterEngine {
             return Redrive::NothingQueued;
         };
         let redrive = repair_form(&pr.mutation);
-        let mut reached = Vec::new();
         let mut still_failed = Vec::new();
         let mut first_err: Option<ShardError> = None;
         // An upsert installs before it removes (ADR-185): the shards that store the
@@ -155,18 +154,15 @@ impl ClusterEngine {
                 break;
             }
             for &s in targets {
-                match crate::cluster::shard::apply_mutation(
+                if let Err(e) = crate::cluster::shard::apply_mutation(
                     self.shards[s].as_ref(),
                     &self.norm,
                     &self.dict,
                     &redrive,
                     Some(s as u32),
                 ) {
-                    Ok(()) => reached.push(s),
-                    Err(e) => {
-                        still_failed.push(s);
-                        first_err.get_or_insert(e);
-                    }
+                    still_failed.push(s);
+                    first_err.get_or_insert(e);
                 }
             }
         }
@@ -198,12 +194,10 @@ impl ClusterEngine {
                     failed_shards: still_failed.clone(),
                 },
             );
-        Redrive::StillPending(ShardError::PartiallyApplied {
-            logical,
-            applied: reached,
-            failed: still_failed,
+        Redrive::StillPending {
+            pending: still_failed,
             detail,
-        })
+        }
     }
 
     /// The logical ids whose last write is still queued for repair, ascending. A coordinator
@@ -282,9 +276,9 @@ pub(super) enum Redrive {
     NothingQueued,
     /// Every shard the repair still had to reach now holds it; the entry is gone.
     Converged,
-    /// Some shard still refuses it. The entry is queued again for those shards, and the error
-    /// names the shards this pass reached and the ones it did not.
-    StillPending(ShardError),
+    /// Some shard still refuses it. The entry is queued again for the `pending` shards;
+    /// `detail` is the first shard error.
+    StillPending { pending: Vec<usize>, detail: String },
 }
 
 /// The mutation a repair sends for `queued`. A failed shard write is ambiguous: the shard may

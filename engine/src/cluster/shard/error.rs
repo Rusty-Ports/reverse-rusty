@@ -88,6 +88,19 @@ pub enum ShardError {
         /// The first underlying shard error, for context.
         detail: String,
     },
+    /// A create-only write was refused because an EARLIER write of the same id has not reached
+    /// every shard, and re-driving that earlier write just failed again (ADR-194). Unlike
+    /// [`PartiallyApplied`](Self::PartiallyApplied), nothing of THIS request was applied or
+    /// queued: converging the earlier write (by resync, say) does not perform it. The caller
+    /// sends the request again, which re-drives the earlier write first.
+    EarlierWriteUnconverged {
+        /// Logical id both writes address.
+        logical: u64,
+        /// Shards the earlier write still has to reach.
+        pending: Vec<usize>,
+        /// The first underlying shard error, for context.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for ShardError {
@@ -108,6 +121,16 @@ impl std::fmt::Display for ShardError {
             ShardError::SourceUnavailable(logical) => {
                 write!(f, "source unavailable for logical id {logical}")
             }
+            ShardError::EarlierWriteUnconverged {
+                logical,
+                pending,
+                detail,
+            } => write!(
+                f,
+                "an earlier write of logical {logical} has not reached shards {pending:?} \
+                 ({detail}), so this create was not applied or queued; send it again, or send \
+                 it as an index operation"
+            ),
             ShardError::DuplicateLogicalId(logical) => write!(
                 f,
                 "logical id {logical} already exists; use upsert_query to replace it"

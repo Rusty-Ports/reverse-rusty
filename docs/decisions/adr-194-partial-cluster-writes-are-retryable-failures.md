@@ -52,9 +52,12 @@ Two details made the retry itself unsafe to ask for:
    shards that took it and would answer a create with 409.
 3. **A create never answers 409 for an id it knows is unconverged.** When the id is reserved and
    a repair is queued for it, `create_query_with_tags` re-drives that repair first, under the same
-   barrier and id lock as any write. While a shard still refuses, the create answers the same
-   retryable failure. Once the repair converges the id is a true conflict (409), or, if the
-   queued write was a delete, free.
+   barrier and id lock as any write. While a shard still refuses, the create answers a retryable
+   503 of its own kind, `earlier_write_unconverged`: the unconverged write is the EARLIER one,
+   and this create was neither applied nor queued, so the answer does not offer `resync`
+   (which would finish the earlier write and leave this one undone) and tells the caller to
+   send the create again. Once the repair converges the id is a true conflict (409), or, if
+   the queued write was a delete, free.
 4. **A repair replaces; it does not insert.** A queued create is re-driven as a replace of that
    id on each failed shard (the atomic shard-side replace from ADR-185). The row is stored when
    the shard never received it and stays one row when it had. Peer recovery and translog replay
@@ -99,7 +102,9 @@ Two details made the retry itself unsafe to ask for:
 
 - `cluster/coordinator/tests/retry_contract.rs`, over fault-injecting shards: a retried create
   answers the retryable failure while its shard refuses and 409 only after it delivered the
-  earlier attempt; a create after a half-applied delete finishes the delete first; repairing an
+  earlier attempt; a create after a half-applied delete finishes the delete first, and a resync
+  of that delete does not perform the create; a create does not re-drive during a resize copy;
+  repairing an
   insert the shard had applied (its acknowledgement lost) leaves one live row and an enumerable
   shard; `pending_repair_ids` names the unconverged ids until a retry or a resync converges them.
 - `tests/cluster_grpc_oracle/partial_apply.rs`, over real gRPC: a write a fenced shard refused

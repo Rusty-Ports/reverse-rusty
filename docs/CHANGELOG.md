@@ -19,9 +19,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   coordinator has no log and keeps its repair queue in memory, so a coordinator restart before a
   manual resync left the write missing from the shards that refused it, for good. `DELETE`
   already worked this way (ADR-125).
-- A retried `op_type=create` no longer answers 409 "already exists" while its earlier attempt
-  is still queued for repair: it re-drives the repair and answers 503 until it converges. Retry
-  a partial create as an index operation, which converges on any coordinator.
+- A retried `op_type=create` no longer answers 409 "already exists" while an earlier write of
+  the id is still queued for repair: it re-drives the repair and answers 503
+  `earlier_write_unconverged` until it converges. Retry a partial create as an index operation,
+  which converges on any coordinator.
 - Fix `resync` storing a second row when the shard had applied a create whose acknowledgement
   was lost. That left the shard unable to enumerate its ids, and after the next coordinator
   attach every create-only write was refused. A repair now replaces the id on the shard.

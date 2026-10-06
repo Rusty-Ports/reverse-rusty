@@ -103,11 +103,14 @@ fn a_retried_create_converges_its_own_earlier_attempt() {
     );
     assert_eq!(cluster.pending_repair_ids(), vec![7]);
 
-    // Still failing: the retry is the same retryable failure. "Already exists" would tell
-    // the caller its document is stored, and no shard holds it.
+    // Still failing: the retry is a retryable failure too. "Already exists" would tell the
+    // caller its document is stored, and no shard holds it.
     let retry = create(&cluster, 7, FIRST).expect_err("the shard still refuses");
     assert!(
-        matches!(retry, ShardError::PartiallyApplied { logical: 7, .. }),
+        matches!(
+            retry,
+            ShardError::EarlierWriteUnconverged { logical: 7, .. }
+        ),
         "{retry:?}"
     );
     assert_eq!(cluster.pending_repair_ids(), vec![7]);
@@ -126,22 +129,38 @@ fn a_retried_create_converges_its_own_earlier_attempt() {
     assert_eq!(live_rows(&cluster), vec![7]);
 }
 
-#[test]
-fn a_create_after_a_half_applied_delete_finishes_the_delete_first() {
-    let Faulty { cluster, fail, .. } = faulty_cluster();
-    create(&cluster, 7, FIRST).expect("create");
-    fail.store(true, Ordering::Release);
-    let removed = cluster.remove_query(7).expect_err("the shards refuse");
+/// A cluster whose document 7 has a delete that no shard took yet, and the create that was
+/// refused because of it.
+fn half_deleted_then_blocked() -> (Faulty, ShardError) {
+    let faulty = faulty_cluster();
+    create(&faulty.cluster, 7, FIRST).expect("create");
+    faulty.fail.store(true, Ordering::Release);
+    let removed = faulty
+        .cluster
+        .remove_query(7)
+        .expect_err("the shards refuse");
     assert!(
         matches!(removed, ShardError::PartiallyApplied { .. }),
         "{removed:?}"
     );
-    assert_eq!(matches(&cluster, FIRST), vec![7], "nothing was deleted yet");
+    assert_eq!(
+        matches(&faulty.cluster, FIRST),
+        vec![7],
+        "nothing was deleted yet"
+    );
+    let blocked = create(&faulty.cluster, 7, SECOND).expect_err("the delete is not converged");
+    (faulty, blocked)
+}
 
+#[test]
+fn a_create_after_a_half_applied_delete_finishes_the_delete_first() {
+    let (Faulty { cluster, fail, .. }, blocked) = half_deleted_then_blocked();
     // While the delete cannot finish, the id is neither free nor simply taken.
-    let blocked = create(&cluster, 7, SECOND).expect_err("the delete is not converged");
     assert!(
-        matches!(blocked, ShardError::PartiallyApplied { logical: 7, .. }),
+        matches!(
+            blocked,
+            ShardError::EarlierWriteUnconverged { logical: 7, .. }
+        ),
         "{blocked:?}"
     );
 
@@ -151,6 +170,38 @@ fn a_create_after_a_half_applied_delete_finishes_the_delete_first() {
     assert!(matches(&cluster, FIRST).is_empty());
     assert_eq!(matches(&cluster, SECOND), vec![7]);
     assert_eq!(live_rows(&cluster), vec![7]);
+}
+
+/// The refusal is about the EARLIER write. The create itself was not applied and is not
+/// queued, so it must not read as a partial apply of its own: a resync finishes the delete
+/// and nothing else, and the caller has to send the create again.
+#[test]
+fn converging_the_earlier_write_does_not_perform_the_blocked_create() {
+    let (Faulty { cluster, fail, .. }, blocked) = half_deleted_then_blocked();
+    let ShardError::EarlierWriteUnconverged {
+        logical, pending, ..
+    } = &blocked
+    else {
+        panic!("{blocked:?}");
+    };
+    assert_eq!((*logical, pending.len()), (7, 3));
+    assert!(blocked.to_string().contains("not applied or queued"));
+    assert_eq!(
+        cluster.pending_repair_ids(),
+        vec![7],
+        "only the delete is queued"
+    );
+
+    fail.store(false, Ordering::Release);
+    assert_eq!(cluster.resync().repaired, 1);
+    assert!(cluster.pending_repair_ids().is_empty());
+    assert!(matches(&cluster, FIRST).is_empty(), "the delete finished");
+    assert!(
+        matches(&cluster, SECOND).is_empty(),
+        "nothing performed the create"
+    );
+    create(&cluster, 7, SECOND).expect("sent again, it is stored");
+    assert_eq!(matches(&cluster, SECOND), vec![7]);
 }
 
 /// A re-drive is a shard write, and a resize copy refuses shard writes so that the layout it
