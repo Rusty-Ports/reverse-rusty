@@ -143,8 +143,14 @@ async fn dry_run_returns_a_round_trippable_uncacheable_vocab_and_metrics() {
         "no-store"
     );
     let value: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
-    assert_eq!(value["synonyms"].as_array().expect("synonyms").len(), 1);
-    assert_eq!(value["synonyms"][0]["token"], "pkg");
+    // The default applies what it learns by expansion (ADR-202): an equivalence group, and
+    // no collapse synonym.
+    assert_eq!(
+        value["equivalences"],
+        serde_json::json!([["package", "pkg"]]),
+        "{value}"
+    );
+    assert!(value["synonyms"].as_array().is_none_or(Vec::is_empty));
     let learned: reverse_rusty::vocab::Vocab =
         serde_json::from_slice(&bytes).expect("round-trip vocabulary");
     learned
@@ -492,4 +498,55 @@ async fn learning_waits_asynchronously_for_admission_and_closed_admission_fails(
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_error(status, &headers, &bytes, "vocab_unavailable");
+}
+
+/// The preview takes the same mode control as the apply route, so it shows what applying
+/// would install: equivalences by default, collapse synonyms on request, and a request whose
+/// two controls disagree is refused (ADR-202).
+#[tokio::test]
+async fn the_preview_shows_the_mode_that_applying_would_use() {
+    let state = test_state();
+    let corpus = serde_json::json!([[10, "(package,pkg) 2024"], [20, "(package,pkg) 2023"]]);
+    let preview = |controls: serde_json::Value| {
+        let mut request = serde_json::json!({"queries": corpus, "min_count": 2});
+        for (key, value) in controls.as_object().expect("controls") {
+            request[key] = value.clone();
+        }
+        let state = Arc::clone(&state);
+        async move {
+            send(
+                &state,
+                Method::POST,
+                "/_vocab/learn",
+                request.to_string(),
+                Some("application/json"),
+                VOCAB_LEARN_BODY_LIMIT,
+            )
+            .await
+        }
+    };
+
+    for (controls, collapse) in [
+        (serde_json::json!({}), false),
+        (serde_json::json!({"anyof_mode": "expansion"}), false),
+        (serde_json::json!({"learn_equivalences": true}), false),
+        (serde_json::json!({"anyof_mode": "collapse"}), true),
+        (serde_json::json!({"learn_equivalences": false}), true),
+    ] {
+        let (status, _, bytes) = preview(controls.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{controls}");
+        let learned: reverse_rusty::vocab::Vocab =
+            serde_json::from_slice(&bytes).expect("vocabulary");
+        assert_eq!(!learned.synonyms().is_empty(), collapse, "{controls}");
+        assert_eq!(learned.equivalences().is_empty(), collapse, "{controls}");
+    }
+
+    for controls in [
+        serde_json::json!({"anyof_mode": "collapse", "learn_equivalences": true}),
+        serde_json::json!({"anyof_mode": "maybe"}),
+    ] {
+        let (status, headers, bytes) = preview(controls.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{controls}");
+        assert_error(status, &headers, &bytes, "validation_error");
+    }
 }

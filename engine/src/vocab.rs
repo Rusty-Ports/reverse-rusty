@@ -38,7 +38,7 @@ pub use alias::{
 pub use distributional::{discover_pairs, DiscoveredPair, DistributionalConfig};
 pub use learn::{
     learn_anyof_groups, learn_equivalences_from_queries, learn_from_queries,
-    learn_vocab_from_corpus, CorpusLearnConfig,
+    learn_vocab_from_corpus, AnyOfLearnMode, CorpusLearnConfig,
 };
 pub use seed::VocabSeedOutcome;
 

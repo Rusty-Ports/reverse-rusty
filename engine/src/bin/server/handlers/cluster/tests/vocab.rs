@@ -67,16 +67,14 @@ async fn vocabulary_learning_uses_the_strict_caller_corpus_contract_in_cluster_m
         "no-store"
     );
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("learned vocab");
-    assert_eq!(body["synonyms"].as_array().expect("synonyms").len(), 1);
-    assert_eq!(body["synonyms"][0]["token"], "pkg");
-    assert!(
-        body["synonyms"]
-            .as_array()
-            .expect("synonyms")
-            .iter()
-            .all(|entry| entry["token"] != "uniquor"),
-        "the dry run must not substitute the cluster's stored corpus"
+    // The default applies what it learns by expansion (ADR-202). One group, from the
+    // caller's corpus only: nothing from the cluster's stored queries.
+    assert_eq!(
+        body["equivalences"],
+        serde_json::json!([["package", "pkg"]]),
+        "the dry run must not substitute the cluster's stored corpus: {body}"
     );
+    assert!(body["synonyms"].as_array().is_none_or(Vec::is_empty));
 
     let (status, headers, bytes) =
         send_raw(&state, req("POST", "/_vocab/learn", &serde_json::json!({}))).await;
@@ -149,9 +147,13 @@ async fn learn_and_apply_is_mode_consistent_bounded_and_off_runtime() {
 
     {
         let cluster = state.cluster.read();
-        assert!(cluster
-            .vocab()
-            .is_some_and(|vocab| vocab.synonyms().iter().any(|entry| entry.token == "pkg")));
+        assert!(cluster.vocab().is_some_and(|vocab| {
+            vocab.synonyms().is_empty()
+                && vocab
+                    .equivalences()
+                    .iter()
+                    .any(|group| group.iter().any(|form| form == "pkg"))
+        }));
         assert!(cluster
             .percolate("vertex package")
             .expect("percolate")
@@ -186,6 +188,63 @@ async fn learn_and_apply_is_mode_consistent_bounded_and_off_runtime() {
             .with_label_values(&["vocab_learn_apply", "400"])
             .get(),
         1
+    );
+}
+
+/// The route's default mode, read back by a search that leaves the broad lane out (ADR-202,
+/// ADR-203): it returns what it returned before, and the learned equivalence widens it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn learn_and_apply_hides_nothing_from_a_search_without_the_broad_lane() {
+    let queries = vec![
+        (1, "widget pkg".to_string()),
+        (2, "(pkg,package) widget".to_string()),
+        (3, "(pkg,package) gadget".to_string()),
+    ];
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: false,
+        ..Default::default()
+    };
+    let cluster = ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), &cfg, &queries)
+        .expect("cluster builds");
+    let state = state_from_cluster(cluster);
+    let search = |title: &'static str| {
+        let state = Arc::clone(&state);
+        async move {
+            let (status, body) = send(
+                &state,
+                req(
+                    "POST",
+                    "/_search",
+                    &serde_json::json!({"document": {"title": title}, "include_broad": false}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["hits"]["hits"]
+                .as_array()
+                .expect("hits")
+                .iter()
+                .map(|hit| hit["_id"].as_u64().expect("id"))
+                .collect::<Vec<u64>>()
+        }
+    };
+    assert!(search("widget pkg").await.contains(&1), "precondition");
+
+    let (status, body) = send(
+        &state,
+        req_empty("POST", "/_vocab/learn_and_apply?min_count=2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert!(
+        search("widget pkg").await.contains(&1),
+        "the default learner removed a query from a search without the broad lane"
+    );
+    assert!(
+        search("widget package").await.contains(&1),
+        "the learned equivalence widens the query in a search without the broad lane"
     );
 }
 

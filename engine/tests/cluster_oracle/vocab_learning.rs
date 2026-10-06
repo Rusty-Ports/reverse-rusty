@@ -107,10 +107,11 @@ fn declared_alias_makes_both_surface_forms_match() {
 
 #[test]
 fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
-    // ADR-046 mechanism (2) auto-learning (ADR-015): the cluster learns a synonym from its
-    // OWN corpus's any-of groups — `(new,pkg)` seen ≥ min_count ⇒ `pkg → new` — and
-    // applies it. A query phrased with the abbreviation then matches a title written with
-    // the canonical form (zero FN). The learned rule merges under the current vocabulary.
+    // ADR-046 mechanism (2) auto-learning: the cluster learns from its OWN corpus's any-of
+    // groups that `pkg` and `new` are interchangeable (`(new,pkg)` seen ≥ min_count) and
+    // applies it by expansion (ADR-202). A query phrased with the abbreviation then matches
+    // a title written with the other form (zero FN). The learned rule merges under the
+    // current vocabulary.
     let (mut queries, _titles) = build_corpus();
     let q_rc = 8_300_001u64;
     queries.push((q_rc, "1994 vertex pkg".into())); // a query phrased with the abbreviation
@@ -149,12 +150,14 @@ fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
             .contains(&q_rc),
         "the abbreviation form still matches after learning"
     );
-    // The learned synonym is recorded + introspectable on the cluster.
+    // The learned relationship is recorded + introspectable on the cluster: as an
+    // equivalence, not as a collapse synonym.
     assert!(
-        cluster
-            .vocab()
-            .is_some_and(|v| v.synonyms().iter().any(|s| s.token == "pkg")),
-        "the learned pkg→new synonym is recorded in the cluster vocab"
+        cluster.vocab().is_some_and(|v| v.synonyms().is_empty()
+            && v.equivalences()
+                .iter()
+                .any(|group| group.iter().any(|form| form == "pkg"))),
+        "the learned pkg ≡ new equivalence is recorded in the cluster vocab"
     );
 }
 
@@ -586,5 +589,52 @@ fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
                 "K={k}: cluster disagrees with the equivalence-aware oracle for {title:?}"
             );
         }
+    }
+}
+
+/// The default learner on a cluster with the broad lane off (ADR-202, ADR-203). Expansion
+/// turns `widget pkg` into `widget (pkg,package)`, and in so small a corpus every anchor that
+/// leaves it is a very common one. The rebuild keeps the query in default reads, and the
+/// learned equivalence widens it there.
+#[test]
+fn the_default_learner_hides_nothing_with_the_broad_lane_off() {
+    let queries = vec![
+        (1u64, "widget pkg".to_string()),
+        (2, "(pkg,package) widget".to_string()),
+        (3, "(pkg,package) gadget".to_string()),
+    ];
+    for &k in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards: k,
+            include_broad: false,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let default_read = |cluster: &ClusterEngine, title: &str| -> HashSet<u64> {
+            cluster
+                .percolate_with_broad(title, false)
+                .expect("percolate")
+                .into_iter()
+                .collect()
+        };
+        let before = default_read(&cluster, "widget pkg");
+        assert!(before.contains(&1), "K={k}: precondition");
+        assert!(
+            !default_read(&cluster, "widget package").contains(&1),
+            "K={k}: before learning, `package` does not satisfy `pkg`"
+        );
+
+        cluster.learn_and_apply(2).expect("learn_and_apply");
+
+        let after = default_read(&cluster, "widget pkg");
+        assert!(
+            before.is_subset(&after),
+            "K={k}: the default learner removed {:?} from a default read",
+            before.difference(&after).collect::<Vec<_>>()
+        );
+        assert!(
+            default_read(&cluster, "widget package").contains(&1),
+            "K={k}: the learned equivalence widens the query in default reads"
+        );
     }
 }

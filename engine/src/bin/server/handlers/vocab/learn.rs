@@ -19,7 +19,7 @@ use crate::dto::ApiError;
 use crate::metrics::PrometheusMetrics;
 use crate::state::{AppState, RequestCtx};
 
-use super::{build_corpus_config, default_min_count};
+use super::{build_corpus_config, default_min_count, resolve_anyof_mode, AnyOfModeParam};
 
 /// Corpus learning can return a complete vocabulary document, but it should not
 /// inherit the server's 100 MiB bulk-ingest ceiling.
@@ -47,9 +47,14 @@ struct LearnRequest {
     npmi_min_count: Option<usize>,
     #[serde(default)]
     npmi_iterations: Option<usize>,
-    /// Opt-in: learn any-of groups as equivalences applied via expansion (ADR-054).
+    /// How what the any-of groups teach is reported: `expansion` (the default) or
+    /// `collapse` (ADR-202). The same control as on `learn_and_apply`, so a preview shows
+    /// what applying would install.
     #[serde(default)]
-    learn_equivalences: bool,
+    anyof_mode: Option<AnyOfModeParam>,
+    /// The boolean `anyof_mode` replaces: `true` is expansion, `false` is collapse.
+    #[serde(default)]
+    learn_equivalences: Option<bool>,
 }
 
 impl LearnRequest {
@@ -67,6 +72,7 @@ impl LearnRequest {
             self.npmi_min_count,
             self.npmi_iterations,
         )?;
+        let anyof_mode = resolve_anyof_mode(self.anyof_mode, self.learn_equivalences)?;
 
         let mut ids = HashSet::with_capacity(self.queries.len());
         let mut relationship_observations = 0usize;
@@ -88,10 +94,11 @@ impl LearnRequest {
                     continue;
                 };
                 let members = members.len();
-                let observations = if self.learn_equivalences {
-                    members.saturating_mul(members.saturating_sub(1)) / 2
-                } else {
-                    members.saturating_sub(1)
+                let observations = match anyof_mode {
+                    reverse_rusty::vocab::AnyOfLearnMode::Expansion => {
+                        members.saturating_mul(members.saturating_sub(1)) / 2
+                    }
+                    reverse_rusty::vocab::AnyOfLearnMode::Collapse => members.saturating_sub(1),
                 };
                 relationship_observations = relationship_observations.saturating_add(observations);
                 if relationship_observations > VOCAB_LEARN_MAX_RELATIONSHIP_OBSERVATIONS {
@@ -115,14 +122,18 @@ impl LearnRequest {
         Ok(())
     }
 
+    /// The corpus and the configuration to learn with. Call after [`validate`](Self::validate),
+    /// which has already refused a request whose two mode controls disagree.
     fn into_work(self) -> (Vec<(u64, String)>, reverse_rusty::vocab::CorpusLearnConfig) {
+        let anyof_mode =
+            resolve_anyof_mode(self.anyof_mode, self.learn_equivalences).unwrap_or_default();
         let config = build_corpus_config(
             self.min_count,
             self.corpus_phrases,
             self.npmi_tau,
             self.npmi_min_count,
             self.npmi_iterations,
-            self.learn_equivalences,
+            anyof_mode,
         );
         (self.queries, config)
     }
