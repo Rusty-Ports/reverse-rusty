@@ -33,7 +33,7 @@ The JSON body accepts these Reverse Rusty controls:
 | `timeout_ms` | 30000 | Native millisecond timeout alias; returns 408 on expiry. Mutually exclusive with `timeout`. |
 | `timeout` | `30s` | ES/OS integer time value with `nanos`, `micros`, `ms`, `s`, `m`, `h`, or `d`; returns 408 on expiry. |
 | `size` | 1000 | Maximum number of hits to return (per slot in multi-doc mode). |
-| `from` | 0 | Offset into the result set for pagination. |
+| `from` | 0 | Offset into the result set for pagination. Each request matches the snapshot current at that moment, so a write between two offset requests can repeat or skip a hit at the page boundary; for a complete set see [recall-first integration](../../integration.md#2-get-every-candidate). |
 | `rank` | – | Optional ranking block (ADR-059) — order hits by a priority tag and/or request boosts before `from`/`size`. See [Ranking](#ranking-adr-059). |
 | `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class C and accepted class D for this request. Class H remains always visible. |
 | `include_source` / `_source` | `true` single-node; `false` cluster | Include original query text in each hit. These are aliases and cannot both be present. An explicit `true` works for an in-process cluster; a remote/gRPC cluster returns 501 because its source-fetch wire is not implemented. |

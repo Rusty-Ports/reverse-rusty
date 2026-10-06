@@ -9,6 +9,9 @@ features, and topology behavior are canonical in the [ranking reference](ranking
 internals live in the [matching](../design/matching.md) and
 [ingestion](../design/ingestion-and-updates.md) design references.
 
+Integrating as the recall stage of a matcher: read
+[recall-first integration](integration.md) before choosing endpoints.
+
 ## API areas
 
 | Area catalog | Scope |

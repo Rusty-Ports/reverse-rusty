@@ -2,8 +2,10 @@
 
 > [Percolation & delivery APIs](../percolate.md) · [REST API hub](../../api.md)
 
-The full-result throughput counterpart to `/_search` (ADR-135). It accepts one strict JSON request
-with a shared option set and returns one ordered `responses[i]` slot per input document.
+The throughput counterpart to `/_search` (ADR-135). It accepts one strict JSON request with a
+shared option set and returns one ordered `responses[i]` slot per input document. Each slot's
+full match set is computed and then paged by `from`/`size` (default 1000), so a slot holds every
+match only when `size` is at least its `hits.total`.
 In **standalone mode**, it evaluates the broad lane once per title batch with the columnar kernel
 (ADR-026), so a hot anchor's large posting is scanned once for the batch rather than once per title.
 Coordinator mode preserves the same exact per-slot semantics but fans out one per-title match; it
@@ -81,7 +83,7 @@ Shared request fields:
 | `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class C and accepted class D for this batch. Class H remains always visible |
 | `include_source` / `_source` | `true` standalone; `false` cluster | Boolean aliases controlling stored query text. Specify at most one. An explicit `true` works for an in-process cluster; a remote/gRPC cluster returns 501 |
 | `size` | 1000 | Maximum hits per document |
-| `from` | 0 | Per-document offset into each document's hits for pagination |
+| `from` | 0 | Per-document offset into each document's hits for pagination. Each request matches the snapshot current at that moment, so a write between two offset requests can repeat or skip a hit at a page boundary ([recall-first integration](../../integration.md#2-get-every-candidate)) |
 | `rank` | – | Optional ranking block (ADR-059), applied per document — see [Ranking](search.md#ranking-adr-059) |
 | `timeout_ms` / `timeout` | 30000 ms | Native milliseconds or an ES/OS time value such as `250ms` or `2s`; specify at most one. Expiry returns whole-request 408 and an explicit value arms cooperative cancellation (ADR-099) |
 | `profile` | false | Standalone only: include the top-level columnar `broad` summary. A coordinator returns `501 profile_unsupported` for `true`; `false` is accepted |
