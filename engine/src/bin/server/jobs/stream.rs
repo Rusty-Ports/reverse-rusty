@@ -292,26 +292,35 @@ pub(super) struct JobChunkSink<'a> {
     job_id: &'a str,
     event_id: &'a str,
     snapshot_generation: u64,
+    query_scope: reverse_rusty::QueryScope,
     deadline: Instant,
     completion: CompletionState,
     prom: &'a PrometheusMetrics,
 }
 
+/// What a job's frames say about the job itself.
+#[derive(Clone, Copy)]
+pub(super) struct JobIdentity<'a> {
+    pub(super) job_id: &'a str,
+    pub(super) event_id: &'a str,
+    pub(super) snapshot_generation: u64,
+    pub(super) query_scope: reverse_rusty::QueryScope,
+}
+
 impl<'a> JobChunkSink<'a> {
     pub(super) fn new(
         tx: tokio::sync::mpsc::Sender<JobFrame>,
-        job_id: &'a str,
-        event_id: &'a str,
-        snapshot_generation: u64,
+        job: JobIdentity<'a>,
         deadline: Instant,
         completion: CompletionState,
         prom: &'a PrometheusMetrics,
     ) -> Self {
         Self {
             tx,
-            job_id,
-            event_id,
-            snapshot_generation,
+            job_id: job.job_id,
+            event_id: job.event_id,
+            snapshot_generation: job.snapshot_generation,
+            query_scope: job.query_scope,
             deadline,
             completion,
             prom,
@@ -378,6 +387,7 @@ impl<'a> JobChunkSink<'a> {
             job_id: self.job_id,
             exact_total: summary.exact_total,
             snapshot_generation: self.snapshot_generation,
+            query_scope: self.query_scope,
             chunk_count: summary.chunk_count,
             checksum: summary.checksum,
         };
@@ -474,6 +484,9 @@ struct CompletionFrame<'a> {
     job_id: &'a str,
     exact_total: u64,
     snapshot_generation: u64,
+    /// The scope the job matched in: the record a consumer commits on says which
+    /// candidates it covers (ADR-201).
+    query_scope: reverse_rusty::QueryScope,
     chunk_count: u64,
     checksum: DeliveryChecksum,
 }

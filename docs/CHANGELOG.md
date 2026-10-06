@@ -9,6 +9,15 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Every search response says which scope ran
+
+- `/_search` and `/_mpercolate` responses carry the header `x-rr-query-scope: standard` or
+  `with_broad`, in both server modes. Their bodies are unchanged. A consumer that relies on the
+  server's `--include-broad` default could not tell from any response which scope it got.
+- An exhaustive job's completion record carries `query_scope` (an added field).
+- A standalone `GET /_settings` reports `include_broad` beside `settings` (an added field), as a
+  coordinator's already did.
+
 ## 2026-10-06 — A guide to getting every candidate
 
 - New [recall-first integration](reference/integration.md) page, linked from the README, the

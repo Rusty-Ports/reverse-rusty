@@ -219,9 +219,12 @@ impl ExhaustiveJobs {
     {
         let mut sink = JobChunkSink::new(
             tx,
-            &record.id,
-            &record.event_id,
-            record.snapshot_generation,
+            super::stream::JobIdentity {
+                job_id: &record.id,
+                event_id: &record.event_id,
+                snapshot_generation: record.snapshot_generation,
+                query_scope: record.query_scope,
+            },
             deadline,
             record.completion.clone(),
             &self.prom,

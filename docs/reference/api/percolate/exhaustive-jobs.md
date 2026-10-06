@@ -171,10 +171,11 @@ object terminated by `\n`:
   {"logical_id":42,"score":1050,"idempotency_key":"<sha256-hex>"},
   {"logical_id":91,"idempotency_key":"<sha256-hex>"}
 ]}
-{"type":"completion","job_id":"...","exact_total":2,"snapshot_generation":987654321012345678,"chunk_count":1,"checksum":{"xor":1190750903085048104,"sum":8313222029812487130}}
+{"type":"completion","job_id":"...","exact_total":2,"snapshot_generation":987654321012345678,"query_scope":"standard","chunk_count":1,"checksum":{"xor":1190750903085048104,"sum":8313222029812487130}}
 ```
 
-Sequences start at zero and are contiguous. A member has `score` only when the request supplied a
+The completion record repeats the job's `query_scope`, so the record a consumer commits on says
+which candidates the result covers. Sequences start at zero and are contiguous. A member has `score` only when the request supplied a
 rank program. Its idempotency key is derived from
 `(event_id, snapshot_generation, logical_id)`. Chunks are provisional and have no global ordering
 guarantee: a consumer deduplicates by key, verifies the exact total/checksum, and commits **only**

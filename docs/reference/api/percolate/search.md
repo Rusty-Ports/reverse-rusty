@@ -46,6 +46,10 @@ Unknown body fields, query parameters, `rank` fields, boost fields, and document
 structured 400 instead of being silently ignored. `rank`, `include_broad`, `include_source`, and
 `timeout_ms` are body-only Reverse Rusty extensions.
 
+Every successful response carries the header `x-rr-query-scope: standard` or `with_broad`: the
+scope the hits were matched in, whether the request named it with `include_broad` or took the
+server's `--include-broad` default (ADR-201). The body does not repeat it.
+
 `hits.total` is deliberately the legacy integer rather than the newer ES object; it always reflects
 the full match count, while `hits.hits` is the paginated window. Every hit carries the stable
 `_index: "queries"` identity. `took` is whole milliseconds, `took_ms` is a higher-precision Reverse

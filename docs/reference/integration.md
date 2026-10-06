@@ -39,8 +39,9 @@ Classes C and D are the broad lane. A request sees them only if its scope includ
 
 **For a recall-first consumer: start the server with `--include-broad`, or send the scope on
 every request.** Sending it on every request is the stronger of the two, because it does not
-depend on how a server was started. The v2 routes and job status echo the scope that ran as
-`query_scope`; check it once in an integration test.
+depend on how a server was started. Every response says which scope ran: the v2 routes, job status and a job's completion record carry
+`query_scope`, and `/_search` and `/_mpercolate` carry the header `x-rr-query-scope`. Assert it
+in an integration test.
 
 What it costs: with the broad lane on, candidates per title grow with the corpus, because a
 query anchored on a very common term is a candidate for every title that has the term. That is
@@ -108,7 +109,8 @@ store keeps the vocabulary it recorded ([ADR-184](../decisions/adr-184-recorded-
 ## Checklist
 
 - [ ] The server runs with `--include-broad`, or every request names its scope.
-- [ ] An integration test asserts the echoed `query_scope` on the v2 routes it uses.
+- [ ] An integration test asserts the scope each route reports (`query_scope`, or the
+      `x-rr-query-scope` header on `/_search` and `/_mpercolate`).
 - [ ] `--accept-class-d` is on if the corpus has negation-only queries.
 - [ ] The consumer checks every response for completeness: `hits.total` equal to the hits
       received, and on the v2 routes `relation` equal to `"eq"`.

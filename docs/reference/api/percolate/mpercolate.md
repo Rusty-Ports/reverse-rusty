@@ -90,6 +90,10 @@ Shared request fields:
 | `explain` | false | `false` is accepted; `true` returns 400 and directs the caller to `/_search` per document |
 | `allow_partial_search_results` | false | `false` names the actual fail-closed contract; `true` returns 400 |
 
+A successful response carries the header `x-rr-query-scope: standard` or `with_broad`, the scope
+every slot was matched in (the request's `include_broad`, or the server's `--include-broad`
+default; ADR-201).
+
 Every successful slot has `timed_out: false`, `status: 200`, and a `hits` object. Its exact matched
 IDs, total, ranking, page, and source projection are the same as a corresponding per-title search.
 Standalone source enrichment stays on the exact snapshot used for matching and fails with

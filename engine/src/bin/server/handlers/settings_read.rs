@@ -127,6 +127,9 @@ where
 
 #[derive(Serialize)]
 struct GetSettingsResponse<'a> {
+    /// The server's `--include-broad`: the scope of a request that names none (ADR-201). It
+    /// is fixed at start-up and is not an engine setting, so it sits beside `settings`.
+    include_broad: bool,
     settings: &'a EngineConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     defaults: Option<&'a EngineConfig>,
@@ -160,10 +163,12 @@ pub(crate) async fn get_settings(
         Err(response) => return response,
     };
     let snapshot = state.snapshot.load_full();
+    let include_broad = state.include_broad;
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let defaults = include_defaults.then(EngineConfig::default);
         serialize_settings_response(&GetSettingsResponse {
+            include_broad,
             settings: snapshot.config(),
             defaults: defaults.as_ref(),
         })

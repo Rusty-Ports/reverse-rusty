@@ -22,6 +22,7 @@ use reverse_rusty::segment::{MatchScratch, MatchStats};
 
 use crate::dto::{ApiError, HitSource};
 use crate::handlers::doc::QUERY_INDEX;
+use crate::handlers::scope_echo::{effective_scope, Scoped};
 use crate::state::AppState;
 
 use super::controls::{resolve_search_controls, SearchControlInput, SearchParams};
@@ -232,7 +233,7 @@ pub(crate) async fn search_route(
     State(state): State<Arc<AppState>>,
     params: Result<Query<SearchParams>, QueryRejection>,
     body: Result<Json<SearchBody>, JsonRejection>,
-) -> Result<Json<SearchResponse>, Reject> {
+) -> Result<Scoped<Json<SearchResponse>>, Reject> {
     let _duration = state
         .prom
         .http_request_duration
@@ -241,7 +242,9 @@ pub(crate) async fn search_route(
     let Query(params) = params
         .map_err(|error| validation(&state, format!("invalid search query parameters: {error}")))?;
     let Json(body) = body.map_err(|error| body_rejection(&state, &error))?;
-    search_inner(state, body, params).await
+    let scope = effective_scope(body.include_broad, state.default_query_scope());
+    let response = search_inner(state, body, params).await?;
+    Ok(Scoped(scope, response))
 }
 
 /// Direct entry used by handler tests.

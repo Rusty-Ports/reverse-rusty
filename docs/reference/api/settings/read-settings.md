@@ -15,10 +15,15 @@ the canonical [ranking settings contract](../../ranking.md#3-profile-file).
 curl localhost:9200/_settings
 ```
 
+Beside `settings`, a standalone response carries `include_broad`: the server's `--include-broad`,
+which is the scope of a request that names none (ADR-201). It is fixed at start-up and cannot be
+changed through `PUT /_settings`. A coordinator reports the same field in its own response.
+
 Representative fields from the full response:
 
 ```json
 {
+  "include_broad": false,
   "settings": {
     "max_segments": 8,
     "holes_ratio_threshold": 0.3,
