@@ -577,6 +577,12 @@ pub struct Engine {
     /// must restore the selected corpus before any later manifest can replace it
     /// with an accidentally partial snapshot.
     source_commit_state: SourceCommitState,
+    /// The [`SourceStore::content_version`] at which the manifest-selected sidecar was
+    /// known to hold exactly the store's documents (ADR-200). `None` when that is not
+    /// known: no sidecar has been written, or the store has documents it does not hold. A
+    /// commit that finds the store at this version selects the same file again instead of
+    /// writing the corpus out a second time.
+    selected_source_version: Option<u64>,
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,

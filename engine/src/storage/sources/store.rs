@@ -1,12 +1,13 @@
 use super::{
     decode_tags, load_stored_sources, open_lazy_base, peek_sources_version, rw_read, rw_write,
-    write_sources_v2, Path, SourceEntryRef, SourceStore, StoredSource, TagsRef, SOURCES_VERSION_V1,
+    write_sources_v2, Path, SourceEntryRef, SourceStore, StoredSource, TagsRef, Tracked,
+    SOURCES_VERSION_V1,
 };
 use std::io;
 
 impl SourceStore {
     pub fn new_resident() -> Self {
-        SourceStore::Resident(std::sync::RwLock::new(crate::util::fast_map()))
+        SourceStore::Resident(Tracked::new(crate::util::fast_map()))
     }
 
     /// An empty store of the kind selected by `retain` (no persisted file yet).
@@ -16,7 +17,7 @@ impl SourceStore {
         } else {
             SourceStore::Lazy {
                 base: None,
-                overlay: std::sync::RwLock::new(crate::util::fast_map()),
+                overlay: Tracked::new(crate::util::fast_map()),
             }
         }
     }
@@ -26,14 +27,14 @@ impl SourceStore {
     /// first migrating a v1 file; an absent file yields an empty lazy store.
     pub fn open(path: &Path, retain: bool) -> io::Result<Self> {
         if retain {
-            return Ok(SourceStore::Resident(std::sync::RwLock::new(
-                load_stored_sources(path)?,
-            )));
+            return Ok(SourceStore::Resident(Tracked::new(load_stored_sources(
+                path,
+            )?)));
         }
         if !path.exists() {
             return Ok(SourceStore::Lazy {
                 base: None,
-                overlay: std::sync::RwLock::new(crate::util::fast_map()),
+                overlay: Tracked::new(crate::util::fast_map()),
             });
         }
         if peek_sources_version(path)? == SOURCES_VERSION_V1 {
@@ -57,7 +58,7 @@ impl SourceStore {
         }
         Ok(SourceStore::Lazy {
             base: Some(open_lazy_base(path)?),
-            overlay: std::sync::RwLock::new(crate::util::fast_map()),
+            overlay: Tracked::new(crate::util::fast_map()),
         })
     }
 
@@ -238,6 +239,17 @@ impl SourceStore {
                     rw_write(overlay).insert(logical, Some(source));
                 }
             }
+        }
+    }
+
+    /// A number that changes whenever the store may have changed. It is taken at every
+    /// write access to the store's contents, and a store opened or created anew never has a
+    /// version another store has had. Equal versions therefore mean the same store with
+    /// nothing written in between.
+    pub(crate) fn content_version(&self) -> u64 {
+        match self {
+            SourceStore::Resident(documents) => documents.version(),
+            SourceStore::Lazy { overlay, .. } => overlay.version(),
         }
     }
 

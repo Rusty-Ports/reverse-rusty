@@ -30,6 +30,7 @@ Write paths, segments, WAL and source persistence, compaction, recovery, and dur
 | [184](../adr-184-recorded-feature-model.md) | Recorded feature model | Records the vocabulary and a normalizer fingerprint in every manifest commit, restores it on reopen, and refuses a corpus under any other normalizer. | Accepted |
 | [188](../adr-188-mask-assigned-once.md) | Mask assigned once | Makes the top-64 mask assignment a one-time event enforced in the dictionary, seals the memtable before it, and stops the server re-running the initial load on a populated store. | Accepted |
 | [190](../adr-190-no-commit-around-in-memory-segments.md) | No commit around in-memory segments | Writes a segment a failed flush or rebuild left in memory to disk before any manifest commit, or refuses the commit, so a later flush cannot retire WAL frames of rows no manifest lists. | Accepted |
+| [200](../adr-200-keep-an-exact-source-sidecar.md) | Keep an exact source sidecar | Gives the source store a content version so a commit that changed no document selects the sidecar it has, instead of writing the corpus again; reports each full write as an event and metrics. | Accepted |
 
 ---
 

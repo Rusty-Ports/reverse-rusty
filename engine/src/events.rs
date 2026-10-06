@@ -198,6 +198,16 @@ pub enum EngineEvent {
         duration_secs: f64,
     },
 
+    /// The whole source corpus was written to a sidecar file: every live document, whatever
+    /// the size of the change that caused it. A commit that changes only the segment
+    /// registry writes none (ADR-200).
+    SourceCommit {
+        /// Size of the file written.
+        bytes: u64,
+        /// Wall-clock seconds spent building, checksumming and syncing the file.
+        duration_secs: f64,
+    },
+
     /// A best-effort removal of a segment file failed (e.g. orphan cleanup after
     /// a write error, or stale-file cleanup after compaction). The owning
     /// operation has already succeeded or reported its own error; this only

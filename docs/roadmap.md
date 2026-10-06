@@ -410,8 +410,16 @@ change, and acceptance boundary; promotion changes its priority, not its documen
 
 - **Reusable WAL encoding.** Pool serialization buffers across writes while preserving frame
   atomicity and ensuring a failed append cannot leak bytes into the next frame.
-- **Faster manifest CRC.** Replace byte-at-a-time CRC with a table or hardware-assisted path,
-  retaining byte-identical checksums and malformed-manifest failures.
+- **Faster checksums for every durable file.** One byte-at-a-time CRC serves the manifest,
+  segments, the source sidecar, the WAL, the translog and the control store. Replace it with a
+  table or hardware-assisted path, retaining byte-identical checksums and the malformed-file
+  failures, and stream the segment checksum while writing instead of reading the file back.
+- **Source commits proportional to the change.** A standalone flush, and every bulk load of new
+  ids, still writes the whole source sidecar under the write lock (ADR-200 removed only the
+  writes that changed nothing). Write what changed instead: a base sidecar plus small deltas
+  selected together by the manifest, folded into a new base outside the write lock. Needs a
+  manifest version with a rollback fence, crash-window coverage for the delta and fold commits,
+  and backup support for several selected files.
 - **Profile-gated SIMD.** Evaluate vectorized intersections only when representative profiles are
   dominated by medium or large postings; keep the scalar path when setup cost wins.
 

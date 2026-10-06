@@ -43,6 +43,9 @@ pub(crate) struct PrometheusMetrics {
     /// durability is degraded. See `EngineEvent::DurabilityFailure`.
     pub(crate) durability_failures_total: IntCounterVec,
     pub(crate) flush_time_seconds_total: Counter,
+    /// Complete writes of the source corpus (ADR-200). A flush or a fresh-id bulk request
+    /// pays one; `flush_time_seconds_total` does not include it.
+    pub(crate) source_commit: source_commit::SourceCommitMetrics,
     pub(crate) compaction_time_seconds_total: Counter,
 
     // Request metrics
@@ -117,6 +120,7 @@ pub(crate) struct PrometheusMetrics {
 }
 
 mod registry;
+mod source_commit;
 
 impl PrometheusMetrics {
     /// Update gauge metrics from an EngineMetrics snapshot.
@@ -232,6 +236,12 @@ impl PrometheusMetrics {
                 self.compaction_tombstones_reclaimed
                     .inc_by(report.tombstones_reclaimed as u64);
                 self.compaction_time_seconds_total.inc_by(*duration_secs);
+            }
+            EngineEvent::SourceCommit {
+                bytes,
+                duration_secs,
+            } => {
+                self.source_commit.observe(*bytes, *duration_secs);
             }
             EngineEvent::SegmentCleanupFailed { .. } => {
                 self.segment_cleanup_failures_total.inc();
