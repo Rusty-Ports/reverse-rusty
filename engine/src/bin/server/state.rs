@@ -326,6 +326,13 @@ pub(crate) struct ClusterAppState {
     /// Coordinator analogue of [`AppState::stats_permits`], including bounded
     /// vocabulary reads, learning, and blue/green replacements.
     pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// The search pool. Its workers take `cluster.read()` for each title they match, and a
+    /// reader waits when a writer is queued for that lock (a vocabulary rebuild, a resize).
+    ///
+    /// **Never wait for this pool while holding the `cluster` lock.** With a writer queued
+    /// behind the holder, the workers wait for the writer, the writer for the holder, and the
+    /// holder for a worker. A request that needs the lock across its whole run (a search
+    /// that returns sources) runs on its own blocking thread instead (ADR-206).
     pub(crate) pool: rayon::ThreadPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
     /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,

@@ -48,6 +48,15 @@ What the one mutex cost:
    then the id lock.
 6. **At most 32 writes run at once**, the admission bound ADR-183 already set for how many
    writes may hold a blocking thread.
+7. **A search that returns sources stays out of the search pool.** It holds the cluster lock
+   for its whole run. The pool's workers take that lock for each title they match, and they
+   wait when a writer is queued for it. Had such a search waited for a worker while holding
+   the lock, a vocabulary rebuild queued behind it would have completed a cycle: the workers
+   wait for the rebuild, the rebuild for the search, the search for a worker. The old mutex
+   prevented this by accident, because a rebuild held it too. Now the search runs on the
+   blocking thread it already has. Such searches run one at a time, so this is one thread; its
+   fan-out to the shards uses the process's general pool. The rule is stated where the pool is
+   declared: never wait for the search pool while holding the cluster lock.
 
 ## What changes for a caller
 
@@ -79,6 +88,9 @@ What the one mutex cost:
 - The comments in `state.rs` and `handlers/cluster.rs` describe the lock as it is. ADR-070's
   concurrency model and its "reads are never blocked by writes" are superseded here; ADR-169
   and ADR-177 carry dated notes.
+- The cycle in item 7 was already possible in one place before this change: a remote resize
+  takes the cluster's write lock for its cutover after it has released write admission. Keeping
+  searches that hold the lock out of the pool closes that as well.
 - **Not changed, and still limits of the coordinator:**
   - One write still visits its shards one after another.
   - A remote position that does not answer still costs every write that touches it the write
@@ -96,6 +108,9 @@ What the one mutex cost:
   `/v2/_mpercolate` and `/_search` with `_source` answer; flush, checkpoint, replacing the
   vocabulary, learning and applying a vocabulary, importing aliases and learning aliases each
   wait for a write in flight and then run.
+- `handlers/cluster/tests/search_pool.rs`: with every worker of the search pool occupied, a
+  search that returns ids only waits, and `/v2/_search`, `/v2/_mpercolate` and `/_search` with
+  sources answer.
 - `handlers/cluster/tests/write_concurrency.rs`, on a durable three-shard cluster: eight
   clients each post five bulk batches over the same thirty-two ids, in different orders. Every
   id ends on a body one of them wrote for it, the index matches the stored source, and a

@@ -641,8 +641,8 @@ async fn percolate_blocking(
                 )));
             }
 
-            let run_pool = |stable_view: Option<&ClusterReadView<'_>>| {
-                state_inner.pool.install(|| {
+            let run = |stable_view: Option<&ClusterReadView<'_>>| {
+                {
                     use rayon::prelude::*;
                     let deadline = requested_deadline.filter(|_| cooperative_cancel);
                     // Without source enrichment the read guard is taken PER TITLE: the
@@ -735,20 +735,21 @@ async fn percolate_blocking(
                             .inc();
                     }
                     run
-                })
+                }
             };
 
             if source_fetch.is_some() {
-                // Source waiters must not occupy the shared Rayon pool. Acquire the
-                // mutation-frozen view on this blocking thread before entering the pool.
-                // It excludes every mutation, served or direct, and every checkpoint,
-                // flush and backup (ADR-197), so the request takes no write admission
-                // and does not wait for a whole bulk batch, a job or a resize (ADR-206).
+                // Take the mutation-frozen view on this blocking thread and stay on it. It
+                // excludes every mutation, served or direct, and every checkpoint, flush
+                // and backup (ADR-197), so the request takes no write admission and does
+                // not wait for a whole bulk batch, a job or a resize (ADR-206). It must not
+                // enter the search pool while it holds the cluster lock (see `pool` on
+                // `ClusterAppState`); such requests run one at a time.
                 let cluster = state_inner.cluster.read();
                 let stable_view = cluster.consistent_read_view();
-                run_pool(Some(&stable_view))
+                run(Some(&stable_view))
             } else {
-                run_pool(None)
+                state_inner.pool.install(|| run(None))
             }
         })
         .await

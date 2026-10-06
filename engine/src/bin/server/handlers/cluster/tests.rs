@@ -452,6 +452,7 @@ mod reconcile;
 mod request_limit;
 mod resize;
 mod resync;
+mod search_pool;
 mod settings_read;
 mod settings_write;
 mod state_read;
