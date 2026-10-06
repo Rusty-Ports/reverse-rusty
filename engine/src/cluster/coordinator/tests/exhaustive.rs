@@ -472,7 +472,7 @@ fn exhaustive_refuses_pending_repair_overlap_until_resync() {
 
     let added = cluster.add_query(5, &old_dsl).expect("healthy old add");
     assert!(
-        matches!(added, AddOutcome::Placed { ref shards } if shards == &vec![old_position]),
+        matches!(added, AddOutcome::Placed { ref shards, .. } if shards == &vec![old_position]),
         "old query must live at the selected old position: {added:?}"
     );
 

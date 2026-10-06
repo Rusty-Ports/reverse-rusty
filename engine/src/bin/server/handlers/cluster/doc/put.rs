@@ -68,6 +68,7 @@ pub(crate) async fn cluster_put_doc(
                         _id: id,
                         _version: None,
                         result: "error",
+                        stored: None,
                         error: Some(msg),
                     }),
                 )
@@ -108,6 +109,7 @@ pub(crate) async fn cluster_put_doc(
                     _id: id,
                     _version: status.is_success().then_some(body.version),
                     result,
+                    stored: outcome.class().map(Into::into),
                     error,
                 }),
             )
@@ -182,6 +184,7 @@ fn partial_put_response(
             _id: id,
             _version: None,
             result: "partial",
+            stored: None,
             error: Some(partial_write_guidance(create_only, applied, failed)),
         }),
     )

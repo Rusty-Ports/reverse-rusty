@@ -169,7 +169,10 @@ fn grpc_live_corpus_export_streams_many_small_frames_and_refuses_an_oversized_do
     let huge = format!("framedneedle1 zz{}", "p".repeat(1500));
     let (_, outcome) = cluster.upsert_query(1, &huge, 2).expect("upsert oversized");
     assert!(
-        matches!(outcome, AddOutcome::Placed { .. } | AddOutcome::Replicated),
+        matches!(
+            outcome,
+            AddOutcome::Placed { .. } | AddOutcome::Replicated { .. }
+        ),
         "the oversized source must be stored: {outcome:?}"
     );
     let error = cluster

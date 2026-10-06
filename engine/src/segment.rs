@@ -74,7 +74,8 @@ pub use match_types::{
 };
 pub use outcomes::{
     AliasApplyReport, AliasDiscoveryReport, AliasFeedbackApplyReport, CompactionReport,
-    HeldPlacement, IngestItemStatus, IngestReport, InsertOutcome, ReplaceOutcome, UpsertOutcome,
+    HeldPlacement, IngestItemStatus, IngestReport, InsertOutcome, ReplaceOutcome, StoredRow,
+    UpsertOutcome,
 };
 pub(crate) use tag_summary::TagSummary;
 
@@ -173,6 +174,10 @@ pub struct CompileKnobs {
 pub struct AddedCompiled {
     /// The new segment-local id.
     pub local: u32,
+    /// The class byte stored for the row: the lane it lives in. For a row that joined an
+    /// identical body it is the group's class, and for a row a rebuild kept visible it is
+    /// the pinned class, so it can differ from the class of the row's own plan.
+    pub class: CostClass,
     /// The plan's observe-first hot-tier flag (see `SigPlan::would_be_hot`).
     pub would_be_hot: bool,
     /// The canonical body signature (feeds the engine's duplication sketch).

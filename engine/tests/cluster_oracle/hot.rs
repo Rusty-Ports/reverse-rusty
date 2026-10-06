@@ -143,7 +143,7 @@ fn live_hot_add_is_ring_placed_and_always_visible() {
         }
         let id = 9_000_000 + base_id;
         let outcome = cluster.add_query(id, text).unwrap();
-        let AddOutcome::Placed { shards } = outcome else {
+        let AddOutcome::Placed { shards, .. } = outcome else {
             continue;
         };
         let h_now = cluster.class_counts().unwrap()[4];

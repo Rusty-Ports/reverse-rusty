@@ -322,3 +322,52 @@ async fn body_limit_and_post_only_route_preserve_http_statuses() {
         Some("POST")
     );
 }
+
+#[tokio::test]
+async fn items_report_the_class_each_query_was_stored_under() {
+    // The first bulk load of an empty engine goes through the fresh-segment path and
+    // assigns the top-64 mask from its own three terms.
+    let state = state();
+    let body = concat!(
+        "{\"index\":{\"_id\":1}}\n",
+        "{\"query\":\"zzalpha zzbeta\"}\n",
+        "{\"create\":{\"_id\":2}}\n",
+        "{\"query\":\"zzgamma\"}\n",
+        "{\"index\":{\"_id\":3}}\n",
+        "{\"query\":\"-zzgamma\"}\n",
+    );
+    let (status, response) = send_bulk(&state, "/_bulk", Some("application/x-ndjson"), body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["items"][0]["index"]["class"], "b", "{response}");
+    assert_eq!(response["items"][0]["index"]["default_visible"], true);
+    assert_eq!(response["items"][1]["create"]["class"], "c", "{response}");
+    assert_eq!(response["items"][1]["create"]["default_visible"], false);
+    assert!(response["items"][2]["index"].get("class").is_none());
+    assert!(response["items"][2]["index"]
+        .get("default_visible")
+        .is_none());
+    assert_eq!(state.engine.lock().class_counts(), [0, 1, 1, 0, 0]);
+
+    // A later bulk writes item by item: a new term is selective, a replacement reports its
+    // new class, and a create of a live id stores nothing.
+    let body = concat!(
+        "{\"index\":{\"_id\":4}}\n",
+        "{\"query\":\"zzrare\"}\n",
+        "{\"index\":{\"_id\":2}}\n",
+        "{\"query\":\"zzrare zzmore\",\"version\":2}\n",
+        "{\"create\":{\"_id\":1}}\n",
+        "{\"query\":\"zzalpha\"}\n",
+        "{\"create\":{\"_id\":5}}\n",
+        "{\"query\":\"zzalpha\"}\n",
+    );
+    let (status, response) = send_bulk(&state, "/_bulk", Some("application/x-ndjson"), body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["items"][0]["index"]["class"], "a", "{response}");
+    assert_eq!(response["items"][0]["index"]["default_visible"], true);
+    assert_eq!(response["items"][1]["index"]["result"], "updated");
+    assert_eq!(response["items"][1]["index"]["class"], "a", "{response}");
+    assert_eq!(response["items"][2]["create"]["status"], 409);
+    assert!(response["items"][2]["create"].get("class").is_none());
+    assert_eq!(response["items"][3]["create"]["class"], "c", "{response}");
+    assert_eq!(response["items"][3]["create"]["default_visible"], false);
+}

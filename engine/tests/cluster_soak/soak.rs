@@ -213,7 +213,10 @@ fn twenty_million_multi_shard_soak() {
         let dsl = live_add_query(i);
         let outcome = cluster.add_query(id, &dsl).expect("live add");
         assert!(
-            matches!(outcome, AddOutcome::Placed { .. } | AddOutcome::Replicated),
+            matches!(
+                outcome,
+                AddOutcome::Placed { .. } | AddOutcome::Replicated { .. }
+            ),
             "live add {i} not stored: {outcome:?}"
         );
         assert!(
@@ -228,7 +231,10 @@ fn twenty_million_multi_shard_soak() {
             .upsert_query(*id, &new_text, 99)
             .expect("live upsert");
         assert!(
-            matches!(outcome, AddOutcome::Placed { .. } | AddOutcome::Replicated),
+            matches!(
+                outcome,
+                AddOutcome::Placed { .. } | AddOutcome::Replicated { .. }
+            ),
             "upsert {i} new version not stored: {outcome:?}"
         );
         let _ = reference.delete_by_logical_id(*id);

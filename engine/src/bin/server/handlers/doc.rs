@@ -87,6 +87,31 @@ enum PutDocOpType {
     Create,
 }
 
+/// How an accepted write was stored: its cost class, named as in `/_stats`
+/// `class_counts`, and whether a read that does not ask for the broad lane returns it.
+/// It describes the write it answers; the recall-first guide says what can change later.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StoredAs {
+    pub(crate) class: &'static str,
+    pub(crate) default_visible: bool,
+}
+
+impl From<reverse_rusty::compile::CostClass> for StoredAs {
+    fn from(class: reverse_rusty::compile::CostClass) -> Self {
+        use reverse_rusty::compile::CostClass;
+        Self {
+            class: match class {
+                CostClass::A => "a",
+                CostClass::B => "b",
+                CostClass::C => "c",
+                CostClass::D => "d",
+                CostClass::H => "h",
+            },
+            default_visible: !class.is_opt_in(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct PutDocResponse {
     pub(crate) _index: &'static str,
@@ -94,13 +119,19 @@ pub(crate) struct PutDocResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) _version: Option<u32>,
     pub(crate) result: &'static str,
+    /// Present on an accepted write only.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub(crate) stored: Option<StoredAs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
 }
 
 enum PutEngineOutcome {
-    Created,
-    Updated { replaced: usize },
+    Created(reverse_rusty::StoredRow),
+    Updated {
+        stored: reverse_rusty::StoredRow,
+        replaced: usize,
+    },
     RejectedClassD,
 }
 
@@ -338,6 +369,9 @@ pub(crate) struct BulkItemInner {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) result: Option<&'static str>,
     pub(crate) status: u16,
+    /// Present on an accepted item only.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub(crate) stored: Option<StoredAs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<BulkItemError>,
 }

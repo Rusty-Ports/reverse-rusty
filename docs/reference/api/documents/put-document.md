@@ -12,8 +12,28 @@ curl -X PUT localhost:9200/_doc/1 \
 ```
 
 ```json
-{"_index": "queries", "_id": 1, "_version": 1, "result": "created"}
+{"_index": "queries", "_id": 1, "_version": 1, "result": "created", "class": "b", "default_visible": true}
 ```
+
+**What the write tells you about recall.** An accepted write reports how the query was stored:
+
+- `class` is its cost class, `"a"`, `"b"`, `"c"`, `"d"` or `"h"`, named as in
+  [`/_stats` `class_counts`](../observability/stats.md).
+- `default_visible` says whether a search that does not ask for the broad lane returns it. It
+  is `false` for classes C and D: those queries are matched only when the request's scope
+  includes the broad lane ([recall-first integration](../../integration.md)).
+
+Both fields describe this write. The class is read from the stored row, so a query that shares
+an identical body with an earlier one reports the class that group is stored under. A later
+rebuild (a vocabulary change, a resize, compaction with re-anchoring) can store a query under
+another class, but it never moves a query that default searches return out of them (ADR-187,
+ADR-203). A write that stores nothing (a parse error, a rejected class-D query, a conflict)
+carries neither field.
+
+In coordinator mode the class is the one the coordinator planned the query under. Every shard
+plans against the same dictionary and stores its copy under that class, and `default_visible`
+follows from it. Remote shard servers started with another `--hot-anchor-threshold` than the
+coordinator can store `"a"` where it reports `"h"`, or the reverse; both are returned by default.
 
 **Replace-by-id (ES `index` semantics, ADR-067).** A re-PUT of an existing id is an **atomic
 upsert**: the new version is inserted and every prior live copy is tombstoned in one critical section
@@ -23,7 +43,7 @@ id answers **201** with `"result": "created"`; a replacement answers **200** wit
 `"result": "updated"`:
 
 ```json
-{"_index": "queries", "_id": 1, "_version": 1, "result": "updated"}
+{"_index": "queries", "_id": 1, "_version": 1, "result": "updated", "class": "a", "default_visible": true}
 ```
 
 Successful responses carry the applicable ES/OpenSearch fields: the implicit index is always

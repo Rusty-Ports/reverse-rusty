@@ -183,3 +183,86 @@ async fn put_doc_honors_memtable_flush_threshold() {
         "the upserted-away version must stay dead across the flush"
     );
 }
+
+/// An engine whose first load gave every one of three terms a top-64 bit.
+fn engine_with_a_mask() -> Engine {
+    let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    engine.build_from_queries(&[
+        (1, "zzalpha zzbeta".to_string()),
+        (2, "zzgamma".to_string()),
+    ]);
+    engine
+}
+
+fn default_read_returns(state: &Arc<AppState>, title: &str, id: u64) -> bool {
+    let snap = state.snapshot.load();
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    snap.match_title(title, &mut s, &mut out, false);
+    out.contains(&id)
+}
+
+#[tokio::test]
+async fn put_doc_reports_the_class_the_query_was_stored_under() {
+    let state = state_with_engine(engine_with_a_mask());
+    for (id, query, class, title) in [
+        (10u64, "zzrare", "a", "zzrare"),
+        (11, "zzalpha zzgamma", "b", "zzgamma zzalpha"),
+        (12, "zzalpha", "c", "zzalpha"),
+    ] {
+        let before = state.engine.lock().class_counts();
+        let (status, body) = do_put(&state, id, query).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["class"], class, "{query:?}: {body}");
+        let visible = class != "c";
+        assert_eq!(body["default_visible"], visible, "{query:?}: {body}");
+        // The class is the one `/_stats` counts the row under.
+        let after = state.engine.lock().class_counts();
+        let slot = ["a", "b", "c", "d", "h"]
+            .iter()
+            .position(|name| *name == class)
+            .expect("class");
+        let mut want = before;
+        want[slot] += 1;
+        assert_eq!(after, want, "{query:?}");
+        // And a read that does not ask for the broad lane returns exactly the visible ones.
+        assert_eq!(
+            default_read_returns(&state, title, id),
+            visible,
+            "{query:?}"
+        );
+        assert!(
+            matches_in_snapshot(&state, title).contains(&id),
+            "{query:?}"
+        );
+    }
+
+    // A replacement reports the class of the new version.
+    let (status, body) = do_put(&state, 12, "zzrare two").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"], "updated");
+    assert_eq!(body["class"], "a");
+    assert_eq!(body["default_visible"], true);
+
+    // A write that stored nothing reports no class.
+    for query in ["-zzalpha", "((("] {
+        let (status, body) = do_put(&state, 13, query).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.get("class").is_none(), "{body}");
+        assert!(body.get("default_visible").is_none(), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn a_create_only_put_reports_the_class_too() {
+    let state = state_with_engine(engine_with_a_mask());
+    let (status, body) = route_put_json(
+        &state,
+        "/_doc/30?op_type=create",
+        &serde_json::json!({ "query": "zzbeta" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["class"], "c");
+    assert_eq!(body["default_visible"], false);
+}

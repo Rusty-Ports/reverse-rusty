@@ -25,7 +25,7 @@
 //! Live writes and log replay run this same funnel, so live and replayed application agree.
 
 use super::{
-    extract_readonly, placement_of, AddOutcome, ClusterEngine, ClusterMutation, ShardError, Target,
+    extract_readonly, planned, AddOutcome, ClusterEngine, ClusterMutation, ShardError, Target,
 };
 use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus, Shard};
 
@@ -139,7 +139,7 @@ impl ClusterEngine {
         // placement is configuration-independent — a knob flip on reopen neither drops nor
         // resurrects (codex review). The empty-class-D guard in `placement_of` still rejects a
         // never-stored empty query defensively.
-        let target = placement_of(
+        let (target, class) = planned(
             &self.dict,
             &self.ring,
             &ex,
@@ -153,13 +153,15 @@ impl ClusterEngine {
         let (placement_shards, outcome): (Vec<usize>, AddOutcome) = match target {
             Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
             // The broad lane is replicated to every shard (ADR-080).
-            Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
-                ((0..self.shards.len()).collect(), AddOutcome::Replicated)
-            }
+            Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => (
+                (0..self.shards.len()).collect(),
+                AddOutcome::Replicated { class },
+            ),
             Target::Selective(shards) => (
                 shards.clone(),
                 AddOutcome::Placed {
                     shards: shards.clone(),
+                    class,
                 },
             ),
         };

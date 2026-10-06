@@ -29,7 +29,9 @@ EOF
         "_id": 1,
         "_version": 7,
         "result": "created",
-        "status": 201
+        "status": 201,
+        "class": "a",
+        "default_visible": true
       }
     },
     {
@@ -38,12 +40,19 @@ EOF
         "_id": 2,
         "_version": 1,
         "result": "created",
-        "status": 201
+        "status": 201,
+        "class": "c",
+        "default_visible": false
       }
     }
   ]
 }
 ```
+
+Each stored item reports the cost class it was stored under and whether default searches return
+it, exactly as [`PUT /_doc/{id}`](../documents/put-document.md) does. The second item above was
+stored, and is matched only by a request whose scope includes the broad lane. An item that
+stored nothing carries neither field.
 
 The supported actions are:
 

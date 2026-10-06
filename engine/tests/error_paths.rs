@@ -70,7 +70,7 @@ fn bulk_detailed_reports_per_item_outcomes() {
 
     // One outcome per input, index-aligned with submission order.
     assert_eq!(items.len(), batch.len());
-    assert_eq!(items[0], IngestItemStatus::Ingested);
+    assert!(matches!(items[0], IngestItemStatus::Ingested { .. }));
     assert_eq!(items[2], IngestItemStatus::RejectedClassD);
 
     // The parse rejection carries the typed diagnostic so the server can echo
@@ -91,7 +91,7 @@ fn bulk_detailed_reports_per_item_outcomes() {
     );
     let ingested = items
         .iter()
-        .filter(|s| matches!(s, IngestItemStatus::Ingested))
+        .filter(|s| matches!(s, IngestItemStatus::Ingested { .. }))
         .count();
     let parsed = items
         .iter()

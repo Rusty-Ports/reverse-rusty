@@ -60,13 +60,32 @@ pub struct AliasDiscoveryReport {
     pub summary: crate::vocab::AliasSummary,
 }
 
+/// An accepted write, as the engine stored it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredRow {
+    /// The memtable-local id (for a later `tombstone`). A flush invalidates it.
+    pub local: u32,
+    /// The cost class the row was stored under. It is read from the stored row, so a row
+    /// that joined an identical body reports its group's class. It describes this write:
+    /// a later rebuild can store the query under another class, but never moves one that
+    /// default reads return out of them (ADR-187).
+    pub class: crate::compile::CostClass,
+}
+
+impl StoredRow {
+    /// Whether a read that does not ask for the broad lane returns the row.
+    pub fn default_visible(self) -> bool {
+        !self.class.is_opt_in()
+    }
+}
+
 /// Outcome of a single live insert. Distinguishes a successful insert (with its
-/// memtable-local id) from a class-D rejection. A parse failure is surfaced as
-/// `Err(ParseError)` by [`Engine::try_insert_live`], never folded in here.
+/// memtable-local id and stored class) from a class-D rejection. A parse failure is
+/// surfaced as `Err(ParseError)` by [`Engine::try_insert_live`], never folded in here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertOutcome {
-    /// Inserted; carries the memtable-local id (for a later `tombstone`).
-    Inserted(u32),
+    /// Inserted; carries the row as stored.
+    Inserted(StoredRow),
     /// Compiled but rejected as cost-class D — not stored.
     RejectedClassD,
 }
@@ -77,11 +96,11 @@ pub enum InsertOutcome {
 /// `Err(ParseError)` by [`Engine::try_upsert_live`], never folded in here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpsertOutcome {
-    /// No prior live copy existed; inserted fresh. Carries the memtable-local id.
-    Created(u32),
+    /// No prior live copy existed; inserted fresh. Carries the row as stored.
+    Created(StoredRow),
     /// Inserted the new version and tombstoned `replaced` prior live copies in
     /// the same critical section (one WAL frame, one snapshot publish).
-    Updated { local: u32, replaced: usize },
+    Updated { stored: StoredRow, replaced: usize },
     /// The NEW version compiled to cost-class D and was rejected — the prior
     /// live copies are left untouched (a failed replace never deletes, matching
     /// ES `index` semantics where a failed op leaves the old document).
@@ -122,8 +141,9 @@ pub enum ReplaceOutcome {
 /// queries were dropped. The variant tallies match the aggregate [`IngestReport`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestItemStatus {
-    /// Compiled and stored in the new base segment.
-    Ingested,
+    /// Compiled and stored in the new base segment, under this cost class (the class
+    /// byte of the stored row, as on [`StoredRow`]).
+    Ingested { class: crate::compile::CostClass },
     /// The DSL string failed to parse; carries the diagnostic so the caller can
     /// echo the same detail the single-doc path returns.
     RejectedParse(crate::error::ParseError),

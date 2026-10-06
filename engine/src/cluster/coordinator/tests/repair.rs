@@ -63,7 +63,7 @@ fn partial_apply_is_detected_then_resync_converges() {
     let dsl = "zznovelaterm";
     let placed = cluster.add_query(1, dsl).expect("healthy add");
     assert!(
-        matches!(placed, AddOutcome::Placed { ref shards } if shards.len() == 1),
+        matches!(placed, AddOutcome::Placed { ref shards, .. } if shards.len() == 1),
         "expected single-shard selective placement, got {placed:?}"
     );
     assert!(

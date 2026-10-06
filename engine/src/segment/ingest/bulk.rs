@@ -86,8 +86,11 @@ impl Engine {
                     Ok(ast) => {
                         let ex = extract(&ast, &self.norm, dict, &mut lc);
                         extracted.push((idx, *logical, ex, text));
-                        // Provisional — Pass B may downgrade this to RejectedClassD.
-                        item_status.push(IngestItemStatus::Ingested);
+                        // Provisional: pass B sets the class the row is stored under, or
+                        // downgrades the item to a rejection.
+                        item_status.push(IngestItemStatus::Ingested {
+                            class: crate::compile::CostClass::A,
+                        });
                     }
                     Err(e) => {
                         self.rejected_parse += 1;
@@ -159,6 +162,7 @@ impl Engine {
                 }
                 Some(added) => {
                     self.record_compiled(&added);
+                    item_status[*idx] = IngestItemStatus::Ingested { class: added.class };
                     accepted.push(AcceptedSource::known(
                         *logical,
                         (*text).to_string(),

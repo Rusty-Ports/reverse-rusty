@@ -68,6 +68,7 @@ pub(crate) async fn put_doc(
                         _id: id,
                         _version: None,
                         result: "error",
+                        stored: None,
                         error: Some(msg),
                     }),
                 )
@@ -87,7 +88,9 @@ pub(crate) async fn put_doc(
             engine
                 .try_insert_live_ranked(&query, id, version, &tags, rank)
                 .map(|outcome| match outcome {
-                    reverse_rusty::segment::InsertOutcome::Inserted(_) => PutEngineOutcome::Created,
+                    reverse_rusty::segment::InsertOutcome::Inserted(stored) => {
+                        PutEngineOutcome::Created(stored)
+                    }
                     reverse_rusty::segment::InsertOutcome::RejectedClassD => {
                         PutEngineOutcome::RejectedClassD
                     }
@@ -96,9 +99,11 @@ pub(crate) async fn put_doc(
             engine
                 .try_upsert_live_ranked(&query, id, version, &tags, rank)
                 .map(|outcome| match outcome {
-                    reverse_rusty::segment::UpsertOutcome::Created(_) => PutEngineOutcome::Created,
-                    reverse_rusty::segment::UpsertOutcome::Updated { replaced, .. } => {
-                        PutEngineOutcome::Updated { replaced }
+                    reverse_rusty::segment::UpsertOutcome::Created(stored) => {
+                        PutEngineOutcome::Created(stored)
+                    }
+                    reverse_rusty::segment::UpsertOutcome::Updated { stored, replaced } => {
+                        PutEngineOutcome::Updated { stored, replaced }
                     }
                     reverse_rusty::segment::UpsertOutcome::RejectedClassD => {
                         PutEngineOutcome::RejectedClassD
@@ -142,8 +147,8 @@ pub(crate) async fn put_doc(
             }
             Ok(PutWrite::Applied(write)) => {
                 match write {
-                    Ok(PutEngineOutcome::Created) => {
-                        info!(query_id = id, "query registered");
+                    Ok(PutEngineOutcome::Created(stored)) => {
+                        info!(query_id = id, class = ?stored.class, "query registered");
                         state
                             .prom
                             .http_requests_total
@@ -156,13 +161,14 @@ pub(crate) async fn put_doc(
                                 _id: id,
                                 _version: Some(body.version),
                                 result: "created",
+                                stored: Some(stored.class.into()),
                                 error: None,
                             }),
                         )
                             .into_response()
                     }
-                    Ok(PutEngineOutcome::Updated { replaced }) => {
-                        info!(query_id = id, replaced, "query replaced");
+                    Ok(PutEngineOutcome::Updated { stored, replaced }) => {
+                        info!(query_id = id, replaced, class = ?stored.class, "query replaced");
                         state
                             .prom
                             .http_requests_total
@@ -175,6 +181,7 @@ pub(crate) async fn put_doc(
                                 _id: id,
                                 _version: Some(body.version),
                                 result: "updated",
+                                stored: Some(stored.class.into()),
                                 error: None,
                             }),
                         )
@@ -194,6 +201,7 @@ pub(crate) async fn put_doc(
                                 _id: id,
                                 _version: None,
                                 result: "rejected",
+                                stored: None,
                                 error: Some(CLASS_D_REJECT_MSG.into()),
                             }),
                         )
@@ -213,6 +221,7 @@ pub(crate) async fn put_doc(
                                 _id: id,
                                 _version: None,
                                 result: "error",
+                                stored: None,
                                 error: Some(format!("parse error: {e}")),
                             }),
                         )
@@ -235,6 +244,7 @@ pub(crate) async fn put_doc(
                                 _id: id,
                                 _version: None,
                                 result: "error",
+                                stored: None,
                                 error: Some(format!("write-ahead log error: {e}")),
                             }),
                         )

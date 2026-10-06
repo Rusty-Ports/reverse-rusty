@@ -79,3 +79,10 @@
   `from` on `/_mpercolate`, `_score`, the `order_and_page` chokepoint). Tests: `src/rank.rs` units,
   `tests/ranking.rs` (engine-level + newest-copy + recall guard), the co-located handler tests in
   `search.rs`.
+
+**Outcome update (2026-10-06).** "The recall-first core jobs consume the count/unranked set
+anyway" overlooked that the unranked set is cut by the same `size`: with the default of 1000 a
+consumer that reads only one page of a larger slot does not have every candidate, although
+`total` says how many there are. The page sizes are unchanged. What a recall-first consumer
+should use to receive every candidate (an exhaustive job, a point-in-time cursor, or one request
+sized to `total`) is in the [recall-first integration guide](../reference/integration.md).

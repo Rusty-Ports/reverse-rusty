@@ -55,6 +55,7 @@ mod pit;
 mod ranked;
 mod ranked_batch;
 mod resize;
+mod target;
 mod topology;
 mod vocab;
 mod write_locks;
@@ -65,6 +66,8 @@ pub use pit::ClusterPitError;
 pub use ranked::{ClusterRankedError, ClusterRankedHit, ClusterRankedMatch};
 pub use ranked_batch::{ClusterBatchRankedMatch, ClusterRankedTitle};
 pub use resize::recommended_shard_count;
+pub use target::AddOutcome;
+use target::{placement_of, planned, Target};
 pub use topology::{resolve_topology, route_topology, seed_position_preserving, ShardEndpoints};
 
 #[cfg(feature = "distributed")]
@@ -97,10 +100,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::compile::{anchor_plan, uses_required_phrase_proxy, CostClass, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
-use crate::error::ParseError;
 use crate::events::EngineEvent;
 use crate::normalize::Normalizer;
 use crate::tagdict::TagDict;
@@ -220,21 +221,6 @@ impl Default for ClusterConfig {
     }
 }
 
-/// Where a freshly added query landed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AddOutcome {
-    /// Selective query (class A / B any-of): placed on these shard(s).
-    Placed { shards: Vec<usize> },
-    /// Broad-lane query (class C / B arity-2 / accepted class D): replicated to
-    /// every shard (ADR-080).
-    Replicated,
-    /// Compiled but rejected as cost-class D with `accept_class_d` off — no
-    /// anchorable feature, stored nowhere.
-    RejectedClassD,
-    /// The DSL failed to parse.
-    RejectedParse(ParseError),
-}
-
 /// One mutation that applied to some target shards but failed on others, queued for repair by
 /// [`ClusterEngine::resync`] (ADR-047). Held in memory only. Only a durable in-process
 /// coordinator has a cluster log whose replay on [`ClusterEngine::open`] re-drives every target
@@ -256,41 +242,6 @@ pub struct ResyncReport {
     pub repaired: usize,
     /// Mutations still pending (at least one target shard still failed); they stay queued.
     pub still_pending: usize,
-}
-
-/// Internal placement decision for one compiled query.
-enum Target {
-    /// Class D with `accept_class_d` off — no anchorable feature, stored nowhere.
-    Reject,
-    /// A class-B pair is replicated to every shard but remains always-visible.
-    ReplicatedAlwaysVisible,
-    /// Class C / accepted class D is replicated to every shard and evaluated on
-    /// one broad-evaluation position per request.
-    ReplicatedBroad,
-    /// Selective shards (class A / B any-of), sorted + deduped, non-empty.
-    Selective(Vec<usize>),
-}
-
-impl Target {
-    fn placement(
-        &self,
-        generation: crate::ownership::PlacementGeneration,
-        num_shards: u32,
-    ) -> Result<crate::ownership::QueryPlacement, ShardError> {
-        use crate::ownership::QueryPlacement;
-        match self {
-            Self::Reject => Ok(QueryPlacement::standalone()),
-            Self::ReplicatedAlwaysVisible => Ok(QueryPlacement::replicated_always_visible(
-                generation, num_shards,
-            )?),
-            Self::ReplicatedBroad => Ok(QueryPlacement::replicated_broad(generation, num_shards)?),
-            Self::Selective(positions) => Ok(QueryPlacement::selective(
-                generation,
-                num_shards,
-                positions.iter().map(|&position| position as u32).collect(),
-            )?),
-        }
-    }
 }
 
 /// The durability-related parts of a [`ClusterEngine`], grouped so the [`from_parts`]
@@ -564,93 +515,4 @@ fn into_shard(copies: Vec<LocalShard>) -> Result<Box<dyn Shard>, ShardError> {
             replicas,
         )) as Box<dyn Shard>
     })
-}
-
-/// The placement decision for one compiled query — see the module-level table. A free
-/// fn over (`dict`, `ring`) so [`ClusterEngine::build`] can bucket the corpus before
-/// the cluster value exists, and [`ClusterEngine::placement`] can delegate. Forbidden
-/// features can't leak in: `anchor_plan` reads only positive `required` /
-/// `anyof` / `required_phrases`, never either forbidden representation
-/// (ADR-006 holds structurally).
-///
-/// `accept_class_d` (the per-shard [`EngineConfig`](crate::config::EngineConfig) knob)
-/// gates the cluster always-candidate lane (ADR-068/080): a negation-only class-D query
-/// is placed on the broad lane (every shard, under the universal signature) when the knob
-/// is on, and rejected otherwise. The decision is re-derived identically on log replay
-/// (same frozen dict + same config), so live ≡ replay.
-///
-/// `theta` is the hot-anchor threshold (ADR-105). A class-H query places
-/// **selectively, exactly like class A**: its anchors are non-top-64 required
-/// features, which `route()` ring-routes on the title side, so every matching
-/// title probes the shard(s) holding it — no replication, no broad-eval-shard
-/// gating (the tier is always-visible on the shards that own it). Because A and
-/// H produce the IDENTICAL `Target`, placement is θ-invariant: a θ change (or a
-/// coordinator/shard θ mismatch) can never move a query to a different shard,
-/// only between the two always-probed indexes on the same shard — the ADR-105
-/// benign-divergence property.
-fn placement_of(
-    dict: &Dict,
-    ring: &HashRing,
-    ex: &Extracted,
-    accept_class_d: bool,
-    theta: u32,
-) -> Target {
-    let ap = anchor_plan(ex, dict, theta);
-    // A phrase-proxy positive cover can contain analyzer labels that ordinary
-    // flat routing intentionally omits (structural/context gap labels). Keep
-    // those candidate-only proxies off the ring: replicate the always-visible
-    // class-B row, then whichever shard the title already probes can retrieve
-    // it from its positioned probe labels. This includes mixed queries whose
-    // sole flat required feature is top-64-hot and would otherwise be class C.
-    if uses_required_phrase_proxy(ex, dict)
-        && matches!(ap.class, CostClass::A | CostClass::B | CostClass::H)
-    {
-        return Target::ReplicatedAlwaysVisible;
-    }
-    match ap.class {
-        CostClass::D => {
-            // Stored only when the lane is on AND there is something to forbid: an
-            // effectively-empty query (no positives, no negatives) would match every title,
-            // so the shard engines reject it regardless (`rejects_class_d`). Rejecting HERE —
-            // before fan-out — is load-bearing for `upsert`: a plan every shard would reject
-            // must not tombstone the prior version first (a silent delete-with-no-replace).
-            if accept_class_d && ex.has_negative_predicate() {
-                Target::ReplicatedBroad
-            } else {
-                Target::Reject
-            }
-        }
-        CostClass::C => Target::ReplicatedBroad,
-        CostClass::A | CostClass::B | CostClass::H => {
-            // A class-B-arity-2 query's only main anchor is an all-hot PAIR (a len-2
-            // group): no rare feature to hash on, so it joins the replicated lane.
-            // Class A and class-B any-of have only arity-1 non-hot anchors, which the
-            // ring distributes selectively — and class H's arity-1 anchors are
-            // non-top-64 by definition, so they ring-place the same way (chained
-            // below; the defensive len!=1 guard would fail a future arity>1 hot
-            // anchor safe into the replicated lane rather than mis-hashing it).
-            if ap
-                .main_anchors
-                .iter()
-                .chain(ap.hot_anchors.iter())
-                .any(|g| g.len() != 1)
-            {
-                return Target::ReplicatedAlwaysVisible;
-            }
-            let mut shards: Vec<usize> = ap
-                .main_anchors
-                .iter()
-                .chain(ap.hot_anchors.iter())
-                .filter_map(|g| g.first().copied())
-                .map(|f| ring.lookup(f))
-                .collect();
-            shards.sort_unstable();
-            shards.dedup();
-            if shards.is_empty() {
-                Target::Reject
-            } else {
-                Target::Selective(shards)
-            }
-        }
-    }
 }

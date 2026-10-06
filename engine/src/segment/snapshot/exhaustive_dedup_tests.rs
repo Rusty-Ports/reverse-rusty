@@ -93,7 +93,7 @@ fn ranked_metadata_scan_polls_cancellation_between_legacy_copies() {
         else {
             panic!("selective test query was unexpectedly rejected");
         };
-        engine.tombstone(local).expect("tombstone newer copy");
+        engine.tombstone(local.local).expect("tombstone newer copy");
     }
     let snapshot = engine.snapshot();
     assert_eq!(
@@ -297,7 +297,9 @@ mod bounded_deadline_tests {
             else {
                 panic!("selective test query was unexpectedly rejected");
             };
-            engine.tombstone(local).expect("tombstone legacy copy");
+            engine
+                .tombstone(local.local)
+                .expect("tombstone legacy copy");
         }
         let snapshot = engine.snapshot();
         assert_eq!(

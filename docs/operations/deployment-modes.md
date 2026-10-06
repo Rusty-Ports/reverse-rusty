@@ -64,12 +64,15 @@ Per-mode extras (single-node runtime settings; cluster `/_cluster/*` operations 
 [`../reference/api.md`](../reference/api.md). Endpoints that exist in only one mode return **501
 with the supported alternative** in the other, never a silent no-op.
 
-**A micro-corpus classification note** (visible in any tiny demo, asserted in the smoke): cost
-classification is frequency-based, and a *bulk* batch finalizes the 64-bit common mask from its
-own corpus — so on a corpus of a handful of queries every term is "hot" and a bulk-ingested
-any-of query can land in the quarantined broad lane (class C, served only with
-`include_broad: true`). This is by design (frequency data is degenerate at that size; see
-[`../design/matching.md`](../design/matching.md) §4); realistic corpora classify normally.
+**Class C is not only a small-corpus effect.** Cost classification is frequency-based: the first
+bulk load assigns the 64-bit common mask from its own corpus (ADR-188), and a query anchored only
+on a term in that mask is stored in the broad lane (class C, matched only when the request's
+scope includes it). On a corpus of a handful of queries every term is in the mask, which is why
+a tiny demo shows it (the smoke asserts it). On a realistic corpus it is the queries made of
+very common terms, a brand alone or a word like `new`. Every write reports the class it was
+stored under, and a recall-first deployment should include the broad lane:
+[recall-first integration](../reference/integration.md). The design is in
+[`../design/matching.md`](../design/matching.md) §4.
 
 ## 3. Auth posture (ADR-062 / ADR-071)
 

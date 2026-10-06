@@ -304,6 +304,7 @@ impl Segment {
         self.logical_index.entry(logical).or_default().push(local);
         Some(AddedCompiled {
             local,
+            class: self.class[local as usize],
             would_be_hot: plan.would_be_hot,
             body_hash,
             is_duplicate,

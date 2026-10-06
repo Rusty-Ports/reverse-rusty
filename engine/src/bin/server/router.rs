@@ -40,6 +40,8 @@ use crate::state::{request_id_middleware, AppState};
 #[cfg(test)]
 pub(crate) mod held;
 #[cfg(test)]
+mod paging_tests;
+#[cfg(test)]
 mod tests;
 
 /// Requests one endpoint (a route and method) works on at once. One more waits.

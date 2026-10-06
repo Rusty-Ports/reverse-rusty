@@ -9,6 +9,24 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — A write reports the class its query was stored under
+
+- `PUT /_doc/{id}` and each `_bulk` item now answer with `class` (`"a"`, `"b"`, `"c"`, `"d"` or
+  `"h"`) and `default_visible`. A query stored in the broad lane (class C, or an accepted class
+  D) is matched only when a request's scope includes that lane, and until now a writer could
+  learn it only from the aggregate `class_counts`. The fields are additive; a write that stores
+  nothing carries neither.
+- The class is read from the stored row, on a single node and through a coordinator. In
+  coordinator mode it is the class the coordinator planned the query under, which is the class
+  each shard stores its copy under.
+- Library: `InsertOutcome::Inserted` and `UpsertOutcome::Created` carry a `StoredRow` (the local
+  id and the class) where they carried the local id; `UpsertOutcome::Updated` has `stored` in
+  place of `local`; `IngestItemStatus::Ingested` and the cluster's `AddOutcome::Placed` and
+  `AddOutcome::Replicated` carry the class.
+- The remaining documents the recall-first guide was to reach now point to it: the deployment
+  modes page (class C is not only a small-corpus effect), the workload note, the cluster Compose
+  file and ADR-059.
+
 ## 2026-10-06 — Activating a multi-word alias no longer removes matches
 
 - A title that carries every word of a multi-word alias form, wherever the words stand, now
