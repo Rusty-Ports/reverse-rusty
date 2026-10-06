@@ -343,9 +343,14 @@ fn reset_publishes_a_new_log_and_appends_follow_its_header() {
 #[test]
 fn a_log_whose_header_was_interrupted_opens_empty() {
     let header = header_bytes();
-    for written in 0..WAL_HEADER_SIZE {
+    // The interrupted header may be an earlier release's: v3 is `PWAL\x03\0\0\0`.
+    let earlier = Wal::header(3);
+    let cases = (0..WAL_HEADER_SIZE)
+        .map(|written| (written, &header[..written]))
+        .chain((5..WAL_HEADER_SIZE).map(|written| (written + 100, &earlier[..written])));
+    for (written, prefix) in cases {
         let path = scratch_path(&format!("interrupted_header_{written}"));
-        std::fs::write(&path, &header[..written]).unwrap();
+        std::fs::write(&path, prefix).unwrap();
         let recovered =
             Wal::recover(&path).unwrap_or_else(|error| panic!("{written} header bytes: {error}"));
         assert!(recovered.entries.is_empty());
@@ -365,7 +370,18 @@ fn a_log_whose_header_was_interrupted_opens_empty() {
 #[test]
 fn a_short_file_that_is_not_a_header_prefix_is_refused() {
     let path = scratch_path("not_a_header");
-    for content in [&b"XYZ"[..], &b"PWAX"[..], &b"PXAL\x03\x00\x00\x00"[..]] {
+    let refused: [&[u8]; 7] = [
+        b"XYZ",
+        b"PWAX",
+        b"PXAL\x03\x00\x00\x00",
+        // A header prefix of a format this reader does not support: a later one, version
+        // zero, and version bytes no header has. The full header would be refused too.
+        b"PWAL\x08\x00\x00",
+        b"PWAL\x00",
+        b"PWAL\x07\x01",
+        b"PWAL\x07\x00\x00\x01",
+    ];
+    for content in refused {
         std::fs::write(&path, content).unwrap();
         assert!(Wal::recover(&path).is_err(), "{content:?}");
         assert!(Wal::open(&path, false).is_err(), "{content:?}");

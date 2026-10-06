@@ -31,10 +31,12 @@ old append handle is disabled before the file is touched.
    it was, still taking writes. From the rename on the old handle addresses an unlinked file,
    so if anything after it fails, appends are refused until a reopen.
 4. **A log whose header was interrupted opens as an empty log.** A file shorter than the
-   header, all of whose bytes are the bytes a header has there, is what the old truncate
-   window (or an interrupted first start) left. It never held a record, so `Wal::open` and
-   `Wal::recover` treat it as empty and the open publishes a whole header. Any other short
-   file, and any file with a complete but wrong header, is still refused and left untouched.
+   header, all of whose bytes are the start of a header this reader supports (the magic and
+   a format version from 1 to the current one), is what the old truncate window (or an
+   interrupted first start) left. It never held a record, so `Wal::open` and `Wal::recover`
+   treat it as empty and the open publishes a whole header. Any other short file is still
+   refused and left untouched, including the start of a later format's header, and so is
+   any file with a complete but wrong header.
 5. The handle a reset or creation leaves is opened for append, like the one an ordinary open
    uses.
 
@@ -64,9 +66,12 @@ old append handle is disabled before the file is touched.
 
 - `wal/tests.rs`: a reset publishes a new file (a different inode) that holds exactly the
   header, and appends follow the header, also after a second reset; a file cut at each of the
-  eight header offsets opens empty, is repaired and takes writes; a short file that is not a
-  header prefix, and a full wrong header, are refused and not rewritten; a reset that cannot
+  eight header offsets opens empty, is repaired and takes writes, and so does the cut header
+  of an earlier format; a short file that is not a header prefix, the start of a later
+  format's header, and a full wrong header are refused and not rewritten; a reset that cannot
   build its replacement leaves every record in place and the log in use.
+- `storage.rs`: the directory synced after a rename is the working directory for a bare file
+  name, whose parent path is empty and cannot be opened.
 - `tests/persistence/wal_reset.rs`: an engine whose committed data directory has its log cut
   at 0, 3 or 7 bytes starts, serves everything, and takes a write that survives another
   restart (it refused to start before); a leftover replacement file is ignored and

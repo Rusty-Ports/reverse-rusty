@@ -99,10 +99,20 @@ impl Crc32 {
 /// Atomic rename with parent-directory fsync for crash durability.
 pub(crate) fn durable_rename(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::rename(from, to)?;
-    if let Some(parent) = to.parent() {
-        File::open(parent)?.sync_all()?;
+    if let Some(directory) = directory_of(to) {
+        File::open(directory)?.sync_all()?;
     }
     Ok(())
+}
+
+/// The directory whose entry names `path`. A bare file name has an empty parent, which
+/// cannot be opened; the entry is in the working directory.
+fn directory_of(path: &Path) -> Option<&Path> {
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        return Some(Path::new("."));
+    }
+    Some(parent)
 }
 
 fn write_u32(w: &mut impl Write, v: u32) -> io::Result<()> {
@@ -135,4 +145,26 @@ fn read_u64_at(data: &[u8], off: usize) -> io::Result<u64> {
         .and_then(|s| s.try_into().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated u64"))?;
     Ok(u64::from_le_bytes(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{directory_of, Path};
+
+    /// `Path::parent` of a bare file name is the empty path, which cannot be opened. The
+    /// rename had already happened by then, so the caller saw an error for a file that was
+    /// in place.
+    #[test]
+    fn a_bare_file_name_is_synced_through_the_working_directory() {
+        assert_eq!(directory_of(Path::new("wal.log")), Some(Path::new(".")));
+        assert_eq!(
+            directory_of(Path::new("data/wal.log")),
+            Some(Path::new("data"))
+        );
+        assert_eq!(
+            directory_of(Path::new("/var/lib/rr/wal.log")),
+            Some(Path::new("/var/lib/rr"))
+        );
+        assert_eq!(directory_of(Path::new("/")), None);
+    }
 }

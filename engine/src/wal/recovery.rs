@@ -12,7 +12,8 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 impl Wal {
     /// Whether `path` is a log whose header was never completely written: shorter than a
-    /// header, and every byte it does hold is the byte a header has there.
+    /// header, and every byte it does hold is the byte a header this reader supports has
+    /// there.
     ///
     /// A log is created, and was once reset, by truncating the file and then writing the
     /// eight header bytes. A crash between the two left a file like this. It never held a
@@ -25,9 +26,18 @@ impl Wal {
             return Ok(false);
         }
         let held = std::fs::read(path)?;
-        // The version bytes changed between releases; only the magic identifies the file.
-        let magic = &held[..held.len().min(WAL_MAGIC.len())];
-        Ok(WAL_MAGIC.starts_with(magic))
+        // The version bytes changed between releases, so any supported header may have been
+        // the one in progress. A prefix of no supported header (a later format's, or bytes
+        // no header has) is refused like the full header would be.
+        Ok((1..=WAL_VERSION).any(|version| Self::header(version).starts_with(&held)))
+    }
+
+    /// The eight bytes that open a log of format `version`.
+    pub(super) fn header(version: u32) -> [u8; WAL_HEADER_SIZE] {
+        let mut header = [0u8; WAL_HEADER_SIZE];
+        header[..WAL_MAGIC.len()].copy_from_slice(&WAL_MAGIC);
+        header[WAL_MAGIC.len()..].copy_from_slice(&version.to_le_bytes());
+        header
     }
 
     /// Validate every complete record before permitting any repair or append.

@@ -1,7 +1,7 @@
 use super::{
     LogAppender, Path, Wal, WalEntry, Write, OP_DELETE_LOGICAL, OP_FLUSH_CHECKPOINT, OP_INSERT,
     OP_INSERT_CLASS_D, OP_TOMBSTONE, OP_UPSERT, OP_UPSERT_CLASS_D, SOURCE_GENERATION_MAGIC,
-    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION,
+    WAL_HEADER_SIZE, WAL_VERSION,
 };
 use crate::storage::framed_log::repair_tail;
 use std::io;
@@ -485,8 +485,7 @@ impl Wal {
     fn write_empty_log_beside(path: &Path) -> io::Result<std::path::PathBuf> {
         let replacement = Self::replacement_path(path);
         let mut file = std::fs::File::create(&replacement)?;
-        file.write_all(&WAL_MAGIC)?;
-        file.write_all(&WAL_VERSION.to_le_bytes())?;
+        file.write_all(&Self::header(WAL_VERSION))?;
         file.sync_all()?;
         Ok(replacement)
     }
