@@ -61,30 +61,35 @@ the response says so. If the corpus has such queries, turn the setting on before
 
 ## 2. Get every candidate
 
-A response is a page. Compare what came back with what matched:
+A response is a page. Check every response for whether it is the whole result:
 
 - `/_search` and `/_mpercolate`: `hits.total` is the full match count, and `hits.hits` holds at
-  most `size` of them (default 1000).
-- `/v2/_search` and `/v2/_mpercolate`: `size` defaults to 100, and `hits.total` is
-  `{"value", "relation"}`. `"relation": "gte"` means the count stopped at
-  `track_total_hits_up_to` and more exist.
+  most `size` of them (default 1000). The result is whole when the two are equal.
+- `/v2/_search` and `/v2/_mpercolate`: `size` defaults to 100 and is at most 10,000, and
+  `hits.total` is `{"value", "relation"}`. The result is whole only when `relation` is `"eq"`
+  and `value` equals the number of hits returned. `"relation": "gte"` means counting stopped at
+  `track_total_hits_up_to` (default 10,000): `value` is then a lower bound, and a page of
+  exactly that many hits is not the whole result.
 
-When `hits.total` is larger than the page, use one of these, in this order of preference:
+When the result is larger than a page, use one of these, in this order of preference:
 
 1. **An exhaustive job**, [`POST /_percolate/jobs`](api/percolate/exhaustive-jobs.md). It
    delivers every match of one snapshot as a stream, ends with a completion record carrying the
    exact total and a checksum, and works on every topology including a remote coordinator. Treat
    the result as complete only after the completion record.
-2. **A point in time with a cursor**, [`POST /v2/_pit`](api/percolate/pit.md) and
-   `search_after` on `/v2/_search`. Pages come from one frozen snapshot, with no gaps and no
-   repeats. Not available on a coordinator with remote shards (501).
-3. **One request large enough to hold everything**: `/_search` with `size` at least `hits.total`.
-   One request is one snapshot, so the set is consistent.
+2. **A point in time with a cursor**, [`POST /v2/_pit`](api/percolate/pit.md). Send the first
+   `/v2/_search` with `"pit": {"id": ...}`, then repeat the same request with the `next_cursor`
+   of each response as `"cursor"` until none is returned. Pages come from one frozen snapshot,
+   with no gaps and no repeats. Not available on a coordinator with remote shards (501).
+3. **One request large enough to hold everything**: `/_search` with `size` at least
+   `hits.total`. On a standalone server one request reads one snapshot, so the set is
+   consistent. On a coordinator the shards are generally read at slightly different moments,
+   so during writes the set can mix moments; use a job there.
 
 **Do not page `/_search` or `/_mpercolate` with `from` while the corpus is being written.** Each
-request matches against the snapshot current at that moment. A query deleted or added between
-two requests shifts every later hit by one position, so a hit at the boundary is returned twice
-or not at all. With no writes in between, offset paging is exact.
+request matches against the data current at that moment. A query deleted or added between two
+requests shifts every later hit by one position, so a hit at the boundary is returned twice or
+not at all. With no writes in between, offset paging is exact.
 
 ## 3. Vocabulary and punctuation
 
@@ -101,7 +106,8 @@ store keeps the vocabulary it recorded ([ADR-184](../decisions/adr-184-recorded-
 - [ ] The server runs with `--include-broad`, or every request names its scope.
 - [ ] An integration test asserts the echoed `query_scope` on the v2 routes it uses.
 - [ ] `--accept-class-d` is on if the corpus has negation-only queries.
-- [ ] The consumer compares `hits.total` with the hits it received, on every response.
-- [ ] Results larger than a page come from an exhaustive job, a point in time, or one request
-      sized to the total, never from `from` paging during writes.
+- [ ] The consumer checks every response for completeness: `hits.total` equal to the hits
+      received, and on the v2 routes `relation` equal to `"eq"`.
+- [ ] Results larger than a page come from an exhaustive job, a point in time, or (standalone)
+      one request sized to the total, never from `from` paging during writes.
 - [ ] The vocabulary and punctuation settings were chosen before the corpus was loaded.
