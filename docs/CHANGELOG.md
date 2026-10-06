@@ -24,6 +24,84 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - `/_health` and `/_stats` report `out_of_sync_replicas`, and health is yellow while it is
   non-zero.
 
+## 2026-10-06 — A partial cluster write is a failure to retry
+
+- **Behaviour change (remote clusters).** A `PUT /_doc/{id}` or bulk item that not every shard
+  took now answers **503** `"result": "partial"` (bulk: item status 503, type `partial_write`)
+  with no `_version`, and tells the caller to repeat it
+  ([ADR-194](decisions/adr-194-partial-cluster-writes-are-retryable-failures.md)). It used to
+  answer 200, say the write was "durably logged" and warn against repeating it. A remote
+  coordinator has no log and keeps its repair queue in memory, so a coordinator restart before a
+  manual resync left the write missing from the shards that refused it, for good. `DELETE`
+  already worked this way (ADR-125).
+- A retried `op_type=create` no longer answers 409 "already exists" while an earlier write of
+  the id is still queued for repair: it re-drives the repair and answers 503
+  `earlier_write_unconverged` until it converges. Retry a partial create as an index operation,
+  which converges on any coordinator.
+- Fix `resync` storing a second row when the shard had applied a create whose acknowledgement
+  was lost. That left the shard unable to enumerate its ids, and after the next coordinator
+  attach every create-only write was refused. A repair now replaces the id on the shard.
+- A stopping coordinator logs the document ids whose repairs it never completed.
+- The documents that described a remote partial write as durably logged are corrected (ADR-047
+  later outcome, the coordinator, bulk and resync references, the design note, the runbooks).
+
+## 2026-10-06 — Requests larger than one gRPC message
+
+- Fix the remote `--load-file` bootstrap failing with `OutOfRange` once a shard's bucket passed
+  4 MiB: the coordinator sent each bucket as one request, and a shard node accepts at most
+  tonic's default. A bucket is now one staged load, the stream a remote resize already uses,
+  in messages of at most 3 MiB ([ADR-193](decisions/adr-193-inbound-request-size.md)). The
+  node compacts to its segment policy and writes its source store once when the load ends.
+- Fix a coordinator being unable to connect, or restart, once its dictionary serialized to more
+  than 4 MiB: `AdoptDict` ships the dictionary in one request. Shard nodes now accept requests
+  up to `shardserver --max-grpc-request-bytes` (default 64 MiB; Helm
+  `shard.maxGrpcRequestBytes`), and a dictionary above a node's limit is refused with an error
+  that names the flag. **Upgrade shard nodes before a coordinator whose dictionary exceeds
+  4 MiB.**
+- Replies are unchanged: the ADR-110 result cap still holds them at or under 4 MiB.
+
+## 2026-10-06 — Boolean server flags that could not be set to false
+
+- Fix `--retain-source`, `--broad-columnar` and `--broad-materialize` on `server`: each was a
+  switch that only set `true`, its default, so it could never be turned off and passing `false`
+  was a startup error. The documented low-memory `retain_source=false` profile could not be
+  selected on the shipped binary. All three now take a value (`--retain-source false`), like
+  `--tag-segment-skipping`. A bare `--retain-source` with no value, which did nothing, is now an
+  error.
+- `shardserver` takes `--broad-columnar <true|false>` and `--broad-materialize <true|false>`
+  beside `--retain-source`; a remote coordinator warns that its own copies do not reach the
+  shards. Helm: `shard.broadColumnar`, `shard.broadMaterialize`. Compose:
+  `RR_SHARD_RETAIN_SOURCE`.
+- `server --retain-source false` without `--data-dir` warns that the setting saves nothing.
+
+## 2026-10-06 — Shard-local engine settings
+
+- Fix the remote topology having no way to turn on power-loss durability: `shardserver` built
+  every shard from default engine settings, and the coordinator's `--wal-sync-on-write` reached
+  nothing while `/_settings` reported it as the shards' configuration. `shardserver` now takes
+  `--wal-sync-on-write`, `--retain-source`, `--max-segments` and `--memtable-flush-threshold`
+  ([ADR-192](decisions/adr-192-shard-local-engine-settings.md)).
+- **Behaviour change:** a coordinator of remote shard nodes refuses `--wal-sync-on-write` and
+  names the shard flag; it warns about `--max-segments`, `--memtable-flush-threshold` and
+  `--retain-source`, which also have no effect there.
+- `GET /_settings` on a remote coordinator lists, under `shard_local`, the `per_shard` keys each
+  shard node sets for itself.
+- Shard nodes print their sync policy at startup and export
+  `reverse_rusty_shard_translog_sync_on_write{shard}`.
+- Helm: `shard.walSyncOnWrite`, `shard.retainSource`, `shard.maxSegments`,
+  `shard.memtableFlushThreshold`. Compose: `RR_SHARD_WAL_SYNC_ON_WRITE`.
+## 2026-10-06 — Data-plane handlers wait off the runtime
+
+- Fix the server becoming unresponsive, `/_health` included, when writes queued behind
+  maintenance: standalone `PUT`/`DELETE /_doc`, `/_bulk` and `/_flush` waited for the engine mutex
+  on async workers, so during a compaction, backup or vocabulary rebuild as many waiting writes as
+  there are CPUs stopped every other request. They now wait, and run, on blocking threads under a
+  32-permit admission ([ADR-191](decisions/adr-191-data-plane-handlers-wait-off-the-runtime.md)).
+- The same for the coordinator's brief cluster reads (`GET`/`HEAD /_doc`, `GET /`, the
+  `/v2/_search` and `/v2/_mpercolate` compile step, job creation), which waited on a worker
+  whenever a vocabulary rebuild or resize held or queued for the exclusive cluster lock.
+- A standalone write whose client disconnects after admission still completes and is published;
+  shutdown waits for such writes before its final flush.
 ## 2026-10-06 — First read after a shard restart, and wider test margins
 
 - Fix a read failing with a transport error right after a shard node restarted: the coordinator

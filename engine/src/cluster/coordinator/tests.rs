@@ -132,6 +132,9 @@ struct ToggleFailShard {
     /// the check an in-process `LocalShard` cannot run (it does not know its
     /// position). Lets in-process tests reproduce remote-only refusals.
     position: Option<u32>,
+    /// While set, a placed insert is applied and then reported as failed: the reply a
+    /// coordinator gets when the shard's acknowledgement is lost on the way back.
+    lose_insert_acks: Arc<AtomicBool>,
 }
 
 impl ToggleFailShard {
@@ -140,15 +143,20 @@ impl ToggleFailShard {
             inner,
             fail_writes,
             position: None,
+            lose_insert_acks: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn with_position(inner: LocalShard, fail_writes: Arc<AtomicBool>, position: u32) -> Self {
         ToggleFailShard {
-            inner,
-            fail_writes,
             position: Some(position),
+            ..Self::new(inner, fail_writes)
         }
+    }
+
+    fn losing_insert_acks(mut self, lose_insert_acks: Arc<AtomicBool>) -> Self {
+        self.lose_insert_acks = lose_insert_acks;
+        self
     }
     fn write_err(&self) -> Option<ShardError> {
         self.fail_writes
@@ -228,6 +236,9 @@ impl Shard for ToggleFailShard {
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         self.inner.class_counts()
     }
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        self.inner.live_logical_ids()
+    }
     fn validate_ownership(
         &self,
         position: u32,
@@ -274,12 +285,18 @@ impl Shard for ToggleFailShard {
                 return Err(crate::ownership::OwnershipError::LocalPositionMissing(p).into());
             }
         }
-        match self.write_err() {
-            Some(e) => Err(e),
-            None => self
-                .inner
-                .insert_extracted_with_placement(ex, logical, version, text, tags, placement),
+        if let Some(e) = self.write_err() {
+            return Err(e);
         }
+        let stored = self
+            .inner
+            .insert_extracted_with_placement(ex, logical, version, text, tags, placement)?;
+        if self.lose_insert_acks.load(Ordering::Acquire) {
+            return Err(ShardError::Remote(
+                "injected lost acknowledgement: the insert was applied".into(),
+            ));
+        }
+        Ok(stored)
     }
     fn replace_placed(
         &self,
@@ -338,6 +355,7 @@ mod basic;
 mod directory;
 mod exhaustive;
 mod repair;
+mod retry_contract;
 mod upsert;
 mod vocab_retry;
 

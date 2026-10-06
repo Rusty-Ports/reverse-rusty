@@ -364,8 +364,9 @@ fn resync_releases_reservation_after_repairing_a_remove() {
     let dsl = "zznovelaterm";
     cluster.add_query(5, dsl).expect("healthy add");
 
-    // Fail the delete: the remove is durably logged, partially applied, and the
-    // id stays reserved (fail-closed) — a re-add must refuse.
+    // Fail the delete: the remove is partially applied, and the id stays reserved
+    // (fail-closed) — a re-add must refuse. It first retries the delete (ADR-194), and
+    // while that still fails the answer is the same retryable failure, never "exists".
     fail.store(true, Ordering::Release);
     assert!(
         matches!(
@@ -377,10 +378,11 @@ fn resync_releases_reservation_after_repairing_a_remove() {
     assert!(
         matches!(
             cluster.add_query(5, dsl),
-            Err(ShardError::DuplicateLogicalId(5))
+            Err(ShardError::EarlierWriteUnconverged { logical: 5, .. })
         ),
         "a partially-removed id must stay reserved"
     );
+    assert_eq!(cluster.pending_repairs(), 1, "the delete is still queued");
 
     // The shard recovers; resync converges the delete and must free the id.
     fail.store(false, Ordering::Release);

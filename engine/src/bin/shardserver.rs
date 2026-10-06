@@ -25,153 +25,39 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use reverse_rusty::cluster::{
     resolve_mesh_token, serve_metrics, ClientSecurity, ServerSecurity, ShardServer,
-    TlsClientConfig, TlsServerIdentity, DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
-    DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION, DEFAULT_MAX_GRPC_RESULT_BYTES,
+    TlsClientConfig, TlsServerIdentity,
 };
 use reverse_rusty::compile::extract;
-use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
 use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::normalize::Normalizer;
 
+#[path = "shardserver/args.rs"]
+mod args;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let pending = args.iter().any(|a| a == "--pending");
-    // `--data-dir <path>` makes the node DURABLE: its shard persists segments there, so it can
-    // serve `FetchSegments` and be a recovering replica (ADR-035/036). Parse it explicitly so its
-    // value is not mistaken for the positional ADDR.
-    let mut data_dir: Option<PathBuf> = None;
-    let mut addr_arg: Option<String> = None;
-    let mut tls_cert: Option<PathBuf> = None;
-    let mut tls_key: Option<PathBuf> = None;
-    let mut tls_ca: Option<PathBuf> = None;
-    let mut tls_domain: Option<String> = None;
-    let mut token_flag: Option<String> = None;
-    // Optional SEPARATE plaintext port for the gRPC health service (k8s probes, ADR-084).
-    let mut health_addr: Option<SocketAddr> = None;
-    // Optional SEPARATE plaintext port for the Prometheus `/_metrics` endpoint (ADR-091).
-    let mut metrics_addr: Option<SocketAddr> = None;
-    // Immutable CPU ranking models used by native ranked RPCs. Every remote
-    // coordinator request carries name + semantic fingerprint, so a missing or
-    // different local file fails before scoring.
-    let mut ranking_profiles_file: Option<PathBuf> = None;
-    // The hot-anchor threshold θ (class H, ADR-105). Cost-only: this node CLASSIFIES the
-    // queries the coordinator places on it, so θ decides whether a fat-anchored query
-    // lands in the always-probed realtime lane (θ=0) or the columnar hot tier. Run the
-    // SAME value as the coordinator; divergence can never drop a match (both lanes are
-    // always visible), it only decides which node re-inherits the un-quarantined scans.
-    let mut hot_anchor_threshold: u32 = 0;
-    // Default-on exact sealed-segment tag summaries (ADR-174). This is a
-    // result-preserving read-path optimization and can be disabled at startup.
-    let mut tag_segment_skipping = true;
-    // Exact protobuf bound for every result-bearing unary reply and each
-    // FetchMatches stream item. The builder enforces the hard 4 MiB ceiling.
-    let mut max_grpc_result_bytes = DEFAULT_MAX_GRPC_RESULT_BYTES;
-    // Node-local backpressure bounds for ADR-114 exhaustive streams. These are
-    // independent of the coordinator's HTTP admission because direct mesh
-    // callers and multiple coordinators share this process.
-    let mut max_concurrent_exhaustive_streams = DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS;
-    let mut max_exhaustive_stream_duration = DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--data-dir" => {
-                data_dir = args.get(i + 1).map(PathBuf::from);
-                i += 1;
-            }
-            "--health-addr" => {
-                if let Some(v) = args.get(i + 1) {
-                    health_addr = Some(v.parse().map_err(|e| format!("--health-addr {v}: {e}"))?);
-                }
-                i += 1;
-            }
-            "--metrics-addr" => {
-                if let Some(v) = args.get(i + 1) {
-                    metrics_addr = Some(v.parse().map_err(|e| format!("--metrics-addr {v}: {e}"))?);
-                }
-                i += 1;
-            }
-            "--ranking-profiles-file" => {
-                ranking_profiles_file = Some(PathBuf::from(
-                    args.get(i + 1)
-                        .ok_or("--ranking-profiles-file requires a path")?,
-                ));
-                i += 1;
-            }
-            "--hot-anchor-threshold" => {
-                if let Some(v) = args.get(i + 1) {
-                    hot_anchor_threshold = v
-                        .parse()
-                        .map_err(|e| format!("--hot-anchor-threshold {v}: {e}"))?;
-                }
-                i += 1;
-            }
-            "--tag-segment-skipping" => {
-                let v = args
-                    .get(i + 1)
-                    .ok_or("--tag-segment-skipping requires true or false")?;
-                tag_segment_skipping = v
-                    .parse::<bool>()
-                    .map_err(|e| format!("--tag-segment-skipping {v}: {e}"))?;
-                i += 1;
-            }
-            "--max-grpc-result-bytes" => {
-                if let Some(v) = args.get(i + 1) {
-                    max_grpc_result_bytes = v
-                        .parse()
-                        .map_err(|e| format!("--max-grpc-result-bytes {v}: {e}"))?;
-                }
-                i += 1;
-            }
-            "--max-concurrent-exhaustive-streams" => {
-                if let Some(v) = args.get(i + 1) {
-                    max_concurrent_exhaustive_streams = v
-                        .parse()
-                        .map_err(|e| format!("--max-concurrent-exhaustive-streams {v}: {e}"))?;
-                }
-                i += 1;
-            }
-            "--max-exhaustive-stream-secs" => {
-                if let Some(v) = args.get(i + 1) {
-                    let seconds = v
-                        .parse()
-                        .map_err(|e| format!("--max-exhaustive-stream-secs {v}: {e}"))?;
-                    max_exhaustive_stream_duration = Duration::from_secs(seconds);
-                }
-                i += 1;
-            }
-            "--tls-cert" => {
-                tls_cert = args.get(i + 1).map(PathBuf::from);
-                i += 1;
-            }
-            "--tls-key" => {
-                tls_key = args.get(i + 1).map(PathBuf::from);
-                i += 1;
-            }
-            "--tls-ca" => {
-                tls_ca = args.get(i + 1).map(PathBuf::from);
-                i += 1;
-            }
-            "--tls-domain" => {
-                tls_domain = args.get(i + 1).cloned();
-                i += 1;
-            }
-            "--cluster-token" => {
-                token_flag = args.get(i + 1).cloned();
-                i += 1;
-            }
-            // First positional arg = ADDR; later positionals are ignored.
-            a if !a.starts_with("--") && addr_arg.is_none() => {
-                addr_arg = Some(a.to_string());
-            }
-            _ => {}
-        }
-        i += 1;
-    }
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let args::ShardServerArgs {
+        pending,
+        data_dir,
+        addr: addr_arg,
+        tls_cert,
+        tls_key,
+        tls_ca,
+        tls_domain,
+        token: token_flag,
+        health_addr,
+        metrics_addr,
+        mut ranking_profiles_file,
+        max_grpc_result_bytes,
+        max_grpc_request_bytes,
+        max_concurrent_exhaustive_streams,
+        max_exhaustive_stream_duration,
+        engine: engine_cfg,
+    } = args::parse(&raw)?;
     if ranking_profiles_file.is_none() {
         ranking_profiles_file = std::env::var_os("RR_RANKING_PROFILES_FILE")
             .filter(|value| !value.is_empty())
@@ -199,11 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rank_profiles = Arc::new(rank_profiles);
 
     let norm = Arc::new(Normalizer::default_vocab()?);
-    let engine_cfg = EngineConfig {
-        hot_anchor_threshold,
-        tag_segment_skipping,
-        ..EngineConfig::default()
-    };
+    println!(
+        "shardserver: {}",
+        args::engine_banner(&engine_cfg, data_dir.is_some())
+    );
     let rt = tokio::runtime::Runtime::new()?;
 
     if pending {
@@ -219,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let server = server
             .with_rank_profiles(Arc::clone(&rank_profiles))
             .with_max_grpc_result_bytes(max_grpc_result_bytes)?
+            .with_max_grpc_request_bytes(max_grpc_request_bytes)?
             .with_max_concurrent_exhaustive_streams(max_concurrent_exhaustive_streams)?
             .with_max_exhaustive_stream_duration(max_exhaustive_stream_duration)?;
         let state = if server.is_serving() {
@@ -279,6 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = server
         .with_rank_profiles(rank_profiles)
         .with_max_grpc_result_bytes(max_grpc_result_bytes)?
+        .with_max_grpc_request_bytes(max_grpc_request_bytes)?
         .with_max_concurrent_exhaustive_streams(max_concurrent_exhaustive_streams)?
         .with_max_exhaustive_stream_duration(max_exhaustive_stream_duration)?;
     server.ingest_dsl(&queries);

@@ -38,6 +38,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [159](../adr-159-get-settings-api-contract.md) | Settings read REST API contract | Makes live configuration reads strict, cache-safe, bounded, observable, and off-runtime. | Accepted |
 | [160](../adr-160-put-settings-api-contract.md) | Settings write REST API contract | Makes runtime configuration updates strict, duplicate-safe, bounded, observable, and coherently published off-runtime. | Accepted |
 | [168](../adr-168-inactive-rkyv-advisory.md) | Inactive `rkyv` advisory qualification | Narrows one lockfile-only RustSec exception behind an all-feature/all-target activation guard. | Accepted |
+| [191](../adr-191-data-plane-handlers-wait-off-the-runtime.md) | Data-plane handlers wait off the runtime | Runs standalone PUT, DELETE, bulk and flush, and the coordinator's brief cluster reads, on blocking threads under bounded admission, so requests queued behind maintenance never park an async worker. | Accepted |
 
 ---
 

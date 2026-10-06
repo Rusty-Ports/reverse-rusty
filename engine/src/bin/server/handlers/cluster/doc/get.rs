@@ -15,10 +15,9 @@ pub(crate) async fn cluster_get_doc(
 ) -> Response {
     let start = Instant::now();
     let response = if method == Method::HEAD {
-        let result = {
-            let cluster = state.cluster.read();
-            cluster.document_exists(id)
-        };
+        let result = super::super::read_cluster(&state, move |cluster| cluster.document_exists(id))
+            .await
+            .and_then(|result| result);
         match result {
             Ok(exists) => {
                 let status = if exists {
@@ -57,10 +56,9 @@ pub(crate) async fn cluster_get_doc(
             }
         }
     } else {
-        let result = {
-            let cluster = state.cluster.read();
-            cluster.get_document(id)
-        };
+        let result = super::super::read_cluster(&state, move |cluster| cluster.get_document(id))
+            .await
+            .and_then(|result| result);
         match result {
             Ok(Some(document)) => {
                 state

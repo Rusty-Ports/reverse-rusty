@@ -41,6 +41,30 @@ source stream item (ADR-110). ADR-114 adds node-local exhaustive-stream limits:
 `--max-exhaustive-stream-secs` (default 300, a hard ceiling on the coordinator/direct caller's
 remaining budget). In remote mode, configure that duration at least as high as the coordinator's
 `--exhaustive-job-timeout-secs`; an over-ask fails loud before shard admission.
+
+**Shard-local engine settings (ADR-192).** A remote coordinator ships a dictionary to its shard
+nodes, never engine configuration, so the settings that belong to the process holding a shard's
+disk are `shardserver` flags:
+
+| `shardserver` flag | Default | Effect |
+|---|---|---|
+| `--wal-sync-on-write <true\|false>` | false | Fsync the shard translog on every write, so an acknowledged write survives a power loss and not only a process crash |
+| `--retain-source <true\|false>` | true | Keep query source text in memory, or on disk and read on demand (ADR-020) |
+| `--max-segments N` | 8 | Base segments before compaction triggers |
+| `--memtable-flush-threshold N` | 100000 | Memtable entries before an automatic flush |
+| `--hot-anchor-threshold N` | 0 | Class-H threshold (ADR-105); run the coordinator's value |
+| `--tag-segment-skipping <true\|false>` | true | ADR-174 kill switch; run the coordinator's value |
+| `--max-grpc-request-bytes N` | 67108864 (64 MiB) | Largest inbound request the node decodes (ADR-193). It bounds the dictionary a coordinator can ship; size it above the serialized dictionary (about 8 bytes plus the name per feature). Bulk loads do not depend on it |
+| `--broad-columnar <true\|false>` | true | Columnar broad evaluator; `false` is the kill switch (identical results) |
+| `--broad-materialize <true\|false>` | true | Pure-anchor materialization fast path; `false` verifies instead (identical results) |
+
+They apply to every slot on the node and are not stored with the data, so a restart with a
+different flag changes them. The node prints its sync policy at startup and exports
+`reverse_rusty_shard_translog_sync_on_write{shard}` on `/_metrics`. The coordinator's flags of
+the same names never reach a remote shard: it **refuses** `--wal-sync-on-write` (it stores no
+shard data, so the flag would promise durability it cannot provide) and warns about the rest.
+On `server` the Boolean flags take a value too (`--retain-source false`, `--broad-columnar false`,
+`--broad-materialize false`).
 `--data-dir` makes
 an **in-process** cluster durable (build once, reopen on restart — `--load-file` is skipped with a
 warning when the reopened cluster is already populated). A **remote** coordinator is stateless and
@@ -86,11 +110,19 @@ startup.
 Behavior deltas from single-node mode (all deliberate, none silent):
 
 - **`PUT /_doc/{id}` is a cluster-atomic upsert** — one coordinator log frame replaces every prior
-  live copy (ES `index` semantics, the ADR-067 contract at the cluster). A partial multi-shard apply
-  (remote clusters only) answers 200 with `"result": "partial"`: the write **is** durably logged and
-  queued for repair — do **not** re-PUT (it would double-log); `POST /_cluster/resync` converges it.
+  live copy (ES `index` semantics, the ADR-067 contract at the cluster). A write that not every
+  shard took (remote clusters only) returns retryable 503 `"result": "partial"` with the applied
+  and pending positions and no `_version` (ADR-194). The document is **not** stored on every
+  shard: repeat the idempotent PUT, or use `POST /_cluster/resync` while the same coordinator
+  still owns its in-memory repair queue. A remote coordinator has no log, so a restart loses that
+  queue; only the repeated PUT converges on any coordinator. Repeat a partial `op_type=create` as
+  an index operation (a restarted coordinator finds the id on the shards that took it and would
+  answer the create with 409).
   `op_type=create` uses the coordinator's atomic logical-id reservation and returns 409 without a
-  log frame when the id exists. Remote startup reconstructs this membership through bounded shard
+  log frame when the id exists. While an earlier write of that id is still queued for repair, a
+  create first re-drives the repair. Until it converges the create answers 503
+  `earlier_write_unconverged`, never 409: the create itself was not applied or queued, so send
+  it again (a resync finishes only the earlier write). Remote startup reconstructs this membership through bounded shard
   enumeration; an unsupported, failed, or over-limit enumeration keeps create-only writes disabled
   ([details](../../../design/clustering-and-scaling.md#94-remote-admission-reconstruction)). `refresh=false|true|wait_for`
   are accepted under the stronger publish-before-response model; unsupported write parameters fail

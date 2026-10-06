@@ -29,15 +29,24 @@ failure class. "Crash" = the process dies (OOM-kill, SIGKILL, node reboot with t
 | Remote (Compose/Helm), RF=1 | shard pod crash | **0** (per-shard translog + committed segments, including successfully recovered targets; ADR-039/181) | pod restart; reads routing to it `502` meanwhile (fail-loud, ADR-072) |
 | Remote, RF=1 | **shard volume loss** | since the last snapshot **of that shard** | §3.1 below |
 | Remote, RF≥2 | one node lost | **0 for reads when the position has an in-sync replica** (failover, ADR-035); a replica that missed a write, or was not proven equal to its primary when the coordinator connected (ADR-195), is never served, so those reads fail loud (502) instead. Writes need the primary | automatic for reads; `/_health` is yellow and reports `out_of_sync_replicas` while redundancy is reduced; replica recovery per [runbook §6](cluster-deployment.md) |
+| Remote | coordinator crash or restart | **0 acked writes** (it holds no data). A write answered 503 `partial` was never acked: until its writer repeats it, it stays missing from the shards that refused it, because the repair queue is the coordinator's memory (ADR-194) | restart; writers repeat their 503s |
 | Remote | control-plane **minority** loss | 0 (quorum holds; durable Raft, ADR-041) | restart the node; it rejoins |
 | Remote | control-plane **majority** loss | cluster-state document: to the last control-volume snapshot (query data is unaffected — it lives on the shards) | §3.2 below |
 | Any | whole-cluster loss | since the last **consistent backup set** | §3.3 below |
 
 **The power-loss caveat** (deployment-modes [§4](deployment-modes.md)): `wal_sync_on_write`
 defaults **false** — an acked write survives a process crash, not necessarily a power cut on the
-same host (the OS page cache is the window). Flip the knob for fsync-per-write where that RPO
-matters; on Kubernetes/cloud volumes a "node loss" normally detaches the volume rather than losing
-the page cache silently, but the honest statement is: default RPO 0 is against process death, not
+same host (the OS page cache is the window). Turn on fsync-per-write where that RPO matters, on
+the process that holds the data (ADR-192):
+
+- single-node and in-process cluster: `server --wal-sync-on-write`;
+- remote (Compose/Helm): `shardserver --wal-sync-on-write true` on **every shard node** (Helm
+  `shard.walSyncOnWrite=true`, Compose `RR_SHARD_WAL_SYNC_ON_WRITE=true`). The coordinator holds
+  no shard data and refuses the flag. Confirm it per shard with
+  `reverse_rusty_shard_translog_sync_on_write == 1` on the shard's `/_metrics`.
+
+On Kubernetes/cloud volumes a "node loss" normally detaches the volume rather than losing the
+page cache silently, but the honest statement is: default RPO 0 is against process death, not
 power loss.
 
 **RTO evidence, not promises:** restore time is dominated by copying the backup and reopening
@@ -50,7 +59,7 @@ your real RTO.
 |---|---|
 | Shard pod crashed / restarting | [runbook §6 row 1](cluster-deployment.md) — self-restores from its volume |
 | Need to restart everything one by one | [runbook §6 rolling restart](cluster-deployment.md); upgrades → [`rolling-upgrade.md`](rolling-upgrade.md) |
-| Coordinator down/restarted | [runbook §6](cluster-deployment.md) — stateless, reconnects and re-derives |
+| Coordinator down/restarted | [runbook §6](cluster-deployment.md) — stateless, reconnects and re-derives; before a planned restart, drain its repair queue (`POST /_cluster/resync` until `still_pending` is 0) |
 | One control node down | [runbook §6](cluster-deployment.md) — quorum holds, restart it |
 | Replica failover / replacement (RF>1) | [runbook §6 last two rows](cluster-deployment.md) — fresh-volume replicas need explicit peer recovery |
 | Shard **volume** lost (RF=1) | **§3.1 below** |

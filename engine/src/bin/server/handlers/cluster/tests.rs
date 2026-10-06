@@ -52,6 +52,9 @@ fn state_from_cluster_with_rebalance_topology(
         write_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_QUEUED_CLUSTER_WRITES,
         )),
+        read_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_QUEUED_CLUSTER_READS,
+        )),
         flush_serial: Mutex::new(()),
         durability_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_CLUSTER_DURABILITY_OPERATIONS,
@@ -441,6 +444,7 @@ mod node_deregister;
 mod node_register;
 mod pit;
 mod ranked;
+mod read_admission;
 mod reassign;
 mod rebalance;
 mod reconcile;

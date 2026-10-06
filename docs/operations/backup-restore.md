@@ -113,7 +113,8 @@ bit-rot before a real restore is needed.
 ## Filesystem snapshots and remote deployments
 
 The built-in `POST /_backup` pauses **writes** (not reads) for the duration of the file copy — a
-multi-second stall on a very large corpus. For a backup that never pauses writes, snapshot a
+multi-second stall on a very large corpus. Paused writes queue on blocking threads under bounded
+admission (ADR-183, ADR-191), so however many arrive, searches and `/_health` keep being served. For a backup that never pauses writes, snapshot a
 checkpointed **local-mode** directory at the filesystem layer:
 
 1. `POST /_checkpoint` (in-process cluster) or `POST /_flush` (single-node) to commit a consistent

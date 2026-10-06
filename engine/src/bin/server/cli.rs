@@ -191,7 +191,9 @@ pub(crate) struct Cli {
     /// saving at scale (the source store is the single largest resident structure
     /// at ~100M queries), at the cost of a cold binary-search + page fault per
     /// `_source`/explain lookup (never the match hot path). See ADR-020.
-    #[arg(long, default_value_t = true)]
+    /// Takes a value (`--retain-source false`): a default-true switch with no value
+    /// could never be turned off.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) retain_source: bool,
 
     /// Title sub-batch size for the columnar broad lane on `POST /_mpercolate`
@@ -203,7 +205,7 @@ pub(crate) struct Cli {
     /// Use the columnar broad evaluator (once per batch). Set false to fall back
     /// to the inline per-title broad probe — the kill-switch (identical results,
     /// no amortization). Dynamic via `PUT /_settings`.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) broad_columnar: bool,
 
     /// Consult exact sealed-segment tag unions before filtered reads (ADR-174).
@@ -217,7 +219,7 @@ pub(crate) struct Cli {
     /// Use the pure-anchor materialization fast path (emit pure-anchor broad
     /// queries straight from the anchor bitmap, skipping verification). Dynamic
     /// via `PUT /_settings`.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) broad_materialize: bool,
 
     /// Maximum documents accepted in one `POST /_mpercolate` batch; larger
@@ -427,6 +429,38 @@ impl Cli {
             ..reverse_rusty::cluster::ClusterConfig::default()
         }
     }
+
+    /// The engine configuration these flags describe, without a data directory: single-node
+    /// mode adds its own, and a cluster gives each shard a directory of its own. One mapping
+    /// for both modes, so a flag cannot reach one and miss the other.
+    pub(crate) fn engine_config(&self) -> reverse_rusty::config::EngineConfig {
+        reverse_rusty::config::EngineConfig {
+            data_dir: None,
+            max_segments: self.max_segments,
+            memtable_flush_threshold: self.memtable_flush_threshold,
+            max_query_length: self.max_query_length,
+            max_query_clauses: self.max_query_clauses,
+            max_anyof_group_size: self.max_anyof_group_size,
+            max_tags: self.max_tags,
+            wal_sync_on_write: self.wal_sync_on_write,
+            retain_source: self.retain_source,
+            broad_batch_size: self.broad_batch_size,
+            hot_anchor_threshold: self.hot_anchor_threshold,
+            broad_columnar: self.broad_columnar,
+            tag_segment_skipping: self.tag_segment_skipping,
+            broad_materialize: self.broad_materialize,
+            max_percolate_batch: self.max_percolate_batch,
+            accept_class_d: self.accept_class_d,
+            ..reverse_rusty::config::EngineConfig::default()
+        }
+    }
+
+    /// `--retain-source false` keeps source text on disk and reads it on demand. Without a
+    /// data directory there is no disk copy: everything stays in the in-memory overlay and
+    /// the setting saves nothing.
+    pub(crate) fn retain_source_saves_nothing(&self) -> bool {
+        !self.retain_source && self.data_dir.is_none()
+    }
 }
 
 #[cfg(test)]
@@ -456,6 +490,87 @@ mod tests {
         let engine = reverse_rusty::config::EngineConfig::default;
         assert!(cli.cluster_config(1, engine(), true).data_dir.is_some());
         assert!(cli.cluster_config(1, engine(), false).data_dir.is_none());
+    }
+
+    /// A `bool` argument with a `true` default and no explicit action is a switch that
+    /// only sets `true`: it can never be turned off, and passing `false` is a parse error.
+    /// Three flags shipped that way. Every default-true flag must take a value.
+    #[test]
+    fn no_default_true_flag_is_a_switch_that_only_sets_true() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        command.clone().debug_assert();
+        for argument in command.get_arguments() {
+            let default_true = argument
+                .get_default_values()
+                .iter()
+                .any(|value| value == "true");
+            assert!(
+                !(default_true && matches!(argument.get_action(), clap::ArgAction::SetTrue)),
+                "--{} defaults to true and cannot be set to false",
+                argument.get_id()
+            );
+        }
+    }
+
+    #[test]
+    fn default_true_flags_accept_an_explicit_false() {
+        for flag in ["--retain-source", "--broad-columnar", "--broad-materialize"] {
+            for arguments in [vec![flag, "false"], vec![&format!("{flag}=false")[..]]] {
+                let mut line = vec!["server"];
+                line.extend(arguments.iter().copied());
+                let cli = Cli::try_parse_from(&line)
+                    .unwrap_or_else(|error| panic!("{line:?} must parse: {error}"));
+                let engine = cli.engine_config();
+                let value = match flag {
+                    "--retain-source" => engine.retain_source,
+                    "--broad-columnar" => engine.broad_columnar,
+                    _ => engine.broad_materialize,
+                };
+                assert!(!value, "{line:?} must reach the engine configuration");
+            }
+            let cli = Cli::try_parse_from(["server", flag, "true"]).expect("explicit true");
+            let engine = cli.engine_config();
+            assert!(engine.retain_source && engine.broad_columnar && engine.broad_materialize);
+        }
+    }
+
+    #[test]
+    fn the_engine_configuration_follows_the_flags_and_the_defaults() {
+        let defaults = reverse_rusty::config::EngineConfig::default();
+        let engine = Cli::try_parse_from(["server"])
+            .expect("no flags")
+            .engine_config();
+        assert_eq!(engine.retain_source, defaults.retain_source);
+        assert_eq!(engine.broad_columnar, defaults.broad_columnar);
+        assert_eq!(engine.broad_materialize, defaults.broad_materialize);
+        assert_eq!(engine.max_segments, defaults.max_segments);
+        assert!(engine.data_dir.is_none(), "each mode adds its own data dir");
+
+        let engine = Cli::try_parse_from([
+            "server",
+            "--max-segments",
+            "4",
+            "--wal-sync-on-write",
+            "--data-dir",
+            "/data",
+        ])
+        .expect("flags")
+        .engine_config();
+        assert_eq!(engine.max_segments, 4);
+        assert!(engine.wal_sync_on_write);
+        assert!(engine.data_dir.is_none());
+    }
+
+    #[test]
+    fn retain_source_false_without_a_data_dir_saves_nothing() {
+        let parse = |line: &[&str]| Cli::try_parse_from(line).expect("valid flags");
+        assert!(parse(&["server", "--retain-source", "false"]).retain_source_saves_nothing());
+        assert!(
+            !parse(&["server", "--retain-source", "false", "--data-dir", "/data"])
+                .retain_source_saves_nothing()
+        );
+        assert!(!parse(&["server"]).retain_source_saves_nothing());
     }
 
     #[test]

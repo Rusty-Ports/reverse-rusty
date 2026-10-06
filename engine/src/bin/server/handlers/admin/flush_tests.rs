@@ -24,6 +24,9 @@ fn state_with_engine(engine: Engine) -> Arc<AppState> {
     Arc::new(AppState {
         engine: Mutex::new(engine),
         flush_serial: Mutex::new(()),
+        write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_QUEUED_WRITES,
+        )),
         backup_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),
@@ -228,4 +231,141 @@ async fn durable_failure_is_a_failed_shard_and_never_acknowledged() {
 
     drop(state);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A lock a flush waits on.
+#[derive(Clone, Copy)]
+enum Held {
+    /// What a compaction, backup or vocabulary rebuild holds.
+    Engine,
+    /// What another explicit flush holds.
+    FlushSerial,
+}
+
+/// Hold `lock` on a helper thread until the returned sender is used or dropped.
+fn hold(
+    state: &Arc<AppState>,
+    lock: Held,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::SyncSender<()>) {
+    let holder_state = Arc::clone(state);
+    let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
+    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel::<()>(1);
+    let holder = std::thread::spawn(move || {
+        let (_engine, _flush) = match lock {
+            Held::Engine => (Some(holder_state.engine.lock()), None),
+            Held::FlushSerial => (None, Some(holder_state.flush_serial.lock())),
+        };
+        locked_sender.send(()).expect("signal the held lock");
+        let _ = release_receiver.recv();
+    });
+    locked_receiver.recv().expect("lock held");
+    (holder, release_sender)
+}
+
+/// A flush waits for the engine mutex (behind a compaction or backup) and, with
+/// `wait_if_ongoing`, for another flush. Both waits happen on a blocking thread: on a
+/// single-threaded runtime a timer still fires while the flush is queued (ADR-191).
+#[test]
+fn a_queued_flush_never_parks_the_async_runtime() {
+    let cases = [
+        ("the engine mutex", Held::Engine),
+        ("another flush", Held::FlushSerial),
+    ];
+    for (held, lock) in cases {
+        let state = state_with_memtable();
+        let (holder, release) = hold(&state, lock);
+        let (alive_sender, alive_receiver) = std::sync::mpsc::channel();
+        let server_state = Arc::clone(&state);
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let flush_state = Arc::clone(&server_state);
+                let flush = tokio::spawn(async move {
+                    send(&flush_state, Method::POST, "/_flush", Body::empty()).await
+                });
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                alive_sender.send(()).expect("report a live runtime");
+                flush.await.expect("flush task")
+            })
+        });
+        let alive = alive_receiver.recv_timeout(std::time::Duration::from_secs(10));
+        drop(release);
+        holder.join().expect("holder");
+        let (status, _, body) = server.join().expect("server");
+        assert!(
+            alive.is_ok(),
+            "the runtime must keep running while a flush waits for {held}"
+        );
+        assert_eq!(status, StatusCode::OK, "waiting for {held}: {body}");
+        assert_eq!(state.snapshot.load().metrics().memtable_entries, 0);
+    }
+}
+
+/// `wait_if_ongoing=false` reports a flush already in progress even when that flush and queued
+/// writes hold every admission permit, instead of queueing behind them and acknowledging later.
+#[test]
+fn a_non_waiting_flush_reports_an_ongoing_flush_without_queueing() {
+    use crate::state::MAX_QUEUED_WRITES;
+    let state = state_with_memtable();
+    let (holder, release) = hold(&state, Held::Engine);
+    let run_state = Arc::clone(&state);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let probe = runtime.block_on(async move {
+        let wait_until = |done: fn(&AppState) -> bool, state: Arc<AppState>| async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done(&state) && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        let flush_state = Arc::clone(&run_state);
+        let queued = tokio::spawn(async move {
+            send(&flush_state, Method::POST, "/_flush", Body::empty()).await
+        });
+        wait_until(
+            |state| state.flush_serial.is_locked(),
+            Arc::clone(&run_state),
+        )
+        .await;
+        // Queued writers take every remaining permit.
+        let mut writers = Vec::new();
+        for _ in 1..MAX_QUEUED_WRITES {
+            writers.push(
+                crate::state::admit_write(&run_state)
+                    .await
+                    .expect("admitted writer"),
+            );
+        }
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            send(
+                &run_state,
+                Method::POST,
+                "/_flush?wait_if_ongoing=false",
+                Body::empty(),
+            ),
+        )
+        .await;
+        drop(release);
+        drop(writers);
+        let _ = queued.await;
+        probe
+    });
+    holder.join().expect("holder");
+    let (status, _, body) =
+        probe.expect("a non-waiting flush must not queue behind write admission");
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"]["type"], "flush_in_progress_exception",
+        "{body}"
+    );
 }

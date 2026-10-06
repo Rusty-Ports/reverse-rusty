@@ -26,13 +26,31 @@ use crate::dto::ApiError;
 use crate::handlers::doc::{
     bulk_body_rejection, bulk_query_rejection, bulk_rejection, error_item, extract_ranked_ingest,
     fail_item, item_inner_mut, parse_bulk_request, pending_item, succeed_item, BulkActionKind,
-    BulkItem, BulkItemError, BulkParams, BulkResponse, DeleteDocParams, DeleteDocResponse,
-    GetDocParams, GetDocResponse, ParsedBulkItem, PutDocBody, PutDocParams, PutDocResponse,
-    CLASS_D_REJECT_MSG, QUERY_INDEX,
+    BulkItem, BulkParams, BulkResponse, DeleteDocParams, DeleteDocResponse, GetDocParams,
+    GetDocResponse, ParsedBulkItem, PutDocBody, PutDocParams, PutDocResponse, CLASS_D_REJECT_MSG,
+    QUERY_INDEX,
 };
 use crate::state::ClusterAppState;
 
 use super::{shard_error_response, shard_error_status};
+
+/// What a caller is told when not every shard took its index or create operation (ADR-194).
+/// The write is a failure to retry: some shard does not hold it, and the repair is queued only
+/// in this coordinator's memory. A retried index operation converges on any coordinator. A
+/// create is retried as an index operation, because a coordinator that restarted in between
+/// finds the id on the shards that took it and would answer a create with 409. Shared by
+/// `PUT /_doc/{id}` and the bulk items so they cannot drift.
+fn partial_write_guidance(create_only: bool, applied: &[usize], failed: &[usize]) -> String {
+    let retry = if create_only {
+        "retry it as an index operation (without op_type=create)"
+    } else {
+        "retry this idempotent index operation"
+    };
+    format!(
+        "applied on shards {applied:?}, pending on {failed:?}; not stored on every shard — \
+         {retry}, or POST /_cluster/resync while this coordinator remains running"
+    )
+}
 
 /// Render one upsert outcome as the PUT /_doc response. Shared with the per-item
 /// bulk mapping so single and bulk writes can never drift.
