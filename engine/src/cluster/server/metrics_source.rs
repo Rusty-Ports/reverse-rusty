@@ -53,6 +53,7 @@ impl ShardMetricsSource {
                     rpc_latency: slot.latency.snapshot(),
                     broad: slot.broad.snapshot(),
                     ranked: slot.ranked.snapshot(),
+                    translog_sync_on_write: st.shard.translog_syncs_each_write(),
                 }
             })
             .collect();

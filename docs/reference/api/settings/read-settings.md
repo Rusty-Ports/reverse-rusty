@@ -72,6 +72,20 @@ Coordinator mode returns its existing topology and assembled per-shard configura
 }
 ```
 
+`per_shard` is the engine configuration this server was started with. In an in-process cluster
+that is every shard's configuration. A coordinator of **remote** shard nodes also returns
+`shard_local`, the `per_shard` keys each shard node sets for itself with its own `shardserver`
+flags (ADR-192):
+
+```json
+"shard_local": ["wal_sync_on_write", "retain_source", "max_segments",
+                "memtable_flush_threshold", "hot_anchor_threshold", "tag_segment_skipping"]
+```
+
+For those keys the values under `per_shard` are the coordinator's and say nothing about the
+shards. Read a shard's sync policy from `reverse_rusty_shard_translog_sync_on_write` on its
+`/_metrics`. `shard_local` is absent in-process.
+
 `defaults` is present only with `include_defaults=true`. Coordinator lock waiting, cloning, and
 serialization run off the async runtime under the same bounded administrative admission as other
 configuration reads.

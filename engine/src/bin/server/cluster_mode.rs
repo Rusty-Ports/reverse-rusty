@@ -78,6 +78,7 @@ mod remote_connect;
 #[cfg(feature = "distributed")]
 mod reconcile_loop;
 mod rpc_runtime;
+pub(crate) mod shard_local_flags;
 
 pub(crate) use rpc_runtime::cluster_rpc_handle;
 pub(crate) mod resize_loop;
@@ -152,6 +153,20 @@ pub(crate) async fn run(
     }
     if in_process && cli.data_dir.is_none() {
         warn!("no --data-dir specified: cluster is in-memory only, data will not survive restarts");
+    }
+    // Durability and storage flags configure whichever process holds a shard's disk. Against
+    // remote shard nodes that is not this one (ADR-192).
+    if !in_process {
+        let flags = shard_local_flags::in_remote_mode(&per_shard);
+        for inert in &flags.inert {
+            warn!("{inert}");
+        }
+        if !flags.refused.is_empty() {
+            for refused in &flags.refused {
+                error!("{refused}");
+            }
+            std::process::exit(1);
+        }
     }
     // The hot tier (ADR-105) is classified SHARD-SIDE in remote mode: each shardserver's
     // own θ decides whether a coordinator-placed query lands in its realtime lane or its

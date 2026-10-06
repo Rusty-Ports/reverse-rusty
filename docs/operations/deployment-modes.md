@@ -98,7 +98,7 @@ is where the trade-off and the follow-on path live.
 | **Cross-shard backup barrier** | a remote (stateless-coordinator) cluster has per-shard-consistent backups, no global barrier; consistent whole-cluster backup requires quiescence | [ADR-079](../decisions/adr-079-backup-restore.md); [roadmap](../roadmap.md#backup-and-restore-as-a-cluster-service) |
 | **Representative-corpus and real-cluster proof** | the durable 20M-query K=8 soak shipped in ADR-104; a production corpus and real Kubernetes failure matrix remain open | [ADR-065](../decisions/adr-065-distributed-v1-graduation.md); [roadmap](../roadmap.md#priority-1--real-world-acceptance-evidence) |
 | **mTLS / per-RPC authz** | the mesh uses one shared token + server TLS; mutual TLS and per-RPC authorization are post-v1 | [ADR-071](../decisions/adr-071-grpc-tls-auth.md); [roadmap](../roadmap.md#security-hardening-beyond-the-v1-trust-model) |
-| **Power-loss durability by default** | `wal_sync_on_write` defaults **false**: an acked write survives a process crash (WAL replay), not necessarily power loss — flip the knob for fsync-per-write | [ADR-013](../decisions/adr-013-write-ahead-log.md); [ADR-088](../decisions/adr-088-crash-injection-harness.md) |
+| **Power-loss durability by default** | `wal_sync_on_write` defaults **false**: an acked write survives a process crash (WAL replay), not necessarily power loss — turn on fsync-per-write on the process holding the data: `server --wal-sync-on-write`, or `shardserver --wal-sync-on-write true` on every shard node of a remote cluster ([ADR-192](../decisions/adr-192-shard-local-engine-settings.md)) | [ADR-013](../decisions/adr-013-write-ahead-log.md); [ADR-088](../decisions/adr-088-crash-injection-harness.md) |
 
 ## 5. Choosing a mode
 

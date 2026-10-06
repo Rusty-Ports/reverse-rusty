@@ -39,6 +39,21 @@ replicationFactor: 1
 # value to the coordinator and every shard node.
 tagSegmentSkipping: true
 
+# Settings each shard node decides for itself (ADR-192). A remote coordinator ships a
+# dictionary, never engine configuration, so these go to `shardserver` only; the
+# coordinator's flags of the same name do not reach a shard.
+shard:
+  # fsync the shard translog on every write, so an acknowledged write survives a power loss
+  # and not only a process crash. Costs one fsync per write. Off: the translog is synced at
+  # flush checkpoints.
+  walSyncOnWrite: false
+  # Keep query source text in memory (true), or on disk and read on demand (false, ADR-020).
+  retainSource: true
+  # Base segments before compaction triggers.
+  maxSegments: 8
+  # Memtable entries before an automatic flush.
+  memtableFlushThreshold: 100000
+
 ports:
   shardGrpc: 50051
   shardHealth: 50052 # plaintext gRPC health (k8s probes, ADR-084)

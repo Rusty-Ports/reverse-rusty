@@ -67,6 +67,7 @@ services:
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
       --tag-segment-skipping ${RR_TAG_SEGMENT_SKIPPING:-true}
+      --wal-sync-on-write ${RR_SHARD_WAL_SYNC_ON_WRITE:-false}
       --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:
@@ -77,6 +78,7 @@ services:
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
       --tag-segment-skipping ${RR_TAG_SEGMENT_SKIPPING:-true}
+      --wal-sync-on-write ${RR_SHARD_WAL_SYNC_ON_WRITE:-false}
       --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:
@@ -87,6 +89,7 @@ services:
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
       --tag-segment-skipping ${RR_TAG_SEGMENT_SKIPPING:-true}
+      --wal-sync-on-write ${RR_SHARD_WAL_SYNC_ON_WRITE:-false}
       --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:

@@ -9,6 +9,23 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Shard-local engine settings
+
+- Fix the remote topology having no way to turn on power-loss durability: `shardserver` built
+  every shard from default engine settings, and the coordinator's `--wal-sync-on-write` reached
+  nothing while `/_settings` reported it as the shards' configuration. `shardserver` now takes
+  `--wal-sync-on-write`, `--retain-source`, `--max-segments` and `--memtable-flush-threshold`
+  ([ADR-192](decisions/adr-192-shard-local-engine-settings.md)).
+- **Behaviour change:** a coordinator of remote shard nodes refuses `--wal-sync-on-write` and
+  names the shard flag; it warns about `--max-segments`, `--memtable-flush-threshold` and
+  `--retain-source`, which also have no effect there.
+- `GET /_settings` on a remote coordinator lists, under `shard_local`, the `per_shard` keys each
+  shard node sets for itself.
+- Shard nodes print their sync policy at startup and export
+  `reverse_rusty_shard_translog_sync_on_write{shard}`.
+- Helm: `shard.walSyncOnWrite`, `shard.retainSource`, `shard.maxSegments`,
+  `shard.memtableFlushThreshold`. Compose: `RR_SHARD_WAL_SYNC_ON_WRITE`.
+
 ## 2026-10-05 — Any-of cover and visibility-preserving rebuilds
 
 - Fix default-read false negatives for queries shaped `<top-64 term> (<variants>)`: a query whose
