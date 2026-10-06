@@ -15,4 +15,4 @@ or exhaustive-delivery contracts.
 | [`GET /_percolate/jobs/{id}/stream`](percolate/exhaustive-jobs.md#status-stream-and-cancellation) | Claim the single bounded, terminally attested NDJSON result stream. | Single-node and coordinator modes |
 | [`GET\|POST /_search`](percolate/search.md) | Compatibility percolation for one or more titles, including filtering, ranking, paging, explain, and profile controls. | Single-node and coordinator modes |
 | [`POST /v2/_mpercolate`](percolate/v2-mpercolate.md) | Strict shared-options exact bounded top-K batch with whole-request exactness. | Single-node and coordinator modes |
-| [`POST /_mpercolate`](percolate/mpercolate.md) | Strict full-result compatibility batch with ordered slots. | Single-node and coordinator modes; some profiling differs |
+| [`POST /_mpercolate`](percolate/mpercolate.md) | Strict compatibility batch with ordered slots, each paged by `from`/`size`. | Single-node and coordinator modes; some profiling differs |

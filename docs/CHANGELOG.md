@@ -9,6 +9,16 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — A guide to getting every candidate
+
+- New [recall-first integration](reference/integration.md) page, linked from the README, the
+  documentation hub and the API hub: which scope to ask for and on which surface, how to tell a
+  page from a complete result, the three ways to get every candidate (an exhaustive job, a point
+  in time, one request sized to the total), and why not to page with `from` during writes.
+- The `/_search` and `/_mpercolate` references say that offset paging re-matches on every
+  request. `/_mpercolate` is no longer described as "full-result": each slot is paged by
+  `from`/`size`. The PUT reference says a class C query is matched only in the broad scope.
+
 ## 2026-10-06 — The cost of a single write, measured as the server runs
 
 - `snapbench` now holds the published snapshot the way the server does, and has a durable mode
