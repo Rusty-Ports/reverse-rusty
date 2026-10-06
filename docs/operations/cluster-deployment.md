@@ -144,6 +144,14 @@ the coordinator exits non-zero; `restart: unless-stopped` brings it straight bac
 makes this rare). This is why a cold start can show one coordinator restart in the logs — expected, not a
 fault.
 
+**An interrupted first load.** With `--load-file`, the coordinator loads the corpus into the shards
+once, when the cluster is empty. If that load stops part-way (the coordinator is killed, or a shard
+fails during it), the shards keep a mark of the unfinished load on their volumes (ADR-196), and the
+coordinator then fails at every start with `holds a bulk load that did not complete`. This restart
+loop is **not** the connect race and does not heal itself: part of the corpus is on the shards and
+the coordinator will not serve it. Stop the stack, remove the shard volumes (`rrc down -v`, or delete
+the shard PVCs), and start again so the load runs from the beginning.
+
 **Advertise URL (bootstrap control node).** The `--bootstrap` node must advertise a routable self-URL
 (`--advertise-url https://control0:50061`, ADR-082 — it fails loud on a wildcard bind). The URL is
 committed into the Raft membership at the *first* bootstrap only (`initialize` is idempotent), so an

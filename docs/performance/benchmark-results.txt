@@ -165,7 +165,8 @@ BROADER INVARIANTS — machine-INDEPENDENT; manual outside the automated subset
   pin 4x past the prior largest run):
     avg unique cand/title 54.56  (p95 96, p99 112, max 152)   <- the flat-~54 invariant HOLDS at 20M
     main max posting len 104, #postings>1024: 0;  classes 20M A / 0 B / 0 C / 0 D
-    dict 683,877 features (84.6 MB resident, 4.2 B/q — bounded);  resident total 5.2 B/q
+    dict 683,877 features (84.6 MB resident, 4.2 B/q — flat per query, NOT bounded in total: the
+    bench adds entities with Q, so the dict grew about as fast as the corpus);  resident total 5.2 B/q
     (retain_source=false) / 109.0 B/q (retain_source=true)
     cross-check (bench 20000000 20000 0.05, same fixed pools — SINGLE-node): unique 6,616.65
     (broad 4,977.71, p99 43,741) -> the broad-on growth reproduces without any cluster code:
@@ -178,9 +179,10 @@ BROADER INVARIANTS — machine-INDEPENDENT; manual outside the automated subset
     10M soak: 0 ghosts, par==seq 0 mismatches, compaction reclaims tombstones, sources consistent
 
   RESIDENT MEMORY  (persistent/mmap profile — machine-independent; ADR-020), bench @1M:
-    retain_source=false -> ~5–6 B/query     (sources off-heap — the production profile)
+    retain_source=false -> ~5–6 B/query     (sources off-heap — opt-in; the default is true)
     retain_source=true  -> ~115–120 B/query (the source store, ~113 B/q, dominates)
-    components: dict ~5 B/q (bounded by vocab), alive overlay ~1 B/q, logical_index ~0 (mmap'd)
+    components: dict ~5 B/q (flat per query; total grows with distinct features), alive overlay
+    ~1 B/q (one byte per row), logical_index ~0 (mmap'd)
 
 --------------------------------------------------------------------------------------------
 MACHINE-DEPENDENT — record the machine; compare only same-machine over time

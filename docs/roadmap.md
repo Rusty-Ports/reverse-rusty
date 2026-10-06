@@ -161,8 +161,9 @@ captures, bounded scratch memory, and a demonstrated broad or hot batch improvem
 
 ### Memory headroom for 100M-query deployments
 
-**Problem.** The shipped durable `retain_source=false` profile already leaves canonical source text
-in the mmap-backed source store and reads it lazily, reducing engine-accounted resident memory from
+**Problem.** The durable `retain_source=false` profile (opt-in on `server` and `shardserver`; the
+default is `true`) already leaves canonical source text in the mmap-backed source store and reads it
+lazily, reducing engine-accounted resident memory from
 roughly a little over 100 B/query to about 5–6 B/query in the current captures. Those measurements
 do not establish host RSS, source-read working set, page-cache pressure, or memory-bandwidth behavior
 at 100M queries, and the remaining dictionary, index, and verification columns may become the
@@ -179,8 +180,13 @@ dominant resident cost.
 - tighten SoA fields and access order to reduce bytes touched per candidate.
 
 Potential techniques include pooled string storage, mmap-backed immutable dictionaries, and narrower
-columns where format bounds prove them safe. Aliveness is already bit-packed; do not count that as
-future savings. SIMD is useful only after a profile identifies a stable intersection kernel.
+columns where format bounds prove them safe. Aliveness is one byte per row (a `Vec<bool>` in
+memory, a `u8` column on disk; only the tombstone sets beside it are bitmaps), so a bitset would
+save about 0.875 B/query and shrink every copy-on-write segment clone. Compaction and flush also
+hold whole copies on the heap (see the sizing guide, §5): an incremental checksum on segment write,
+merging from mmap without materializing, and a cap on the merge range would lower the peak. The CI
+resident-memory gate measures only `retain_source=false`; the default profile is not gated. SIMD is
+useful only after a profile identifies a stable intersection kernel.
 
 **Completion.** A measured 100M memory model with component attribution, no regression to the
 allocation-free matching contract, and pressure tests showing that the new representation remains

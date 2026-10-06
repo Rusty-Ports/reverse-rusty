@@ -21,6 +21,54 @@ reverse chronological and describe outcomes, not the current architecture or fut
   machine, not ~2 µs. No behaviour change.
 - Making a write cost proportional to the change is now a roadmap item.
 
+## 2026-10-06 — Sizing and memory documentation corrected
+
+- The sizing guide now says what compaction, a flush and a resident-source open hold on the heap
+  (its inputs and output together for a compaction, and the whole source store file for every
+  flush and every standalone compaction commit), which requests run a full merge, that the default
+  profile is `retain_source=true`, and that the throughput captures need the segment working set
+  in the page cache on a durable node. It gives no multiplier for the compaction peak: measure it.
+- Two claims were wrong and are corrected where they appeared (roadmap, ADR-020 outcome, the
+  capture notes and a code comment): aliveness is one byte per row, not bit-packed; and the
+  dictionary does not saturate in the captures, where its cost per query is flat and its total
+  grows with the corpus.
+- The roadmap's memory item lists the heap copies, the byte-per-row aliveness and the ungated
+  default profile as candidates. No behaviour change.
+
+## 2026-10-06 — The WAL is replaced, not truncated
+
+- Fix a single-node server that could refuse to start after a crash during a flush: the WAL was
+  reset by truncating it to zero bytes and then writing its header, and a crash between the two
+  left a log "too small" to open, with no data missing. The log is now reset, and created, by
+  renaming a complete empty log into place
+  ([ADR-198](decisions/adr-198-wal-is-replaced-not-truncated.md)).
+- A `wal.log` that an older binary left cut inside its header now opens as an empty log, so
+  such a node starts without manual repair.
+
+## 2026-10-06 — A checkpoint excludes writes
+
+- Fix a library-level race in the cluster coordinator: `ClusterEngine::checkpoint`, `flush`
+  and `backup_to` took no lock that a write takes. A checkpoint that ran while a write was
+  between its log append and its shard could truncate that write out of the log (an
+  acknowledged write lost after a restart) or commit it in a segment and keep it in the log
+  (a cluster that fails to reopen with a duplicate id). All three now wait for writes in
+  flight and hold new ones back
+  ([ADR-197](decisions/adr-197-checkpoint-excludes-mutations.md)). The server was not affected:
+  it serializes these calls itself.
+- `backup_to` no longer asks its caller to hold a lock.
+
+## 2026-10-06 — An interrupted bootstrap is not served
+
+- Fix a remote cluster serving part of its corpus after a `--load-file` bootstrap that stopped
+  part-way: the coordinator exited, was restarted by its supervisor, found the cluster "already
+  populated", skipped the load and served what had landed. The shard nodes now carry a mark
+  from before the first bucket until after the last, kept on disk, and a coordinator that finds
+  one refuses to start and says the load did not complete
+  ([ADR-196](decisions/adr-196-unfinished-bulk-loads-are-remembered.md)). Reset the shard
+  nodes' data and load again.
+- Upgrade shard nodes before a coordinator that bulk-loads: a node that cannot record the mark
+  is not loaded in bulk. Attaching to older nodes is unaffected.
+
 ## 2026-10-06 — Replicas are proven before they are trusted
 
 - Fix a silent miss on the remote replicated topology: every coordinator that connected marked
@@ -102,6 +150,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   `reverse_rusty_shard_translog_sync_on_write{shard}`.
 - Helm: `shard.walSyncOnWrite`, `shard.retainSource`, `shard.maxSegments`,
   `shard.memtableFlushThreshold`. Compose: `RR_SHARD_WAL_SYNC_ON_WRITE`.
+
 ## 2026-10-06 — Data-plane handlers wait off the runtime
 
 - Fix the server becoming unresponsive, `/_health` included, when writes queued behind
@@ -114,6 +163,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   whenever a vocabulary rebuild or resize held or queued for the exclusive cluster lock.
 - A standalone write whose client disconnects after admission still completes and is published;
   shutdown waits for such writes before its final flush.
+
 ## 2026-10-06 — First read after a shard restart, and wider test margins
 
 - Fix a read failing with a transport error right after a shard node restarted: the coordinator
@@ -164,6 +214,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   ([ADR-189](decisions/adr-189-dropped-shards-await-recovery.md)).
 - Moving a shard back to a node that gave it up is unchanged. Re-seeding such a node from scratch
   under the same dictionary and placement generation now requires wiping its data directory.
+
 ## 2026-10-05 — Any-of cover and visibility-preserving rebuilds
 
 - Fix default-read false negatives for queries shaped `<top-64 term> (<variants>)`: a query whose
@@ -179,6 +230,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **Upgrade:** compiler semantics version 7. Single-node stores rebuild from retained source on
   open; cluster data follows the existing compiler-semantics procedure (rebuild through the
   coordinator, or reseed remote shard volumes).
+
 ## 2026-10-05 — The top-64 mask is assigned once
 
 - Fix silent false negatives after a second initial build: `Dict::finalize_mask` re-ranked the
@@ -194,6 +246,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - A store that was restarted with `--load-file` before this fix may hold rows with stale mask
   bits. They are repaired by the next rebuild from source (a vocabulary change, or a
   compiler-semantics migration on open).
+
 ## 2026-10-05 — Memtable deletes survive a commit and a restart
 
 - Fix an acknowledged delete coming back after a restart: deleting a query that was still in the
@@ -201,6 +254,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   the WAL but skipped the delete, because the commit had advanced the WAL watermark past it without
   sealing the memtable. Recovery now always applies a delete to memtable copies and leaves only the
   segment copies to the watermark rule (ADR-066, later outcome).
+
 ## 2026-10-05 — Reader-atomic cluster upsert
 
 - Fix silent false negatives during cluster upserts: `PUT /_doc` and every `_bulk` index item

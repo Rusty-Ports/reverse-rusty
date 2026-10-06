@@ -570,7 +570,7 @@ impl ClusterEngine {
                 .propose(ClusterStateChange::BumpModelVersion {
                     dict_fingerprint: engine.dict.fingerprint(),
                 })?;
-            engine.checkpoint()?;
+            engine.checkpoint_quiesced()?;
         } else {
             for (_pos, mutation) in replay.entries {
                 engine.replay_apply(mutation)?;

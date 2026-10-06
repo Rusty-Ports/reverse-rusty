@@ -34,12 +34,8 @@ fn every_grpc_handshake_refuses_a_peer_without_atomic_replace() {
         let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
         let addr = incoming.local_addr().expect("addr");
         let svc = ShardServiceServer::new(LegacyOwnershipServer {
-            dict_fp,
-            tag_fp,
-            placement_generation: 1,
-            num_shards: 1,
-            top_k_delay: None,
             atomic_replace,
+            ..LegacyOwnershipServer::one_shard(dict_fp, tag_fp)
         });
         rt.spawn(
             tonic::transport::Server::builder()
