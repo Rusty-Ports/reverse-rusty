@@ -591,3 +591,50 @@ fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
         }
     }
 }
+
+/// The default learner on a cluster with the broad lane off (ADR-202, ADR-203). Expansion
+/// turns `widget pkg` into `widget (pkg,package)`, and in so small a corpus every anchor that
+/// leaves it is a very common one. The rebuild keeps the query in default reads, and the
+/// learned equivalence widens it there.
+#[test]
+fn the_default_learner_hides_nothing_with_the_broad_lane_off() {
+    let queries = vec![
+        (1u64, "widget pkg".to_string()),
+        (2, "(pkg,package) widget".to_string()),
+        (3, "(pkg,package) gadget".to_string()),
+    ];
+    for &k in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards: k,
+            include_broad: false,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let default_read = |cluster: &ClusterEngine, title: &str| -> HashSet<u64> {
+            cluster
+                .percolate_with_broad(title, false)
+                .expect("percolate")
+                .into_iter()
+                .collect()
+        };
+        let before = default_read(&cluster, "widget pkg");
+        assert!(before.contains(&1), "K={k}: precondition");
+        assert!(
+            !default_read(&cluster, "widget package").contains(&1),
+            "K={k}: before learning, `package` does not satisfy `pkg`"
+        );
+
+        cluster.learn_and_apply(2).expect("learn_and_apply");
+
+        let after = default_read(&cluster, "widget pkg");
+        assert!(
+            before.is_subset(&after),
+            "K={k}: the default learner removed {:?} from a default read",
+            before.difference(&after).collect::<Vec<_>>()
+        );
+        assert!(
+            default_read(&cluster, "widget package").contains(&1),
+            "K={k}: the learned equivalence widens the query in default reads"
+        );
+    }
+}

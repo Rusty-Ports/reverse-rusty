@@ -59,6 +59,10 @@ reason, and left collapse as the default of the learner.
   (`/_vocab/aliases/learn_and_apply`, ADR-060 and ADR-061).
 - Expansion adds members to any-of groups, which can fan a query's anchors out to more postings
   and, in a cluster, to more shards. That costs work and never a match.
+- Expansion can leave a stored query with only top-64 anchors, which is the opt-in class C. The
+  rebuild that applies the learned rules keeps such a query in default reads: ADR-187 on the
+  single-node engine, ADR-203 on a cluster. So the default learner removes nothing from a read
+  that leaves the broad lane out either.
 - Collapse rules installed by earlier calls stay installed. `GET /_vocab` lists them
   (`synonyms`, and `phrases` without `additive`); remove the ones that are not wanted and
   `PUT /_vocab`.
@@ -73,6 +77,9 @@ reason, and left collapse as the default of the learner.
   the default learner removes no match any stored query had, and a query naming one member now
   matches the other; the collapse learner, asked for by name, does remove matches on the same
   corpus (so the first test shows a difference that exists).
+- `tests/cluster_oracle/vocab_learning.rs` and a coordinator route test: on a cluster with the
+  broad lane off, the default learner leaves `widget pkg` in the default read of `widget pkg`
+  when it learns `pkg` ≡ `package`, and the query now also matches `widget package` there.
 - Server tests: with no control the apply route installs an equivalence and no synonym, in both
   modes; `anyof_mode=collapse` and `learn_equivalences=false` install synonyms; the preview
   reports the same per control; disagreeing controls and an unknown mode are 400s.

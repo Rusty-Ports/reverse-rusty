@@ -191,6 +191,63 @@ async fn learn_and_apply_is_mode_consistent_bounded_and_off_runtime() {
     );
 }
 
+/// The route's default mode, read back by a search that leaves the broad lane out (ADR-202,
+/// ADR-203): it returns what it returned before, and the learned equivalence widens it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn learn_and_apply_hides_nothing_from_a_search_without_the_broad_lane() {
+    let queries = vec![
+        (1, "widget pkg".to_string()),
+        (2, "(pkg,package) widget".to_string()),
+        (3, "(pkg,package) gadget".to_string()),
+    ];
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: false,
+        ..Default::default()
+    };
+    let cluster = ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), &cfg, &queries)
+        .expect("cluster builds");
+    let state = state_from_cluster(cluster);
+    let search = |title: &'static str| {
+        let state = Arc::clone(&state);
+        async move {
+            let (status, body) = send(
+                &state,
+                req(
+                    "POST",
+                    "/_search",
+                    &serde_json::json!({"document": {"title": title}, "include_broad": false}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["hits"]["hits"]
+                .as_array()
+                .expect("hits")
+                .iter()
+                .map(|hit| hit["_id"].as_u64().expect("id"))
+                .collect::<Vec<u64>>()
+        }
+    };
+    assert!(search("widget pkg").await.contains(&1), "precondition");
+
+    let (status, body) = send(
+        &state,
+        req_empty("POST", "/_vocab/learn_and_apply?min_count=2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert!(
+        search("widget pkg").await.contains(&1),
+        "the default learner removed a query from a search without the broad lane"
+    );
+    assert!(
+        search("widget package").await.contains(&1),
+        "the learned equivalence widens the query in a search without the broad lane"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alias_registry_read_has_the_same_paged_contract_in_coordinator_mode() {
     let state = test_state(&alias_seed());
