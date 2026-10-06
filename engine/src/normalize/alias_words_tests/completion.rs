@@ -399,12 +399,28 @@ fn a_form_waits_for_a_piece_an_equivalent_will_supply() {
         "`ew` at its key and once more when `x` arrives"
     );
 
+    // The same title again, with the same scratch: the class `eb` brought into the first
+    // title's view is not taken to be in this one's.
+    scratch.names = hashes(&["term:za", "term:zb", "term:zc", "term:zk"]);
+    out.clear();
+    let again = words.complete_into(&mut scratch, &dict, &mut out);
+    out.sort_unstable();
+    assert_eq!(out, ids(&["term:ea", "term:eb", "term:ew"]));
+    assert_eq!(again, examined);
+
     // A title that carries `eb`'s equivalent carries `x` from the start.
     scratch.names = hashes(&["term:zk", "term:eb"]);
     out.clear();
     let examined = words.complete_into(&mut scratch, &dict, &mut out);
     assert_eq!(out, ids(&["term:ew"]));
     assert_eq!(examined, 1);
+
+    // And the class that title carried is not taken to be in the next one's view.
+    scratch.names = hashes(&["term:za", "term:zb", "term:zc", "term:zk"]);
+    out.clear();
+    words.complete_into(&mut scratch, &dict, &mut out);
+    out.sort_unstable();
+    assert_eq!(out, ids(&["term:ea", "term:eb", "term:ew"]));
 }
 
 #[test]
@@ -476,4 +492,47 @@ fn what_a_class_can_supply_is_decided_afresh_for_each_title() {
     words.complete_into(&mut scratch, &with, &mut out);
     out.sort_unstable();
     assert_eq!(out, ids(&["term:ea", "term:eb", "term:ew1", "term:ew2"]));
+}
+
+#[test]
+fn a_class_is_gone_through_once_however_many_forms_complete_into_it() {
+    // Two thousand forms with one entity, which a query takes for two thousand other
+    // names. A title that completes every form goes through the class once.
+    let forms: Vec<_> = (0..2_000)
+        .map(|at| form("term:zzone", &[&format!("term:zzv{at}"), "term:zzcommon"]))
+        .collect();
+    let words = super::super::core::AliasWords::new(forms).expect("alias words");
+    let mut members: Vec<String> = (0..2_000).map(|at| format!("term:zzalso{at}")).collect();
+    members.push("term:zzone".to_string());
+    let members: Vec<&str> = members.iter().map(String::as_str).collect();
+    let dict = dict_with_class(&members);
+
+    let mut carried: Vec<String> = (0..2_000).map(|at| format!("term:zzv{at}")).collect();
+    carried.push("term:zzcommon".to_string());
+    let carried: Vec<&str> = carried.iter().map(String::as_str).collect();
+    let mut scratch = super::super::core::AliasScratch::default();
+    let mut out = Vec::new();
+    scratch.names = hashes(&carried);
+    let examined = words.complete_into(&mut scratch, &dict, &mut out);
+    assert_eq!(examined, 2_000);
+    out.sort_unstable();
+    out.dedup();
+    assert_eq!(out, ids(&["term:zzone"]));
+    assert_eq!(
+        scratch.scanned,
+        members.len(),
+        "the class was gone through once"
+    );
+
+    // A class the title's own names already brought in is not gone through again.
+    scratch.scanned = 0;
+    let mut carried = carried.clone();
+    carried.push("term:zzalso7");
+    scratch.names = hashes(&carried);
+    out.clear();
+    words.complete_into(&mut scratch, &dict, &mut out);
+    assert_eq!(scratch.scanned, 0);
+    out.sort_unstable();
+    out.dedup();
+    assert_eq!(out, ids(&["term:zzone"]));
 }

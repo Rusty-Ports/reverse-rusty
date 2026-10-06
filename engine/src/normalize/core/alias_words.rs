@@ -79,8 +79,13 @@ pub(in crate::normalize) struct AliasScratch {
     waiting: FastMap<u64, Vec<u32>>,
     /// Which token positions of the form under examination the view reaches.
     reach: Vec<bool>,
-    /// The equivalence classes of the title's names, each by its first member.
+    /// The equivalence classes of the title's names, each by its first member, sorted.
     classes: Vec<u64>,
+    /// The classes a completed form brought into the view, by their first member.
+    widened: FastSet<u64>,
+    /// How many names a completion went through to put them in the view.
+    #[cfg(test)]
+    pub(in crate::normalize) scanned: usize,
     /// Class (by its first member) -> whether one of its members is a form's entity, so
     /// that a class is looked through once per title however many pieces ask.
     supplies: FastMap<u64, bool>,
@@ -203,6 +208,7 @@ impl AliasWords {
         dict: &Dict,
         out: &mut Vec<FeatureId>,
     ) -> usize {
+        debug_assert!(scratch.is_clear());
         // A title that repeats a word a thousand times carries it once.
         scratch.names.sort_unstable();
         scratch.names.dedup();
@@ -212,7 +218,6 @@ impl AliasWords {
             // Each class once, however many of its members the title carries: a class is
             // told by its first member.
             let AliasScratch { names, classes, .. } = scratch;
-            classes.clear();
             classes.extend(
                 names
                     .iter()
@@ -230,7 +235,6 @@ impl AliasWords {
                 names.dedup();
             }
         }
-        debug_assert!(scratch.is_clear());
         let mut examined = 0usize;
         for at in 0..scratch.names.len() {
             let name = scratch.names[at];
@@ -250,6 +254,8 @@ impl AliasWords {
         scratch.noted.clear();
         scratch.waiting.clear();
         scratch.supplies.clear();
+        scratch.classes.clear();
+        scratch.widened.clear();
         examined
     }
 
@@ -297,8 +303,11 @@ impl AliasWords {
             noted,
             waiting,
             reach,
-            classes: _,
+            classes,
+            widened,
             supplies,
+            #[cfg(test)]
+            scanned,
         } = scratch;
         if done.contains(&u64::from(form)) {
             return;
@@ -325,10 +334,24 @@ impl AliasWords {
             done.insert(u64::from(form));
             out.push(dict.get_or_synthetic(&candidate.entity));
             // The entity is in the view, and with it every name a query takes for it. A
-            // name the title already carries has had its forms examined.
+            // name the title already carries has had its forms examined, and a class is
+            // gone through once for a title, however many forms complete into it.
             let entity = [candidate.entity_name];
-            let class = dict.equivalent_names(candidate.entity_name);
-            for &name in class.unwrap_or(&entity) {
+            let members = match dict.equivalent_names(candidate.entity_name) {
+                Some(class) => {
+                    let first = class.first().copied().unwrap_or(candidate.entity_name);
+                    if classes.binary_search(&first).is_ok() || !widened.insert(first) {
+                        return;
+                    }
+                    class
+                }
+                None => &entity,
+            };
+            for &name in members {
+                #[cfg(test)]
+                {
+                    *scanned += 1;
+                }
                 if names.binary_search(&name).is_err() && entered.insert(name) {
                     queue.push(name);
                 }
@@ -396,6 +419,8 @@ impl AliasScratch {
             && self.noted.is_empty()
             && self.waiting.is_empty()
             && self.supplies.is_empty()
+            && self.classes.is_empty()
+            && self.widened.is_empty()
     }
 
     /// The memory held for what a title's completion remembers, in entries. A title that
@@ -410,5 +435,6 @@ impl AliasScratch {
             + self.noted.capacity()
             + self.waiting.capacity()
             + self.supplies.capacity()
+            + self.widened.capacity()
     }
 }
