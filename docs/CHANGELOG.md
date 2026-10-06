@@ -9,6 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — A checkpoint excludes writes
+
+- Fix a library-level race in the cluster coordinator: `ClusterEngine::checkpoint`, `flush`
+  and `backup_to` took no lock that a write takes. A checkpoint that ran while a write was
+  between its log append and its shard could truncate that write out of the log (an
+  acknowledged write lost after a restart) or commit it in a segment and keep it in the log
+  (a cluster that fails to reopen with a duplicate id). All three now wait for writes in
+  flight and hold new ones back
+  ([ADR-197](decisions/adr-197-checkpoint-excludes-mutations.md)). The server was not affected:
+  it serializes these calls itself.
+- `backup_to` no longer asks its caller to hold a lock.
+
 ## 2026-10-06 — An interrupted bootstrap is not served
 
 - Fix a remote cluster serving part of its corpus after a `--load-file` bootstrap that stopped
