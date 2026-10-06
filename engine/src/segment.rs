@@ -494,7 +494,8 @@ pub struct Engine {
     /// copy-on-write handle via `Arc::make_mut`. That clone costs O(dict), and the
     /// dict grows with the number of distinct features: in the synthetic captures
     /// it grew about as fast as the corpus, so the clone is not bounded by a fixed
-    /// vocabulary.
+    /// vocabulary. A server holds its published snapshot, so it pays this clone at
+    /// every write (ADR-016, dated outcome).
     dict: Arc<Dict>,
     /// Per-query metadata tag dictionary (ADR-049). `Arc` + CoW exactly like `dict`:
     /// a snapshot shares it; a tagged write interns new `(key,value)`s via
@@ -516,8 +517,10 @@ pub struct Engine {
     /// flush/recompile commit and can also differ when a later durable segment
     /// follows an uncommitted memory fallback.
     committed_segment_generations: Vec<Arc<SegmentGeneration>>,
-    /// mutable hot delta — insert_live / tombstone land here. `Arc` + CoW: a
-    /// write clones only the (bounded) memtable, never the base segments.
+    /// mutable hot delta — insert_live / tombstone land here. `Arc` + CoW: while a
+    /// snapshot shares it, a write clones the whole memtable (up to the flush
+    /// threshold). A write that tombstones a base-segment row also clones that
+    /// segment's liveness overlay, or the whole segment when it is an in-memory one.
     memtable: Arc<Segment>,
     /// Number of segment states (including the memtable) with a live phrase row.
     /// Updated on writes and reduced to an O(1) capability bit in snapshots.

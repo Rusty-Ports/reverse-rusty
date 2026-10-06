@@ -43,7 +43,9 @@ HOW TO RUN
   cargo run --release --bin segbench -- 300000 3000 0.0     # read-amp vs 1/2/4/8 segments
   cargo run --release --bin tagbench -- 160000 2000 8 0.05 372
                                                             # ADR-174 category-local tag skip
-  cargo run --release --bin snapbench -- 1000000 200        # snapshot-publish cost (ADR-016)
+  cargo run --release --bin snapbench -- 1000000 200        # write + publish cost, in-memory
+  cargo run --release --bin snapbench -- 1000000 200 /tmp/snapbench-data
+                                                            #   the same on mmap base segments
   cargo run --release --bin clusterbench -- 100000 5000 8 0.05  # CLUSTER fan-out + candidate structure
   cargo run --release --bin rankbench -- 20000 500 8 275775489  # local/distributed bounded top-K + fetch
   cargo run --release --bin rankbench -- 20000 500 8 275775489 \
@@ -59,7 +61,7 @@ HOW TO RUN
   bench args:        <num_queries> <num_titles> <broad_frac> <skew> [seed] [reps] [hot_theta] [dedup]
   segbench args:     <num_queries> <num_titles> <broad_frac> <seed>
   tagbench args:     <num_queries> <num_titles> <segments> <broad_frac> <seed>
-  snapbench args:    <num_queries> <iters>
+  snapbench args:    <num_queries> <iters> [data_dir]
   clusterbench args: <num_queries> <num_titles> <num_shards> <broad_frac> <seed>
   rankbench args:    <num_queries> <num_titles> <num_shards> <seed> [profile_file] [profile_name]
   Most seeds default to 0x00C0FFEE; tagbench defaults to 0x174. Budget: each is <~30s except the
@@ -500,6 +502,9 @@ CAPTURE LOG  (newest first — append a block per run; lead with the machine)
   THROUGHPUT — indicative (single core unless noted):
     build ~510–535k q/s;  selective match ~590–700k titles/s/core;  +broad inline ~184k
     updates ~205–825k/s;  snapshot() publish 52M/s;  PUT+publish 488k/s;  bulk(1k)+publish 733k q/s
+      [corrected 2026-10-06: the PUT+publish figure was measured with each snapshot dropped at
+       once, so nothing was shared and nothing was copied. A server holds its published
+       snapshot; see the 2026-10-06 capture below for that path.]
     parallel selective, 16 threads ~1.0M titles/s total (~1.7–2.6x single-thread — bandwidth-bound)
     10M mixed-ops full cycle (insert/delete/update/flush/compact/search): 30.3s
 
@@ -514,6 +519,30 @@ CAPTURE LOG  (newest first — append a block per run; lead with the machine)
   segbench             : 53.48/55.11/56.67/57.68 cands/title;  717728/574005/327257/351379 titles/s/core
   oracle               : 109024 == 109024 matches, false_neg=0, false_pos=0
   updates              : ~730–825k/s/core, immediate (epoch) visibility
+
+[2026-10-06]  Apple M4 Max, rustc 1.95.0 (release).  WRITE + PUBLISH WITH THE SNAPSHOT HELD (ADR-016
+              later outcome; snapbench, 200 iterations per leg, automatic flush off, each leg
+              from a memtable sealed and refilled to the size it names).
+  A server keeps its last published snapshot until the next one replaces it, so at every write the
+  dict and the memtable are shared with a reader and `Arc::make_mut` copies them. Earlier snapbench
+  legs dropped each snapshot at once and never paid that copy; they remain as a lower bound.
+  ms per write + publish (writes/sec):
+                                         200k in-mem     200k durable    1M in-mem       1M durable
+    dict features                        6,919           6,919           34,274          34,274
+    snapshot dropped (lower bound) PUT   0.011 (89.8k)   0.013 (76.3k)   0.011 (89.5k)   0.014 (73.4k)
+    snapshot held, memtable 0 rows       0.323 (3,101)   0.345 (2,898)   1.538 (650)     1.518 (659)
+    snapshot held, memtable 10k rows     0.545 (1,834)   0.550 (1,818)   1.773 (564)     1.774 (564)
+    snapshot held, memtable 50k rows     1.387 (721)     1.390 (719)     2.601 (384)     2.608 (383)
+    snapshot held, memtable 100k rows    2.498 (400)     2.501 (400)     3.711 (269)     3.873 (258)
+    upsert of a base row, memtable 0     4.619 (216)     0.328 (3,050)   24.380 (41)     1.527 (655)
+    delete of a base row, memtable 0     4.355 (230)     0.014 (69.5k)   22.472 (44)     0.024 (41.0k)
+    one more snapshot pinned, 100k rows  2.440 (410)     2.463 (406)     3.672 (272)     3.650 (274)
+  Reading it: a single write costs time proportional to the dict plus the memtable, not O(1). The
+  in-memory upsert and delete of a base row copy the whole in-memory base segment; on mmap
+  segments they copy only its liveness overlay. The benchmark's bulk leg is not in this table:
+  on a durable engine it is dominated by the whole-corpus source sidecar rewrite (ADR-200) and
+  runs after the flushes above, so it is not comparable between runs.
+  Throughput is machine-dependent; the shape (growth with dict and memtable size) is not.
 
 ============================================================================================
 APPENDIX — RETIRED NPMI corpus-feature learner capture (2026-05-27, 4-core)

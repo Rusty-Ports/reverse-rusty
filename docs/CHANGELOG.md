@@ -9,6 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — The cost of a single write, measured as the server runs
+
+- `snapbench` now holds the published snapshot the way the server does, and has a durable mode
+  (`snapbench <queries> <iters> <data_dir>`, in a subdirectory it creates and removes). The
+  earlier legs dropped each snapshot at once, so
+  the write that followed copied nothing; they remain, labelled as a lower bound.
+- The record is corrected with the measured server path (ADR-016, ADR-004 and ADR-113 dated
+  outcomes, the performance results, the write-scenario table): a single write copies the
+  feature dictionary and the memtable, and costs 1.5 to 3.9 ms at 1M queries on the capture
+  machine, not ~2 µs. No behaviour change.
+- Making a write cost proportional to the change is now a roadmap item.
+
 ## 2026-10-06 — `--include-broad` applies on every search surface
 
 - **Behaviour change for servers started with `--include-broad`.** `/v2/_search`,

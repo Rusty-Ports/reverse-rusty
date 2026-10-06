@@ -13,3 +13,9 @@
   stop-the-world). Read amplification grows with segment count — compaction caps it (ADR-009).
 - **See also:** [ingestion-and-updates.md](../design/ingestion-and-updates.md)
 
+## Later outcome — 2026-10-06
+
+"~750k updates/sec/core" is the rate of the bare memtable append in an early capture, without a
+published snapshot. A server publishes after every write and holds the snapshot, which makes
+each write copy the dictionary and the memtable; see the dated outcome on
+[ADR-016](adr-016-snapshot-read-path-arcswap.md) for the measured server path.

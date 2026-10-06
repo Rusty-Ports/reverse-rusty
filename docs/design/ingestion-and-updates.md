@@ -119,7 +119,7 @@ This is exactly the §1 model, now named and tuned.
 
 | Scenario | Best-in-class approach | Cost | Touches existing data? |
 |---|---|---|---|
-| **Single add / update / remove** | append to durable tail + memtable; tombstone old on update | O(1 query), visible when the successful operation publishes | no |
+| **Single add / update / remove** | append to durable tail + memtable; tombstone old on update | O(1 query) of new index data, visible when the successful operation publishes; a server also copies the feature dictionary and the memtable at each write, because readers share the previous snapshot (ADR-016, dated outcome) | no |
 | **Bulk add** | compile the batch → build a **new base segment directly** → durable commit + publish | O(batch) for match data, existing segments are untouched; a standalone engine also rewrites its whole source sidecar at the commit, O(corpus) (ADR-200) | no |
 | **Routine churn / accumulated tombstones** | background compaction triggered by size & `holes_ratio` | amortized; off the hot path | merges a few segments |
 | **Anchor drift / poor covers** | repaired *during* compaction of the affected segments (re-anchor, repack) | amortized into a merge already happening | only the segments being merged |

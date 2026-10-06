@@ -129,7 +129,8 @@ pub(crate) struct Cli {
     pub(crate) pit_max_keep_alive_secs: u64,
 
     /// Hard ceiling on concurrently open PITs. Each PIT pins one engine
-    /// snapshot (retaining its memtable copy and any since-compacted segments),
+    /// snapshot (retaining its copy of the feature dictionary and the memtable,
+    /// and any since-compacted segments),
     /// so the bound is memory/disk-retention admission; breaches are rejected
     /// with 429, never evicted.
     #[arg(long, default_value_t = 64)]

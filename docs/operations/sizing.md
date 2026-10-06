@@ -118,7 +118,10 @@ Steady state is not the peak:
   builds the resident map from it, so it briefly holds about twice the sources;
 - in-process vocabulary rebuild and resize build replacement state before swapping;
 - peer recovery temporarily holds source and target copies;
-- open PITs retain snapshots and may keep unlinked mmap segments alive;
+- open PITs retain snapshots and may keep unlinked mmap segments alive. Each write makes a new
+  copy of the feature dictionary and the memtable while a snapshot shares them (ADR-016, dated
+  outcome), so PITs opened after different writes each pin their own copy of both: budget
+  `--max-open-pits` times the two together;
 - ingest bursts grow the memtable before its flush threshold.
 
 Two-times steady-state memory/disk is a useful **starting reserve**, not a guarantee: a compaction
