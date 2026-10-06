@@ -830,35 +830,50 @@ impl Shard for RemoteShard {
         // Send raw DSL + raw tags, NOT the pre-extracted feature ids: the server re-compiles
         // read-only against its own frozen dict + resolves tags against its adopted frozen tag
         // space (dict-/tag-agnostic wire). The coordinator's `Extracted` was only for placement.
-        let req = proto::IngestRequest {
-            items: items
-                .iter()
-                .map(|q| proto::AddItem {
-                    logical_id: q.logical,
-                    dsl: q.dsl.clone(),
-                    version: q.version,
-                    tags: proto::tags_to_proto(&q.tags),
-                    placement: Some(proto::placement_to_proto(&q.placement)),
-                })
-                .collect(),
-            shard_id: self.shard_id,
+        let items: Vec<proto::AddItem> = items
+            .iter()
+            .map(|q| proto::AddItem {
+                logical_id: q.logical,
+                dsl: q.dsl.clone(),
+                version: q.version,
+                tags: proto::tags_to_proto(&q.tags),
+                placement: Some(proto::placement_to_proto(&q.placement)),
+            })
+            .collect();
+        // One request per bucket grows with the corpus and stops fitting in a gRPC message.
+        // Send the bucket as consecutive bounded requests (ADR-193); each is its own write
+        // call, with its own deadline. An empty bucket is still one request, as before.
+        let mut requests = super::ingest_chunks::split_by_encoded_size(
+            items,
+            crate::cluster::INGEST_REQUEST_BUDGET_BYTES,
+        )?;
+        if requests.is_empty() {
+            requests.push(Vec::new());
+        }
+        let mut report = IngestReport {
+            ingested: 0,
+            rejected_parse: 0,
+            rejected_class_d: 0,
         };
-        let client = self.client.clone();
-        let reply = self.call(RpcMethod::Ingest, CallKind::Write, move || {
-            let mut client = client.clone();
-            let req = req.clone();
-            async move {
-                client
-                    .ingest_extracted(req)
-                    .await
-                    .map(tonic::Response::into_inner)
-            }
-        })?;
-        Ok(IngestReport {
-            ingested: reply.ingested as usize,
-            rejected_parse: reply.rejected_parse as usize,
-            rejected_class_d: reply.rejected_class_d as usize,
-        })
+        for items in requests {
+            let req = proto::IngestRequest {
+                items,
+                shard_id: self.shard_id,
+            };
+            let client = self.client.clone();
+            let reply = self.call(RpcMethod::Ingest, CallKind::Write, move || {
+                let mut client = client.clone();
+                let req = req.clone();
+                async move {
+                    client
+                        .ingest_extracted(req)
+                        .await
+                        .map(tonic::Response::into_inner)
+                }
+            })?;
+            super::ingest_chunks::add_reply(&mut report, &reply);
+        }
+        Ok(report)
     }
 
     fn insert_extracted_with_tags(

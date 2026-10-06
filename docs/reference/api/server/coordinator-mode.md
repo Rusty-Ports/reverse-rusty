@@ -53,6 +53,7 @@ disk are `shardserver` flags:
 | `--memtable-flush-threshold N` | 100000 | Memtable entries before an automatic flush |
 | `--hot-anchor-threshold N` | 0 | Class-H threshold (ADR-105); run the coordinator's value |
 | `--tag-segment-skipping <true\|false>` | true | ADR-174 kill switch; run the coordinator's value |
+| `--max-grpc-request-bytes N` | 67108864 (64 MiB) | Largest inbound request the node decodes (ADR-193). It bounds the dictionary a coordinator can ship; size it above the serialized dictionary (about 8 bytes plus the name per feature). Bulk loads do not depend on it |
 | `--broad-columnar <true\|false>` | true | Columnar broad evaluator; `false` is the kill switch (identical results) |
 | `--broad-materialize <true\|false>` | true | Pure-anchor materialization fast path; `false` verifies instead (identical results) |
 

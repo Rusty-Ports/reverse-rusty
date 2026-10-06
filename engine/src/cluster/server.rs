@@ -37,6 +37,14 @@ use super::shard::{LocalShard, Shard, ShardError};
 /// cap but ADR-110 deliberately does not permit raising this transport cliff.
 pub const DEFAULT_MAX_GRPC_RESULT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_GRPC_RESULT_BYTES: usize = DEFAULT_MAX_GRPC_RESULT_BYTES;
+/// The largest request a shard node accepts, unless configured otherwise (ADR-193). Tonic's
+/// own default is 4 MiB, which a dictionary outgrows: `AdoptDict` ships the whole dictionary
+/// in one message, at every coordinator connect. Bulk ingest does not depend on this; the
+/// coordinator splits a bucket into requests of [`INGEST_REQUEST_BUDGET_BYTES`].
+pub const DEFAULT_MAX_GRPC_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// The size the coordinator keeps each bulk-ingest request under. Below tonic's 4 MiB default
+/// with room for framing, so a shard node of any version and configuration accepts it.
+pub const INGEST_REQUEST_BUDGET_BYTES: usize = 3 * 1024 * 1024;
 /// Node-local admission for long-running exhaustive shard streams. This is
 /// deliberately independent of the coordinator HTTP job quota because a
 /// shard endpoint can be called by more than one coordinator or directly.
@@ -214,6 +222,8 @@ pub struct ShardServer {
     /// Exact protobuf encoded-result cap for unary result messages and each
     /// `FetchMatches` stream item (ADR-110).
     max_grpc_result_bytes: usize,
+    /// The largest inbound request this node decodes (ADR-193).
+    max_grpc_request_bytes: usize,
     /// One bounded logical-ID snapshot at a time per node, including stream lifetime.
     logical_id_permits: Arc<tokio::sync::Semaphore>,
     /// Node-scope non-queuing admission for `PercolateAll` blocking workers.

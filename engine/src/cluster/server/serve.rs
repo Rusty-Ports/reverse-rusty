@@ -56,6 +56,18 @@ impl ShardServer {
         Ok(self)
     }
 
+    /// Set the largest inbound request this node decodes (ADR-193). It bounds the dictionary a
+    /// coordinator can ship in `AdoptDict`, and what one caller can make the node buffer.
+    pub fn with_max_grpc_request_bytes(mut self, bytes: usize) -> Result<Self, ShardError> {
+        if bytes == 0 {
+            return Err(ShardError::Config(
+                "max gRPC request bytes must be at least 1".into(),
+            ));
+        }
+        self.max_grpc_request_bytes = bytes;
+        Ok(self)
+    }
+
     /// Set the node-local maximum number of concurrently executing exhaustive
     /// shard streams. Admission never queues: requests above this bound receive
     /// gRPC `RESOURCE_EXHAUSTED` before a blocking worker is spawned.
@@ -124,7 +136,14 @@ impl ShardServer {
             Arc::clone(&self.coordinator_lease),
         );
         let coordinator_lease = Arc::clone(&self.coordinator_lease);
-        let service = ShardServiceServer::with_interceptor(self, verify);
+        // Tonic's inbound default is 4 MiB; a dictionary outgrows it (ADR-193). The verifier
+        // sees only headers, so with a mesh token configured a caller must authenticate before
+        // the node reads a body of this size.
+        let max_request_bytes = self.max_grpc_request_bytes;
+        let service = tonic::service::interceptor::InterceptedService::new(
+            ShardServiceServer::new(self).max_decoding_message_size(max_request_bytes),
+            verify,
+        );
         Ok(builder.add_service(CoordinatorLeaseService::new(service, coordinator_lease)))
     }
 

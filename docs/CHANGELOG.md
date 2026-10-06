@@ -9,6 +9,21 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Requests larger than one gRPC message
+
+- Fix the remote `--load-file` bootstrap failing with `OutOfRange` once a shard's bucket passed
+  4 MiB: the coordinator sent each bucket as one request, and a shard node accepts at most
+  tonic's default. Buckets are now sent as consecutive requests of at most 3 MiB
+  ([ADR-193](decisions/adr-193-inbound-request-size.md)). No wire change; works against shard
+  nodes of any version.
+- Fix a coordinator being unable to connect, or restart, once its dictionary serialized to more
+  than 4 MiB: `AdoptDict` ships the dictionary in one request. Shard nodes now accept requests
+  up to `shardserver --max-grpc-request-bytes` (default 64 MiB; Helm
+  `shard.maxGrpcRequestBytes`), and a dictionary above a node's limit is refused with an error
+  that names the flag. **Upgrade shard nodes before a coordinator whose dictionary exceeds
+  4 MiB.**
+- Replies are unchanged: the ADR-110 result cap still holds them at or under 4 MiB.
+
 ## 2026-10-06 — Boolean server flags that could not be set to false
 
 - Fix `--retain-source`, `--broad-columnar` and `--broad-materialize` on `server`: each was a

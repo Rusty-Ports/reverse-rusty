@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics_addr,
         mut ranking_profiles_file,
         max_grpc_result_bytes,
+        max_grpc_request_bytes,
         max_concurrent_exhaustive_streams,
         max_exhaustive_stream_duration,
         engine: engine_cfg,
@@ -103,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let server = server
             .with_rank_profiles(Arc::clone(&rank_profiles))
             .with_max_grpc_result_bytes(max_grpc_result_bytes)?
+            .with_max_grpc_request_bytes(max_grpc_request_bytes)?
             .with_max_concurrent_exhaustive_streams(max_concurrent_exhaustive_streams)?
             .with_max_exhaustive_stream_duration(max_exhaustive_stream_duration)?;
         let state = if server.is_serving() {
@@ -163,6 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = server
         .with_rank_profiles(rank_profiles)
         .with_max_grpc_result_bytes(max_grpc_result_bytes)?
+        .with_max_grpc_request_bytes(max_grpc_request_bytes)?
         .with_max_concurrent_exhaustive_streams(max_concurrent_exhaustive_streams)?
         .with_max_exhaustive_stream_duration(max_exhaustive_stream_duration)?;
     server.ingest_dsl(&queries);
