@@ -111,21 +111,27 @@ fn main() {
         1.0 / per_snap
     );
 
+    // Every write below that inserts takes a new id from here, so no leg rewrites another's.
+    let mut next_id = 10_000_000_000u64;
+    let mut fresh = move || {
+        next_id += 1;
+        next_id
+    };
+
     // ---- PUT + publish, with nobody holding the previous snapshot ----
     // A lower bound, and not how the server runs: the snapshot is dropped at the end of
     // each statement, so the next write finds the dict and the memtable unshared and
     // copies nothing.
+    let inserted: Vec<u64> = (0..iters).map(|_| fresh()).collect();
     let t = Instant::now();
-    for i in 0..iters {
-        let logical = 10_000_000 + i as u64;
-        put(&mut eng, logical);
+    for logical in &inserted {
+        put(&mut eng, *logical);
         std::hint::black_box(eng.snapshot());
     }
     report("PUT + publish (snapshot dropped)", t, iters);
     let t = Instant::now();
-    for i in 0..iters {
-        let logical = 10_000_000 + i as u64; // delete the ones we just inserted
-        eng.delete_by_logical_id(logical).expect("delete");
+    for logical in &inserted {
+        eng.delete_by_logical_id(*logical).expect("delete");
         std::hint::black_box(eng.snapshot());
     }
     report("DELETE + publish (snapshot dropped)", t, iters);
@@ -133,35 +139,30 @@ fn main() {
     // ---- The server's path: the published snapshot is held until the next replaces it ----
     // `AppState` keeps the last snapshot in an `ArcSwap`, so at every write the engine's
     // dict and memtable are shared with it, and `Arc::make_mut` copies them (RR-016).
+    // Each leg starts from an empty memtable filled to the size it names, so a leg measures
+    // the same workload whatever the iteration count and whatever ran before it.
     println!("--- published snapshot held, as the server holds it ---");
-    let mut published = Arc::new(eng.snapshot());
     for memtable_rows in [0usize, 10_000, 50_000, 100_000] {
-        if memtable_rows > 0 {
-            // Fill the memtable to this many live rows without paying the copy per row.
-            drop(std::mem::replace(
-                &mut published,
-                Arc::new(Engine::new(Normalizer::default_vocab().expect("vocabulary")).snapshot()),
-            ));
-            let have = eng.metrics().memtable_entries;
-            for i in have..memtable_rows {
-                put(&mut eng, 30_000_000 + i as u64);
-            }
-            published = Arc::new(eng.snapshot());
-        }
+        let mut published = memtable_of(&mut eng, memtable_rows, &mut fresh);
         let t = Instant::now();
-        for i in 0..iters {
-            put(&mut eng, 40_000_000 + (memtable_rows * 1_000 + i) as u64);
+        for _ in 0..iters {
+            put(&mut eng, fresh());
             published = Arc::new(eng.snapshot());
         }
         report(
-            &format!("PUT + publish, memtable ~{memtable_rows} rows"),
+            &format!(
+                "PUT + publish, memtable {memtable_rows}..{}",
+                memtable_rows + iters
+            ),
             t,
             iters,
         );
+        drop(published);
     }
 
-    // An upsert that replaces a row in a base segment, and a delete of one: each also
-    // copies the liveness overlay of the segment it touches.
+    // An upsert that replaces a row in a base segment, and a delete of one, from an empty
+    // memtable: what they add is the copy of the base segment's liveness (an in-memory
+    // segment is copied whole).
     let base_ids: Vec<u64> = data
         .queries
         .iter()
@@ -169,6 +170,7 @@ fn main() {
         .map(|(id, _)| *id)
         .collect();
     let (replaced, deleted) = base_ids.split_at(iters.min(base_ids.len() / 2));
+    let mut published = memtable_of(&mut eng, 0, &mut fresh);
     let t = Instant::now();
     for id in replaced {
         eng.try_upsert_live("1994 north star wireless mouse limited pro", *id, 2)
@@ -176,22 +178,33 @@ fn main() {
         published = Arc::new(eng.snapshot());
     }
     report("UPSERT of a base row + publish", t, replaced.len());
+    drop(published);
+    let mut published = memtable_of(&mut eng, 0, &mut fresh);
     let t = Instant::now();
     for id in deleted {
         eng.delete_by_logical_id(*id).expect("delete");
         published = Arc::new(eng.snapshot());
     }
     report("DELETE of a base row + publish", t, deleted.len());
+    drop(published);
 
-    // A point in time pins one more snapshot. The write path is the same; what changes is
-    // that the copy it pins is not freed.
+    // A point in time pins one more snapshot. The write path is the same as the 100,000-row
+    // leg above; what changes is that the copy the pin holds is not freed.
+    let mut published = memtable_of(&mut eng, 100_000, &mut fresh);
     let pinned = Arc::clone(&published);
     let t = Instant::now();
-    for i in 0..iters {
-        put(&mut eng, 50_000_000 + i as u64);
+    for _ in 0..iters {
+        put(&mut eng, fresh());
         published = Arc::new(eng.snapshot());
     }
-    report("PUT + publish, one PIT open", t, iters);
+    report(
+        &format!(
+            "PUT + publish, one PIT open, memtable 100000..{}",
+            100_000 + iters
+        ),
+        t,
+        iters,
+    );
     drop(pinned);
     drop(published);
 
@@ -202,7 +215,7 @@ fn main() {
     for b in 0..bulk_iters {
         let batch: Vec<(u64, String)> = (0..bulk_n)
             .map(|j| {
-                let logical = 20_000_000 + (b * bulk_n + j) as u64;
+                let logical = 20_000_000_000 + (b * bulk_n + j) as u64;
                 (
                     logical,
                     "1994 north star wireless mouse limited pro".to_string(),
@@ -240,10 +253,24 @@ fn put(eng: &mut Engine, logical: u64) {
     .expect("insert");
 }
 
+/// Seal whatever the memtable holds, fill a new one with `rows` fresh rows while nothing
+/// shares it (so the fill copies nothing), and publish: the snapshot a server would hold.
+fn memtable_of(
+    eng: &mut Engine,
+    rows: usize,
+    fresh: &mut impl FnMut() -> u64,
+) -> Arc<reverse_rusty::segment::EngineSnapshot> {
+    eng.flush();
+    for _ in 0..rows {
+        put(eng, fresh());
+    }
+    Arc::new(eng.snapshot())
+}
+
 fn report(label: &str, started: Instant, ops: usize) {
     let per_op = started.elapsed().as_secs_f64() / ops.max(1) as f64;
     println!(
-        "{label:<40}: {:.3} ms/op    ({:.0} writes/sec)",
+        "{label:<52}: {:.3} ms/op    ({:.0} writes/sec)",
         per_op * 1e3,
         1.0 / per_op
     );

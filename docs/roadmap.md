@@ -126,7 +126,7 @@ agreement fence, and a real-corpus reduction in scanned postings or verifier wor
 
 **Problem.** A server holds its published snapshot, which shares the feature dictionary and the
 memtable with the engine, so every single write copies both before it changes them, under the
-engine mutex. Measured on the 2026-10-06 capture, a PUT costs 1.5 to 3.7 ms at 1M queries and
+engine mutex. Measured on the 2026-10-06 capture, a PUT costs 1.5 to 3.9 ms at 1M queries and
 grows with the vocabulary and the memtable; an upsert or delete of a row in an in-memory base
 segment copies the whole segment. Each open point in time can pin its own copy of both.
 

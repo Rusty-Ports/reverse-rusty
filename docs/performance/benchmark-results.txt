@@ -519,26 +519,27 @@ CAPTURE LOG  (newest first — append a block per run; lead with the machine)
   updates              : ~730–825k/s/core, immediate (epoch) visibility
 
 [2026-10-06]  Apple M4 Max, rustc 1.95.0 (release).  WRITE + PUBLISH WITH THE SNAPSHOT HELD (ADR-016
-              later outcome; snapbench, 200 iterations per leg, automatic flush off).
+              later outcome; snapbench, 200 iterations per leg, automatic flush off, each leg
+              from a memtable sealed and refilled to the size it names).
   A server keeps its last published snapshot until the next one replaces it, so at every write the
   dict and the memtable are shared with a reader and `Arc::make_mut` copies them. Earlier snapbench
   legs dropped each snapshot at once and never paid that copy; they remain as a lower bound.
   ms per write + publish (writes/sec):
                                          200k in-mem     200k durable    1M in-mem       1M durable
     dict features                        6,919           6,919           34,274          34,274
-    snapshot dropped (lower bound) PUT   0.011 (92.6k)   0.013 (77.1k)   0.012 (84.3k)   0.013 (74.1k)
-    snapshot held, memtable ~0 rows      0.321 (3,113)   0.334 (2,993)   1.543 (648)     1.526 (655)
-    snapshot held, memtable ~10k rows    0.556 (1,798)   0.547 (1,828)   1.802 (555)     1.772 (564)
-    snapshot held, memtable ~50k rows    1.373 (728)     1.453 (688)     2.585 (387)     2.631 (380)
-    snapshot held, memtable ~100k rows   2.437 (410)     2.509 (399)     3.634 (275)     3.708 (270)
-    upsert of a base-segment row         6.872 (146)     2.415 (414)     26.550 (38)     3.689 (271)
-    delete of a base-segment row         4.328 (231)     0.014 (72.9k)   22.532 (44)     0.024 (42.2k)
-    PUT with one more snapshot pinned    2.516 (398)     2.446 (409)     3.650 (274)     3.710 (270)
-    bulk(1k) + publish, ms per request   1.560           348.7           1.580           1158.7
+    snapshot dropped (lower bound) PUT   0.011 (89.8k)   0.013 (76.3k)   0.011 (89.5k)   0.014 (73.4k)
+    snapshot held, memtable 0 rows       0.323 (3,101)   0.345 (2,898)   1.538 (650)     1.518 (659)
+    snapshot held, memtable 10k rows     0.545 (1,834)   0.550 (1,818)   1.773 (564)     1.774 (564)
+    snapshot held, memtable 50k rows     1.387 (721)     1.390 (719)     2.601 (384)     2.608 (383)
+    snapshot held, memtable 100k rows    2.498 (400)     2.501 (400)     3.711 (269)     3.873 (258)
+    upsert of a base row, memtable 0     4.619 (216)     0.328 (3,050)   24.380 (41)     1.527 (655)
+    delete of a base row, memtable 0     4.355 (230)     0.014 (69.5k)   22.472 (44)     0.024 (41.0k)
+    one more snapshot pinned, 100k rows  2.440 (410)     2.463 (406)     3.672 (272)     3.650 (274)
   Reading it: a single write costs time proportional to the dict plus the memtable, not O(1). The
   in-memory upsert and delete of a base row copy the whole in-memory base segment; on mmap
-  segments they copy only its liveness overlay. The durable bulk(1k) row is the whole-corpus
-  source sidecar rewrite at each commit (ADR-200), not the copy measured here.
+  segments they copy only its liveness overlay. The benchmark's bulk leg is not in this table:
+  on a durable engine it is dominated by the whole-corpus source sidecar rewrite (ADR-200) and
+  runs after the flushes above, so it is not comparable between runs.
   Throughput is machine-dependent; the shape (growth with dict and memtable size) is not.
 
 ============================================================================================
