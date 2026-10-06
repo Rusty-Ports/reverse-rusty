@@ -1,5 +1,5 @@
-//! Request admission on the real coordinator router (ADR-199). The single-node twin is
-//! `crate::router::tests`; both use one admission function.
+//! The request limit on the real coordinator router: one limit per endpoint (ADR-199). The
+//! single-node twin is `crate::router::tests`.
 
 use std::time::Duration;
 
@@ -9,69 +9,77 @@ use tower::ServiceExt;
 use super::test_state;
 use crate::auth::AuthConfig;
 use crate::cluster_mode::router::build_cluster_router;
-use crate::router::held::{bare, hold, release_all, send};
-use crate::router::RequestPools;
+use crate::router::held::{bare, hold, hold_as, release_all, send};
 
 /// Long enough for a request that is free to run to finish, by a wide margin.
 const SETTLE: Duration = Duration::from_millis(300);
 
-/// A pool is one pool for every route of its class. Two reads on two routes fill a read
-/// pool of two, and a read on a third route waits for one of them. With a pool per route,
-/// which is what `ConcurrencyLimitLayer` under `Router::layer` gave, the third ran at once.
+/// An endpoint works on its limit and no more: with a limit of one and one search in
+/// flight, a second search waits until the first has answered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_full_read_pool_holds_back_a_read_on_any_other_route() {
-    let router = build_cluster_router(test_state(&[]), RequestPools::sized(2));
-    let search = hold(&router, "POST", "/_search").await;
-    let percolate = hold(&router, "POST", "/_mpercolate").await;
+async fn an_endpoint_works_on_its_limit_and_no_more() {
+    let router = build_cluster_router(test_state(&[]), 1);
+    let first = hold(&router, "POST", "/_search").await;
+    let mut second = send(&router, "POST", "/_search");
+    let ran_beside_the_first = second.is_admitted_within(SETTLE).await;
 
-    let mut waiting = tokio::spawn(router.clone().oneshot(bare("GET", "/")));
-    let ran = tokio::time::timeout(SETTLE, &mut waiting).await.is_ok();
-
-    // Free the slots before asserting, so a failure does not leave requests in flight.
-    search.release().await;
-    let answered = tokio::time::timeout(Duration::from_secs(30), waiting).await;
-    percolate.release().await;
+    first.release().await;
+    let ran_after_it = second.is_admitted_within(SETTLE * 10).await;
+    second.release().await;
 
     assert!(
-        !ran,
-        "a read ran on a third route while two others held a read pool of two"
+        !ran_beside_the_first,
+        "two searches ran at once under a limit of one"
     );
-    let response = answered
-        .expect("the waiting request runs once a slot is free")
-        .expect("request task")
-        .expect("router response");
-    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        ran_after_it,
+        "the waiting search runs once the slot is free"
+    );
 }
 
-/// The probes take no request slot: an orchestrator and a scraper get their answer from a
-/// server whose read pool is full.
+/// The limit is per endpoint, and it has to be. A full endpoint holds back no other: not
+/// another search route, not a write, not a read, not administration, not the probes. Some
+/// requests wait in flight for a request on another endpoint (a job-status poll for the
+/// job's stream; a search or a write for a lock a job holds until its stream is read), and
+/// if they shared slots with it, the waiters would fill the pool and it would never run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_probes_answer_while_the_read_pool_is_full() {
-    let router = build_cluster_router(test_state(&[]), RequestPools::sized(1));
+async fn a_full_endpoint_holds_back_no_other_endpoint() {
+    let router = build_cluster_router(test_state(&[]), 1);
     let search = hold(&router, "POST", "/_search").await;
 
-    let mut statuses = Vec::new();
-    for path in ["/_health", "/_metrics"] {
+    let mut held = Vec::new();
+    let mut admitted = Vec::new();
+    for (method, path) in [("POST", "/_mpercolate"), ("PUT", "/_doc/1")] {
+        let mut other = send(&router, method, path);
+        admitted.push((path, other.is_admitted_within(SETTLE * 10).await));
+        held.push(other);
+    }
+    let mut answered = Vec::new();
+    for path in ["/", "/_stats", "/_health", "/_metrics"] {
         let answer =
             tokio::time::timeout(SETTLE * 10, router.clone().oneshot(bare("GET", path))).await;
-        statuses.push((
+        answered.push((
             path,
             answer.map(|response| response.expect("router").status()),
         ));
     }
-    search.release().await;
+    // Free everything before asserting, so a failure does not leave requests in flight.
+    release_all(held.into_iter().chain([search])).await;
 
-    for (path, status) in statuses {
+    for (path, ran) in admitted {
+        assert!(ran, "{path} waited for the search endpoint's slot");
+    }
+    for (path, status) in answered {
         assert_eq!(
             status.ok(),
             Some(StatusCode::OK),
-            "{path} waited for a slot"
+            "{path} waited for the search endpoint's slot"
         );
     }
 }
 
-/// Auth is outside admission: a request without the token is refused at once, also when
-/// the pool it would use is full, so a flood of them cannot queue in front of real traffic.
+/// Auth is outside the limiter: a request without the token is refused at once, also when
+/// its endpoint is full, so a flood of them cannot queue in front of real traffic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_without_the_token_is_refused_without_waiting_for_a_slot() {
     let auth = AuthConfig::resolve(
@@ -84,79 +92,15 @@ async fn a_request_without_the_token_is_refused_without_waiting_for_a_slot() {
     std::sync::Arc::get_mut(&mut state)
         .expect("a state nothing else holds yet")
         .auth = auth;
-    let router = build_cluster_router(state, RequestPools::sized(1));
-    // An open read fills the read pool; `/v2/_mpercolate` is a read that needs the token.
-    let search = hold(&router, "POST", "/_search").await;
+    let router = build_cluster_router(state, 1);
+    let write = hold_as(&router, "PUT", "/_doc/1", Some("s3cret")).await;
 
-    let refused = tokio::time::timeout(
-        SETTLE * 10,
-        router.clone().oneshot(bare("POST", "/v2/_mpercolate")),
-    )
-    .await;
-    search.release().await;
+    let refused =
+        tokio::time::timeout(SETTLE * 10, router.clone().oneshot(bare("PUT", "/_doc/2"))).await;
+    write.release().await;
 
     let response = refused
-        .expect("the refusal does not wait for a slot")
+        .expect("the refusal does not wait for the endpoint's slot")
         .expect("router response");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-/// Document writes have a pool of their own. A compaction or backup keeps the engine lock
-/// for as long as it takes and every write that arrives meanwhile waits in flight; those
-/// waiting writes hold no slot a search could use.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn writes_waiting_for_their_pool_take_no_slot_from_searches() {
-    // Four read slots, one write slot.
-    let router = build_cluster_router(test_state(&[]), RequestPools::sized(4));
-    let write = hold(&router, "PUT", "/_doc/1").await;
-    let mut queued: Vec<_> = (2..=6)
-        .map(|id| send(&router, "PUT", &format!("/_doc/{id}")))
-        .collect();
-    let mut admitted_writes = 0;
-    for write in &mut queued {
-        if write.is_admitted_within(SETTLE / 3).await {
-            admitted_writes += 1;
-        }
-    }
-
-    let mut searches = Vec::new();
-    for _ in 0..4 {
-        let mut search = send(&router, "POST", "/_search");
-        let admitted = search.is_admitted_within(SETTLE * 10).await;
-        searches.push((search, admitted));
-    }
-
-    // Free everything before asserting, so a failure does not leave requests in flight.
-    let all_searches_ran = searches.iter().all(|(_, admitted)| *admitted);
-    let searches = searches.into_iter().map(|(search, _)| search);
-    release_all(searches.chain([write]).chain(queued)).await;
-
-    assert_eq!(
-        admitted_writes, 0,
-        "a second write ran in a write pool of one"
-    );
-    assert!(
-        all_searches_ran,
-        "a search waited behind writes that were only waiting for their own pool"
-    );
-}
-
-/// The other direction: a full read pool holds back neither a write nor an administrative
-/// request, so an operator can still act on a server that is saturated with searches.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_full_read_pool_holds_back_neither_writes_nor_administration() {
-    let router = build_cluster_router(test_state(&[]), RequestPools::sized(1));
-    let search = hold(&router, "POST", "/_search").await;
-
-    let mut write = send(&router, "PUT", "/_doc/1");
-    let write_ran = write.is_admitted_within(SETTLE * 10).await;
-    let stats =
-        tokio::time::timeout(SETTLE * 10, router.clone().oneshot(bare("GET", "/_stats"))).await;
-    release_all([search, write]).await;
-
-    assert!(write_ran, "a write waited for a read slot");
-    let stats = stats
-        .expect("an administrative read does not wait for a read slot")
-        .expect("router response");
-    assert_eq!(stats.status(), StatusCode::OK);
 }

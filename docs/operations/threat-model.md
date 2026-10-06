@@ -55,15 +55,14 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
   admits at most eight concurrent requests; excess work receives 429. It takes no slot of the
   request pool and none of the stats limit. Its body read also expires after 250 ms, preventing
   stalled streams from retaining the whole health admission pool indefinitely.
-- **Request admission.** Every request takes a slot from the pool of its class before its
-  handler runs ([ADR-199](../decisions/adr-199-request-admission-by-class.md)): 256 for matching
-  and reads, 64 each for document writes, job-status reads and everything else. No slot is
-  shared between classes, so writes queued behind a compaction cannot keep searches out and a
-  search flood cannot keep an operator out. A request beyond its pool waits without its body
-  being read. Auth is checked first, so requests without the token take no slot. `/_health` is
-  outside the pools and `/_metrics` has eight slots of its own. The pools bound the number of
-  requests, not their memory: a body may be up to 100 MB on the document, bulk and search
-  routes, and the number of waiting connections is not bounded.
+- **Request limit.** Each endpoint (a route and method) works on at most 256 requests at once,
+  and one more waits without its body being read
+  ([ADR-199](../decisions/adr-199-request-limit-per-endpoint.md)). The limit is per endpoint,
+  not per server: there is no cap on requests in flight across the whole server, and no pool is
+  shared between endpoints, because some requests wait for a request on another endpoint and
+  would keep it out. Auth is checked first, so requests without the token take no slot. The
+  limit bounds a number of requests, not their memory: a body may be up to 100 MB on the
+  document, bulk and search routes. `--max-concurrent-searches` bounds concurrent match work.
 - **Fail-loud, never fail-open.** `AuthConfig::resolve` (`auth.rs`) refuses to start on an empty,
   non-printable, or **set-but-not-UTF-8** `RR_AUTH_TOKEN` (the latter was a real fail-open bug, fixed
   in ADR-062) — the server never silently serves open when a token was intended.

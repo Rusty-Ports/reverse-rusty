@@ -1,9 +1,9 @@
-//! Requests that take slots of the request pool and keep them until the test lets go.
+//! Requests that take a slot of their endpoint's limit and keep it until the test lets go.
 //!
-//! Admission gives a request its slots before the handler runs, and the handler asks for
+//! The limiter gives a request its slot before the handler runs, and the handler asks for
 //! the body. A body that reports that first ask and then withholds its bytes therefore
-//! marks the moment the slots are taken, without a sleep, and holds them for as long as
-//! the test wants.
+//! marks the moment the slot is taken, without a sleep, and holds it for as long as the
+//! test wants.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -46,7 +46,7 @@ pub(crate) struct Sent {
 
 impl Sent {
     /// Whether the handler asks for the body within `wait`. Once it has, the request was
-    /// admitted and holds its slots until it is released.
+    /// admitted and holds its slot until it is released.
     pub(crate) async fn is_admitted_within(&mut self, wait: Duration) -> bool {
         let Some(asked) = self.asked.as_mut() else {
             return true;
@@ -58,7 +58,7 @@ impl Sent {
         true
     }
 
-    /// End the request's body and wait for its response, which frees its slots.
+    /// End the request's body and wait for its response, which frees its slot.
     pub(crate) async fn release(self) -> Response<Body> {
         let _ = self.release.send(());
         finished(self.response).await
@@ -90,18 +90,25 @@ pub(crate) async fn release_all(requests: impl IntoIterator<Item = Sent>) {
 
 /// Send `method path` with a JSON body that does not arrive until the request is released.
 pub(crate) fn send(router: &Router, method: &str, path: &str) -> Sent {
+    send_as(router, method, path, None)
+}
+
+/// [`send`], presenting `token` as the bearer token when there is one.
+pub(crate) fn send_as(router: &Router, method: &str, path: &str, token: Option<&str>) -> Sent {
     let (asked, was_asked) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let body = Body::from_stream(WithheldBody {
         asked: Some(asked),
         release: released,
     });
-    let request = Request::builder()
+    let mut request = Request::builder()
         .method(method)
         .uri(path)
-        .header("content-type", "application/json")
-        .body(body)
-        .expect("request");
+        .header("content-type", "application/json");
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let request = request.body(body).expect("request");
     let service = router.clone();
     let response =
         tokio::spawn(async move { service.oneshot(request).await.expect("router response") });
@@ -112,9 +119,19 @@ pub(crate) fn send(router: &Router, method: &str, path: &str) -> Sent {
     }
 }
 
-/// [`send`] a request and return once it is in flight, holding its slots.
+/// [`send`] a request and return once it is in flight, holding its slot.
 pub(crate) async fn hold(router: &Router, method: &str, path: &str) -> Sent {
-    let mut sent = send(router, method, path);
+    hold_as(router, method, path, None).await
+}
+
+/// [`hold`], presenting `token` as the bearer token when there is one.
+pub(crate) async fn hold_as(
+    router: &Router,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Sent {
+    let mut sent = send_as(router, method, path, token);
     assert!(
         sent.is_admitted_within(Duration::from_secs(30)).await,
         "{method} {path} was never admitted"

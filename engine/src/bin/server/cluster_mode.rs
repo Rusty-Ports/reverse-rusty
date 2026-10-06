@@ -428,8 +428,10 @@ pub(crate) async fn run(
         )),
     });
 
-    let app =
-        router::build_cluster_router(Arc::clone(&state), crate::router::RequestPools::serving());
+    let app = router::build_cluster_router(
+        Arc::clone(&state),
+        crate::router::MAX_IN_FLIGHT_PER_ENDPOINT,
+    );
 
     let addr = SocketAddr::new(cli.host, cli.port);
     info!(address = %addr, mode = "cluster", "server listening");

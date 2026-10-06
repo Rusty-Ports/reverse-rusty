@@ -37,20 +37,20 @@ use crate::handlers::{
 };
 use crate::state::{request_id_middleware, AppState};
 
-pub(crate) mod admission;
 #[cfg(test)]
 pub(crate) mod held;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use admission::RequestPools;
+/// Requests one endpoint (a route and method) works on at once. One more waits.
+pub(crate) const MAX_IN_FLIGHT_PER_ENDPOINT: usize = 256;
 
 /// The largest request body a route accepts unless it sets its own limit.
 pub(crate) const DEFAULT_BODY_LIMIT: usize = 100 * 1024 * 1024;
 
-/// Build the single-node router. Every request takes a slot from `pools` before its handler
-/// runs, and waits when its pool has none (see [`admission`]).
-pub(crate) fn build_router(state: Arc<AppState>, pools: RequestPools) -> Router {
+/// Build the single-node router. Each endpoint works on at most
+/// `max_in_flight_per_endpoint` requests at once; one more waits for a slot of that endpoint.
+pub(crate) fn build_router(state: Arc<AppState>, max_in_flight_per_endpoint: usize) -> Router {
     Router::new()
         .route("/", get(api_root))
         .route("/_doc/{id}", get(get_doc).put(put_doc).delete(delete_doc))
@@ -173,11 +173,17 @@ pub(crate) fn build_router(state: Arc<AppState>, pools: RequestPools) -> Router 
             any(prometheus_metrics).layer(DefaultBodyLimit::max(METRICS_BODY_LIMIT)),
         )
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
-        // Admission for every route (ADR-199). The middleware decides by method and path
-        // which pool a request takes its slot from, so a route is never unbounded by where
-        // it was added.
-        .layer(middleware::from_fn_with_state(pools, admission::admit))
-        // Auth sits OUTSIDE admission: an unauthenticated flood is rejected by a cheap
+        // A limit PER ENDPOINT, on purpose (ADR-199). `Router::layer` gives every route, and
+        // every method of a route, its own clone of this layer, and each clone has its own
+        // semaphore. Do not replace it with `GlobalConcurrencyLimitLayer` or any pool that
+        // endpoints share: some requests wait in flight for another request (a job-status
+        // poll for the job's stream, a write or a source-enriched search for a lock a job
+        // holds until its stream is read), and in a shared pool the waiters fill it and the
+        // request they wait for is never admitted.
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            max_in_flight_per_endpoint,
+        ))
+        // Auth sits OUTSIDE the limiter: an unauthenticated flood is rejected by a cheap
         // header compare without taking a slot from legitimate traffic (ADR-062).
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),

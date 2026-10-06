@@ -44,12 +44,15 @@ use crate::handlers::{
     VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
     VOCAB_WRITE_BODY_LIMIT,
 };
-use crate::router::{admission, RequestPools, DEFAULT_BODY_LIMIT};
+use crate::router::DEFAULT_BODY_LIMIT;
 use crate::state::{request_id_middleware, ClusterAppState};
 
-/// Build the coordinator's router. Every request takes a slot from `pools` before its handler
-/// runs, and waits when its pool has none (see [`crate::router::admission`]).
-pub(crate) fn build_cluster_router(state: Arc<ClusterAppState>, pools: RequestPools) -> Router {
+/// Build the coordinator's router. Each endpoint works on at most
+/// `max_in_flight_per_endpoint` requests at once; one more waits for a slot of that endpoint.
+pub(crate) fn build_cluster_router(
+    state: Arc<ClusterAppState>,
+    max_in_flight_per_endpoint: usize,
+) -> Router {
     Router::new()
         .route("/", get(cluster_root))
         .route(
@@ -245,11 +248,17 @@ pub(crate) fn build_cluster_router(state: Arc<ClusterAppState>, pools: RequestPo
             any(cluster_metrics).layer(DefaultBodyLimit::max(METRICS_BODY_LIMIT)),
         )
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
-        // Admission for every route (ADR-199). The middleware decides by method and path
-        // which pool a request takes its slot from, so a route is never unbounded by where
-        // it was added.
-        .layer(middleware::from_fn_with_state(pools, admission::admit))
-        // Auth sits OUTSIDE admission: an unauthenticated flood is rejected by a cheap
+        // A limit PER ENDPOINT, on purpose (ADR-199). `Router::layer` gives every route, and
+        // every method of a route, its own clone of this layer, and each clone has its own
+        // semaphore. Do not replace it with `GlobalConcurrencyLimitLayer` or any pool that
+        // endpoints share: some requests wait in flight for another request (a job-status
+        // poll for the job's stream, a write or a source-enriched search for a lock a job
+        // holds until its stream is read), and in a shared pool the waiters fill it and the
+        // request they wait for is never admitted.
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            max_in_flight_per_endpoint,
+        ))
+        // Auth sits OUTSIDE the limiter: an unauthenticated flood is rejected by a cheap
         // header compare without taking a slot from legitimate traffic (ADR-062).
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),

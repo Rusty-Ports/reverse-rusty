@@ -438,7 +438,7 @@ async fn main() {
         },
     });
 
-    let app = router::build_router(Arc::clone(&state), router::RequestPools::serving());
+    let app = router::build_router(Arc::clone(&state), router::MAX_IN_FLIGHT_PER_ENDPOINT);
 
     let addr = SocketAddr::new(cli.host, cli.port);
     info!(

@@ -39,7 +39,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [160](../adr-160-put-settings-api-contract.md) | Settings write REST API contract | Makes runtime configuration updates strict, duplicate-safe, bounded, observable, and coherently published off-runtime. | Accepted |
 | [168](../adr-168-inactive-rkyv-advisory.md) | Inactive `rkyv` advisory qualification | Narrows one lockfile-only RustSec exception behind an all-feature/all-target activation guard. | Accepted |
 | [191](../adr-191-data-plane-handlers-wait-off-the-runtime.md) | Data-plane handlers wait off the runtime | Runs standalone PUT, DELETE, bulk and flush, and the coordinator's brief cluster reads, on blocking threads under bounded admission, so requests queued behind maintenance never park an async worker. | Accepted |
-| [199](../adr-199-request-admission-by-class.md) | Request admission by class | Admits every request through one function into one of four disjoint pools (256 matching and reads, 64 each for document writes, job-status reads and everything else), with the probes outside them; the limit was 256 per route. | Accepted |
+| [199](../adr-199-request-limit-per-endpoint.md) | Request limit per endpoint | Keeps the 256-request limit per endpoint on purpose, tested on the real routers, and corrects the record that called it server-wide: a pool shared between endpoints lets waiting requests keep out the request they wait for. | Accepted |
 
 ---
 

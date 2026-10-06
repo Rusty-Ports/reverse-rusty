@@ -9,20 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-10-06 — Requests are admitted by class
+## 2026-10-06 — The request limit is per endpoint, and the record now says so
 
-- **Behaviour change.** A server now admits each request into the pool of its class
-  ([ADR-199](decisions/adr-199-request-admission-by-class.md)): 256 matching and read requests
-  at once across all of their routes, and 64 each for document writes, job-status reads and
-  everything else. The limit was documented as one server-wide 256 since ADR-062 but was
-  applied per route, so a standalone server admitted 256 requests on each of 32 routes and a
-  coordinator on each of 47. A request beyond its pool waits, as before.
-- The pools share no slot, so writes waiting behind a compaction, backup or rebuild cannot keep
-  searches out, a job-status long poll cannot keep its own stream from being read, and a search
-  flood cannot keep administrative requests out.
-- `/_health` is outside the pools, and `/_metrics` has eight slots of its own (it had 256).
-- Both HTTP routers are now built by functions the tests call, so the layer stack that is
-  tested is the one that is served.
+- No behaviour change. The 256-request limit has always applied to each endpoint (a route and
+  method) separately, while ADR-062, ADR-099, ADR-144, the threat model and the server
+  reference called it server-wide. The documents are corrected
+  ([ADR-199](decisions/adr-199-request-limit-per-endpoint.md)).
+- The limit stays per endpoint on purpose. One pool shared by every route, and then one pool
+  per class of request, were both built and both stalled: writes waiting behind a compaction,
+  job-status polls waiting for their own stream, and searches and checkpoints waiting for a
+  lock a job holds can each fill a shared pool and keep out the request they are waiting for.
+- Both HTTP routers are now built by functions the tests call, so the limit, its isolation
+  between endpoints and the position of auth are tested on the layer stack that is served.
 
 ## 2026-10-06 — Boolean server flags that could not be set to false
 

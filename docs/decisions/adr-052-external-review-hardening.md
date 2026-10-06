@@ -79,6 +79,6 @@
 
 ## Later outcome — 2026-10-06
 
-Item #6 says to "bound load with the request-concurrency limit". That limit was 256 per route,
-not per server. [ADR-199](adr-199-request-admission-by-class.md) bounds matching and read
-requests at 256 across all of their routes.
+Item #6 says to "bound load with the request-concurrency limit". That limit is 256 per endpoint,
+not per server ([ADR-199](adr-199-request-limit-per-endpoint.md)), so it does not bound total
+load; `--max-concurrent-searches` (ADR-099) bounds concurrent match work.

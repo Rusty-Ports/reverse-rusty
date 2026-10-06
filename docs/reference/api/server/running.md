@@ -67,29 +67,21 @@ cargo run --release --bin server -- \
 The server handles SIGINT/SIGTERM gracefully — it drains in-flight requests, flushes the memtable,
 and syncs the WAL before exiting.
 
-### Request admission
+### Request limit
 
-A server, standalone or coordinator, admits each request into the pool of its class
-([ADR-199](../../../decisions/adr-199-request-admission-by-class.md)). A request that finds its
-pool full waits for a slot; it is not refused, and its body is not read while it waits.
+Each endpoint (a route and method) of a server, standalone or coordinator, works on at most
+**256 requests at once** ([ADR-199](../../../decisions/adr-199-request-limit-per-endpoint.md)).
+One more waits for a slot of that endpoint; it is not refused, and its body is not read while it
+waits.
 
-| Class | Requests | At once |
-|---|---|---|
-| Matching and reads | `/_search`, `/_mpercolate`, `/v2/_search`, `/v2/_mpercolate`, `/v2/_pit`, `GET /_doc/{id}`, `GET /`, `POST /_percolate/jobs`, `/_percolate/jobs/{id}/stream` | 256 |
-| Document writes | `PUT`/`DELETE /_doc/{id}`, `POST /_bulk`, `/_flush` | 64 |
-| Job status | `GET /_percolate/jobs/{id}` | 64 |
-| Everything else | statistics, vocabulary, settings, backup, compaction, cluster operations, `DELETE /_percolate/jobs/{id}` | 64 |
-| `/_metrics` | | 8 |
+The limit is per endpoint, not per server. A full `/_search` holds back no other route, and
+there is no cap on requests in flight across the whole server. That is deliberate: some requests
+wait for a request on another endpoint (a job-status read for the job's stream, a write for a
+lock that a compaction holds), and in a shared pool they would keep it out.
 
-The pools are separate on purpose. Document writes run one at a time, and while a compaction,
-backup or vocabulary rebuild holds the lock they all wait; a job-status read can wait for the
-job's stream to be read. In separate pools those waiting requests cannot take the slots that
-searches, or the requests they are waiting for, need.
-
-`/_health` takes no slot (it admits eight requests itself and answers 429 beyond that). A
-request without a valid token, where one is required, is refused before it takes a slot. The
-numbers are not configurable. `--max-concurrent-searches` separately bounds how many searches
-occupy the match pool.
+A request without a valid token, where one is required, is refused before it takes a slot. The
+number is not configurable. `--max-concurrent-searches` separately bounds how many searches
+occupy the match pool, and is the setting to use to bound match work.
 
 ### Ranking profile file
 
