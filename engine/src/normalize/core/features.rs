@@ -101,11 +101,12 @@ impl Normalizer {
         pos.clear();
         // Every feature enters the positive view through `add`. With a multi-word alias
         // active it also notes the feature's name, so that the finished view can be asked
-        // which alias forms it carries the words of (ADR-205). `names` is the scratch's
-        // buffer, taken out because `emit` borrows the scratch while `add` runs.
+        // which alias forms it carries the words of (ADR-205). The alias scratch is taken
+        // out because `emit` borrows the rest of the scratch while `add` runs.
         let words = self.alias_words.as_ref();
-        let mut names = std::mem::take(&mut sc.alias_names);
-        names.clear();
+        let mut alias = std::mem::take(&mut sc.alias);
+        alias.names.clear();
+        let names = &mut alias.names;
         let mut add = |name: &str, pos: &mut Vec<FeatureId>| {
             if words.is_some() {
                 names.push(name_hash(name));
@@ -159,13 +160,7 @@ impl Normalizer {
                 // for in the whole view as it stands here. Only this view gets the entity:
                 // the canonical one, which negation reads, keeps the adjacent reading.
                 if let Some(words) = words {
-                    words.complete_into(
-                        &mut names,
-                        &mut sc.alias_in_view,
-                        &mut sc.alias_completed,
-                        dict,
-                        pos,
-                    );
+                    words.complete_into(&mut alias, dict, pos);
                 }
                 pos.sort_unstable();
                 pos.dedup();
@@ -174,6 +169,6 @@ impl Normalizer {
             // the library fail-safe if that invariant is ever broken.
             (true, None) => debug_assert!(false, "alias phrase missing overlap automaton"),
         }
-        sc.alias_names = names;
+        sc.alias = alias;
     }
 }

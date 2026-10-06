@@ -244,22 +244,41 @@ fn a_form_the_title_carries_can_be_a_word_of_another_form() {
     assert!(!canonical_has(&norm, "york new catalog", "term:ny_catalog"));
 }
 
-/// Run the completion on a title given by the names it carries. Returns the entities added
-/// and how many times a form was examined.
+/// Run the completion on a title given by the names it carries. Returns the entities added,
+/// distinct and in order, and how many times a form was examined.
 fn complete(words: &super::core::AliasWords, carried: &mut Vec<u64>) -> (Vec<FeatureId>, usize) {
-    let (mut in_view, mut completed, mut out) = (Vec::new(), Vec::new(), Vec::new());
-    let examined = words.complete_into(
-        carried,
-        &mut in_view,
-        &mut completed,
-        &Dict::new(),
-        &mut out,
-    );
-    assert!(
-        completed.is_empty() && in_view.iter().all(|flag| !flag),
-        "the scratch is left empty for the next title"
-    );
+    let mut scratch = super::core::AliasScratch::default();
+    let (out, examined) = complete_with(words, carried, &mut scratch);
     (out, examined)
+}
+
+fn complete_with(
+    words: &super::core::AliasWords,
+    carried: &mut Vec<u64>,
+    scratch: &mut super::core::AliasScratch,
+) -> (Vec<FeatureId>, usize) {
+    let mut out = Vec::new();
+    scratch.names.clear();
+    scratch.names.append(carried);
+    let examined = words.complete_into(scratch, &Dict::new(), &mut out);
+    carried.clone_from(&scratch.names);
+    // The view sorts what it is given, and a form can be reached twice.
+    out.sort_unstable();
+    out.dedup();
+    (out, examined)
+}
+
+fn hashes(names: &[&str]) -> Vec<u64> {
+    names
+        .iter()
+        .map(|name| super::core::name_hash(name))
+        .collect()
+}
+
+fn ids(names: &[&str]) -> Vec<FeatureId> {
+    let mut ids: Vec<FeatureId> = names.iter().map(|name| id(name)).collect();
+    ids.sort_unstable();
+    ids
 }
 
 fn form(entity: &str, words: &[&str]) -> (String, Vec<Vec<String>>) {
@@ -326,7 +345,7 @@ fn the_work_follows_the_forms_a_title_touches() {
     ];
     let (out, examined) = complete(&words, &mut carried);
     assert_eq!(out.len(), 2_000);
-    assert_eq!(out.last(), Some(&id("term:s2000")));
+    assert!(out.contains(&id("term:s2000")));
     assert_eq!(examined, 2_000);
 
     // The chain entered in the middle completes from there on only.
@@ -337,6 +356,15 @@ fn the_work_follows_the_forms_a_title_touches() {
     let (out, examined) = complete(&words, &mut carried);
     assert_eq!(out.len(), 500);
     assert_eq!(examined, 500);
+
+    // An entity the title already carries has had its forms examined; completing the
+    // form for it does not examine them again.
+    let (out, examined) = complete(
+        &words,
+        &mut hashes(&["term:unit", "term:s0", "term:s1", "term:s2"]),
+    );
+    assert_eq!(out.len(), 2_000);
+    assert_eq!(examined, 2_000);
 }
 
 #[test]
@@ -358,7 +386,194 @@ fn two_forms_for_one_entity_add_it_once() {
     .map(|name| super::core::name_hash(name))
     .collect();
     let (out, _) = complete(&words, &mut carried);
-    assert_eq!(out, vec![id("entity:place"), id("term:trip")]);
+    assert_eq!(out, ids(&["entity:place", "term:trip"]));
+}
+
+#[test]
+fn an_entity_that_many_forms_share_as_a_word_wakes_none_of_them() {
+    // `wire less` is a form for the word `wireless`, which ten thousand forms
+    // `wireless <model>` share. They are keyed on their model, so a title that carries
+    // `wireless` only through `wire less` examines the one form it touches.
+    let mut forms = vec![form("term:wireless", &["term:wire", "term:less"])];
+    forms.extend((0..10_000).map(|model| {
+        form(
+            &format!("term:wireless_m{model}"),
+            &["term:wireless", &format!("term:m{model}")],
+        )
+    }));
+    let words = super::core::AliasWords::new(forms).expect("alias words");
+    assert_eq!(words.forms_keyed_on("term:wireless"), 0);
+
+    let (out, examined) = complete(&words, &mut hashes(&["term:wire", "term:less"]));
+    assert_eq!(out, ids(&["term:wireless"]));
+    assert_eq!(examined, 1);
+
+    // With a model as well, that model's form is the only other one looked at: once if
+    // `wireless` was already in the view, twice if the form had to wait for it.
+    let (out, examined) = complete(&words, &mut hashes(&["term:wire", "term:less", "term:m7"]));
+    assert_eq!(out, ids(&["term:wireless", "term:wireless_m7"]));
+    assert!((2..=3).contains(&examined), "examined {examined} times");
+}
+
+#[test]
+fn a_form_waits_for_the_word_it_lacks() {
+    // `zk s2` is keyed on `zk`, which the title carries, and lacks `s2`, which only the
+    // completion can supply, two steps later. It is looked at once when its key is seen
+    // and once when `s2` arrives, and not in between.
+    let words = super::core::AliasWords::new(vec![
+        form("term:s3", &["term:zk", "term:s2"]),
+        form("term:s1", &["term:za", "term:zb"]),
+        form("term:s2", &["term:s1", "term:zc"]),
+    ])
+    .expect("alias words");
+    assert_eq!(words.forms_keyed_on("term:zk"), 1);
+    assert_eq!(words.forms_keyed_on("term:s2"), 0);
+    let (out, examined) = complete(
+        &words,
+        &mut hashes(&["term:za", "term:zb", "term:zc", "term:zk"]),
+    );
+    assert_eq!(out, ids(&["term:s1", "term:s2", "term:s3"]));
+    assert_eq!(examined, 4);
+
+    // Without the word the chain needs, the waiting form is never looked at again.
+    let (out, examined) = complete(&words, &mut hashes(&["term:za", "term:zb", "term:zk"]));
+    assert_eq!(out, ids(&["term:s1"]));
+    assert_eq!(examined, 3, "each form once");
+}
+
+#[test]
+fn a_form_is_noted_once_under_a_word_it_waits_on() {
+    // The second word of `last` can arrive under two names, `a1` and `a2`, and both do,
+    // one after the other, while its third word `b` is still two steps away. The second
+    // arrival finds the form waiting on `b` as the first left it, and notes nothing: when
+    // `b` arrives the form is looked at once, not once per earlier look.
+    let twice = |entity: &str, word: &str| form(entity, &[word, word]);
+    let words = super::core::AliasWords::new(vec![
+        form("term:q1", &["term:x1", "term:x2"]),
+        form("term:q2", &["term:y1", "term:y2"]),
+        twice("term:a1", "term:q1"),
+        twice("term:a2", "term:q2"),
+        form("term:bb", &["term:a1", "term:a2"]),
+        twice("term:b", "term:bb"),
+        (
+            "term:last".to_string(),
+            vec![
+                vec!["term:zkey".to_string()],
+                vec!["term:a1".to_string(), "term:a2".to_string()],
+                vec!["term:b".to_string()],
+            ],
+        ),
+    ])
+    .expect("alias words");
+    assert_eq!(words.forms_keyed_on("term:zkey"), 1);
+    let (out, examined) = complete(
+        &words,
+        &mut hashes(&["term:x1", "term:x2", "term:y1", "term:y2", "term:zkey"]),
+    );
+    assert_eq!(
+        out,
+        ids(&[
+            "term:q1",
+            "term:q2",
+            "term:a1",
+            "term:a2",
+            "term:bb",
+            "term:b",
+            "term:last"
+        ])
+    );
+    // Six forms once each, and `last` four times: at its key, when `a1` and `a2` arrive,
+    // and when `b` does.
+    assert_eq!(examined, 10);
+}
+
+#[test]
+fn a_key_word_carried_under_two_names_completes_the_form_once() {
+    // `unit` is a word of two forms, so the first is keyed on its other word, which has
+    // two names.
+    let words = super::core::AliasWords::new(vec![
+        (
+            "term:refurb_unit".to_string(),
+            vec![
+                vec!["term:refurb".to_string(), "term:refurbished".to_string()],
+                vec!["term:unit".to_string()],
+            ],
+        ),
+        form("term:unit_price", &["term:unit", "term:price"]),
+    ])
+    .expect("alias words");
+    assert_eq!(words.forms_keyed_on("term:refurb"), 1);
+    assert_eq!(words.forms_keyed_on("term:refurbished"), 1);
+    let mut scratch = super::core::AliasScratch::default();
+    let mut out = Vec::new();
+    scratch.names = hashes(&["term:refurb", "term:refurbished", "term:unit"]);
+    let examined = words.complete_into(&mut scratch, &Dict::new(), &mut out);
+    assert_eq!(out, vec![id("term:refurb_unit")], "added once");
+    assert_eq!(examined, 2, "once per name of the key word");
+}
+
+#[test]
+fn a_title_that_touches_no_form_holds_no_completion_state() {
+    // A scratch made for one title (cluster routing makes one per request) must not pay
+    // for the size of the registry.
+    let forms: Vec<_> = (0..20_000)
+        .map(|model| {
+            form(
+                &format!("term:wireless_m{model}"),
+                &["term:wireless", &format!("term:m{model}")],
+            )
+        })
+        .collect();
+    let words = super::core::AliasWords::new(forms).expect("alias words");
+    let mut scratch = super::core::AliasScratch::default();
+    let (out, examined) = complete_with(
+        &words,
+        &mut hashes(&["term:wireless", "term:lamp"]),
+        &mut scratch,
+    );
+    assert!(out.is_empty());
+    assert_eq!(examined, 0);
+    assert_eq!(scratch.held(), 0);
+
+    // Nor does a title that has a form's key word and lacks a word nothing can supply.
+    let (out, examined) = complete_with(&words, &mut hashes(&["term:m3"]), &mut scratch);
+    assert!(out.is_empty());
+    assert_eq!(examined, 1);
+    assert_eq!(scratch.held(), 0);
+}
+
+#[test]
+fn nothing_of_one_title_is_left_for_the_next() {
+    // One scratch serves every title of a request. `s3` waits on `s2`; `s2` is keyed on
+    // `zc` and needs `s1`.
+    let words = super::core::AliasWords::new(vec![
+        form("term:s1", &["term:za", "term:zb"]),
+        form("term:s2", &["term:zc", "term:s1"]),
+        form("term:s3", &["term:zk", "term:s2"]),
+    ])
+    .expect("alias words");
+    let mut scratch = super::core::AliasScratch::default();
+    let full = ["term:za", "term:zb", "term:zc", "term:zk"];
+    let all = ids(&["term:s1", "term:s2", "term:s3"]);
+
+    let (out, first) = complete_with(&words, &mut hashes(&full), &mut scratch);
+    assert_eq!(out, all);
+    // The same title again completes the same forms with the same work: a form that was
+    // completed for the first title is not taken as done for the second.
+    let (out, again) = complete_with(&words, &mut hashes(&full), &mut scratch);
+    assert_eq!(out, all);
+    assert_eq!(again, first);
+
+    // `s1` was in the first title's view. A title without its words does not carry it,
+    // so `s2` is examined and not completed, and `s3` waits on a word that never comes.
+    let (out, examined) = complete_with(&words, &mut hashes(&["term:zc", "term:zk"]), &mut scratch);
+    assert!(out.is_empty());
+    assert_eq!(examined, 2);
+
+    // A title that left `s3` waiting leaves no one waiting for the next title.
+    let (out, examined) = complete_with(&words, &mut hashes(&["term:za", "term:zb"]), &mut scratch);
+    assert_eq!(out, ids(&["term:s1"]));
+    assert_eq!(examined, 1);
 }
 
 #[test]

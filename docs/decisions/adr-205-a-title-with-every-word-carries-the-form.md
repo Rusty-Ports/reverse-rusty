@@ -56,12 +56,17 @@ of the form, wherever the words stand.**
    notes the feature's name. When the view is complete, the forms whose words it holds add
    their entities. With no multi-word alias nothing is noted and the path is not taken.
 5. **The work follows the forms a title touches.** Each form is keyed on the one of its
-   words that the fewest forms share, and is examined when the title carries that word. Ten
-   thousand forms `wireless <model>` cost a title that says `wireless` nothing; a title that
-   names a model looks at that model's form. A form is examined again only when an entity that
-   is one of its words enters the view, so a chain of forms built on one another is walked
-   once. A title's names are reduced to the distinct ones first and compared by a 64-bit hash,
-   so they are kept without strings; a collision could only add a candidate. Entities are told
+   words that the fewest forms share, and is not looked at before that word is in the view.
+   Ten thousand forms `wireless <model>` cost nothing to a title that says `wireless`, or
+   that gets `wireless` from a form `wire less`; a title that names a model looks at that
+   model's form. A name enters the view once, from the title or as the entity of a completed
+   form, and one thing is done with it: the forms keyed on it are examined, and so are the
+   forms an earlier look found waiting on it. A form that lacks a word only another form can
+   supply waits on that word, and is noted there once. What the completion remembers for a
+   title is empty until the title touches a form, so a scratch made for one title (cluster
+   routing makes one per request) costs nothing to size or clear, whatever the number of
+   forms. A title's names are reduced to the distinct ones first and compared by a 64-bit
+   hash, so they are kept without strings; a collision could only add a candidate.
    apart exactly.
 
 **Why no match is lost.** Take a title that matched a query before the alias, and a form the
@@ -100,7 +105,7 @@ entity satisfies the rewritten query.
   consumer's own matcher decides; an alias form made of very common words will add candidates.
 - While a multi-word alias is active a title pays one hash per feature of its positive view,
   a sort of those hashes and one lookup per distinct name, and nothing otherwise. On 200,000
-  generated queries with three aliases active that was 2.07–2.26 µs per title against
+  generated queries with three aliases active that was 2.11–2.20 µs per title against
   1.89–1.91 µs before (Apple M4 Max, release build, alternating runs); classes and candidates
   per title were identical.
 - No migration and no upgrade order: stored rows, the manifest and the wire formats are
@@ -114,8 +119,11 @@ entity satisfies the rewritten query.
   through an unrelated phrase; the canonical view is unchanged; forms that share an entity,
   nested forms, forms built on one another, and a repeated word; no multi-word alias, no
   change. The work is counted: a title with the shared word of five thousand forms examines
-  none, a chain of two thousand forms is examined once each, and a word repeated fifty
-  thousand times is looked at once.
+  none; a chain of two thousand forms is examined once each; a word repeated fifty thousand
+  times is looked at once; an entity that ten thousand forms share as a word wakes none of
+  them; a form that waits on a word is looked at once when the word arrives; a title that
+  touches no form leaves the completion's scratch unallocated; and nothing of one title is
+  left for the next.
 - `tests/oracle/alias_components.rs`: every match a query set had before `wireless mouse =>
   cordless mouse` and `ny => new york` survives activation, over titles with the words
   adjacent, apart and reordered; the alias matches; one word of a form does not; quoted and

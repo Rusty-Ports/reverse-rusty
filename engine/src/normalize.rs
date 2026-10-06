@@ -259,14 +259,9 @@ pub struct NormScratch {
     phrase_emitted: Vec<bool>,
     /// Per-token "consumed by a phrase" flags, sized to `tokens.len()`.
     token_consumed: Vec<bool>,
-    /// Every feature name of the current title's positive view, as
-    /// [`name_hash`](core::name_hash) values (ADR-205). Taken out while the view is built
-    /// and put back.
-    alias_names: Vec<u64>,
-    /// Which alias entities the rule has put in the current title's view, by entity slot,
-    /// and the forms that put them there (ADR-205). Both are empty between titles.
-    alias_in_view: Vec<bool>,
-    alias_completed: Vec<u32>,
+    /// The names of the current title's positive view and what completing the alias forms
+    /// over them remembers (ADR-205). Taken out while the view is built and put back.
+    alias: core::AliasScratch,
     /// Feature-name builder (`"term:"`/`"year:"` + value) handed to the helper emitters.
     scratch: String,
     /// Reused difference array for linear positioned-graph coverage. Entry `i`

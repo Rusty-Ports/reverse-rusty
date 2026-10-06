@@ -18,7 +18,7 @@ mod alias_overlap;
 mod alias_words;
 mod helpers;
 pub(super) use alias_overlap::PhraseOverlap;
-pub(super) use alias_words::{name_hash, AliasWords};
+pub(super) use alias_words::{name_hash, AliasScratch, AliasWords};
 pub use helpers::fold_diacritic;
 use helpers::{as_year, collapse_ws_runs_in_place, emit_generic, parse_number};
 
