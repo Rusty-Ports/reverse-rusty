@@ -296,8 +296,15 @@ struct ClusterSettingsResponse {
     replication_factor: usize,
     include_broad: bool,
     durable: bool,
-    /// The per-shard engine configuration the cluster was assembled with.
+    /// The engine configuration this server was started with. In-process it is every shard's
+    /// configuration. Against remote shard nodes it is the coordinator's own, and the keys in
+    /// `shard_local` say nothing about the shards.
     per_shard: EngineConfig,
+    /// Remote clusters only (ADR-192): the `per_shard` keys each shard node sets for itself
+    /// with its own `shardserver` flags. The values shown under `per_shard` for these keys
+    /// are not the shards'.
+    #[serde(skip_serializing_if = "<[&str]>::is_empty")]
+    shard_local: &'static [&'static str],
     /// Built-in per-shard defaults, when explicitly requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     defaults: Option<EngineConfig>,
@@ -327,6 +334,11 @@ pub(crate) async fn cluster_get_settings(
                 include_broad: worker_state.include_broad,
                 durable: cluster.is_durable(),
                 per_shard: cluster.per_shard_config().clone(),
+                shard_local: if cluster.is_remote() {
+                    &crate::cluster_mode::shard_local_flags::SHARD_LOCAL_SETTINGS
+                } else {
+                    &[]
+                },
                 defaults: include_defaults.then(EngineConfig::default),
             }
         };

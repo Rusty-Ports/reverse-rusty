@@ -23,6 +23,7 @@ fn sample(
         rpc_latency: [LatencySnapshot::zero(); SHARD_RPC_LABELS.len()],
         broad: BroadCostSnapshot::default(),
         ranked: RankDeliverySnapshot::default(),
+        translog_sync_on_write: false,
     }
 }
 

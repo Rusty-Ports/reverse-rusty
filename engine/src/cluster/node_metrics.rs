@@ -155,6 +155,8 @@ pub(crate) struct ShardSample {
     pub broad: BroadCostSnapshot,
     /// ADR-110 bounded result/fetch/cap/cancellation counters.
     pub ranked: RankDeliverySnapshot,
+    /// Whether this slot's translog is fsynced on every write (ADR-192).
+    pub translog_sync_on_write: bool,
 }
 
 /// Render a shard node's `/_metrics` body over ALL the node's loaded slots (ADR-093 multi-shard). A
@@ -183,6 +185,19 @@ pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
             "reverse_rusty_total_queries",
             &[("shard", sid)],
             s.metrics.total_queries,
+        );
+    }
+
+    e.header(
+        "reverse_rusty_shard_translog_sync_on_write",
+        "1 if this shard fsyncs its translog on every write (an acknowledged write survives \
+         power loss), 0 if it syncs at flush checkpoints or has no data dir.",
+    );
+    for (s, sid) in samples.iter().zip(&sids) {
+        e.sample(
+            "reverse_rusty_shard_translog_sync_on_write",
+            &[("shard", sid)],
+            u64::from(s.translog_sync_on_write),
         );
     }
 

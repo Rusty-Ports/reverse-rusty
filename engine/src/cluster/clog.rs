@@ -140,6 +140,14 @@ pub(crate) trait ClusterLog: Send + Sync {
     /// document, so this byte-log stays a pure ordered store.
     fn checkpoint(&self, up_to: LogPos) -> Result<(), ShardError>;
 
+    /// Whether each append is fsynced before it returns, so an acknowledged write survives a
+    /// power loss and not only a process crash. False for a log that persists nothing.
+    /// Read by the shard node's metrics, which exist only in the distributed build.
+    #[cfg(feature = "distributed")]
+    fn syncs_each_write(&self) -> bool {
+        false
+    }
+
     /// Test-only fault injection: make subsequent `append`s fail. Default no-op (e.g.
     /// `NullClusterLog`); `FileClusterLog` revokes its write handle. Exposed on the trait
     /// so a coordinator test can break the log through a `Box<dyn ClusterLog>` and prove
@@ -399,6 +407,11 @@ impl ClusterLog for FileClusterLog {
 
     fn last_pos(&self) -> Result<LogPos, ShardError> {
         Ok(LogPos(self.lock().next_seq.saturating_sub(1)))
+    }
+
+    #[cfg(feature = "distributed")]
+    fn syncs_each_write(&self) -> bool {
+        self.fsync_each_write
     }
 
     fn checkpoint(&self, up_to: LogPos) -> Result<(), ShardError> {

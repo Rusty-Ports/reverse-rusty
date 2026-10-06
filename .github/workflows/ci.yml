@@ -278,6 +278,18 @@ jobs:
           validate --set clusterToken.create=true --set clusterToken.value=x \
                    --set auth.create=true --set auth.value=y
           validate --set rankingProfiles.configMapName=rr-ranking-profiles
+          validate --set shard.walSyncOnWrite=true --set shard.retainSource=false \
+                   --set shard.maxSegments=4 --set shard.memtableFlushThreshold=2000000
+          # ADR-192: the shard-local values must reach `shardserver` as it parses them.
+          rendered="$(helm template rr deploy/helm/reverse-rusty -n rrns \
+              --set shard.walSyncOnWrite=true --set shard.memtableFlushThreshold=2000000)"
+          for expected in '- --wal-sync-on-write' '- "true"' \
+                          '- --memtable-flush-threshold' '- "2000000"'; do
+            if ! grep -qF -- "$expected" <<<"$rendered"; then
+              echo "shard StatefulSet does not render: $expected" >&2
+              exit 1
+            fi
+          done
           validate \
             --set rankingProfiles.volumeSource.persistentVolumeClaim.claimName=rr-ranking-profiles \
             --set rankingProfiles.volumeSource.persistentVolumeClaim.readOnly=true

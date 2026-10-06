@@ -140,6 +140,7 @@ mod add_shard;
 mod adopt;
 mod drop_sequence;
 mod dropped;
+mod engine_config;
 mod fence;
 mod gc;
 mod limits;
