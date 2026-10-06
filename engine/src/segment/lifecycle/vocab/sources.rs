@@ -108,6 +108,48 @@ impl Engine {
         logicals
     }
 
+    /// Logical ids a default (`include_broad = false`) read can NOT return now: every
+    /// live copy is in an opt-in class. Kept as the complement of the visible set because
+    /// it is the small one; any live id absent from it is default-visible.
+    pub(in crate::segment) fn opt_in_only_logical_ids(&self) -> crate::util::FastSet<u64> {
+        // (logical, is the copy opt-in) for every live copy, memtable then segments.
+        let live_copies = || {
+            let memtable = (0..self.memtable.len() as u32)
+                .filter(|&local| self.memtable.is_alive(local))
+                .map(|local| {
+                    (
+                        self.memtable.exact_store().logical(local),
+                        self.memtable.class[local as usize].is_opt_in(),
+                    )
+                });
+            let segments = self.segments.iter().flat_map(|segment| {
+                (0..segment.len() as u32)
+                    .filter(|&local| segment.is_alive(local))
+                    .map(|local| {
+                        (
+                            segment.logical(local),
+                            segment
+                                .class_of(local)
+                                .is_some_and(crate::compile::CostClass::is_opt_in),
+                        )
+                    })
+            });
+            memtable.chain(segments)
+        };
+        let mut opt_in_only: crate::util::FastSet<u64> = live_copies()
+            .filter(|&(_, opt_in)| opt_in)
+            .map(|(logical, _)| logical)
+            .collect();
+        if !opt_in_only.is_empty() {
+            for (logical, opt_in) in live_copies() {
+                if !opt_in {
+                    opt_in_only.remove(&logical);
+                }
+            }
+        }
+        opt_in_only
+    }
+
     /// Lowest logical id represented by more than one live physical exact row.
     /// Ordinary vocabulary rebuilds intentionally canonicalize such additive
     /// histories to the newest source generation. A compiler compatibility

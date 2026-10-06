@@ -20,6 +20,7 @@ mod alias;
 mod alias_discovery;
 mod alias_edges;
 mod alias_feedback;
+mod anyof_cover;
 mod batch;
 mod class_d;
 mod core;

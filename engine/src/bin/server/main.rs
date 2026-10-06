@@ -51,6 +51,7 @@ mod handlers;
 mod jobs;
 mod metrics;
 mod pit;
+mod preload;
 mod resize_ops;
 mod state;
 mod vocab_seed;
@@ -388,21 +389,26 @@ async fn main() {
         if !result.queries.is_empty() {
             // All-or-nothing: if the initial load can't be durably persisted,
             // fail fast rather than silently serve an empty/non-durable engine.
-            let report = match engine.try_build_from_queries(&result.queries) {
-                Ok(report) => report,
+            match preload::preload_queries(&mut engine, &result.queries) {
+                Ok(preload::Preload::Loaded(report)) => {
+                    let elapsed = start.elapsed();
+                    info!(
+                        ingested = report.ingested,
+                        rejected_parse = report.rejected_parse,
+                        rejected_class_d = report.rejected_class_d,
+                        elapsed_ms = format!("{:.1}", elapsed.as_secs_f64() * 1000.0),
+                        "query file loaded"
+                    );
+                }
+                Ok(preload::Preload::SkippedPopulated { existing }) => warn!(
+                    existing = existing,
+                    "skipping --load-file: the reopened data directory is already populated"
+                ),
                 Err(e) => {
                     error!(error = %e, "initial query load could not be durably persisted; aborting startup");
                     std::process::exit(1);
                 }
-            };
-            let elapsed = start.elapsed();
-            info!(
-                ingested = report.ingested,
-                rejected_parse = report.rejected_parse,
-                rejected_class_d = report.rejected_class_d,
-                elapsed_ms = format!("{:.1}", elapsed.as_secs_f64() * 1000.0),
-                "query file loaded"
-            );
+            }
         }
     }
 

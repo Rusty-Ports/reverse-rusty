@@ -22,6 +22,45 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - A standalone write whose client disconnects after admission still completes and is published;
   shutdown waits for such writes before its final flush.
 
+## 2026-10-05 — Dropped shards await recovery
+
+- Fix a silent false negative with a stale cluster topology: after orphan GC dropped a shard from
+  a node, a coordinator that still named that node could re-adopt the shard, get an empty slot and
+  read no matches from it. The node now remembers the shards it dropped, and a slot re-created for
+  one refuses every read and write as an ownership mismatch until a peer recovery fills it
+  ([ADR-189](decisions/adr-189-dropped-shards-await-recovery.md)).
+- Moving a shard back to a node that gave it up is unchanged. Re-seeding such a node from scratch
+  under the same dictionary and placement generation now requires wiping its data directory.
+## 2026-10-05 — Any-of cover and visibility-preserving rebuilds
+
+- Fix default-read false negatives for queries shaped `<top-64 term> (<variants>)`: a query whose
+  only required feature is top-64 now anchors on an any-of group that has no top-64 member, instead
+  of going to the opt-in broad lane. Activating an alias on a rare term (`acme mouse` with
+  `acme ≡ acm`) therefore no longer removes the query from `include_broad=false` reads
+  ([ADR-187](decisions/adr-187-anyof-cover-and-visible-rebuilds.md)).
+- Choose the any-of cover from the frozen top-64 mask, not from frequency order, so two compiles of
+  one query agree on visibility.
+- Keep a default-visible query visible through every single-node rebuild (vocabulary change,
+  compiler-semantics migration), including a query whose only term turned top-64 after it was
+  compiled and an alias that leaves only top-64 anchors.
+- **Upgrade:** compiler semantics version 7. Single-node stores rebuild from retained source on
+  open; cluster data follows the existing compiler-semantics procedure (rebuild through the
+  coordinator, or reseed remote shard volumes).
+## 2026-10-05 — The top-64 mask is assigned once
+
+- Fix silent false negatives after a second initial build: `Dict::finalize_mask` re-ranked the
+  top-64 mask on every call, and the initial-build path called it on engines that already held
+  queries. Stored rows keep their required top-64 features as mask bits, so after a re-rank they
+  stopped matching in both `include_broad` modes. The mask is now assigned once
+  ([ADR-188](decisions/adr-188-mask-assigned-once.md)).
+- The single-node server no longer applies `--load-file` to a populated data directory. It did so
+  on every restart, which re-ranked the mask and stored every query in the file again.
+- Fix a query disappearing from default reads after a restart: a live insert made before the
+  first mask assignment was re-planned by WAL replay under the finalized mask. The memtable is now
+  sealed before the first assignment.
+- A store that was restarted with `--load-file` before this fix may hold rows with stale mask
+  bits. They are repaired by the next rebuild from source (a vocabulary change, or a
+  compiler-semantics migration on open).
 ## 2026-10-05 — Memtable deletes survive a commit and a restart
 
 - Fix an acknowledged delete coming back after a restart: deleting a query that was still in the
