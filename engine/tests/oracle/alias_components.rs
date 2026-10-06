@@ -498,3 +498,35 @@ fn a_later_overlapping_alias_removes_no_match() {
     let after = matches_of(&mut eng, &titles);
     assert_nothing_lost(&titles, &before, &after);
 }
+
+/// A form the title carries can be a word of a form activated later. `new york` is a
+/// declared phrase for `ny`; as an alias form it makes `york new catalog` carry `ny`, and
+/// the stored `ny catalog` matches. When `ny catalog` becomes an alias form itself the
+/// query is rewritten to that form's entity, which the same title must then carry too.
+#[test]
+fn a_form_built_on_another_forms_entity_removes_no_match() {
+    let mut vocab = Vocab::new();
+    vocab.add_phrase(&["new", "york"], "term:ny", FeatureKind::Generic);
+    let mut eng = Engine::with_vocab(vocab, EngineConfig::default()).expect("engine");
+    eng.build_from_queries(&owned(&[(1, "ny catalog"), (2, "new york catalog")]));
+    let titles = [
+        "york new catalog",
+        "new york catalog",
+        "ny catalog",
+        "catalog york",
+    ];
+
+    eng.import_alias_synonyms("ny => new york").expect("import");
+    let before = matches_of(&mut eng, &titles);
+    assert!(before[0].contains(&1) && before[0].contains(&2));
+    assert!(!before[3].contains(&1));
+
+    eng.import_alias_synonyms("nycat => ny catalog")
+        .expect("import");
+    let after = matches_of(&mut eng, &titles);
+    assert_nothing_lost(&titles, &before, &after);
+    assert!(
+        !after[3].contains(&1),
+        "one word of the form is not the form"
+    );
+}

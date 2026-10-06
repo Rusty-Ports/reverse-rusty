@@ -444,21 +444,31 @@ pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<F
 
     // A title that carries every word of a multi-word alias form carries the form, wherever
     // the words stand (ADR-205). A word is carried as its own token, or under whatever the
-    // word analyzes to by itself (a synonym's canonical, a typed number). Judged against the
-    // view as it stands here, so one form's entity never counts as a word of another form.
-    let carried = pos.clone();
-    for phrase in &vocab.phrases {
-        if phrase.mode != PhraseMode::Alias {
-            continue;
+    // word analyzes to by itself (a synonym's canonical, a typed number). A form the title
+    // carries is itself carried, and may be a word of another form, so the rule is applied
+    // until it adds nothing.
+    loop {
+        let carried = pos.clone();
+        for phrase in &vocab.phrases {
+            if phrase.mode != PhraseMode::Alias {
+                continue;
+            }
+            let entity = Feature::raw(phrase.feature.clone());
+            if pos.contains(&entity) {
+                continue;
+            }
+            let every_word = phrase.tokens.iter().all(|word| {
+                carried.contains(&Feature::term(word))
+                    || emit(vocab, word, Side::Title, false)
+                        .iter()
+                        .any(|feature| carried.contains(feature))
+            });
+            if every_word {
+                pos.push(entity);
+            }
         }
-        let every_word = phrase.tokens.iter().all(|word| {
-            carried.contains(&Feature::term(word))
-                || emit(vocab, word, Side::Title, false)
-                    .iter()
-                    .any(|feature| carried.contains(feature))
-        });
-        if every_word {
-            pos.push(Feature::raw(phrase.feature.clone()));
+        if pos.len() == carried.len() {
+            break;
         }
     }
 

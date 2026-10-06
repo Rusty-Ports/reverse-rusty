@@ -41,7 +41,9 @@ of the form, wherever the words stand.**
    counts. So does whatever the word compiles to as a token of its own: a synonym's canonical,
    a year. A title that says `refurbished unit` therefore carries the form `refurb unit` when
    `refurb` is a synonym of `refurbished`, and `unit #1995` carries `1995 unit`. The words are
-   looked for in the complete view, including what an overlapping phrase contributes.
+   looked for in the complete view, including what an overlapping phrase contributes, and the
+   rule is applied until it adds nothing: a form the title carries is itself in the view, and
+   may be a word of another form.
 2. **Only the positive view.** The canonical view, which negation reads, keeps the adjacent
    reading: `inventory -(new york, boston)` rejects `new york inventory` and still accepts a
    title that has the two words apart. A quoted `"new york"` is checked against positions and
@@ -93,10 +95,11 @@ entity satisfies the rewritten query.
   alias (`ny catalog`) now also matches a title that has the words of `new york` apart
   (`new seasonal york catalog`). The engine is a recall-first candidate generator and the
   consumer's own matcher decides; an alias form made of very common words will add candidates.
-- While a multi-word alias is active a title pays one hash and one lookup per feature of its
-  positive view, and nothing otherwise. On 200,000 generated queries with three aliases active
-  that was about 0.2 µs on a 1.9 µs title (Apple M4 Max, release build); classes and candidates
-  per title were identical to `main`.
+- While a multi-word alias is active a title pays one hash per feature of its positive view,
+  a sort of those hashes and one lookup per distinct name, and nothing otherwise. On 200,000
+  generated queries with three aliases active that was 2.14–2.23 µs per title against
+  1.89–1.91 µs before (Apple M4 Max, release build, four alternating runs); classes and
+  candidates per title were identical.
 - No migration and no upgrade order: stored rows, the manifest and the wire formats are
   unchanged. During a rolling upgrade a node on the old binary answers as before.
 
@@ -106,14 +109,16 @@ entity satisfies the rewritten query.
   reordered, written through a synonym, typed by their context, consumed by another phrase in
   the canonical view, and restored by an overlapping phrase; not for a missing word, and not
   through an unrelated phrase; the canonical view is unchanged; forms that share an entity,
-  nested forms and a repeated word; five thousand forms that share a word are keyed on the
-  other one; no multi-word alias, no change.
+  nested forms, forms built on one another, and a repeated word; five thousand forms that
+  share a word are keyed on the other one; a title that repeats a word carries it once; no
+  multi-word alias, no change.
 - `tests/oracle/alias_components.rs`: every match a query set had before `wireless mouse =>
   cordless mouse` and `ny => new york` survives activation, over titles with the words
   adjacent, apart and reordered; the alias matches; one word of a form does not; quoted and
   negated forms keep their results; the engine equals a brute-force evaluation of every stored
   query; a form over an existing additive or collapse phrase; a number typed by its context;
-  a later alias whose form overlaps an earlier one removes no match;
+  a later alias whose form overlaps an earlier one, or is built on its entity, removes no
+  match;
   queries written under the alias keep the class and default visibility they have on `main`;
   and the same at scale on generated queries the aliases rewrite, against the no-alias brute
   force.

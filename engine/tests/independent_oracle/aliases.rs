@@ -291,6 +291,50 @@ fn a_form_word_written_through_a_synonym_differential() {
     oracle.assert_matches(&titles, "alias/a-word-through-a-synonym");
 }
 
+/// Forms built on one another: `new york` is a declared phrase for the word `ny` and an
+/// alias form, and `ny catalog` is an alias form whose first word is that entity. A title
+/// with the words of `new york` apart carries `ny`, and through it `ny catalog` (ADR-205).
+#[test]
+fn a_form_built_on_another_forms_entity_differential() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "ny catalog".into()),
+        (2, "nycat".into()),
+        (3, "new york catalog".into()),
+        (4, "york".into()),
+        (5, "sale -(ny catalog,zzother)".into()),
+    ];
+    let titles: Vec<String> = [
+        "york new catalog",
+        "new york catalog",
+        "ny catalog",
+        "nycat",
+        "catalog york",
+        "new york city catalog sale",
+        "catalog sale ny",
+        "ny catalog sale",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let mut vocab = reverse_rusty::vocab::Vocab::new();
+    vocab.add_phrase(
+        &["new", "york"],
+        "term:ny",
+        reverse_rusty::dict::FeatureKind::Generic,
+    );
+    let ref_vocab = RefVocab::default_vocab()
+        .phrase("new york", "term:ny", PhraseMode::Alias)
+        .phrase("ny catalog", "term:ny_catalog", PhraseMode::Alias)
+        .equivalence(&["ny catalog", "nycat"]);
+    let oracle = RefOracle::build_with_vocab_and_alias_import(
+        &queries,
+        vocab,
+        "ny => new york\nnycat => ny catalog",
+        ref_vocab,
+    );
+    oracle.assert_matches(&titles, "alias/forms-built-on-one-another");
+}
+
 /// A randomized at-scale alias corpus combining the overlapping forms (`ny` / `new york` /
 /// `new york city` / `nyc` / component tokens) with fillers, negations (incl. forbidden phrases),
 /// and any-of groups (incl. multi-word members) — so the two-view normalization, the overlap scan,

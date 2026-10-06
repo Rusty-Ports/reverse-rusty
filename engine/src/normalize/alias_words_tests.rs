@@ -223,6 +223,56 @@ fn forms_that_share_a_word_are_keyed_on_the_other_one() {
 }
 
 #[test]
+fn a_form_the_title_carries_can_be_a_word_of_another_form() {
+    // `new york` is a phrase for the word `ny`, and an alias form. A title with its words
+    // apart carries `ny`, and with `catalog` it therefore carries the form `ny catalog`.
+    let norm = build(|b| {
+        b.add_phrase(&["new", "york"], "term:ny", FeatureKind::Generic);
+        b.add_alias_form("new york");
+        b.add_alias_form("ny catalog");
+        b.add_alias_form("ny_catalog sale");
+    });
+    assert!(positive_has(&norm, "york new catalog", "term:ny"));
+    assert!(positive_has(&norm, "york new catalog", "term:ny_catalog"));
+    assert!(!positive_has(&norm, "york catalog", "term:ny_catalog"));
+    // And so on down the chain, in whatever order the forms are examined.
+    assert!(positive_has(
+        &norm,
+        "sale catalog york new",
+        "term:ny_catalog_sale"
+    ));
+    assert!(!canonical_has(&norm, "york new catalog", "term:ny_catalog"));
+}
+
+#[test]
+fn a_title_that_repeats_a_word_carries_it_once() {
+    // The names of a title are reduced to the distinct ones before any form is examined,
+    // so a word repeated thousands of times costs one look, not one per occurrence.
+    let words = super::core::AliasWords::new(vec![(
+        "term:wireless_mouse".to_string(),
+        vec![
+            vec!["term:wireless".to_string()],
+            vec!["term:mouse".to_string()],
+        ],
+    )])
+    .expect("alias words");
+    let wireless = super::core::name_hash("term:wireless");
+    let mouse = super::core::name_hash("term:mouse");
+    let dict = Dict::new();
+
+    let mut carried = vec![wireless; 50_000];
+    let mut out = Vec::new();
+    words.complete_into(&mut carried, &dict, &mut out);
+    assert_eq!(carried, vec![wireless]);
+    assert!(out.is_empty());
+
+    let mut carried = vec![mouse, wireless, mouse, wireless];
+    words.complete_into(&mut carried, &dict, &mut out);
+    assert_eq!(out, vec![id("term:wireless_mouse")]);
+    assert_eq!(carried.len(), 3, "the two words and the entity");
+}
+
+#[test]
 fn a_repeated_word_is_one_word() {
     let norm = build(|b| b.add_alias_form("tick tick boom"));
     assert!(positive_has(&norm, "boom tick", "term:tick_tick_boom"));

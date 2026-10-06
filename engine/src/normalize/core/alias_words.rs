@@ -20,6 +20,9 @@ pub(in crate::normalize) fn name_hash(name: &str) -> u64 {
 
 struct Form {
     entity: String,
+    /// The entity's own name: a form the title carries is itself something the title
+    /// carries, and may be a word of another form.
+    entity_name: u64,
     /// One entry per word: the names a title may carry the word under, sorted.
     words: Vec<Vec<u64>>,
 }
@@ -44,6 +47,7 @@ impl AliasWords {
             .into_iter()
             .filter(|(_, words)| !words.is_empty())
             .map(|(entity, words)| Form {
+                entity_name: name_hash(&entity),
                 entity,
                 words: words
                     .iter()
@@ -86,30 +90,51 @@ impl AliasWords {
         Some(Self { forms, keyed })
     }
 
-    /// Append the entity of every form all of whose words the title carries. `carried` is
-    /// the title's complete positive view by name, in any order and possibly with repeats:
-    /// a title has a few dozen names, and a form is examined only when one of them is the
-    /// form's key, so a scan is cheaper than sorting. An entity the dictionary has not
+    /// Append the entity of every form all of whose words the title carries, to a fixed
+    /// point: a form the title carries adds its entity to what the title carries, and that
+    /// entity may be a word of another form.
+    ///
+    /// `carried` is the title's complete positive view by name, in any order and with
+    /// repeats; it is left sorted and distinct, followed by the names this call added. An
+    /// entity already in the view is not appended again. An entity the dictionary has not
     /// interned resolves to its synthetic id, as everywhere on the title side (ADR-046).
     pub(in crate::normalize) fn complete_into(
         &self,
-        carried: &[u64],
+        carried: &mut Vec<u64>,
         dict: &Dict,
         out: &mut Vec<FeatureId>,
     ) {
-        for name in carried {
-            let Some(forms) = self.keyed.get(name) else {
-                continue;
-            };
-            for &form in forms {
-                let form = &self.forms[form as usize];
-                let every_word = form
-                    .words
-                    .iter()
-                    .all(|names| names.iter().any(|name| carried.contains(name)));
-                if every_word {
-                    out.push(dict.get_or_synthetic(&form.entity));
+        // A title that repeats a word a thousand times carries it once.
+        carried.sort_unstable();
+        carried.dedup();
+        let sorted = carried.len();
+        // Every round but the last adds a form's entity, and a form is added once, so the
+        // rounds are bounded by the number of forms whatever else goes wrong.
+        for _ in 0..=self.forms.len() {
+            let before = carried.len();
+            for at in 0..before {
+                let Some(forms) = self.keyed.get(&carried[at]) else {
+                    continue;
+                };
+                for &form in forms {
+                    let form = &self.forms[form as usize];
+                    let has = |name: &u64| {
+                        carried[..sorted].binary_search(name).is_ok()
+                            || carried[sorted..].contains(name)
+                    };
+                    if has(&form.entity_name) {
+                        continue;
+                    }
+                    if form.words.iter().all(|names| names.iter().any(has)) {
+                        carried.push(form.entity_name);
+                        out.push(dict.get_or_synthetic(&form.entity));
+                    }
                 }
+            }
+            // Another round only when this one added an entity: it may complete a form
+            // that was a word short.
+            if carried.len() == before {
+                break;
             }
         }
     }

@@ -159,7 +159,7 @@ impl Normalizer {
                 // for in the whole view as it stands here. Only this view gets the entity:
                 // the canonical one, which negation reads, keeps the adjacent reading.
                 if let Some(words) = words {
-                    words.complete_into(&names, dict, pos);
+                    words.complete_into(&mut names, dict, pos);
                 }
                 pos.sort_unstable();
                 pos.dedup();
