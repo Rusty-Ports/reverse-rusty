@@ -11,6 +11,25 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 impl Wal {
+    /// Whether `path` is a log whose header was never completely written: shorter than a
+    /// header, and every byte it does hold is the byte a header has there.
+    ///
+    /// A log is created, and was once reset, by truncating the file and then writing the
+    /// eight header bytes. A crash between the two left a file like this. It never held a
+    /// record: a creation has none yet, and a reset runs only after the manifest covers
+    /// every record the old log held. So it is an empty log, not a damaged one. A short
+    /// file with any other content is not ours to reinterpret and stays an error.
+    pub(super) fn header_was_interrupted(path: &Path) -> io::Result<bool> {
+        let len = std::fs::metadata(path)?.len();
+        if len >= WAL_HEADER_SIZE as u64 {
+            return Ok(false);
+        }
+        let held = std::fs::read(path)?;
+        // The version bytes changed between releases; only the magic identifies the file.
+        let magic = &held[..held.len().min(WAL_MAGIC.len())];
+        Ok(WAL_MAGIC.starts_with(magic))
+    }
+
     /// Validate every complete record before permitting any repair or append.
     pub(super) fn read_entries(path: &Path) -> io::Result<(FrameScan<WalEntry>, u32)> {
         let data = std::fs::read(path)?;
@@ -42,6 +61,12 @@ impl Wal {
     /// Return only records after the last materialized FlushCheckpoint. Unknown
     /// or malformed complete frames are errors, not an implicitly discarded tail.
     pub fn recover(path: &Path) -> io::Result<WalRecovery> {
+        if Self::header_was_interrupted(path)? {
+            return Ok(WalRecovery {
+                entries: Vec::new(),
+                skipped_bytes: 0,
+            });
+        }
         let (scan, _) = Self::read_entries(path)?;
         let all = scan.records;
         let last_checkpoint_idx = all

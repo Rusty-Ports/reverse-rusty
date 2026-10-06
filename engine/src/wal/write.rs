@@ -14,7 +14,7 @@ impl Wal {
     /// `fsync_each_write` selects the per-append durability policy (see
     /// [`Wal::fsync_each_write`]).
     pub fn open(path: &Path, fsync_each_write: bool) -> io::Result<Self> {
-        if path.exists() {
+        if path.exists() && !Self::header_was_interrupted(path)? {
             // Open existing, find the max sequence number and current pending count.
             let (scan, version) = Self::read_entries(path)?;
             let entries = scan.records;
@@ -56,11 +56,9 @@ impl Wal {
                 repaired_tail_bytes: scan.torn_bytes,
             })
         } else {
-            // Create new
-            let mut file = std::fs::File::create(path)?;
-            file.write_all(&WAL_MAGIC)?;
-            file.write_all(&WAL_VERSION.to_le_bytes())?;
-            file.sync_all()?;
+            // A new log, or one whose header an interrupted creation or reset left
+            // incomplete: such a file never held a record (see `header_was_interrupted`).
+            let file = Self::publish_empty_log(path)?;
             Ok(Wal {
                 file: LogAppender::new(file),
                 path: path.to_path_buf(),
@@ -454,19 +452,50 @@ impl Wal {
         }
     }
 
-    /// Reset the WAL: truncate to just the header. Called after a successful
-    /// compaction + manifest write when all data is in sealed segments.
+    /// Reset the WAL to an empty log. Called after a successful compaction + manifest
+    /// write when all data is in sealed segments.
+    ///
+    /// The log is replaced, never truncated in place: an empty log is written beside it
+    /// and renamed over it, so a crash at any point leaves either the old log (whose
+    /// records the manifest already covers) or the new one, and both open. Until the
+    /// rename the old log and its handle are untouched, so a failure before it leaves the
+    /// WAL as it was. From the rename on, the old handle addresses an unlinked file and is
+    /// disabled first: if anything after it fails, appends are refused until a reopen
+    /// rather than acknowledged into a file no restart will read.
     pub fn reset(&mut self) -> io::Result<()> {
+        let replacement = Self::write_empty_log_beside(&self.path)?;
         self.file.disable();
-        let mut file = std::fs::File::create(&self.path)?;
-        file.write_all(&WAL_MAGIC)?;
-        file.write_all(&WAL_VERSION.to_le_bytes())?;
-        file.sync_all()?;
+        crate::storage::durable_rename(&replacement, &self.path)?;
+        let file = std::fs::OpenOptions::new().append(true).open(&self.path)?;
         self.file = LogAppender::new(file);
         self.size_bytes = WAL_HEADER_SIZE as u64;
         self.pending_entries = 0;
         // Don't reset next_seq — keep it monotonic across resets
         Ok(())
+    }
+
+    /// Where an empty replacement is built before it is renamed over the log.
+    pub(super) fn replacement_path(path: &Path) -> std::path::PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".tmp");
+        std::path::PathBuf::from(name)
+    }
+
+    /// Write a complete, synced, header-only log beside `path` and return where it is.
+    fn write_empty_log_beside(path: &Path) -> io::Result<std::path::PathBuf> {
+        let replacement = Self::replacement_path(path);
+        let mut file = std::fs::File::create(&replacement)?;
+        file.write_all(&WAL_MAGIC)?;
+        file.write_all(&WAL_VERSION.to_le_bytes())?;
+        file.sync_all()?;
+        Ok(replacement)
+    }
+
+    /// Put an empty log at `path` atomically and return an append handle on it.
+    fn publish_empty_log(path: &Path) -> io::Result<std::fs::File> {
+        let replacement = Self::write_empty_log_beside(path)?;
+        crate::storage::durable_rename(&replacement, path)?;
+        std::fs::OpenOptions::new().append(true).open(path)
     }
 
     /// Test-only: swap the underlying file for a read-only handle so subsequent

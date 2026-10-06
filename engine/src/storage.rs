@@ -97,7 +97,7 @@ impl Crc32 {
 }
 
 /// Atomic rename with parent-directory fsync for crash durability.
-fn durable_rename(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn durable_rename(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::rename(from, to)?;
     if let Some(parent) = to.parent() {
         File::open(parent)?.sync_all()?;

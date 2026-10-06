@@ -9,6 +9,16 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — The WAL is replaced, not truncated
+
+- Fix a single-node server that could refuse to start after a crash during a flush: the WAL was
+  reset by truncating it to zero bytes and then writing its header, and a crash between the two
+  left a log "too small" to open, with no data missing. The log is now reset, and created, by
+  renaming a complete empty log into place
+  ([ADR-198](decisions/adr-198-wal-is-replaced-not-truncated.md)).
+- A `wal.log` that an older binary left cut inside its header now opens as an empty log, so
+  such a node starts without manual repair.
+
 ## 2026-10-06 — Boolean server flags that could not be set to false
 
 - Fix `--retain-source`, `--broad-columnar` and `--broad-materialize` on `server`: each was a
