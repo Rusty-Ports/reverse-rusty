@@ -163,6 +163,8 @@ fn multiword_alias_two_view_differential() {
         (7, "(ny,chicago) closing".into()), // any-of with an alias form
         (8, "brooklyn".into()),
         (9, "\"new york\" office".into()), // quoted alias path keeps adjacency
+        (10, "(new york,brooklyn) office".into()), // a form as a group member keeps its words
+        (11, "office -(new york,chicago)".into()), // a negated form rejects the form alone
     ];
     let titles: Vec<String> = [
         "new york catalog opening day",
@@ -178,6 +180,12 @@ fn multiword_alias_two_view_differential() {
         "new  york catalog", // whitespace run: P(T) overlap scan still matches the alias
         "ny office",
         "new vintage york office",
+        // The form's words apart and reordered: q2 and q6 spell a form out and keep them.
+        "new vintage york inventory",
+        "york inventory new",
+        "city subway york new",
+        "york office", // one word of the form is not the form
+        "new office",
     ]
     .iter()
     .map(ToString::to_string)

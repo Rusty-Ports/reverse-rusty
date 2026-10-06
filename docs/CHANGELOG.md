@@ -27,6 +27,34 @@ reverse chronological and describe outcomes, not the current architecture or fut
   modes page (class C is not only a small-corpus effect), the workload note, the cluster Compose
   file and ADR-059.
 
+## 2026-10-06 — Activating a multi-word alias no longer removes matches
+
+- A title that carries every word of a multi-word alias form, wherever the words stand, now
+  carries the form ([ADR-205](decisions/adr-205-a-title-with-every-word-carries-the-form.md)).
+  Importing `wireless mouse => cordless mouse` used to remove `wireless optical mouse` and
+  `mouse, wireless` from the matches of the stored query `wireless mouse`, which had matched them
+  before the alias. Every activation path was affected: synonym import, an edited registry, and
+  feedback activation, on a single node and on a cluster.
+- A negated form still rejects only the form written out, and a quoted form still requires
+  adjacency.
+- **Wider than before:** a query that names another form of the alias (`ny catalog`) also matches
+  a title with the words of `new york` apart. An alias made of very common words adds candidates.
+- A form is carried under any reading a query could have had of its text. After
+  `ny => new york`, a title with `york new catalog` carries the form `ny catalog`, and after
+  `new york => big apple`, a title with `big seasonal apple catalog` carries `new york catalog`,
+  so a later import that makes those forms removes no match either.
+- **One shape still narrows:** a new form that cuts through a phrase an earlier alias covered.
+  With `yc => york city` active, importing `ny => new york` re-reads the stored query
+  `new york city` as `new york` and `city`, and the title `new yc` stops matching. ADR-205 says
+  why the title side cannot repair it.
+- Nothing stored changes: no recompile, no migration and no upgrade order. The rule is applied
+  to titles and costs a few lookups per title while a multi-word alias is active.
+- Library: `Dict::set_equivalences` takes the `Equivalences` value that
+  `Vocab::resolve_equivalences` now returns. It dereferences to the former map.
+- The reference documents and four ADRs said activation only widens. That is now true for
+  multi-word forms; the at-scale test that claimed it could not fail and is replaced by one that
+  rewrites real generated queries.
+
 ## 2026-10-06 — A vocabulary change no longer strands queries at the next insert
 
 - **A silent false negative on single-node engines is fixed.** After a vocabulary change that

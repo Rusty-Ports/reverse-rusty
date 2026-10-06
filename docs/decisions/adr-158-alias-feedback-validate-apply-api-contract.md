@@ -81,3 +81,8 @@ fixed telemetry, asynchronous and closed admission, and off-runtime feedback/eng
 Coordinator tests cover the observed no-store 501, shared validation, telemetry, and method
 fallback. Core tests cover identical evidence retry semantics; the existing differential oracle
 continues to prove stamping is match-neutral and activation is widening-only.
+
+**Outcome update (2026-10-06).** Activation "widens positive query requirements", and the
+oracle's widening-only check, covered single-token pairs. Activating a pair with a multi-word
+form could remove matches until [ADR-205](adr-205-a-title-with-every-word-carries-the-form.md); the route is unchanged and the oracle now covers such a
+pair.

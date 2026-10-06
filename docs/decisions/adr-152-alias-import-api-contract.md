@@ -101,3 +101,8 @@ Coordinator tests cover response and matching parity, no-op behavior, durable re
 control-transition repair, incompatible-manifest refusal, telemetry, method handling, asynchronous
 admission, and off-runtime write-lock contention over a real multi-shard cluster. Embedded lifecycle
 tests prove an identical import completes a pending split-apply rebuild.
+
+**Outcome update (2026-10-06).** "Active groups still widen positive requirements" was not the
+whole effect of importing a multi-word rule such as `wireless mouse => cordless mouse`: a stored
+query that spelled the form out also lost the titles with its words apart. [ADR-205](adr-205-a-title-with-every-word-carries-the-form.md) removes that
+loss; the route is unchanged.

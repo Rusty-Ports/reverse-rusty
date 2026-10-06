@@ -15,6 +15,7 @@
 
 mod harness;
 
+mod alias_forms;
 mod aliases;
 mod core;
 mod corpus;

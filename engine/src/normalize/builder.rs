@@ -233,17 +233,89 @@ impl NormalizerBuilder {
             &self.number_context,
         );
 
-        Ok(Normalizer {
+        let alias_patterns: Vec<(String, String)> = self
+            .phrase_patterns
+            .iter()
+            .zip(&self.phrase_entries)
+            .filter(|(_, entry)| entry.mode == PhraseMode::Alias)
+            .map(|(pattern, entry)| (pattern.clone(), entry.feature.clone()))
+            .collect();
+        let mut norm = Normalizer {
             automaton,
             phrase_entries: self.phrase_entries,
             phrase_overlap,
             has_multiword_aliases,
+            alias_words: None,
             synonyms: self.synonyms,
             syn_index: self.syn_index,
             punct: self.punct,
             number_context: self.number_context,
             fingerprint,
-        })
+        };
+        // ADR-205: the parses of each alias form's text, and under which feature names a
+        // title carries each piece.
+        let (mut lc, mut sc) = (String::new(), super::NormScratch::new());
+        let forms = alias_patterns
+            .into_iter()
+            .map(|(pattern, entity)| {
+                let words: Vec<&str> = pattern.split(' ').collect();
+                let mut units: Vec<super::core::UnitSpec> = Vec::new();
+                for (at, word) in words.iter().enumerate() {
+                    // The token itself, which the positive view holds as `term:<token>`
+                    // for every token of a title whatever its context makes of it, and
+                    // what the word compiles to alone (a synonym's canonical, a year).
+                    let mut names = vec![format!("term:{word}")];
+                    norm.emit(
+                        word,
+                        &mut lc,
+                        &mut sc,
+                        super::Side::Title,
+                        false,
+                        &mut |name, _kind| {
+                            if !names.iter().any(|seen| seen == name) {
+                                names.push(name.to_string());
+                            }
+                        },
+                    );
+                    units.push(super::core::UnitSpec {
+                        from: at,
+                        to: at + 1,
+                        names,
+                    });
+                }
+                // A phrase the vocabulary has for several of the words, short of the form
+                // itself: a query compiled those words to the phrase's feature. The
+                // occurrences are read off the pattern in one scan.
+                if let Some(overlap) = norm.phrase_overlap.as_ref() {
+                    let mut starts: Vec<usize> = Vec::with_capacity(words.len());
+                    let mut at = 0;
+                    for word in &words {
+                        starts.push(at);
+                        at += word.len() + 1;
+                    }
+                    overlap.occurrences(&pattern, &mut |start, tokens, feature| {
+                        let Ok(from) = starts.binary_search(&start) else {
+                            return;
+                        };
+                        let to = from + tokens as usize;
+                        if to - from >= 2 && to <= words.len() && to - from < words.len() {
+                            units.push(super::core::UnitSpec {
+                                from,
+                                to,
+                                names: vec![feature.to_string()],
+                            });
+                        }
+                    });
+                }
+                super::core::FormSpec {
+                    entity,
+                    len: words.len(),
+                    units,
+                }
+            })
+            .collect();
+        norm.alias_words = super::core::AliasWords::new(forms);
+        Ok(norm)
     }
 }
 

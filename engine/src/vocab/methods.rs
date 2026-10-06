@@ -8,7 +8,7 @@ use std::io;
 use std::path::Path;
 
 use super::{AliasRegistry, AliasSummary, PhraseEntry, PunctRule, SynonymEntry, Vocab};
-use crate::dict::{Dict, EquivMap, FeatureId, FeatureKind};
+use crate::dict::{Dict, EquivMap, Equivalences, FeatureId, FeatureKind};
 use crate::normalize::{Normalizer, NormalizerBuilder, PunctClass};
 use crate::util::fast_map;
 
@@ -310,16 +310,30 @@ impl Vocab {
     /// On a **mutable** single-node dict, call [`intern_equivalence_forms`](Self::intern_equivalence_forms)
     /// first so a later insert can't mint a different (dense) id for a form that resolved to a
     /// synthetic id here (the ADR-060 ID-stability fix).
-    pub fn resolve_equivalences(&self, norm: &Normalizer, dict: &Dict) -> EquivMap {
+    pub fn resolve_equivalences(&self, norm: &Normalizer, dict: &Dict) -> Equivalences {
         let mut lc = String::new();
-        // 1. Resolve each effective group's forms to a feature set.
+        // 1. Resolve each effective group's forms to a feature set, keeping each member's
+        //    name for the title side (ADR-205).
         let mut groups: Vec<Vec<FeatureId>> = Vec::new();
+        // Two names can share one id (a synthetic id is a hash, ADR-046). The compiler then
+        // takes them for one feature, and the title side must know both names.
+        let mut names_of: crate::util::FastMap<FeatureId, Vec<u64>> = fast_map();
         for group in self.effective_equivalence_groups() {
             let mut feats: Vec<FeatureId> = Vec::with_capacity(group.len());
             for form in &group {
-                let fs = norm.compile_features_readonly(form, dict, &mut lc);
-                if fs.len() == 1 {
-                    feats.push(fs[0]);
+                let named = norm.compile_named_readonly(form, dict, &mut lc);
+                let Some(&(feature, _)) = named.first() else {
+                    continue;
+                };
+                if named.iter().any(|(other, _)| *other != feature) {
+                    continue;
+                }
+                feats.push(feature);
+                let names = names_of.entry(feature).or_default();
+                for (_, name) in named {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
                 }
             }
             feats.sort_unstable();
@@ -332,14 +346,25 @@ impl Vocab {
         //    declarations `[a,b]` + `[b,c]` become `{a,b,c}` (an equivalence is transitive) —
         //    otherwise a shared member would be order-dependently overwritten.
         let merged = merge_overlapping_groups(groups);
-        // 3. Map each member -> its full (merged) group.
+        // 3. Map each member -> its full (merged) group, by feature and by name.
         let mut map: EquivMap = fast_map();
+        let mut by_name: crate::util::FastMap<u64, std::sync::Arc<[u64]>> = fast_map();
         for g in &merged {
             for &f in g {
                 map.insert(f, g.clone());
             }
+            let mut names: Vec<u64> = g
+                .iter()
+                .flat_map(|f| names_of.get(f).into_iter().flatten().copied())
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            let names: std::sync::Arc<[u64]> = names.into();
+            for &name in names.iter() {
+                by_name.insert(name, std::sync::Arc::clone(&names));
+            }
         }
-        map
+        Equivalences::new(map, by_name)
     }
 
     // ── Alias registry (ADR-060) ────────────────────────────────────────
