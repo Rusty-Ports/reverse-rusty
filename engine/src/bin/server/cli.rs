@@ -308,6 +308,14 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = false)]
     pub(crate) route_by_assignments: bool,
 
+    /// At startup, re-recover from its primary any remote replica that does not hold exactly
+    /// what the primary holds (ADR-195). Without it such a replica is left as it is and kept out
+    /// of the in-sync set, so reads never fail over to it. Recovery discards the replica's
+    /// data: pass this only when the primaries are the authoritative copies. Remote clusters
+    /// only (`--shard-endpoint` groups with replicas, or resolve-only routing).
+    #[arg(long, default_value_t = false)]
+    pub(crate) recover_divergent_replicas: bool,
+
     /// Run the unattended re-point reconciler every N seconds (ADR-092): periodically reconcile the
     /// committed shard→node map to the desired HRW placement by MOVING data (not the underlying
     /// map-only library primitive), so a membership change converges routing automatically with no
@@ -397,6 +405,31 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
+    /// The coordinator's cluster configuration. `num_shards` is the ring size the caller
+    /// resolved, and `in_process` says whether this process holds the shards itself: only then
+    /// does the coordinator own a data directory.
+    pub(crate) fn cluster_config(
+        &self,
+        num_shards: usize,
+        per_shard: reverse_rusty::config::EngineConfig,
+        in_process: bool,
+    ) -> reverse_rusty::cluster::ClusterConfig {
+        reverse_rusty::cluster::ClusterConfig {
+            num_shards,
+            replication_factor: self.replication_factor,
+            per_shard,
+            include_broad: self.include_broad,
+            data_dir: if in_process {
+                self.data_dir.clone()
+            } else {
+                None
+            },
+            wal_sync_on_write: self.wal_sync_on_write,
+            recover_divergent_replicas: self.recover_divergent_replicas,
+            ..reverse_rusty::cluster::ClusterConfig::default()
+        }
+    }
+
     /// The engine configuration these flags describe, without a data directory: single-node
     /// mode adds its own, and a cluster gives each shard a directory of its own. One mapping
     /// for both modes, so a flag cannot reach one and miss the other.
@@ -434,6 +467,30 @@ impl Cli {
 mod tests {
     use super::Cli;
     use clap::Parser;
+
+    /// Recovery discards a replica's data, so it happens only when the operator asks, and
+    /// the request has to reach the cluster configuration.
+    #[test]
+    fn divergent_replicas_are_recovered_only_when_asked() {
+        let config = |args: &[&str]| {
+            Cli::try_parse_from(args)
+                .expect("arguments")
+                .cluster_config(3, reverse_rusty::config::EngineConfig::default(), false)
+        };
+        assert!(!config(&["reverse-rusty-server"]).recover_divergent_replicas);
+        let asked = config(&["reverse-rusty-server", "--recover-divergent-replicas"]);
+        assert!(asked.recover_divergent_replicas);
+        assert_eq!(asked.num_shards, 3);
+    }
+
+    #[test]
+    fn only_an_in_process_coordinator_owns_a_data_directory() {
+        let cli = Cli::try_parse_from(["reverse-rusty-server", "--data-dir", "/tmp/rr-cli-test"])
+            .expect("arguments");
+        let engine = reverse_rusty::config::EngineConfig::default;
+        assert!(cli.cluster_config(1, engine(), true).data_dir.is_some());
+        assert!(cli.cluster_config(1, engine(), false).data_dir.is_none());
+    }
 
     /// A `bool` argument with a `true` default and no explicit action is a switch that
     /// only sets `true`: it can never be turned off, and passing `false` is a parse error.

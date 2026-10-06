@@ -3,8 +3,8 @@
 > [Cluster control APIs](../cluster.md) · [REST API hub](../../api.md) · [ADR-169](../../../decisions/adr-169-cluster-resync-api-contract.md)
 
 Run one exact pass over the coordinator's in-memory partial-apply repair queue. Each queued mutation
-was already durably logged but failed on one or more target positions; the pass re-drives only those
-failed positions. It is safe to repeat.
+failed on one or more target positions, and its writer was answered with a retryable 503; the pass
+re-drives only those failed positions. It is safe to repeat.
 
 ```http
 POST /_cluster/resync?cluster_manager_timeout=30s
@@ -76,13 +76,17 @@ ergonomics map without changing the operation.
 
 ## Recovery limits
 
-Use this after a cluster write reports a durably logged partial apply. A partial `PUT /_doc/{id}`
-must not be repeated because that would append a second write; resync converges the existing logged
-operation. An idempotent partial DELETE may instead be repeated.
+Use this after a cluster write reports a partial apply (503 `"result": "partial"`), or repeat the
+write: a partial `PUT /_doc/{id}`, bulk item or DELETE is idempotent, and repeating it converges
+the document on any coordinator (ADR-194). Repeat a partial `op_type=create` as an index
+operation. A re-drive replaces the document on each position it reaches, so a position that had
+in fact applied the write before its reply was lost ends with one copy.
 
-The queue exists only in the same coordinator process. A stateless remote coordinator restart does
-not restore it; an in-process durable coordinator's log replay is the authoritative recovery
-backstop. A successful no-op pass proves only that this process currently has no queued repairs; it
+The queue exists only in the same coordinator process, and nothing in the server drains it on its
+own. A stateless remote coordinator restart does not restore it: the writes it held stay missing
+from the positions that refused them until their writers repeat them. As it stops, a coordinator
+logs the document ids it never converged. An in-process durable coordinator's log replay is its
+recovery backstop, and its shard writes do not fail part-way. A successful no-op pass proves only that this process currently has no queued repairs; it
 cannot attest that a prior stateless coordinator never observed a partial apply. See ADR-047,
 ADR-067, and ADR-125. Cross-topology assembly rules and mesh configuration are documented in
 [coordinator mode](../server/coordinator-mode.md); the system invariants are canonical in

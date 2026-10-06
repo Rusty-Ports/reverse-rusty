@@ -7,6 +7,8 @@ pub(super) enum WriteCall {
     Replace(u64, crate::cluster::shard::ReplaceMode),
     Delete(u64),
     Bulk,
+    /// A checkpoint is about to seal this shard.
+    Seal,
 }
 
 pub(super) type WriteHook = Arc<dyn Fn(usize, WriteCall) -> Result<(), ShardError> + Send + Sync>;
@@ -186,6 +188,7 @@ impl Shard for ObservedShard {
     }
 
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
+        (self.hook)(self.position, WriteCall::Seal)?;
         self.inner.seal_for_checkpoint()
     }
 

@@ -132,7 +132,8 @@ body live at its prior owner and a replacement live at a different owner, making
 individually ownership-valid. The coordinator therefore checks `pending_repairs` before delivery
 and at every shard boundary. A nonzero value fails the job before completion (before any chunk in
 the pre-existing case); the operator must run `resync` (or reopen a durable in-process coordinator,
-whose log replay reconstructs the repair) and retry. Exact cross-shard deduplication is
+whose log replay reconstructs the repair) and retry. (On a remote coordinator the writes
+themselves were answered 503 and can simply be repeated: ADR-194.) Exact cross-shard deduplication is
 intentionally not added because it would require result-sized state.
 A fresh in-memory coordinator attached to already-populated remote shards is a separate
 unattested state: its empty `pending_repairs` map says only that this process witnessed no failure,

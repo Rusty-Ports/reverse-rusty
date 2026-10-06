@@ -106,7 +106,10 @@ out of the fence window entirely.
   replicated clusters (the reconcile loop / REST already pass the cluster's real
   `replication_factor` — no server-surface change). The boot-time in-sync presumption for committed
   replicas (`connect_replicated` marks all boot replicas in-sync) is pre-existing and unchanged —
-  this ADR guarantees completeness **at commit time**.
+  this ADR guarantees completeness **at commit time**. *(Later outcome — 2026-10-06,
+  [ADR-195](adr-195-replicas-are-proven-at-connect.md): the presumption is gone. A connecting
+  coordinator proves each replica against its primary by content fingerprint and trusts only an
+  exact match.)*
 - **Still deferred:** cross-coordinator conditional-propose (the commit compare stays best-effort
   single-active-coordinator, ADR-090); orphan-slot GC; degraded-source moves (primary-down → fail
   the position; a failover controller is a separate increment); parallel multi-position moves

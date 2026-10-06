@@ -22,7 +22,8 @@ cargo run --release --bin server --features distributed -- --cluster \
 ```
 
 Cluster-mode flags: `--cluster`, `--shards` (in-process K, default 8), `--replication-factor`
-(in-process copies per position), `--shard-endpoint` (repeatable; remote mode). Remote links take
+(in-process copies per position), `--shard-endpoint` (repeatable; remote mode), and
+`--recover-divergent-replicas` (remote mode; see below). Remote links take
 the **mesh security** flags (ADR-071): `--grpc-tls-ca` (PEM CA to verify shard servers — endpoints
 then use `https://`), `--grpc-tls-domain` (SNI/verification override for raw-IP endpoints), and
 `--cluster-token`/`RR_CLUSTER_TOKEN` (the shared mesh secret attached to every gRPC RPC — distinct
@@ -69,9 +70,22 @@ an **in-process** cluster durable (build once, reopen on restart — `--load-fil
 warning when the reopened cluster is already populated). A **remote** coordinator is stateless and
 refuses `--data-dir`: durability lives on the shard nodes (`shardserver --data-dir`, the per-shard
 translog — ADR-039); restarting the coordinator reconnects and re-mints the identical frozen dict
-from the same `--load-file`, so the fingerprint handshake holds. Its new boot ID may need to retry
+from the same `--load-file`, so the fingerprint handshake holds. The file is loaded in bulk only
+into an empty cluster. The shard nodes are marked for the duration of that load (ADR-196): if it
+stops part-way, every later coordinator start fails with "holds a bulk load that did not
+complete" instead of serving the part that landed, until the shard nodes' data is reset and the
+corpus is loaded again. Its new boot ID may need to retry
 until the 30-second renewable owner lease expires, then wait for any response bodies/streams
 admitted under the prior owner to drain before taking over a node.
+
+When a remote coordinator connects, it compares each replica's content fingerprint with its
+primary's and trusts a replica for read failover only on an exact match (ADR-195). A replica that
+differs, or cannot attest its content (for example a node that does not retain query sources), is
+left as it is and kept out of the in-sync set: reads never fail over to it, `/_health` is yellow
+and reports `out_of_sync_replicas`. Starting the coordinator with `--recover-divergent-replicas`
+re-recovers each such replica from its primary first. Recovery discards the replica's data, so
+pass it only when the primaries are the good copies, and never after a primary lost its volume.
+In-process clusters rebuild replicas from the primary on every start and refuse the flag.
 
 A resolve-only coordinator takes its shard count and placement generation from the committed
 control document, so it follows a remote resize (ADR-180) without editing `--shards`; every other
@@ -100,11 +114,19 @@ startup.
 Behavior deltas from single-node mode (all deliberate, none silent):
 
 - **`PUT /_doc/{id}` is a cluster-atomic upsert** — one coordinator log frame replaces every prior
-  live copy (ES `index` semantics, the ADR-067 contract at the cluster). A partial multi-shard apply
-  (remote clusters only) answers 200 with `"result": "partial"`: the write **is** durably logged and
-  queued for repair — do **not** re-PUT (it would double-log); `POST /_cluster/resync` converges it.
+  live copy (ES `index` semantics, the ADR-067 contract at the cluster). A write that not every
+  shard took (remote clusters only) returns retryable 503 `"result": "partial"` with the applied
+  and pending positions and no `_version` (ADR-194). The document is **not** stored on every
+  shard: repeat the idempotent PUT, or use `POST /_cluster/resync` while the same coordinator
+  still owns its in-memory repair queue. A remote coordinator has no log, so a restart loses that
+  queue; only the repeated PUT converges on any coordinator. Repeat a partial `op_type=create` as
+  an index operation (a restarted coordinator finds the id on the shards that took it and would
+  answer the create with 409).
   `op_type=create` uses the coordinator's atomic logical-id reservation and returns 409 without a
-  log frame when the id exists. Remote startup reconstructs this membership through bounded shard
+  log frame when the id exists. While an earlier write of that id is still queued for repair, a
+  create first re-drives the repair. Until it converges the create answers 503
+  `earlier_write_unconverged`, never 409: the create itself was not applied or queued, so send
+  it again (a resync finishes only the earlier write). Remote startup reconstructs this membership through bounded shard
   enumeration; an unsupported, failed, or over-limit enumeration keeps create-only writes disabled
   ([details](../../../design/clustering-and-scaling.md#94-remote-admission-reconstruction)). `refresh=false|true|wait_for`
   are accepted under the stronger publish-before-response model; unsupported write parameters fail
@@ -174,8 +196,9 @@ Cluster-only routes are cataloged by responsibility:
 
 `GET /_stats` in cluster mode reports timing and `_shards` plus
 `{shards, replication_factor, total_queries, shard_queries[], class_counts, epoch,
-pending_repairs, has_tagged_queries, durable}`. Counts are the primary physical-row view (including
+pending_repairs, out_of_sync_replicas, has_tagged_queries, durable}`. Counts are the primary physical-row view (including
 tombstones and content-driven multi-position copies), not distinct live logical IDs; a missing
 position fails the whole response (ADR-140). `GET`/`HEAD /_health` validates every serving
-position plus the committed control topology: green is ready, yellow has queued repairs, and red
+position plus the committed control topology: green is ready, yellow has queued repairs or a
+replica outside the in-sync set, and red
 means a required dependency or topology check failed (ADR-144).

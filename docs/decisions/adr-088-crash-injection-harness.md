@@ -135,3 +135,7 @@
     matchable — zero false negatives across a real kill mid-write, with the documented repair path.
   - *Still deferred:* a cluster-coordinator (not shard) mid-write kill, and a power-loss (page-cache-drop)
     leg, which SIGKILL structurally cannot reproduce (the torn-tail / CRC simulations keep that domain).
+  - *Later outcome — 2026-10-06 ([ADR-194](adr-194-partial-cluster-writes-are-retryable-failures.md)):*
+    a write that routed to the dead shard now returns `503 "partial"` and is not acknowledged. The
+    leg's writer repeats a refused write until it is accepted, as a client must, and every accepted
+    id is still required to match after the restart.

@@ -73,3 +73,8 @@
   Coordinator tests pin the same shared boundary, replacement and conflict behavior, source
   readback, and typed-priority preservation. Existing durable bulk, WAL/reopen, cluster repair, and
   oracle suites remain the semantic and persistence backstop.
+
+- **Later outcome — 2026-10-06 ([ADR-194](adr-194-partial-cluster-writes-are-retryable-failures.md)):**
+  a distributed item that not every shard took is not durably logged on a remote coordinator. It
+  is now a failed item (status 503, type `partial_write`, no `_version`, not counted as
+  accepted) whose reason tells the caller to send it again as an `index` action.

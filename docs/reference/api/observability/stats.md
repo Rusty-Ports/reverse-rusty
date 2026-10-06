@@ -108,6 +108,7 @@ This is the single-node shape. Cluster mode returns its coordinator-level shape 
   "class_counts": {"a": 9120, "b": 917, "c": 280, "d": 5, "h": 20},
   "epoch": 4,
   "pending_repairs": 0,
+  "out_of_sync_replicas": 0,
   "has_tagged_queries": true
 }
 ```
@@ -117,7 +118,8 @@ on multiple positions contributes to each holder; the coordinator reports the pr
 extra replica copies. `total_queries` is the sum of this array and `class_counts` is the
 corresponding physical-row tally, both including tombstones. These are placement/capacity
 signals—not a distinct live logical-query count. `pending_repairs > 0` means a partial cluster
-mutation is queued for `POST /_cluster/resync`.
+mutation is queued for `POST /_cluster/resync`. `out_of_sync_replicas > 0` means that many replicas
+are not served on failover until they are recovered from their primaries (ADR-195).
 
 Cluster collection performs one count request and one class-count request per logical position in
 the single admitted blocking job. If any required position fails, the entire request fails loudly;

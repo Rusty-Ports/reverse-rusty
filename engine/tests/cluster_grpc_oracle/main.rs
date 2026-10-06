@@ -22,6 +22,7 @@ mod harness;
 
 mod block_on;
 mod broad_cost;
+mod bulk_load_marker;
 mod capability_handshake;
 mod class_d;
 mod colocation;
@@ -54,6 +55,7 @@ mod recovery;
 mod recovery_checkpoint;
 mod relocation;
 mod remote_resize;
+mod replica_proof;
 mod replication;
 mod replication_colocation;
 mod routing;

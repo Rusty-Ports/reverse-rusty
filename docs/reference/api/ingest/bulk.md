@@ -111,8 +111,9 @@ writes cost. A repeated or existing ID, or a source
 version other than 1, uses ordered WAL-backed live writes so `index` remains a true replacement and
 `create` can conflict. A direct segment commit failure rejects the whole request with 503; an
 ordered WAL failure is a per-item 503 after any earlier successful items. Cluster mode uses its
-ordered coordinator-log upsert/create path and reports a durably logged partial write as an
-error-bearing `partial` item pending repair.
+ordered coordinator-log upsert/create path. An item that not every shard took is a failed item:
+status 503, error type `partial_write`, no `_version`, and not stored on every shard (ADR-194).
+Send it again as an `index` action, or use `POST /_cluster/resync` on the same coordinator.
 
 `update`, `delete`, automatic IDs, arbitrary indices, routing, pipelines, scripts, aliases,
 sequence-number/primary-term controls, ES/OpenSearch version controls, and shard-wait controls are

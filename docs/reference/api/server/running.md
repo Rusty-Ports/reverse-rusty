@@ -67,6 +67,22 @@ cargo run --release --bin server -- \
 The server handles SIGINT/SIGTERM gracefully — it drains in-flight requests, flushes the memtable,
 and syncs the WAL before exiting.
 
+### Request limit
+
+Each endpoint (a route and method) of a server, standalone or coordinator, works on at most
+**256 requests at once** ([ADR-199](../../../decisions/adr-199-request-limit-per-endpoint.md)).
+One more waits for a slot of that endpoint; it is not refused, and its body is not read while it
+waits.
+
+The limit is per endpoint, not per server. A full `/_search` holds back no other route, and
+there is no cap on requests in flight across the whole server. That is deliberate: some requests
+wait for a request on another endpoint (a job-status read for the job's stream, a write for a
+lock that a compaction holds), and in a shared pool they would keep it out.
+
+A request without a valid token, where one is required, is refused before it takes a slot. The
+number is not configurable. `--max-concurrent-searches` separately bounds how many searches
+occupy the match pool, and is the setting to use to bound match work.
+
 ### Ranking profile file
 
 `--ranking-profiles-file` or `RR_RANKING_PROFILES_FILE` loads an immutable registry before the

@@ -478,17 +478,15 @@ fn grpc_logical_ids_reserve_stale_replica_ids_even_with_an_empty_primary() {
             .upsert_query(7, "replacementneedle", 2)
             .expect("explicit replacement remains available");
         if !broken_replica {
+            // The replica never held what its primary holds, so it was not proven at connect
+            // (ADR-195): the writes above went to the primary alone, and a read that cannot
+            // reach the primary fails instead of answering from the replica's stale rows.
+            assert_eq!(reattached.out_of_sync_replicas(), 1);
             drop(primary_rt);
-            assert!(reattached
-                .percolate("stalereservedneedle")
-                .expect("deleted predicate on failover")
-                .is_empty());
-            assert_eq!(
-                reattached
-                    .percolate("replacementneedle")
-                    .expect("replacement on failover"),
-                vec![7]
-            );
+            assert!(matches!(
+                reattached.percolate("replacementneedle"),
+                Err(ShardError::Remote(_))
+            ));
             assert!(reattached.transport_metrics().total_errors() > 0);
         }
     }
