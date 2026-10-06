@@ -226,8 +226,10 @@ pub enum AddOutcome {
 }
 
 /// One mutation that applied to some target shards but failed on others, queued for repair by
-/// [`ClusterEngine::resync`] (ADR-047). Held in memory only — the durable backstop is the
-/// cluster log, whose replay on [`ClusterEngine::open`] re-drives every target shard.
+/// [`ClusterEngine::resync`] (ADR-047). Held in memory only. Only a durable in-process
+/// coordinator has a cluster log whose replay on [`ClusterEngine::open`] re-drives every target
+/// shard, and its shard writes do not fail; a remote coordinator, the one that queues repairs,
+/// has no log, so the write is answered as a failure the client retries (ADR-194).
 #[derive(Clone)]
 struct PendingRepair {
     /// The mutation to re-drive (raw DSL for an Add; just the id for a Remove).
@@ -436,8 +438,8 @@ pub struct ClusterEngine {
     /// keyed by logical id so a later mutation for the same id supersedes an earlier pending one
     /// (a successful full apply / a Remove clears any stale entry). Drained + re-driven by
     /// [`Self::resync`]. Empty on the in-process / RF=1 path (its `LocalShard` writes never
-    /// fail), so the default path is byte-identical. In memory only — the durable backstop is
-    /// the cluster log, replayed on [`Self::open`].
+    /// fail), so the default path is byte-identical. In memory only, and a remote coordinator
+    /// has no log to rebuild it from: the queue does not survive the process (ADR-194).
     pending_repair: Mutex<BTreeMap<u64, PendingRepair>>,
     /// ADR-113 coordinator PIT registry: each entry records the placement
     /// identity its per-shard pins were taken under ([`pit::ClusterPitMeta`]);

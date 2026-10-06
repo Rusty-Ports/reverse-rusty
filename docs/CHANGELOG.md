@@ -9,6 +9,27 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — A partial cluster write is a failure to retry
+
+- **Behaviour change (remote clusters).** A `PUT /_doc/{id}` or bulk item that not every shard
+  took now answers **503** `"result": "partial"` (bulk: item status 503, type `partial_write`)
+  with no `_version`, and tells the caller to repeat it
+  ([ADR-194](decisions/adr-194-partial-cluster-writes-are-retryable-failures.md)). It used to
+  answer 200, say the write was "durably logged" and warn against repeating it. A remote
+  coordinator has no log and keeps its repair queue in memory, so a coordinator restart before a
+  manual resync left the write missing from the shards that refused it, for good. `DELETE`
+  already worked this way (ADR-125).
+- A retried `op_type=create` no longer answers 409 "already exists" while an earlier write of
+  the id is still queued for repair: it re-drives the repair and answers 503
+  `earlier_write_unconverged` until it converges. Retry a partial create as an index operation,
+  which converges on any coordinator.
+- Fix `resync` storing a second row when the shard had applied a create whose acknowledgement
+  was lost. That left the shard unable to enumerate its ids, and after the next coordinator
+  attach every create-only write was refused. A repair now replaces the id on the shard.
+- A stopping coordinator logs the document ids whose repairs it never completed.
+- The documents that described a remote partial write as durably logged are corrected (ADR-047
+  later outcome, the coordinator, bulk and resync references, the design note, the runbooks).
+
 ## 2026-10-06 — Requests larger than one gRPC message
 
 - Fix the remote `--load-file` bootstrap failing with `OutOfRange` once a shard's bucket passed

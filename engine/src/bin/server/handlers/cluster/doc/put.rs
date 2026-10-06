@@ -1,16 +1,16 @@
 use super::{
-    error, extract_ranked_ingest, info, instrument, shard_error_response, shard_error_status,
-    upsert_status, warn, ApiError, Arc, ClusterAppState, Instant, IntoResponse, Json, Path,
-    PutDocBody, PutDocParams, PutDocResponse, Query, QueryRejection, Response, ShardError, State,
-    StatusCode, QUERY_INDEX,
+    error, extract_ranked_ingest, info, instrument, partial_write_guidance, shard_error_response,
+    shard_error_status, upsert_status, warn, ApiError, Arc, ClusterAppState, Instant, IntoResponse,
+    Json, Path, PutDocBody, PutDocParams, PutDocResponse, Query, QueryRejection, Response,
+    ShardError, State, StatusCode, QUERY_INDEX,
 };
 
 /// PUT /_doc/{id} — cluster-atomic index/create operation (ADR-117). The default
 /// upsert replaces by id under ONE coordinator log frame; `op_type=create` uses
 /// the insert-only `Add` funnel and conflicts without logging when the id is live.
-/// A partial multi-shard apply (remote clusters only) answers 200 `partial`: the
-/// mutation IS durably logged and queued for repair — re-PUTting would double-log
-/// (`POST /_cluster/resync` converges it).
+/// A write that not every shard took (remote clusters only) answers 503 `partial`
+/// (ADR-194): the caller retries it, or `POST /_cluster/resync` converges it while
+/// this coordinator stays up.
 #[instrument(skip(state, params, body), fields(query_id = id))]
 pub(crate) async fn cluster_put_doc(
     State(state): State<Arc<ClusterAppState>>,
@@ -118,33 +118,18 @@ pub(crate) async fn cluster_put_doc(
             ref failed,
             ..
         }) => {
-            // Durably logged + queued for repair: tell the caller precisely, with a
-            // 200 (NOT a retry signal — a re-PUT would double-log; resync converges).
             warn!(
                 query_id = id,
                 ?applied,
                 ?failed,
-                "upsert partially applied; queued for repair"
+                "document write did not reach every shard; queued for repair"
             );
             state
                 .prom
                 .http_requests_total
-                .with_label_values(&["put_doc", "200"])
+                .with_label_values(&["put_doc", "503"])
                 .inc();
-            (
-                StatusCode::OK,
-                Json(PutDocResponse {
-                    _index: QUERY_INDEX,
-                    _id: id,
-                    _version: Some(body.version),
-                    result: "partial",
-                    error: Some(format!(
-                        "applied on shards {applied:?}, pending on {failed:?}; durably \
-                         logged — POST /_cluster/resync (or reopen) converges it"
-                    )),
-                }),
-            )
-                .into_response()
+            partial_put_response(id, create_only, applied, failed)
         }
         Err(ShardError::DuplicateLogicalId(_)) if params.create_only() => {
             warn!(
@@ -180,4 +165,71 @@ pub(crate) async fn cluster_put_doc(
         .with_label_values(&["put_doc"])
         .observe(start.elapsed().as_secs_f64());
     response
+}
+
+/// The answer to a PUT that not every shard took: a retryable failure with no `_version`,
+/// since no version of the document is stored cluster-wide.
+fn partial_put_response(
+    id: u64,
+    create_only: bool,
+    applied: &[usize],
+    failed: &[usize],
+) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(PutDocResponse {
+            _index: QUERY_INDEX,
+            _id: id,
+            _version: None,
+            result: "partial",
+            error: Some(partial_write_guidance(create_only, applied, failed)),
+        }),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn body_of(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("response JSON")
+    }
+
+    #[tokio::test]
+    async fn a_partial_put_is_an_explicit_retryable_failure() {
+        let response = partial_put_response(7, false, &[0], &[1]);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_of(response).await;
+        assert_eq!(body["_id"], 7);
+        assert_eq!(body["result"], "partial");
+        assert!(
+            body.get("_version").is_none(),
+            "no version is stored on every shard"
+        );
+        let guidance = body["error"].as_str().expect("guidance");
+        assert!(guidance.contains("applied on shards [0], pending on [1]"));
+        assert!(guidance.contains("retry this idempotent index operation"));
+        assert!(guidance.contains("/_cluster/resync"));
+        for claim in ["durably logged", "reopen", "double-log"] {
+            assert!(!guidance.contains(claim), "{guidance}");
+        }
+    }
+
+    /// A create that is retried as a create answers 409 on a coordinator that restarted in
+    /// between, so the guidance has to name the operation that converges anywhere.
+    #[tokio::test]
+    async fn a_partial_create_is_told_to_retry_as_an_index_operation() {
+        let response = partial_put_response(7, true, &[], &[2]);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_of(response).await;
+        assert_eq!(body["result"], "partial");
+        let guidance = body["error"].as_str().expect("guidance");
+        assert!(guidance.contains("applied on shards [], pending on [2]"));
+        assert!(guidance.contains("as an index operation (without op_type=create)"));
+        assert!(!guidance.contains("retry this idempotent index operation"));
+    }
 }

@@ -248,9 +248,12 @@ fingerprints rather than attaching a partial corpus.
 
 ### 5.1 Cross-position partial apply
 
-A coordinator mutation may target several positions. It is logged before fan-out, but a remote RPC
-can fail after another position applied. The coordinator reports the partial state, emits an event,
-and records the failed targets for `resync`; replay of the durable coordinator log is the backstop.
+A coordinator mutation may target several positions, and a remote RPC can fail after another
+position applied. The coordinator answers the write as a retryable failure (ADR-194), emits an
+event, and records the failed targets in memory for `resync`. Only a durable in-process coordinator
+has a log to replay, and its shard writes do not fail part-way; a remote coordinator has none, so
+the repair queue stops with its process and the writer's retry is what converges the write. A
+re-drive replaces the id on each position, because a refused write may have been applied.
 Reads that promise exact exhaustive completion refuse while repairs are pending. The in-process RF=1
 path is infallible at that seam. The strict native REST boundary runs one independently supervised,
 admission-bounded pass and reports any still-unreachable mutations explicitly; it is not an alias for

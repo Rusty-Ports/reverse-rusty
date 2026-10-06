@@ -100,11 +100,19 @@ startup.
 Behavior deltas from single-node mode (all deliberate, none silent):
 
 - **`PUT /_doc/{id}` is a cluster-atomic upsert** — one coordinator log frame replaces every prior
-  live copy (ES `index` semantics, the ADR-067 contract at the cluster). A partial multi-shard apply
-  (remote clusters only) answers 200 with `"result": "partial"`: the write **is** durably logged and
-  queued for repair — do **not** re-PUT (it would double-log); `POST /_cluster/resync` converges it.
+  live copy (ES `index` semantics, the ADR-067 contract at the cluster). A write that not every
+  shard took (remote clusters only) returns retryable 503 `"result": "partial"` with the applied
+  and pending positions and no `_version` (ADR-194). The document is **not** stored on every
+  shard: repeat the idempotent PUT, or use `POST /_cluster/resync` while the same coordinator
+  still owns its in-memory repair queue. A remote coordinator has no log, so a restart loses that
+  queue; only the repeated PUT converges on any coordinator. Repeat a partial `op_type=create` as
+  an index operation (a restarted coordinator finds the id on the shards that took it and would
+  answer the create with 409).
   `op_type=create` uses the coordinator's atomic logical-id reservation and returns 409 without a
-  log frame when the id exists. Remote startup reconstructs this membership through bounded shard
+  log frame when the id exists. While an earlier write of that id is still queued for repair, a
+  create first re-drives the repair. Until it converges the create answers 503
+  `earlier_write_unconverged`, never 409: the create itself was not applied or queued, so send
+  it again (a resync finishes only the earlier write). Remote startup reconstructs this membership through bounded shard
   enumeration; an unsupported, failed, or over-limit enumeration keeps create-only writes disabled
   ([details](../../../design/clustering-and-scaling.md#94-remote-admission-reconstruction)). `refresh=false|true|wait_for`
   are accepted under the stronger publish-before-response model; unsupported write parameters fail
