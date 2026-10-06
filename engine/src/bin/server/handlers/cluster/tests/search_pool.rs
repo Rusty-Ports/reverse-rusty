@@ -1,11 +1,11 @@
-//! A search that returns sources needs the cluster lock for its whole run and runs in the
-//! search pool. It takes them in that order's reverse: a worker first, the lock inside it
-//! (ADR-206).
+//! A search that returns sources holds the cluster lock while it waits for a worker of the
+//! search pool. That is safe only because nothing can queue for the cluster's write lock
+//! behind it: it shares write admission, and whoever takes the write lock holds admission
+//! alone (ADR-206).
 //!
 //! The pool's workers take the cluster lock for each title they match, and they wait when a
-//! writer is queued for it. A request that held the lock and then waited for a worker would
-//! complete a cycle with a vocabulary rebuild or a resize queued behind it: the workers wait
-//! for the writer, the writer for the request, the request for a worker.
+//! writer is queued for it. With a vocabulary rebuild queued behind the search, the workers
+//! would wait for the rebuild, the rebuild for the search, and the search for a worker.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex as StdMutex};
@@ -52,16 +52,16 @@ impl Occupied {
     }
 }
 
-/// What one request did while every worker of the pool was occupied.
+/// What happened while every worker of the pool was occupied.
 struct Observed {
-    took_its_turn: bool,
-    answered_without_a_worker: bool,
-    cluster_lock_was_free: bool,
+    /// What should not have happened, if anything did.
+    violations: Vec<&'static str>,
     answer: Option<(StatusCode, serde_json::Value)>,
+    rebuild: Option<StatusCode>,
 }
 
 #[test]
-fn a_search_with_sources_waits_for_a_worker_without_holding_the_cluster_lock() {
+fn nothing_queues_for_the_cluster_lock_behind_a_search_that_waits_for_a_worker() {
     let requests = [
         (
             "/v2/_search",
@@ -93,26 +93,38 @@ fn a_search_with_sources_waits_for_a_worker_without_holding_the_cluster_lock() {
             let request_state = Arc::clone(&run_state);
             let mut request =
                 tokio::spawn(async move { send(&request_state, req("POST", path, &body)).await });
-            // It takes its turn, and then waits for a worker.
+            // The search shares write admission, takes the cluster lock and its view, and
+            // then waits for a worker.
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while !run_state.stable_view_turn.is_locked() && std::time::Instant::now() < deadline {
+            while !run_state.write_admission.is_locked() && std::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
-            let took_its_turn = run_state.stable_view_turn.is_locked();
+            let shared_admission = run_state.write_admission.is_locked()
+                && !run_state.write_admission.is_locked_exclusive();
             let early = tokio::time::timeout(Duration::from_millis(150), &mut request).await;
-            // While it waits it must not hold the cluster lock: a vocabulary rebuild or a
-            // resize that asks for the write lock now gets it.
-            let lock_state = Arc::clone(&run_state);
-            let cluster_lock_was_free = tokio::task::spawn_blocking(move || {
-                lock_state
-                    .cluster
-                    .try_write_for(Duration::from_secs(2))
-                    .is_some()
-            })
-            .await
-            .expect("lock probe");
-            // Free the pool before leaving the runtime: the request is parked on a blocking
-            // thread, and the runtime does not shut down until it is done.
+
+            // A vocabulary change arrives. It needs admission alone, so it waits there and
+            // does not queue for the cluster's write lock: the cluster lock is still free
+            // to read, which is what the pool's workers need.
+            let rebuild_state = Arc::clone(&run_state);
+            let mut rebuild = tokio::spawn(async move {
+                send_raw(
+                    &rebuild_state,
+                    req("PUT", "/_vocab", &serde_json::json!({})),
+                )
+                .await
+                .0
+            });
+            let rebuild_early =
+                tokio::time::timeout(Duration::from_millis(150), &mut rebuild).await;
+            let probe_state = Arc::clone(&run_state);
+            let no_writer_queued_for_the_cluster =
+                tokio::task::spawn_blocking(move || probe_state.cluster.try_read().is_some())
+                    .await
+                    .expect("lock probe");
+
+            // Free the pool before leaving the runtime: the requests are parked on blocking
+            // threads, and the runtime does not shut down until they are done.
             occupied.release();
             let (answered_without_a_worker, answer) = match early {
                 Ok(answer) => (true, answer.ok()),
@@ -124,25 +136,51 @@ fn a_search_with_sources_waits_for_a_worker_without_holding_the_cluster_lock() {
                         .and_then(Result::ok),
                 ),
             };
+            let (rebuild_ran_beside_it, rebuild) = match rebuild_early {
+                Ok(status) => (true, status.ok()),
+                Err(_) => (
+                    false,
+                    tokio::time::timeout(Duration::from_secs(20), rebuild)
+                        .await
+                        .ok()
+                        .and_then(Result::ok),
+                ),
+            };
+            let mut violations = Vec::new();
+            if !shared_admission {
+                violations.push("the search does not share write admission");
+            }
+            if answered_without_a_worker {
+                violations.push("the search ran outside the search pool and its thread budget");
+            }
+            if rebuild_ran_beside_it {
+                violations
+                    .push("a vocabulary change ran beside a search that holds the cluster lock");
+            }
+            if !no_writer_queued_for_the_cluster {
+                violations.push(
+                    "a writer queued for the cluster lock behind a search waiting for a worker",
+                );
+            }
             Observed {
-                took_its_turn,
-                answered_without_a_worker,
-                cluster_lock_was_free,
+                violations,
                 answer,
+                rebuild,
             }
         });
-        assert!(observed.took_its_turn, "{path} did not take its turn");
         assert!(
-            !observed.answered_without_a_worker,
-            "{path} ran outside the search pool, so outside the configured thread budget"
-        );
-        assert!(
-            observed.cluster_lock_was_free,
-            "{path} held the cluster lock while it waited for a pool worker"
+            observed.violations.is_empty(),
+            "{path}: {:?}",
+            observed.violations
         );
         let (status, body) = observed
             .answer
             .unwrap_or_else(|| panic!("{path} never answered once the pool was free"));
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(
+            observed.rebuild,
+            Some(StatusCode::OK),
+            "{path}: the vocabulary change runs once the search is done"
+        );
     }
 }

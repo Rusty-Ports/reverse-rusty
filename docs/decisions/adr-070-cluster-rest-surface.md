@@ -114,5 +114,5 @@ query, which is what makes the cluster honor ADR-067's "never both, never neithe
 reader-writer admission lock: writes share it and run beside each other, so two bulk batches sent
 at the same time interleave their items, and whole-cluster operations take it alone. "Reads are
 never blocked by writes" had stopped being true before that: since ADR-126 a search that returns
-sources waits for the writes in flight, and it also took the writer mutex. It no longer takes
-that lock; it still waits for writes in flight.
+sources waits for the writes in flight, and it also took the writer mutex. It now shares that
+lock with writes, and still waits for the writes in flight.

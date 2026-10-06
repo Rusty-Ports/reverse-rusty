@@ -359,7 +359,6 @@ pub(crate) async fn run(
         cluster: RwLock::new(cluster),
         topology_guard: RwLock::new(()),
         write_admission: RwLock::new(()),
-        stable_view_turn: Mutex::new(()),
         write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_QUEUED_CLUSTER_WRITES,
         )),

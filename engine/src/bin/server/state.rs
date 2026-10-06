@@ -278,8 +278,10 @@ pub(crate) struct ClusterAppState {
     /// - **Exclusive:** an operation that needs every write finished and none started:
     ///   flush, checkpoint, backup, a vocabulary change, resync, resize, an exhaustive job,
     ///   and shutdown.
-    /// - **Not taken by reads.** A read that needs a stable view takes the cluster's own
-    ///   (`ClusterEngine::consistent_read_view`).
+    /// - **Shared, too:** a search that returns sources or an explanation. It is kept apart
+    ///   from writes by the cluster's mutation-frozen view, not by this lock; it shares
+    ///   admission so that nothing can queue for the cluster's write lock while it holds
+    ///   the read lock (see `pool`). A read that returns ids only takes nothing.
     ///
     /// Take it before the `cluster` lock, never after.
     pub(crate) write_admission: RwLock<()>,
@@ -329,17 +331,12 @@ pub(crate) struct ClusterAppState {
     /// The search pool. Its workers take `cluster.read()` for each title they match, and a
     /// reader waits when a writer is queued for that lock (a vocabulary rebuild, a resize).
     ///
-    /// **Never wait for this pool while holding the `cluster` lock.** With a writer queued
-    /// behind the holder, the workers wait for the writer, the writer for the holder, and the
-    /// holder for a worker. A request that needs the lock across its whole run (a search
-    /// that returns sources) enters the pool first and takes the lock inside it; see
-    /// [`ClusterAppState::run_with_stable_view`] (ADR-206).
+    /// **Wait for this pool while holding the `cluster` lock only if you also hold
+    /// `write_admission`.** Otherwise a writer can queue behind you, the workers then wait
+    /// for the writer, the writer for you, and you for a worker. Whoever takes the cluster's
+    /// write lock holds write admission alone, so holding it shared keeps every such writer
+    /// from queueing. See [`ClusterAppState::run_with_stable_view`] (ADR-206).
     pub(crate) pool: rayon::ThreadPool,
-    /// One search that returns sources at a time enters the search pool. Such searches
-    /// exclude each other anyway (the mutation-frozen view is exclusive); taking a turn
-    /// before entering keeps the ones that wait on blocking threads, so that at most one
-    /// pool worker is ever parked on their behalf.
-    pub(crate) stable_view_turn: Mutex<()>,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
     /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,
     /// and the permit is moved INTO the closure — released when the blocking work
@@ -371,21 +368,22 @@ impl ClusterAppState {
     /// search that returns sources or an explanation (ADR-206). Call it from a blocking
     /// thread that holds no lock.
     ///
-    /// The order matters. The request takes its turn, then a pool worker, and only then, on
-    /// that worker, the cluster lock and the view. It never holds the cluster lock while it
-    /// waits for a worker, which is what would let a queued vocabulary rebuild or resize
-    /// stall the pool it is waiting for. The work runs inside the pool, so it stays within
-    /// the configured thread budget.
+    /// The request shares write admission, as a write does. It does not need it to be kept
+    /// apart from writes; the view does that. It needs it because it then holds the cluster
+    /// lock while it waits for the view and for a pool worker, and nothing that takes the
+    /// cluster's write lock may queue behind it meanwhile (see `pool`). Sharing admission
+    /// means it waits for a vocabulary change, a resize, a checkpoint or an exhaustive job,
+    /// which it would wait for at the cluster lock or the view anyway, and not for other
+    /// writes or for a whole bulk batch. The waits happen on the caller's thread, and the
+    /// work runs inside the pool, within the configured thread budget.
     pub(crate) fn run_with_stable_view<T: Send>(
         &self,
         work: impl FnOnce(&reverse_rusty::cluster::ClusterReadView<'_>) -> T + Send,
     ) -> T {
-        let _turn = self.stable_view_turn.lock();
-        self.pool.install(|| {
-            let cluster = self.cluster.read();
-            let stable_view = cluster.consistent_read_view();
-            work(&stable_view)
-        })
+        let _admission = self.write_admission.read();
+        let cluster = self.cluster.read();
+        let stable_view = cluster.consistent_read_view();
+        self.pool.install(|| work(&stable_view))
     }
 }
 

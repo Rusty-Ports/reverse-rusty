@@ -696,9 +696,9 @@ async fn cluster_v2_search_inner(
             deadline,
         };
         let result = if mutation_fenced {
-            // Match, winner fetch and explanation run inside one mutation-frozen view. The
-            // view excludes every mutation, so the request takes no write admission
-            // (ADR-206). It enters the search pool before it takes the cluster lock.
+            // Match, winner fetch and explanation run inside one mutation-frozen view,
+            // taken on this blocking thread before the work enters the search pool. The
+            // request shares write admission with writes (ADR-206).
             cluster_state.run_with_stable_view(|stable_view| {
                 delivery::cluster_delivery(
                     stable_view,
@@ -726,7 +726,7 @@ async fn cluster_v2_search_inner(
             result
         })
     };
-    // Fenced requests wait for their turn on the driver's blocking thread and enter the
+    // Fenced requests wait for their view on the driver's blocking thread and enter the
     // search pool themselves; source-free requests are installed in it by the driver.
     delivery::drive(
         state,

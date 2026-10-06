@@ -90,9 +90,9 @@ by owning position, and compiles explanations locally. A shard/fetch failure, mi
 placement-generation drift, timeout, or malformed reply fails the whole response—partial hits never
 escape. A source/explanation request takes a request-scoped mutation-frozen cluster view across
 matching, winner fetch, and explanation; a same-ID replacement cannot splice its source onto an
-older hit. Such requests run one at a time and wait for the writes in flight and for a checkpoint,
-flush or backup in progress; they do not wait for a whole bulk batch, a resize or an exhaustive job
-(ADR-206). Source-free requests remain concurrent. Enrichment is current-view even under a PIT
+older hit. Such requests run one at a time. They wait for the writes in flight, though not for a
+whole bulk batch, and for a checkpoint, flush, backup, vocabulary change, resync, resize or
+exhaustive job in progress (ADR-206). Source-free requests remain concurrent. Enrichment is current-view even under a PIT
 (ADR-113): matching, scores, order, and totals are snapshot-stable, but `_source` text is read from
 the live store as it exists when the request obtains that fence. A winner deleted before that point
 fails its enriched page typed (`include_source: false` pages stay fully pinned).

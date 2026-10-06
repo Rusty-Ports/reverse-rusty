@@ -20,10 +20,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **Behaviour change:** two bulk batches sent at the same time interleave their items, where the
   second used to wait for the first. Send them one after the other when their order matters.
 - **A search that returns sources (the default on `/v2/_search` and `/v2/_mpercolate`) no
-  longer takes the write lock.** It used to wait for a whole bulk batch, a resize, or an
-  exhaustive job to finish. It still waits for the writes in flight and runs one at a time.
+  longer waits for a whole bulk batch to finish.** It shares admission with writes. It still
+  waits for the writes in flight and runs one at a time.
 - Flush, checkpoint, backup, a vocabulary change, resync, resize and an exhaustive job still
-  hold every write out while they run.
+  hold every write, and every search that returns sources, out while they run.
 - Not changed: one write still visits its shards one after another.
 
 ## 2026-10-06 — A write reports the class its query was stored under
