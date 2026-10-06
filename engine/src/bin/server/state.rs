@@ -348,6 +348,32 @@ pub(crate) trait RequestCtx: Send + Sync + 'static {
     fn health_permits(&self) -> &std::sync::Arc<tokio::sync::Semaphore>;
 }
 
+/// The scope `--include-broad` selects for requests that name none.
+fn scope_for(include_broad: bool) -> reverse_rusty::QueryScope {
+    if include_broad {
+        reverse_rusty::QueryScope::WithBroad
+    } else {
+        reverse_rusty::QueryScope::Standard
+    }
+}
+
+impl AppState {
+    /// The scope a request is evaluated in when it names none: what `--include-broad` set
+    /// for this process (ADR-201). Every surface resolves an omitted scope through this, so
+    /// the flag means the same on the compatibility routes, the v2 routes and exhaustive
+    /// jobs. A request that names a scope gets that scope.
+    pub(crate) fn default_query_scope(&self) -> reverse_rusty::QueryScope {
+        scope_for(self.include_broad)
+    }
+}
+
+impl ClusterAppState {
+    /// See [`AppState::default_query_scope`].
+    pub(crate) fn default_query_scope(&self) -> reverse_rusty::QueryScope {
+        scope_for(self.include_broad)
+    }
+}
+
 impl RequestCtx for AppState {
     fn prom(&self) -> &PrometheusMetrics {
         &self.prom
@@ -448,3 +474,6 @@ pub(crate) async fn request_id_middleware<S: RequestCtx>(
     }
     response
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;

@@ -569,6 +569,7 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(flush_time_seconds_total.clone()))
             .unwrap();
+        let source_commit = super::source_commit::SourceCommitMetrics::register(&registry);
         registry
             .register(Box::new(compaction_time_seconds_total.clone()))
             .unwrap();
@@ -621,6 +622,7 @@ impl PrometheusMetrics {
             segment_cleanup_failures_total,
             durability_failures_total,
             flush_time_seconds_total,
+            source_commit,
             compaction_time_seconds_total,
             http_requests_total,
             http_request_duration,

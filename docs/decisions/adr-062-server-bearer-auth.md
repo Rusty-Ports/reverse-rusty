@@ -78,3 +78,11 @@
   transports (Tier-3 distributed hardening), and cooperative cancellation on the match path (the other
   ADR-052 deferral). The `--version` flag (a one-line `clap` attribute) rode along, closing that
   ops-ergonomics backlog item for the server bin.
+
+## Later outcome — 2026-10-06
+
+"The 256 in-flight slots" in the layering paragraph are 256 per endpoint, not per server: the
+limiter this ADR placed auth outside of gives every route and method its own pool.
+[ADR-199](adr-199-request-limit-per-endpoint.md) keeps that on purpose and records why one
+shared pool is unsafe. Auth is still outside the limiter, and that is now tested on the real
+router.

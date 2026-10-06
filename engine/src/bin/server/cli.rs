@@ -63,7 +63,11 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) ranking_profiles_file: Option<PathBuf>,
 
-    /// Include broad-lane queries in match results.
+    /// Include broad-lane queries (class C and accepted class D) in the results of every
+    /// request that does not name a scope, on every search surface: `/_search`,
+    /// `/_mpercolate`, `/v2/_search`, `/v2/_mpercolate` and exhaustive jobs. A request can
+    /// still name its own (`include_broad` on the compatibility routes, `query_scope` on v2
+    /// and jobs).
     #[arg(long, default_value_t = false)]
     pub(crate) include_broad: bool,
 

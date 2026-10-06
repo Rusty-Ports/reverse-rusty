@@ -262,12 +262,27 @@ pub(crate) async fn create_job(
     create_job_inner(&state, body, CreateJobParams::default())
 }
 
+/// Start a job from a JSON body and return its id. For tests outside this module, which
+/// cannot name the request type.
+#[cfg(test)]
+pub(crate) fn create_job_for_test(state: &AppState, body: serde_json::Value) -> String {
+    let body = serde_json::from_value(body).expect("job request");
+    let (_, Json(created)) =
+        create_job_inner(state, body, CreateJobParams::default()).expect("job created");
+    created.job_id
+}
+
 fn create_job_inner(
     state: &AppState,
     body: CreateJobBody,
     params: CreateJobParams,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
-    let prepared = prepare(&state.exhaustive_jobs, body, params)?;
+    let prepared = prepare(
+        &state.exhaustive_jobs,
+        body,
+        params,
+        state.default_query_scope(),
+    )?;
     let snapshot = state.snapshot.load_full();
     let pred = snapshot.compile_tag_predicate(&prepared.filter);
     let program = match prepared.rank.as_ref() {
@@ -334,7 +349,12 @@ async fn cluster_create_job_inner(
     body: CreateJobBody,
     params: CreateJobParams,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
-    let prepared = prepare(&state.exhaustive_jobs, body, params)?;
+    let prepared = prepare(
+        &state.exhaustive_jobs,
+        body,
+        params,
+        state.default_query_scope(),
+    )?;
     // The compile reads the cluster under its lock, on a blocking thread (ADR-191).
     let program = match prepared.rank.clone() {
         Some(spec) => {

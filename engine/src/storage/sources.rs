@@ -138,12 +138,12 @@ impl StoredSource {
 }
 
 #[inline]
-fn rw_read<T>(l: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    l.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+fn rw_read<T>(l: &Tracked<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    l.read()
 }
 #[inline]
-fn rw_write<T>(l: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    l.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+fn rw_write<T>(l: &Tracked<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    l.write()
 }
 
 fn bad_sources() -> io::Error {
@@ -157,10 +157,10 @@ fn bad_sources() -> io::Error {
 /// binary-searchable v2 file, so it fetches text on demand instead of holding the
 /// whole corpus resident (the production-scale memory win — ADR-020 Item 1).
 pub enum SourceStore {
-    Resident(std::sync::RwLock<crate::util::FastMap<u64, StoredSource>>),
+    Resident(Tracked<crate::util::FastMap<u64, StoredSource>>),
     Lazy {
         base: Option<LazyBase>,
-        overlay: std::sync::RwLock<crate::util::FastMap<u64, Option<StoredSource>>>,
+        overlay: Tracked<crate::util::FastMap<u64, Option<StoredSource>>>,
     },
 }
 
@@ -212,6 +212,9 @@ struct SourceEntryRef<'a> {
 mod format;
 mod lazy;
 mod store;
+mod tracked;
+
+pub use tracked::Tracked;
 
 #[cfg(test)]
 use format::encode_tags;

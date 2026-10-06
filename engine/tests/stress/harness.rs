@@ -156,6 +156,12 @@ impl EventLog {
                         base_segments_after
                     )
                 }
+                EngineEvent::SourceCommit {
+                    bytes,
+                    duration_secs,
+                } => {
+                    format!("[SOURCE_COMMIT] bytes={bytes} secs={duration_secs:.3}")
+                }
                 EngineEvent::SegmentCleanupFailed { path, error } => {
                     format!("[CLEANUP_FAIL] path={} error={error}", path.display())
                 }

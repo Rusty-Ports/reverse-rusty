@@ -31,7 +31,7 @@ Options:
 | `--exhaustive-channel-depth` | 8 | Bounded frames buffered between an exhaustive worker and its stream consumer |
 | `--exhaustive-job-timeout-secs` | 300 | Maximum exhaustive admission-to-terminal lifetime (including worker scheduling); a request may ask for less |
 | `--max-retained-exhaustive-jobs` | 1024 | In-memory job records; oldest terminal records are pruned, while an all-active full registry rejects with 429 |
-| `--include-broad` | false | Include opt-in broad-lane class C and accepted class D queries. Class H is always visible |
+| `--include-broad` | false | Include opt-in broad-lane class C and accepted class D queries in every request that names no scope, on every search surface: `/_search`, `/_mpercolate`, `/v2/_search`, `/v2/_mpercolate` and exhaustive jobs ([ADR-201](../../../decisions/adr-201-server-default-scope-on-every-surface.md)). A request can name its own with `include_broad` (compatibility routes) or `query_scope` (v2 and jobs). Class H is always visible |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
 | `--slow-query-threshold-ms` | 1000 | Log searches exceeding this at `warn` level (0 disables) |
@@ -66,6 +66,22 @@ cargo run --release --bin server -- \
 
 The server handles SIGINT/SIGTERM gracefully — it drains in-flight requests, flushes the memtable,
 and syncs the WAL before exiting.
+
+### Request limit
+
+Each endpoint (a route and method) of a server, standalone or coordinator, works on at most
+**256 requests at once** ([ADR-199](../../../decisions/adr-199-request-limit-per-endpoint.md)).
+One more waits for a slot of that endpoint; it is not refused, and its body is not read while it
+waits.
+
+The limit is per endpoint, not per server. A full `/_search` holds back no other route, and
+there is no cap on requests in flight across the whole server. That is deliberate: some requests
+wait for a request on another endpoint (a job-status read for the job's stream, a write for a
+lock that a compaction holds), and in a shared pool they would keep it out.
+
+A request without a valid token, where one is required, is refused before it takes a slot. The
+number is not configurable. `--max-concurrent-searches` separately bounds how many searches
+occupy the match pool, and is the setting to use to bound match work.
 
 ### Ranking profile file
 

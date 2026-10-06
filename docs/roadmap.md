@@ -420,6 +420,18 @@ change, and acceptance boundary; promotion changes its priority, not its documen
 - **CORS policy.** Browser tools cannot call the API across origins today. Add an explicit
   configurable `CorsLayer`, default it to no cross-origin access, document credential handling, and
   test preflight behavior with authentication enabled.
+- **Effective scope on every response.** v2 responses and job status echo `query_scope`, but the
+  compatibility `/_search` and `/_mpercolate` responses do not say which scope ran, the job
+  completion frame does not repeat it, and single-node `GET /_settings` does not show the
+  server's `--include-broad` default (the coordinator's does). Add a response header on the
+  compatibility routes so their bodies stay unchanged, the scope in the completion frame, and
+  the default in single-node settings.
+- **A byte budget for request bodies.** The request limit is per endpoint (ADR-199) and counts
+  requests, not what they hold: the document, bulk and search routes buffer bodies of up to
+  100 MB each, on endpoints that each admit 256. Add a configurable budget for buffered body
+  bytes, give the read routes a body limit that matches their real maximum, and decide whether
+  a request beyond the budget waits or is refused. A budget on bytes is the server-wide bound a
+  shared request pool cannot safely be.
 - **Thread-pool introspection.** Search admission is bounded but operators cannot see queue
   pressure directly. Expose active, queued, rejected, and completed work through fixed-cardinality
   metrics and an operator endpoint, then verify the counters under saturation.
@@ -454,8 +466,16 @@ change, and acceptance boundary; promotion changes its priority, not its documen
 
 - **Reusable WAL encoding.** Pool serialization buffers across writes while preserving frame
   atomicity and ensuring a failed append cannot leak bytes into the next frame.
-- **Faster manifest CRC.** Replace byte-at-a-time CRC with a table or hardware-assisted path,
-  retaining byte-identical checksums and malformed-manifest failures.
+- **Faster checksums for every durable file.** One byte-at-a-time CRC serves the manifest,
+  segments, the source sidecar, the WAL, the translog and the control store. Replace it with a
+  table or hardware-assisted path, retaining byte-identical checksums and the malformed-file
+  failures, and stream the segment checksum while writing instead of reading the file back.
+- **Source commits proportional to the change.** A standalone flush, and every bulk load of new
+  ids, still writes the whole source sidecar under the write lock (ADR-200 removed only the
+  writes that changed nothing). Write what changed instead: a base sidecar plus small deltas
+  selected together by the manifest, folded into a new base outside the write lock. Needs a
+  manifest version with a rollback fence, crash-window coverage for the delta and fold commits,
+  and backup support for several selected files.
 - **Profile-gated SIMD.** Evaluate vectorized intersections only when representative profiles are
   dominated by medium or large postings; keep the scalar path when setup cost wins.
 

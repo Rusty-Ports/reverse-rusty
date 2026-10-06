@@ -60,6 +60,7 @@ that followed the ADR-065 graduation program.
 | [124](../adr-124-variance-tolerant-performance-gate.md) | Variance-tolerant performance gate | Uses variance-aware regression gating with scheduled soak coverage. | Done |
 | [125](../adr-125-delete-document-contract.md) | DELETE document contract | Defines strict refresh parsing, honest metadata, logical counts, and retryable partial repair. | Accepted |
 | [186](../adr-186-visibility-partitioned-dedup.md) | Visibility-partitioned dedup | Lets a dedup member join only a leader on its own side of the opt-in boundary, so a join can never hide or expose a query. | Accepted |
+| [201](../adr-201-server-default-scope-on-every-surface.md) | Server default scope on every surface | Makes an omitted scope on v2 search, v2 batch and exhaustive jobs the one `--include-broad` selected, as on the compatibility routes, so the flag cannot hide broad-lane candidates on some surfaces. | Accepted |
 
 ---
 

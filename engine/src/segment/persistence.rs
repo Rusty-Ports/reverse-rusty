@@ -191,7 +191,8 @@ impl Engine {
         // The manifest write is the atomic commit point. It names both already-
         // durable artifacts. If it fails, roll the batch back entirely: drop the
         // in-memory segment and delete both orphans.
-        let staged_publishes_lazy = staged_sources.is_some() && self.query_store.is_lazy();
+        let staged_a_sidecar = staged_sources.is_some();
+        let staged_publishes_lazy = staged_a_sidecar && self.query_store.is_lazy();
         if !self.commit_staged_sources_and_manifest(staged_sources) {
             self.segments.pop();
             self.segment_generations.pop();
@@ -212,6 +213,11 @@ impl Engine {
             for (logical, source) in pending_sources {
                 self.query_store.insert_stored(logical, source);
             }
+        }
+        // Applied directly or re-mapped from the file, the store now holds what the sidecar
+        // this commit selected holds.
+        if staged_a_sidecar {
+            self.mark_selected_sources_current();
         }
 
         self.emit(crate::events::EngineEvent::Ingest {
@@ -445,11 +451,36 @@ impl Engine {
 
     /// Persist the current source corpus as a new immutable sidecar and atomically
     /// select it with the current standalone segment registry.
+    ///
+    /// When the selected sidecar already holds exactly the store's documents, the commit
+    /// selects it again: only the segment registry changed (a compaction, a reseal, the
+    /// merge that follows a flush), and writing the whole corpus out again would cost time
+    /// proportional to the corpus for nothing (ADR-200).
     pub(in crate::segment) fn commit_sources_and_manifest(&mut self) -> bool {
+        if self.selected_sources_are_current() {
+            return self.commit_staged_sources_and_manifest(None);
+        }
         let Ok(staged) = self.stage_query_sources(&[]) else {
             return false;
         };
         self.commit_staged_sources_and_manifest(staged)
+    }
+
+    /// Whether the manifest-selected sidecar is known to hold exactly the store's documents.
+    ///
+    /// The store's version changes at every write access to it and differs for every store
+    /// opened or created, so an equal version means nothing was written since the file and
+    /// the store were last known equal. Anything else answers no, and the corpus is written.
+    fn selected_sources_are_current(&self) -> bool {
+        self.selected_source_version == Some(self.query_store.content_version())
+    }
+
+    /// Record that the selected sidecar holds exactly the store's documents now. A recovery
+    /// that could not load its sidecar, or skipped a segment, never records it: its store is
+    /// not what any sidecar holds, and its commits are refused until a restart.
+    pub(in crate::segment) fn mark_selected_sources_current(&mut self) {
+        self.selected_source_version = (self.source_commit_state == SourceCommitState::Ready)
+            .then(|| self.query_store.content_version());
     }
 
     /// Atomically select a prepared source generation with the engine's current
@@ -471,6 +502,10 @@ impl Engine {
 
         if let Some(staged) = staged {
             self.activate_staged_sources(staged);
+            // The sidecar was written from the store. A caller that staged documents the
+            // store does not hold yet applies them next, which changes the version, and
+            // marks again once the store has caught up (`commit_base_segment`).
+            self.mark_selected_sources_current();
         }
         true
     }
