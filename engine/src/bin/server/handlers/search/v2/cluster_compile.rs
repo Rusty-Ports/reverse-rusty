@@ -68,14 +68,17 @@ pub(super) struct CompileRequest {
 /// Compile under the cluster lock. The stale gate runs BEFORE the fingerprint so a rebuilt
 /// normalizer cannot mis-classify a dead cursor as a client mismatch; the kernel re-gates
 /// inside its own blocking closure, so the gap between here and there stays fail-closed.
+///
+/// The worker only classifies a failure; the outcome metric is recorded here, by the request
+/// that receives the result. A request that already answered 408 has dropped this future, so
+/// a worker that finishes afterwards cannot count the same request a second time.
 pub(super) async fn compile(
     state: &Arc<ClusterAppState>,
     request: CompileRequest,
 ) -> Result<(CompiledRankProgram, Option<page::MintCtx>), Reject> {
     let scope = request.scope;
-    let worker_state = Arc::clone(state);
+    let profiles = Arc::clone(&state.rank_profiles);
     let compiled = crate::handlers::cluster::read_cluster(state, move |cluster| {
-        let state = worker_state;
         let CompileRequest {
             rank,
             pit,
@@ -84,24 +87,21 @@ pub(super) async fn compile(
             filter,
             scope,
         } = request;
-        let program = match cluster.compile_rank_program_with_profiles(&rank, &state.rank_profiles)
-        {
-            Ok(program) => program,
-            Err(error) => {
-                record_outcome(&state.prom, "validation", scope);
-                return Err(rank_program_error(&error));
-            }
-        };
+        let program = cluster
+            .compile_rank_program_with_profiles(&rank, &profiles)
+            .map_err(|error| ("validation", rank_program_error(&error)))?;
         let Some(pit) = pit else {
             return Ok((program, None));
         };
         if let Err(error) = cluster.check_pit(pit, Instant::now()) {
             let (status, kind, outcome) = error.v2_http_class();
-            record_outcome(&state.prom, outcome, scope);
-            return Err(ApiError::response(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                kind,
-                error.to_string(),
+            return Err((
+                outcome,
+                ApiError::response(
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                    kind,
+                    error.to_string(),
+                ),
             ));
         }
         let fingerprint = crate::pit::request_fingerprint(
@@ -113,14 +113,17 @@ pub(super) async fn compile(
             &filter,
         );
         if expected_fingerprint.is_some_and(|expected| expected != fingerprint) {
-            record_outcome(&state.prom, "cursor_mismatch", scope);
-            return Err(crate::pit::cursor_mismatch_response());
+            return Err(("cursor_mismatch", crate::pit::cursor_mismatch_response()));
         }
         Ok((program, Some(page::MintCtx { pit, fingerprint })))
     })
     .await;
     match compiled {
-        Ok(compiled) => compiled,
+        Ok(Ok(compiled)) => Ok(compiled),
+        Ok(Err((outcome, reject))) => {
+            record_outcome(&state.prom, outcome, scope);
+            Err(reject)
+        }
         Err(error) => {
             record_outcome(&state.prom, "error", scope);
             Err(ApiError::response(

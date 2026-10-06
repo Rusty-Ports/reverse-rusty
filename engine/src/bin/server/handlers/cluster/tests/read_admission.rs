@@ -213,3 +213,65 @@ fn a_ranked_request_times_out_while_its_compile_waits_for_the_cluster_lock() {
         assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{route}: {body}");
     }
 }
+
+fn ranked_outcomes(state: &ClusterAppState, outcome: &str) -> u64 {
+    state
+        .prom
+        .ranked_requests_total
+        .with_label_values(&[outcome, "standard"])
+        .get()
+}
+
+/// A request that timed out is counted once, as a timeout. Its compile worker is still
+/// queued when the request answers; when the lock frees, the worker finds the rank program
+/// invalid, and that result has no request left to belong to.
+#[test]
+fn a_timed_out_ranked_request_is_counted_once() {
+    let state = test_state(&seed());
+    let (holder, release) = hold_cluster_exclusively(&state);
+    let run_state = Arc::clone(&state);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (answer, after_release) = runtime.block_on(async move {
+        let request = req(
+            "POST",
+            "/v2/_search?query_scope=standard",
+            &serde_json::json!({
+                "document": {"title": "1994 acme"},
+                "rank": {"profile": "no-such-profile"},
+                "timeout_ms": 20
+            }),
+        );
+        let answer = tokio::time::timeout(Duration::from_secs(5), send(&run_state, request)).await;
+        drop(release);
+        // The detached worker now runs to completion and frees its read permit.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while run_state.read_permits.available_permits() != MAX_QUEUED_CLUSTER_READS
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        (
+            answer,
+            (
+                ranked_outcomes(&run_state, "timeout"),
+                ranked_outcomes(&run_state, "validation"),
+                run_state.read_permits.available_permits(),
+            ),
+        )
+    });
+    holder.join().expect("holder");
+    drop(runtime);
+    let (status, body) = answer.expect("the request answers at its deadline");
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{body}");
+    let (timeouts, validations, permits) = after_release;
+    assert_eq!(permits, MAX_QUEUED_CLUSTER_READS, "the worker finished");
+    assert_eq!(
+        (timeouts, validations),
+        (1, 0),
+        "one request, one outcome: the late worker must not add a second"
+    );
+}
