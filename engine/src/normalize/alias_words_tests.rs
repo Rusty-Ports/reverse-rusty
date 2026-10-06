@@ -244,32 +244,121 @@ fn a_form_the_title_carries_can_be_a_word_of_another_form() {
     assert!(!canonical_has(&norm, "york new catalog", "term:ny_catalog"));
 }
 
+/// Run the completion on a title given by the names it carries. Returns the entities added
+/// and how many times a form was examined.
+fn complete(words: &super::core::AliasWords, carried: &mut Vec<u64>) -> (Vec<FeatureId>, usize) {
+    let (mut in_view, mut completed, mut out) = (Vec::new(), Vec::new(), Vec::new());
+    let examined = words.complete_into(
+        carried,
+        &mut in_view,
+        &mut completed,
+        &Dict::new(),
+        &mut out,
+    );
+    assert!(
+        completed.is_empty() && in_view.iter().all(|flag| !flag),
+        "the scratch is left empty for the next title"
+    );
+    (out, examined)
+}
+
+fn form(entity: &str, words: &[&str]) -> (String, Vec<Vec<String>>) {
+    (
+        entity.to_string(),
+        words.iter().map(|word| vec![(*word).to_string()]).collect(),
+    )
+}
+
 #[test]
 fn a_title_that_repeats_a_word_carries_it_once() {
     // The names of a title are reduced to the distinct ones before any form is examined,
     // so a word repeated thousands of times costs one look, not one per occurrence.
-    let words = super::core::AliasWords::new(vec![(
-        "term:wireless_mouse".to_string(),
-        vec![
-            vec!["term:wireless".to_string()],
-            vec!["term:mouse".to_string()],
-        ],
+    let words = super::core::AliasWords::new(vec![form(
+        "term:wireless_mouse",
+        &["term:wireless", "term:mouse"],
     )])
     .expect("alias words");
     let wireless = super::core::name_hash("term:wireless");
     let mouse = super::core::name_hash("term:mouse");
-    let dict = Dict::new();
 
     let mut carried = vec![wireless; 50_000];
-    let mut out = Vec::new();
-    words.complete_into(&mut carried, &dict, &mut out);
+    let (out, examined) = complete(&words, &mut carried);
     assert_eq!(carried, vec![wireless]);
     assert!(out.is_empty());
+    assert!(examined <= 1, "examined {examined} times");
 
     let mut carried = vec![mouse, wireless, mouse, wireless];
-    words.complete_into(&mut carried, &dict, &mut out);
+    let (out, examined) = complete(&words, &mut carried);
     assert_eq!(out, vec![id("term:wireless_mouse")]);
-    assert_eq!(carried.len(), 3, "the two words and the entity");
+    assert_eq!(examined, 1);
+}
+
+#[test]
+fn the_work_follows_the_forms_a_title_touches() {
+    // Thousands of forms that share a word: a title with that word alone examines none.
+    let shared: Vec<_> = (0..5_000)
+        .map(|model| {
+            form(
+                &format!("term:wireless_m{model}"),
+                &["term:wireless", &format!("term:m{model}")],
+            )
+        })
+        .collect();
+    let words = super::core::AliasWords::new(shared).expect("alias words");
+    let (out, examined) = complete(&words, &mut vec![super::core::name_hash("term:wireless")]);
+    assert!(out.is_empty());
+    assert_eq!(examined, 0);
+
+    // A chain two thousand forms long, each built on the entity of the one before. The
+    // title carries the first word; every form completes, and each is examined once.
+    let chain: Vec<_> = (0..2_000)
+        .map(|link| {
+            form(
+                &format!("term:s{}", link + 1),
+                &[&format!("term:s{link}"), "term:unit"],
+            )
+        })
+        .collect();
+    let words = super::core::AliasWords::new(chain).expect("alias words");
+    let mut carried = vec![
+        super::core::name_hash("term:unit"),
+        super::core::name_hash("term:s0"),
+    ];
+    let (out, examined) = complete(&words, &mut carried);
+    assert_eq!(out.len(), 2_000);
+    assert_eq!(out.last(), Some(&id("term:s2000")));
+    assert_eq!(examined, 2_000);
+
+    // The chain entered in the middle completes from there on only.
+    let mut carried = vec![
+        super::core::name_hash("term:unit"),
+        super::core::name_hash("term:s1500"),
+    ];
+    let (out, examined) = complete(&words, &mut carried);
+    assert_eq!(out.len(), 500);
+    assert_eq!(examined, 500);
+}
+
+#[test]
+fn two_forms_for_one_entity_add_it_once() {
+    let words = super::core::AliasWords::new(vec![
+        form("entity:place", &["term:new", "term:york"]),
+        form("entity:place", &["term:big", "term:apple"]),
+        form("term:trip", &["entity:place", "term:tour"]),
+    ])
+    .expect("alias words");
+    let mut carried: Vec<u64> = [
+        "term:new",
+        "term:york",
+        "term:big",
+        "term:apple",
+        "term:tour",
+    ]
+    .iter()
+    .map(|name| super::core::name_hash(name))
+    .collect();
+    let (out, _) = complete(&words, &mut carried);
+    assert_eq!(out, vec![id("entity:place"), id("term:trip")]);
 }
 
 #[test]

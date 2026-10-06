@@ -263,6 +263,10 @@ pub struct NormScratch {
     /// [`name_hash`](core::name_hash) values (ADR-205). Taken out while the view is built
     /// and put back.
     alias_names: Vec<u64>,
+    /// Which alias entities the rule has put in the current title's view, by entity slot,
+    /// and the forms that put them there (ADR-205). Both are empty between titles.
+    alias_in_view: Vec<bool>,
+    alias_completed: Vec<u32>,
     /// Feature-name builder (`"term:"`/`"year:"` + value) handed to the helper emitters.
     scratch: String,
     /// Reused difference array for linear positioned-graph coverage. Entry `i`

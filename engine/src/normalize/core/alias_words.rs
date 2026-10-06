@@ -20,9 +20,9 @@ pub(in crate::normalize) fn name_hash(name: &str) -> u64 {
 
 struct Form {
     entity: String,
-    /// The entity's own name: a form the title carries is itself something the title
-    /// carries, and may be a word of another form.
-    entity_name: u64,
+    /// Which entity this is, among the distinct entities of all forms. Two forms that name
+    /// one entity share it.
+    entity_slot: u32,
     /// One entry per word: the names a title may carry the word under, sorted.
     words: Vec<Vec<u64>>,
 }
@@ -35,6 +35,12 @@ pub(in crate::normalize) struct AliasWords {
     /// word. Ten thousand forms `wireless <model>` cost a title that says `wireless`
     /// nothing; they are keyed on their model.
     keyed: FastMap<u64, Vec<u32>>,
+    /// Entity name -> its slot. A form the title carries puts its entity in the view, and
+    /// that entity may be a word of another form.
+    entity_slots: FastMap<u64, u32>,
+    /// Entity slot -> the forms that have the entity among the names of one of their
+    /// words: the only forms worth another look once the entity is in the view.
+    dependents: Vec<Vec<u32>>,
 }
 
 impl AliasWords {
@@ -43,22 +49,30 @@ impl AliasWords {
     /// holds for every cleaned token, and whatever the word compiles to as a token of its
     /// own (a synonym's canonical, a typed number).
     pub(in crate::normalize) fn new(forms: Vec<(String, Vec<Vec<String>>)>) -> Option<Self> {
+        // Entities are told apart by their names, exactly.
+        let mut slot_of: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut entity_slots: FastMap<u64, u32> = fast_map();
         let forms: Vec<Form> = forms
             .into_iter()
             .filter(|(_, words)| !words.is_empty())
-            .map(|(entity, words)| Form {
-                entity_name: name_hash(&entity),
-                entity,
-                words: words
-                    .iter()
-                    .map(|names| {
-                        let mut hashes: Vec<u64> =
-                            names.iter().map(|name| name_hash(name)).collect();
-                        hashes.sort_unstable();
-                        hashes.dedup();
-                        hashes
-                    })
-                    .collect(),
+            .map(|(entity, words)| {
+                let next = u32::try_from(slot_of.len()).unwrap_or(u32::MAX);
+                let entity_slot = *slot_of.entry(entity.clone()).or_insert(next);
+                entity_slots.insert(name_hash(&entity), entity_slot);
+                Form {
+                    entity,
+                    entity_slot,
+                    words: words
+                        .iter()
+                        .map(|names| {
+                            let mut hashes: Vec<u64> =
+                                names.iter().map(|name| name_hash(name)).collect();
+                            hashes.sort_unstable();
+                            hashes.dedup();
+                            hashes
+                        })
+                        .collect(),
+                }
             })
             .collect();
         if forms.is_empty() {
@@ -75,6 +89,7 @@ impl AliasWords {
             }
         }
         let mut keyed: FastMap<u64, Vec<u32>> = fast_map();
+        let mut dependents: Vec<Vec<u32>> = vec![Vec::new(); slot_of.len()];
         for (index, form) in forms.iter().enumerate() {
             let index = u32::try_from(index).ok()?;
             let key = form.words.iter().min_by_key(|names| {
@@ -86,57 +101,92 @@ impl AliasWords {
             for &name in key {
                 keyed.entry(name).or_default().push(index);
             }
-        }
-        Some(Self { forms, keyed })
-    }
-
-    /// Append the entity of every form all of whose words the title carries, to a fixed
-    /// point: a form the title carries adds its entity to what the title carries, and that
-    /// entity may be a word of another form.
-    ///
-    /// `carried` is the title's complete positive view by name, in any order and with
-    /// repeats; it is left sorted and distinct, followed by the names this call added. An
-    /// entity already in the view is not appended again. An entity the dictionary has not
-    /// interned resolves to its synthetic id, as everywhere on the title side (ADR-046).
-    pub(in crate::normalize) fn complete_into(
-        &self,
-        carried: &mut Vec<u64>,
-        dict: &Dict,
-        out: &mut Vec<FeatureId>,
-    ) {
-        // A title that repeats a word a thousand times carries it once.
-        carried.sort_unstable();
-        carried.dedup();
-        let sorted = carried.len();
-        // Every round but the last adds a form's entity, and a form is added once, so the
-        // rounds are bounded by the number of forms whatever else goes wrong.
-        for _ in 0..=self.forms.len() {
-            let before = carried.len();
-            for at in 0..before {
-                let Some(forms) = self.keyed.get(&carried[at]) else {
-                    continue;
-                };
-                for &form in forms {
-                    let form = &self.forms[form as usize];
-                    let has = |name: &u64| {
-                        carried[..sorted].binary_search(name).is_ok()
-                            || carried[sorted..].contains(name)
-                    };
-                    if has(&form.entity_name) {
-                        continue;
-                    }
-                    if form.words.iter().all(|names| names.iter().any(has)) {
-                        carried.push(form.entity_name);
-                        out.push(dict.get_or_synthetic(&form.entity));
+            for name in form.words.iter().flatten() {
+                if let Some(&slot) = entity_slots.get(name) {
+                    let waiting = &mut dependents[slot as usize];
+                    if !waiting.contains(&index) {
+                        waiting.push(index);
                     }
                 }
             }
-            // Another round only when this one added an entity: it may complete a form
-            // that was a word short.
-            if carried.len() == before {
-                break;
+        }
+        Some(Self {
+            forms,
+            keyed,
+            entity_slots,
+            dependents,
+        })
+    }
+
+    /// Append the entity of every form all of whose words the title carries, to a fixed
+    /// point: a form the title carries puts its entity in the view, and that entity may be a
+    /// word of another form. Returns how many times a form was examined.
+    ///
+    /// `carried` is the title's complete positive view by name, in any order and with
+    /// repeats; it is left sorted and distinct. `in_view` and `completed` are scratch,
+    /// empty between calls. An entity the dictionary has not interned resolves to its
+    /// synthetic id, as everywhere on the title side (ADR-046).
+    ///
+    /// A form is examined when the title carries its key word, and again each time an
+    /// entity that is one of its words enters the view, so the work follows the forms the
+    /// title touches and not the number of forms.
+    pub(in crate::normalize) fn complete_into(
+        &self,
+        carried: &mut Vec<u64>,
+        in_view: &mut Vec<bool>,
+        completed: &mut Vec<u32>,
+        dict: &Dict,
+        out: &mut Vec<FeatureId>,
+    ) -> usize {
+        // A title that repeats a word a thousand times carries it once.
+        carried.sort_unstable();
+        carried.dedup();
+        if in_view.len() != self.dependents.len() {
+            in_view.clear();
+            in_view.resize(self.dependents.len(), false);
+        }
+        debug_assert!(completed.is_empty());
+        let mut examined = 0usize;
+        let mut examine = |form: u32, in_view: &mut Vec<bool>, completed: &mut Vec<u32>| {
+            examined += 1;
+            let candidate = &self.forms[form as usize];
+            if in_view[candidate.entity_slot as usize] {
+                return;
+            }
+            let has = |name: &u64| {
+                carried.binary_search(name).is_ok()
+                    || self
+                        .entity_slots
+                        .get(name)
+                        .is_some_and(|&slot| in_view[slot as usize])
+            };
+            if candidate.words.iter().all(|names| names.iter().any(has)) {
+                in_view[candidate.entity_slot as usize] = true;
+                completed.push(form);
+                out.push(dict.get_or_synthetic(&candidate.entity));
+            }
+        };
+        for name in carried.iter() {
+            if let Some(forms) = self.keyed.get(name) {
+                for &form in forms {
+                    examine(form, in_view, completed);
+                }
             }
         }
+        // Each entity that entered the view gives the forms waiting on it another look.
+        let mut next = 0;
+        while next < completed.len() {
+            let slot = self.forms[completed[next] as usize].entity_slot;
+            next += 1;
+            for &form in &self.dependents[slot as usize] {
+                examine(form, in_view, completed);
+            }
+        }
+        for &form in completed.iter() {
+            in_view[self.forms[form as usize].entity_slot as usize] = false;
+        }
+        completed.clear();
+        examined
     }
 
     /// How many forms a title that carries `name` has to look at.
