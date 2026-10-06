@@ -3,7 +3,7 @@
 //! positive graphs regardless of alias activation. Split out of `core.rs` to
 //! keep that file within the size budget.
 
-use crate::dict::{Dict, FeatureId, FeatureKind};
+use crate::dict::{Dict, FeatureKind};
 use crate::normalize::PositionArc;
 use daachorse::DoubleArrayAhoCorasick;
 
@@ -24,21 +24,17 @@ pub(in crate::normalize) struct PhraseOverlap {
 }
 
 impl PhraseOverlap {
-    /// Append the entity feature id of every word-boundary-aligned phrase occurrence in the
-    /// already-cleaned text `lc` (overlapping matches included) to `out`. Unknown entities hash to
-    /// a stable synthetic id (ADR-046), exactly as the leftmost-longest pass resolves.
+    /// Hand `add` the entity feature name of every word-boundary-aligned phrase occurrence in
+    /// the already-cleaned text `lc` (overlapping matches included). The caller resolves the
+    /// name: an unknown entity hashes to a stable synthetic id (ADR-046), exactly as the
+    /// leftmost-longest pass resolves.
     ///
     /// The scan **collapses whitespace runs** so a phrase (registered single-spaced) still matches
     /// a title with repeated spaces or adjacent split punctuation (`new  york`, `new---york`) —
     /// codex R8. This is the flat positive-view (`P(T)`) path and only ever ADDS entities
     /// (recall-safe); flat canonical `N(T)` remains unchanged. No allocation unless a run is
     /// actually present.
-    pub(in crate::normalize) fn collect_into(
-        &self,
-        lc: &str,
-        dict: &Dict,
-        out: &mut Vec<FeatureId>,
-    ) {
+    pub(in crate::normalize) fn collect_into(&self, lc: &str, add: &mut dyn FnMut(&str)) {
         if lc.as_bytes().windows(2).any(|w| w == b"  ") {
             let mut collapsed = String::with_capacity(lc.len());
             let mut prev_space = true; // suppress a leading space
@@ -53,9 +49,9 @@ impl PhraseOverlap {
                     prev_space = false;
                 }
             }
-            self.scan_overlapping(&collapsed, dict, out);
+            self.scan_overlapping(&collapsed, add);
         } else {
-            self.scan_overlapping(lc, dict, out);
+            self.scan_overlapping(lc, add);
         }
     }
 
@@ -104,15 +100,34 @@ impl PhraseOverlap {
         }
     }
 
-    /// Emit the entity id of every word-boundary-aligned overlapping phrase match in `text`.
-    fn scan_overlapping(&self, text: &str, dict: &Dict, out: &mut Vec<FeatureId>) {
+    /// Hand `visit` every word-boundary-aligned phrase occurrence in the single-spaced
+    /// `text`: the byte offset it starts at, the number of tokens it spans, and its feature
+    /// name. One scan, so the work follows the text and what occurs in it.
+    pub(in crate::normalize) fn occurrences(
+        &self,
+        text: &str,
+        visit: &mut dyn FnMut(usize, u32, &str),
+    ) {
         let bytes = text.as_bytes();
         for m in self.automaton.find_overlapping_iter(text) {
             let (s, e) = (m.start(), m.end());
             let ok_start = s == 0 || bytes[s - 1] == b' ';
             let ok_end = e == text.len() || bytes[e] == b' ';
             if ok_start && ok_end {
-                out.push(dict.get_or_synthetic(&self.entries[m.value()].0));
+                visit(s, self.token_lens[m.value()], &self.entries[m.value()].0);
+            }
+        }
+    }
+
+    /// Emit the entity name of every word-boundary-aligned overlapping phrase match in `text`.
+    fn scan_overlapping(&self, text: &str, add: &mut dyn FnMut(&str)) {
+        let bytes = text.as_bytes();
+        for m in self.automaton.find_overlapping_iter(text) {
+            let (s, e) = (m.start(), m.end());
+            let ok_start = s == 0 || bytes[s - 1] == b' ';
+            let ok_end = e == text.len() || bytes[e] == b' ';
+            if ok_start && ok_end {
+                add(&self.entries[m.value()].0);
             }
         }
     }

@@ -28,6 +28,8 @@ mod core;
 mod fingerprint;
 
 #[cfg(test)]
+mod alias_words_tests;
+#[cfg(test)]
 mod tests;
 
 /// Independent parse-union oracle for the ADR-061 positive view `P(T)` (the matcher's
@@ -257,6 +259,9 @@ pub struct NormScratch {
     phrase_emitted: Vec<bool>,
     /// Per-token "consumed by a phrase" flags, sized to `tokens.len()`.
     token_consumed: Vec<bool>,
+    /// The names of the current title's positive view and what completing the alias forms
+    /// over them remembers (ADR-205). Taken out while the view is built and put back.
+    alias: core::AliasScratch,
     /// Feature-name builder (`"term:"`/`"year:"` + value) handed to the helper emitters.
     scratch: String,
     /// Reused difference array for linear positioned-graph coverage. Entry `i`

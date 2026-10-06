@@ -413,7 +413,8 @@ pub fn match_features(vocab: &RefVocab, text: &str) -> Vec<Feature> {
 /// The two semantic title views (ADR-061): `neg` = canonical `N(T)` (forbidden checks), `pos` =
 /// the maximal flat positive superset `P(T) ⊇ N(T)` (flat retrieval + required + any-of).
 /// Phrase-aware callers build their candidate-only graph-label probe separately. With no active
-/// multi-word alias the two are identical. Translation of `core.rs::match_features_dual`.
+/// multi-word alias the two are identical. Written from the rules `core.rs::match_features_dual`
+/// implements, with plain scans in place of its automata and indexes.
 #[must_use]
 pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<Feature>) {
     let mut neg = emit(vocab, text, Side::Title, false);
@@ -439,6 +440,66 @@ pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<F
     }
     for idx in phrases::scan_overlapping(&lc, &vocab.phrases) {
         pos.push(Feature::raw(vocab.phrases[idx].feature.clone()));
+    }
+
+    // A title carries a multi-word alias form when it carries some reading of the form's
+    // text, wherever the pieces stand (ADR-205). A reading cuts the text into words and
+    // phrases the vocabulary already has. A word is carried as its own token, or under what
+    // it analyzes to by itself (a synonym's canonical, a typed number); a phrase under its
+    // feature; and either under anything a query would accept in its place (an equivalent).
+    // A form the title carries is itself carried and may be a piece of another form, so the
+    // rule is applied until it adds nothing.
+    let equivalents = crate::semantic::resolve_equivalences(vocab);
+    loop {
+        let carried = pos.clone();
+        let holds = |reading: &Feature| {
+            carried.contains(reading)
+                || equivalents
+                    .get(reading)
+                    .is_some_and(|class| class.iter().any(|same| carried.contains(same)))
+        };
+        for phrase in &vocab.phrases {
+            if phrase.mode != PhraseMode::Alias {
+                continue;
+            }
+            let entity = Feature::raw(phrase.feature.clone());
+            if pos.contains(&entity) {
+                continue;
+            }
+            // covered[n]: the first n tokens of the form can be read in pieces the title
+            // carries.
+            let tokens = &phrase.tokens;
+            let mut covered = vec![false; tokens.len() + 1];
+            covered[0] = true;
+            for start in 0..tokens.len() {
+                if !covered[start] {
+                    continue;
+                }
+                let word = &tokens[start];
+                if holds(&Feature::term(word))
+                    || emit(vocab, word, Side::Title, false).iter().any(&holds)
+                {
+                    covered[start + 1] = true;
+                }
+                for inner in &vocab.phrases {
+                    let end = start + inner.tokens.len();
+                    if inner.tokens.len() >= 2
+                        && inner.tokens.len() < tokens.len()
+                        && end <= tokens.len()
+                        && tokens[start..end] == inner.tokens[..]
+                        && holds(&Feature::raw(inner.feature.clone()))
+                    {
+                        covered[end] = true;
+                    }
+                }
+            }
+            if covered[tokens.len()] {
+                pos.push(entity);
+            }
+        }
+        if pos.len() == carried.len() {
+            break;
+        }
     }
 
     pos.sort();

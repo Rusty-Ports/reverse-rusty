@@ -1,4 +1,4 @@
-use super::{Dict, FeatureId, FeatureKind, NormScratch, Normalizer, Side};
+use super::{name_hash, Dict, FeatureId, FeatureKind, NormScratch, Normalizer, Side};
 
 impl Normalizer {
     // ---- compile-time and match-time entry points ----
@@ -42,6 +42,26 @@ impl Normalizer {
         ids.sort_unstable();
         ids.dedup();
         ids
+    }
+
+    /// [`compile_features_readonly`](Self::compile_features_readonly) with each feature's
+    /// name, as its [`name_hash`]: what an equivalence group's form resolves to, for both the
+    /// compiler and the title side (ADR-205). Sorted and distinct; two names that share a
+    /// feature id are both kept.
+    pub(crate) fn compile_named_readonly(
+        &self,
+        text: &str,
+        dict: &Dict,
+        lc: &mut String,
+    ) -> Vec<(FeatureId, u64)> {
+        let mut named: Vec<(FeatureId, u64)> = Vec::new();
+        let mut sc = NormScratch::new();
+        self.emit(text, lc, &mut sc, Side::Query, false, &mut |name, _kind| {
+            named.push((dict.get_or_synthetic(name), name_hash(name)));
+        });
+        named.sort_unstable();
+        named.dedup();
+        named
     }
 
     /// Match path: resolve title features by name. A token absent from the (frozen)
@@ -99,13 +119,27 @@ impl Normalizer {
     ) {
         neg.clear();
         pos.clear();
+        // Every feature enters the positive view through `add`. With a multi-word alias
+        // active it also notes the feature's name, so that the finished view can be asked
+        // which alias forms it carries the words of (ADR-205). The alias scratch is taken
+        // out because `emit` borrows the rest of the scratch while `add` runs.
+        let words = self.alias_words.as_ref();
+        let mut alias = std::mem::take(&mut sc.alias);
+        alias.names.clear();
+        let names = &mut alias.names;
+        let mut add = |name: &str, pos: &mut Vec<FeatureId>| {
+            if words.is_some() {
+                names.push(name_hash(name));
+            }
+            pos.push(dict.get_or_synthetic(name));
+        };
         // N(T): the canonical leftmost-longest parse (phrase modes respected). `emit` cleans
         // `text` into `lc` first. We accumulate into `pos` (the caller's reused buffer, disjoint
         // from the `sc` working buffers `emit` borrows), sort + dedup, then copy the canonical
         // set into `neg`. `pos` then stays the running superset accumulator below — so the path
         // allocates no per-call `tmp`.
         self.emit(text, lc, sc, Side::Title, false, &mut |name, _kind| {
-            pos.push(dict.get_or_synthetic(name));
+            add(name, pos);
         });
         pos.sort_unstable();
         pos.dedup();
@@ -124,7 +158,7 @@ impl Normalizer {
                 // cleaned component, and the second `emit` leaves `lc` holding the text used
                 // by the overlap pass and token scan.
                 self.emit(text, lc, sc, Side::Title, true, &mut |name, _kind| {
-                    pos.push(dict.get_or_synthetic(name));
+                    add(name, pos);
                 });
                 // The `"term:<token>"` builder is reused on `sc.name` (the second `emit` has
                 // returned, so `sc` is free again). `lc` is borrowed immutably for tokenization,
@@ -138,9 +172,16 @@ impl Normalizer {
                     }
                     name.truncate(5); // keep the "term:" prefix
                     name.push_str(tok);
-                    pos.push(dict.get_or_synthetic(name));
+                    add(name, pos);
                 }
-                ov.collect_into(lc, dict, pos);
+                ov.collect_into(lc, &mut |entity| add(entity, pos));
+                // A form all of whose words the title carries, wherever they stand, is in
+                // the positive view like a form written out (ADR-205). The words are looked
+                // for in the whole view as it stands here. Only this view gets the entity:
+                // the canonical one, which negation reads, keeps the adjacent reading.
+                if let Some(words) = words {
+                    words.complete_into(&mut alias, dict, pos);
+                }
                 pos.sort_unstable();
                 pos.dedup();
             }
@@ -148,5 +189,6 @@ impl Normalizer {
             // the library fail-safe if that invariant is ever broken.
             (true, None) => debug_assert!(false, "alias phrase missing overlap automaton"),
         }
+        sc.alias = alias;
     }
 }

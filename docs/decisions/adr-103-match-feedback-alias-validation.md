@@ -140,3 +140,7 @@
 vocabulary in the single-node manifest ([ADR-184](adr-184-recorded-feature-model.md)), so the
 feedback-apply response reports `persisted: true` on a durable engine. The process-local capture
 counters remain unpersisted, as described above.
+
+**Outcome update (2026-10-06).** "Widens only" was asserted by the oracle for a single-token
+pair. For a pair with a multi-word form it did not hold until [ADR-205](adr-205-a-title-with-every-word-carries-the-form.md); the feedback oracle now
+activates such a pair and checks that every earlier match survives.
