@@ -81,6 +81,7 @@
 
 ## Later outcome — 2026-10-06
 
-"The 256 in-flight slots" in the layering paragraph were 256 per route until
-[ADR-199](adr-199-one-request-pool.md): the limiter this ADR placed auth outside of gave every
-route its own pool. Auth is still outside admission, and the pool is now one pool.
+"The 256 in-flight slots" in the layering paragraph were 256 per route:
+the limiter this ADR placed auth outside of gave every route its own pool.
+[ADR-199](adr-199-request-admission-by-class.md) replaces it with one pool per class of request
+(256 for matching and reads). Auth is still outside admission.

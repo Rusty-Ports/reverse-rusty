@@ -43,14 +43,14 @@ pub(crate) mod held;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use admission::{RequestPool, MAX_IN_FLIGHT_REQUESTS};
+pub(crate) use admission::RequestPools;
 
 /// The largest request body a route accepts unless it sets its own limit.
 pub(crate) const DEFAULT_BODY_LIMIT: usize = 100 * 1024 * 1024;
 
-/// Build the single-node router. At most `max_in_flight` requests are in flight together,
-/// the probes aside; one more waits for a slot (see [`admission`]).
-pub(crate) fn build_router(state: Arc<AppState>, max_in_flight: usize) -> Router {
+/// Build the single-node router. Every request takes a slot from `pools` before its handler
+/// runs, and waits when its pool has none (see [`admission`]).
+pub(crate) fn build_router(state: Arc<AppState>, pools: RequestPools) -> Router {
     Router::new()
         .route("/", get(api_root))
         .route("/_doc/{id}", get(get_doc).put(put_doc).delete(delete_doc))
@@ -173,12 +173,10 @@ pub(crate) fn build_router(state: Arc<AppState>, max_in_flight: usize) -> Router
             any(prometheus_metrics).layer(DefaultBodyLimit::max(METRICS_BODY_LIMIT)),
         )
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
-        // ONE pool for every route (ADR-199). The middleware decides by method and path what
-        // a request needs, so a route is never outside the pool by where it was added.
-        .layer(middleware::from_fn_with_state(
-            RequestPool::new(max_in_flight),
-            admission::admit,
-        ))
+        // Admission for every route (ADR-199). The middleware decides by method and path
+        // which pool a request takes its slot from, so a route is never unbounded by where
+        // it was added.
+        .layer(middleware::from_fn_with_state(pools, admission::admit))
         // Auth sits OUTSIDE admission: an unauthenticated flood is rejected by a cheap
         // header compare without taking a slot from legitimate traffic (ADR-062).
         .layer(middleware::from_fn_with_state(

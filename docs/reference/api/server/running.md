@@ -69,18 +69,26 @@ and syncs the WAL before exiting.
 
 ### Request admission
 
-A server, standalone or coordinator, works on at most **256 requests at once** across all of its
-routes ([ADR-199](../../../decisions/adr-199-one-request-pool.md)). One more waits for a slot; it
-is not refused, and its body is not read while it waits.
+A server, standalone or coordinator, admits each request into the pool of its class
+([ADR-199](../../../decisions/adr-199-request-admission-by-class.md)). A request that finds its
+pool full waits for a slot; it is not refused, and its body is not read while it waits.
 
-- Document writes (`PUT`/`DELETE /_doc/{id}`, `POST /_bulk`, `/_flush`) may hold 64 of the 256
-  slots. They run one at a time, and while a compaction, backup or vocabulary rebuild holds the
-  lock they all wait; the bound keeps those waiting writes from taking the slots searches use.
-- `/_health` takes no slot (it admits eight requests itself and answers 429 beyond that), and
-  `/_metrics` has eight slots of its own, so a saturated server can still be probed and scraped.
-- A request without a valid token, where one is required, is refused before it takes a slot.
+| Class | Requests | At once |
+|---|---|---|
+| Matching and reads | `/_search`, `/_mpercolate`, `/v2/_search`, `/v2/_mpercolate`, `/v2/_pit`, `GET /_doc/{id}`, `GET /`, `POST /_percolate/jobs`, `/_percolate/jobs/{id}/stream` | 256 |
+| Document writes | `PUT`/`DELETE /_doc/{id}`, `POST /_bulk`, `/_flush` | 64 |
+| Job status | `GET /_percolate/jobs/{id}` | 64 |
+| Everything else | statistics, vocabulary, settings, backup, compaction, cluster operations, `DELETE /_percolate/jobs/{id}` | 64 |
+| `/_metrics` | | 8 |
 
-The numbers are not configurable. `--max-concurrent-searches` separately bounds how many searches
+The pools are separate on purpose. Document writes run one at a time, and while a compaction,
+backup or vocabulary rebuild holds the lock they all wait; a job-status read can wait for the
+job's stream to be read. In separate pools those waiting requests cannot take the slots that
+searches, or the requests they are waiting for, need.
+
+`/_health` takes no slot (it admits eight requests itself and answers 429 beyond that). A
+request without a valid token, where one is required, is refused before it takes a slot. The
+numbers are not configurable. `--max-concurrent-searches` separately bounds how many searches
 occupy the match pool.
 
 ### Ranking profile file

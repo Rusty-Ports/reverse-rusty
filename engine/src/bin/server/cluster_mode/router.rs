@@ -44,12 +44,12 @@ use crate::handlers::{
     VOCAB_LEARN_APPLY_BODY_LIMIT, VOCAB_LEARN_BODY_LIMIT, VOCAB_READ_BODY_LIMIT,
     VOCAB_WRITE_BODY_LIMIT,
 };
-use crate::router::{admission, RequestPool, DEFAULT_BODY_LIMIT};
+use crate::router::{admission, RequestPools, DEFAULT_BODY_LIMIT};
 use crate::state::{request_id_middleware, ClusterAppState};
 
-/// Build the coordinator's router. At most `max_in_flight` requests are in flight together,
-/// the probes aside; one more waits for a slot (see [`crate::router::admission`]).
-pub(crate) fn build_cluster_router(state: Arc<ClusterAppState>, max_in_flight: usize) -> Router {
+/// Build the coordinator's router. Every request takes a slot from `pools` before its handler
+/// runs, and waits when its pool has none (see [`crate::router::admission`]).
+pub(crate) fn build_cluster_router(state: Arc<ClusterAppState>, pools: RequestPools) -> Router {
     Router::new()
         .route("/", get(cluster_root))
         .route(
@@ -245,12 +245,10 @@ pub(crate) fn build_cluster_router(state: Arc<ClusterAppState>, max_in_flight: u
             any(cluster_metrics).layer(DefaultBodyLimit::max(METRICS_BODY_LIMIT)),
         )
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
-        // ONE pool for every route (ADR-199). The middleware decides by method and path what
-        // a request needs, so a route is never outside the pool by where it was added.
-        .layer(middleware::from_fn_with_state(
-            RequestPool::new(max_in_flight),
-            admission::admit,
-        ))
+        // Admission for every route (ADR-199). The middleware decides by method and path
+        // which pool a request takes its slot from, so a route is never unbounded by where
+        // it was added.
+        .layer(middleware::from_fn_with_state(pools, admission::admit))
         // Auth sits OUTSIDE admission: an unauthenticated flood is rejected by a cheap
         // header compare without taking a slot from legitimate traffic (ADR-062).
         .layer(middleware::from_fn_with_state(

@@ -9,16 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-10-06 — One request pool for the whole server
+## 2026-10-06 — Requests are admitted by class
 
-- **Behaviour change.** A server now works on at most 256 requests at once across all of its
-  routes ([ADR-199](decisions/adr-199-one-request-pool.md)). The limit was documented as
-  server-wide since ADR-062 but was applied per route, so a standalone server admitted 256
-  requests on each of 32 routes and a coordinator on each of 47. A request beyond the pool
-  waits, as before.
-- Document writes (`PUT`/`DELETE /_doc/{id}`, `/_bulk`, `/_flush`) may hold 64 of the 256 slots,
-  so writes waiting behind a compaction, backup or rebuild cannot keep searches out.
-- `/_health` is outside the pool, and `/_metrics` has eight slots of its own (it had 256).
+- **Behaviour change.** A server now admits each request into the pool of its class
+  ([ADR-199](decisions/adr-199-request-admission-by-class.md)): 256 matching and read requests
+  at once across all of their routes, and 64 each for document writes, job-status reads and
+  everything else. The limit was documented as one server-wide 256 since ADR-062 but was
+  applied per route, so a standalone server admitted 256 requests on each of 32 routes and a
+  coordinator on each of 47. A request beyond its pool waits, as before.
+- The pools share no slot, so writes waiting behind a compaction, backup or rebuild cannot keep
+  searches out, a job-status long poll cannot keep its own stream from being read, and a search
+  flood cannot keep administrative requests out.
+- `/_health` is outside the pools, and `/_metrics` has eight slots of its own (it had 256).
 - Both HTTP routers are now built by functions the tests call, so the layer stack that is
   tested is the one that is served.
 

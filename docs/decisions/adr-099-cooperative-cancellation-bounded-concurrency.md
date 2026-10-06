@@ -116,5 +116,6 @@
 ## Later outcome — 2026-10-06
 
 The context says the tower `ConcurrencyLimit(256)` "caps HTTP requests of every kind". It capped
-each route separately. [ADR-199](adr-199-one-request-pool.md) replaces it with one pool of 256
-for the whole server. The match-pool bound this ADR added is unchanged.
+each route separately. [ADR-199](adr-199-request-admission-by-class.md) replaces it with one pool
+per class of request, 256 for matching and reads across all of their routes. The match-pool
+bound this ADR added is unchanged.

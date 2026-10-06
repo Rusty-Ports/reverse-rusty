@@ -80,4 +80,5 @@
 ## Later outcome — 2026-10-06
 
 Item #6 says to "bound load with the request-concurrency limit". That limit was 256 per route,
-not per server, until [ADR-199](adr-199-one-request-pool.md).
+not per server. [ADR-199](adr-199-request-admission-by-class.md) bounds matching and read
+requests at 256 across all of their routes.

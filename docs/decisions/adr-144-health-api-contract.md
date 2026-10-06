@@ -74,5 +74,5 @@ complete; its stats permit remains held during that work, preventing unbounded f
 ## Later outcome — 2026-10-06
 
 The "server-wide request" limit this ADR measures the health surface against was a limit per
-route until [ADR-199](adr-199-one-request-pool.md). `/_health` is now outside the request pool
-entirely: it takes no request slot, and its own eight permits are its only bound.
+route. Under [ADR-199](adr-199-request-admission-by-class.md) `/_health` is outside every request
+pool: it takes no slot, and its own eight permits are its only bound.
