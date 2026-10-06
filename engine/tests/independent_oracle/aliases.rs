@@ -387,6 +387,109 @@ fn a_form_word_carried_through_an_equivalence_differential() {
     oracle.assert_matches(&titles, "alias/form-words-through-equivalences");
 }
 
+/// A form that contains an earlier alias: `new york catalog` over `new york ≡ big apple`, and
+/// `north star lamp` over a declared collapse phrase with a declared equivalent. A title
+/// carries the long form under any reading of its text (ADR-205).
+#[test]
+fn a_form_that_contains_a_phrase_differential() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "new york catalog".into()),
+        (2, "big apple catalog".into()),
+        (3, "nyc".into()),
+        (4, "catalog".into()),
+        (5, "sale -(nyc,zzother)".into()),
+        (6, "north star lamp".into()),
+        (7, "nslamp".into()),
+        (8, "polaris".into()),
+        (9, "(nyc,nslamp) sale".into()),
+        (10, "lamp -\"north star\"".into()),
+    ];
+    let titles: Vec<String> = [
+        "big seasonal apple catalog",
+        "apple big catalog",
+        "new york catalog",
+        "catalog york new",
+        "big apple catalog sale",
+        "big catalog",
+        "nyc",
+        "nyc sale",
+        "lamp polaris",
+        "lamp, north star",
+        "star lamp north sale",
+        "north star lamp",
+        "nslamp sale",
+        "lamp",
+        "polaris big lamp apple catalog sale",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let mut vocab = reverse_rusty::vocab::Vocab::new();
+    vocab.add_phrase(
+        &["north", "star"],
+        "entity:north_star",
+        reverse_rusty::dict::FeatureKind::Entity,
+    );
+    vocab.add_equivalence(&["north star", "polaris"]);
+    let ref_vocab = RefVocab::default_vocab()
+        .phrase("north star", "entity:north_star", PhraseMode::Collapse)
+        .phrase("new york", "term:new_york", PhraseMode::Alias)
+        .phrase("big apple", "term:big_apple", PhraseMode::Alias)
+        .phrase(
+            "new york catalog",
+            "term:new_york_catalog",
+            PhraseMode::Alias,
+        )
+        .phrase("north star lamp", "term:north_star_lamp", PhraseMode::Alias)
+        .equivalence(&["north star", "polaris"])
+        .equivalence(&["new york", "big apple"])
+        .equivalence(&["nyc", "new york catalog"])
+        .equivalence(&["nslamp", "north star lamp"]);
+    let oracle = RefOracle::build_with_vocab_and_alias_import(
+        &queries,
+        vocab,
+        "new york => big apple\nnyc => new york catalog\nnslamp => north star lamp",
+        ref_vocab,
+    );
+    oracle.assert_matches(&titles, "alias/forms-that-contain-a-phrase");
+}
+
+/// A number its context types: after `#`, `1995` is a plain number and not a year. A title
+/// carries the word `1995` of the form `1995 unit` as its own token whatever the context
+/// made of it (ADR-205).
+#[test]
+fn a_form_word_typed_by_its_context_differential() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "#1995 unit".into()),
+        (2, "1995 unit".into()),
+        (3, "unit1995".into()),
+        (4, "unit -unit1995".into()),
+    ];
+    let titles: Vec<String> = [
+        "unit #1995",
+        "1995 unit",
+        "unit 1995 edition",
+        "#1995 unit",
+        "unit1995",
+        "unit",
+        "1995",
+        "#1995",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let ref_vocab = RefVocab::default_vocab()
+        .phrase("1995 unit", "term:1995_unit", PhraseMode::Alias)
+        .equivalence(&["unit1995", "1995 unit"]);
+    let oracle = RefOracle::build_with_vocab_and_alias_import(
+        &queries,
+        reverse_rusty::vocab::Vocab::new(),
+        "unit1995 => 1995 unit",
+        ref_vocab,
+    );
+    oracle.assert_matches(&titles, "alias/a-word-typed-by-its-context");
+}
+
 /// A randomized at-scale alias corpus combining the overlapping forms (`ny` / `new york` /
 /// `new york city` / `nyc` / component tokens) with fillers, negations (incl. forbidden phrases),
 /// and any-of groups (incl. multi-word members) — so the two-view normalization, the overlap scan,

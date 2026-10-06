@@ -264,7 +264,8 @@ serving it or roll back to the previous one.
 changes into a parallel index from canonical sources, validate it against the independent oracle,
 then atomically swap the serving epoch. A rebuild from sources must carry each stored query's
 default visibility with it (ADR-187, ADR-203); the remote corpus export carries no placement today,
-so a cross-process vocabulary change has to add it.
+so a cross-process vocabulary change has to add it. It also has to ship the equivalence classes the
+title side reads and fence a node whose title view differs (ADR-205).
 
 **Completion.** Rollback retains the previous complete index, and the blue/green swap is
 result-equivalent across crash and reopen.

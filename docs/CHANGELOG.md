@@ -21,14 +21,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
   adjacency.
 - **Wider than before:** a query that names another form of the alias (`ny catalog`) also matches
   a title with the words of `new york` apart. An alias made of very common words adds candidates.
-- A word of a form also counts under what a query would accept in its place: after
-  `ny => new york`, a title with `york new catalog` carries the form `ny catalog`, so a later
-  `nycat => ny catalog` removes no match either.
-- Nothing stored changes: no recompile and no migration. The rule is applied to titles and
-  costs a few lookups per title while a multi-word alias is active.
-- **Remote clusters: upgrade shard servers before the coordinator.** Every handshake reply now
-  attests the rule (`alias_form_words`), and a coordinator refuses a shard server that does not,
-  because that server would answer without the matches the rule adds.
+- A form is carried under any reading a query could have had of its text. After
+  `ny => new york`, a title with `york new catalog` carries the form `ny catalog`, and after
+  `new york => big apple`, a title with `big seasonal apple catalog` carries `new york catalog`,
+  so a later import that makes those forms removes no match either.
+- **One shape still narrows:** a new form that cuts through a phrase an earlier alias covered.
+  With `yc => york city` active, importing `ny => new york` re-reads the stored query
+  `new york city` as `new york` and `city`, and the title `new yc` stops matching. ADR-205 says
+  why the title side cannot repair it.
+- Nothing stored changes: no recompile, no migration and no upgrade order. The rule is applied
+  to titles and costs a few lookups per title while a multi-word alias is active.
+- Library: `Dict::set_equivalences` takes the `Equivalences` value that
+  `Vocab::resolve_equivalences` now returns. It dereferences to the former map.
 - The reference documents and four ADRs said activation only widens. That is now true for
   multi-word forms; the at-scale test that claimed it could not fail and is replaced by one that
   rewrites real generated queries.

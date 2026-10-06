@@ -44,6 +44,25 @@ impl Normalizer {
         ids
     }
 
+    /// [`compile_features_readonly`](Self::compile_features_readonly) with each feature's
+    /// name, as its [`name_hash`]: what an equivalence group's form resolves to, for both the
+    /// compiler and the title side (ADR-205). Sorted and distinct by feature.
+    pub(crate) fn compile_named_readonly(
+        &self,
+        text: &str,
+        dict: &Dict,
+        lc: &mut String,
+    ) -> Vec<(FeatureId, u64)> {
+        let mut named: Vec<(FeatureId, u64)> = Vec::new();
+        let mut sc = NormScratch::new();
+        self.emit(text, lc, &mut sc, Side::Query, false, &mut |name, _kind| {
+            named.push((dict.get_or_synthetic(name), name_hash(name)));
+        });
+        named.sort_unstable();
+        named.dedup_by_key(|(feature, _)| *feature);
+        named
+    }
+
     /// Match path: resolve title features by name. A token absent from the (frozen)
     /// dict is assigned a deterministic *synthetic* ID (dynamic vocabulary, ADR-046)
     /// rather than dropped — so a live-added query that references a new term still

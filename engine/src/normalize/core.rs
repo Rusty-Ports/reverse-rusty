@@ -17,8 +17,9 @@ use daachorse::DoubleArrayAhoCorasick;
 mod alias_overlap;
 mod alias_words;
 mod helpers;
+pub(super) use crate::dict::name_hash;
 pub(super) use alias_overlap::PhraseOverlap;
-pub(super) use alias_words::{name_hash, AliasScratch, AliasWords};
+pub(super) use alias_words::{AliasScratch, AliasWords, FormSpec, UnitSpec};
 pub use helpers::fold_diacritic;
 use helpers::{as_year, collapse_ws_runs_in_place, emit_generic, parse_number};
 

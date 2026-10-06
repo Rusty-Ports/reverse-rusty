@@ -47,10 +47,13 @@ synchronously live.
 An imported expressible single-token or multi-word group activates because the file is an operator
 declaration. An unexpressible or mixed-feature-kind group remains a candidate.
 
-Activation never removes a match. After `wireless mouse => cordless mouse`, a stored query
+Activation removes no match, with one exception below. After `wireless mouse => cordless mouse`, a stored query
 `wireless mouse` matches `cordless mouse` titles and still matches `wireless optical mouse` and
 `mouse, wireless`: a title that carries every word of a form carries the form (ADR-205). A quoted
 `"wireless mouse"` keeps requiring adjacency, and a negated form rejects only the form written out.
+The exception is a new form that cuts through a phrase an earlier alias covered: with
+`yc => york city` active, importing `ny => new york` makes the stored query `new york city` ask
+for the word `city`, which the title `new yc` does not have (ADR-205, "What remains").
 
 ```json
 { "took": 37, "took_ms": 37.42, "acknowledged": true, "result": "updated",

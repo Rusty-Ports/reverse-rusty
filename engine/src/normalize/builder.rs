@@ -43,10 +43,6 @@ pub struct NormalizerBuilder {
     /// Raw multi-word alias forms (ADR-061), cleaned + registered as alias-mode phrases at
     /// [`build`](Self::build) (after the punctuation table is final, so cleaning matches titles).
     alias_forms: Vec<String>,
-    /// Groups of forms a query's word is widened to (ADR-054, ADR-060), as the vocabulary
-    /// declares them. A title carries a word of a multi-word alias form under any name the
-    /// word's own is equivalent to (ADR-205); nothing else reads them here.
-    equivalent_forms: Vec<Vec<String>>,
     /// Number-context words. Empty by default; callers may declare tokens whose
     /// following number must remain generic instead of being typed as a year.
     number_context: Vec<String>,
@@ -91,19 +87,6 @@ impl NormalizerBuilder {
     /// keeps its feature, so resolution and emission stay consistent.
     pub fn add_alias_form(&mut self, form: &str) {
         self.alias_forms.push(form.to_string());
-    }
-
-    /// Declare a group of forms that queries treat as one (ADR-054): the groups the
-    /// vocabulary's equivalence map is resolved from. The normalizer does not expand
-    /// anything through them. It needs them for one thing: a query written before a
-    /// multi-word alias form existed asked for each word *or its equivalents*, so a title
-    /// must carry the form when it carries those (ADR-205).
-    /// [`Vocab::to_normalizer`](crate::vocab::Vocab::to_normalizer) supplies them; a
-    /// normalizer assembled by hand needs them only if it registers alias forms.
-    pub fn add_equivalent_forms(&mut self, forms: &[String]) {
-        if forms.len() >= 2 {
-            self.equivalent_forms.push(forms.to_vec());
-        }
     }
 
     /// Fold the pending raw alias forms into the phrase tables. Called once at the start of
@@ -257,6 +240,18 @@ impl NormalizerBuilder {
             .filter(|(_, entry)| entry.mode == PhraseMode::Alias)
             .map(|(pattern, entry)| (pattern.clone(), entry.feature.clone()))
             .collect();
+        // Every phrase, of any mode, by its pattern: what a stretch of a form's text
+        // compiled to in a query before the form existed.
+        let phrase_features: std::collections::HashMap<String, String> =
+            if alias_patterns.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                self.phrase_patterns
+                    .iter()
+                    .zip(&self.phrase_entries)
+                    .map(|(pattern, entry)| (pattern.clone(), entry.feature.clone()))
+                    .collect()
+            };
         let mut norm = Normalizer {
             automaton,
             phrase_entries: self.phrase_entries,
@@ -269,130 +264,63 @@ impl NormalizerBuilder {
             number_context: self.number_context,
             fingerprint,
         };
-        // ADR-205: under which feature names a title carries each word of each alias form.
+        // ADR-205: the parses of each alias form's text, and under which feature names a
+        // title carries each piece.
         let (mut lc, mut sc) = (String::new(), super::NormScratch::new());
-        let equivalents = if alias_patterns.is_empty() {
-            std::collections::HashMap::new()
-        } else {
-            equivalent_names(&norm, &self.equivalent_forms, &mut lc, &mut sc)
-        };
         let forms = alias_patterns
             .into_iter()
             .map(|(pattern, entity)| {
-                let words = pattern
-                    .split(' ')
-                    .map(|word| {
-                        // The token itself, which the positive view holds as `term:<token>`
-                        // for every token of a title whatever its context makes of it, and
-                        // what the word compiles to alone (a synonym's canonical, a year).
-                        let mut names = vec![format!("term:{word}")];
-                        norm.emit(
-                            word,
-                            &mut lc,
-                            &mut sc,
-                            super::Side::Title,
-                            false,
-                            &mut |name, _kind| {
-                                if !names.iter().any(|seen| seen == name) {
-                                    names.push(name.to_string());
-                                }
-                            },
-                        );
-                        // And every name a query that asked for the word would also have
-                        // accepted: its active equivalents.
-                        for at in 0..names.len() {
-                            for equivalent in equivalents.get(&names[at]).into_iter().flatten() {
-                                if !names.contains(equivalent) {
-                                    names.push(equivalent.clone());
-                                }
+                let words: Vec<&str> = pattern.split(' ').collect();
+                let mut units: Vec<super::core::UnitSpec> = Vec::new();
+                for (at, word) in words.iter().enumerate() {
+                    // The token itself, which the positive view holds as `term:<token>`
+                    // for every token of a title whatever its context makes of it, and
+                    // what the word compiles to alone (a synonym's canonical, a year).
+                    let mut names = vec![format!("term:{word}")];
+                    norm.emit(
+                        word,
+                        &mut lc,
+                        &mut sc,
+                        super::Side::Title,
+                        false,
+                        &mut |name, _kind| {
+                            if !names.iter().any(|seen| seen == name) {
+                                names.push(name.to_string());
                             }
+                        },
+                    );
+                    units.push(super::core::UnitSpec {
+                        from: at,
+                        to: at + 1,
+                        names,
+                    });
+                }
+                // A phrase the vocabulary has for several of the words, short of the form
+                // itself: a query compiled those words to the phrase's feature.
+                for from in 0..words.len() {
+                    for to in from + 2..=words.len() {
+                        if from == 0 && to == words.len() {
+                            continue;
                         }
-                        names
-                    })
-                    .collect();
-                (entity, words)
+                        if let Some(feature) = phrase_features.get(&words[from..to].join(" ")) {
+                            units.push(super::core::UnitSpec {
+                                from,
+                                to,
+                                names: vec![feature.clone()],
+                            });
+                        }
+                    }
+                }
+                super::core::FormSpec {
+                    entity,
+                    len: words.len(),
+                    units,
+                }
             })
             .collect();
         norm.alias_words = super::core::AliasWords::new(forms);
         Ok(norm)
     }
-}
-
-/// The representative of `at`'s class in a union-find forest, with path halving.
-fn class_root(parent: &mut [usize], mut at: usize) -> usize {
-    while parent[at] != at {
-        parent[at] = parent[parent[at]];
-        at = parent[at];
-    }
-    at
-}
-
-/// Feature name -> the names its equivalence class holds, itself included.
-///
-/// A form belongs to a group when it compiles, as a query, to exactly one feature, and a
-/// group counts with two or more distinct features; groups that share a feature are one
-/// class. These are the rules [`Vocab::resolve_equivalences`](crate::vocab::Vocab::resolve_equivalences)
-/// applies to feature ids, applied here to names, so that the two agree on what a word is
-/// widened to.
-fn equivalent_names(
-    norm: &Normalizer,
-    groups: &[Vec<String>],
-    lc: &mut String,
-    sc: &mut super::NormScratch,
-) -> std::collections::HashMap<String, Vec<String>> {
-    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut names: Vec<String> = Vec::new();
-    let mut parent: Vec<usize> = Vec::new();
-    for group in groups {
-        let mut members: Vec<usize> = Vec::new();
-        for form in group {
-            let mut emitted: Vec<String> = Vec::new();
-            norm.emit(
-                form,
-                lc,
-                sc,
-                super::Side::Query,
-                false,
-                &mut |name, _kind| {
-                    if !emitted.iter().any(|seen| seen == name) {
-                        emitted.push(name.to_string());
-                    }
-                },
-            );
-            let [name] = emitted.as_slice() else {
-                continue;
-            };
-            let at = *index.entry(name.clone()).or_insert_with(|| {
-                names.push(name.clone());
-                parent.push(parent.len());
-                parent.len() - 1
-            });
-            if !members.contains(&at) {
-                members.push(at);
-            }
-        }
-        if members.len() < 2 {
-            continue;
-        }
-        let first = class_root(&mut parent, members[0]);
-        for &member in &members[1..] {
-            let other = class_root(&mut parent, member);
-            parent[other] = first;
-        }
-    }
-    let mut classes: std::collections::HashMap<usize, Vec<String>> =
-        std::collections::HashMap::new();
-    for (at, name) in names.iter().enumerate() {
-        let class = class_root(&mut parent, at);
-        classes.entry(class).or_default().push(name.clone());
-    }
-    let mut equivalents = std::collections::HashMap::new();
-    for class in classes.into_values().filter(|class| class.len() >= 2) {
-        for name in &class {
-            equivalents.insert(name.clone(), class.clone());
-        }
-    }
-    equivalents
 }
 
 /// Build the overlapping (`MatchKind::Standard`) automaton used by the title

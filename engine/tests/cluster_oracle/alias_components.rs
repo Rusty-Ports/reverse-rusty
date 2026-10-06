@@ -130,6 +130,8 @@ fn a_cluster_keeps_every_match_across_a_chain_of_imports() {
         (3, "nycat".into()),
         (4, "pkg deal".into()),
         (5, "bargain".into()),
+        (6, "red fox den".into()),
+        (7, "rfd".into()),
     ];
     let titles = [
         "york new catalog",
@@ -140,6 +142,9 @@ fn a_cluster_keeps_every_match_across_a_chain_of_imports() {
         "deal package",
         "pkg deal",
         "package",
+        "den of the vixen",
+        "fox den red",
+        "den",
     ];
     for &num_shards in &[1usize, 3, 8] {
         let cfg = ClusterConfig {
@@ -149,16 +154,17 @@ fn a_cluster_keeps_every_match_across_a_chain_of_imports() {
         };
         let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
         cluster
-            .import_alias_synonyms("ny => new york\npkg => package")
+            .import_alias_synonyms("ny => new york\npkg => package\nred fox => vixen")
             .expect("import");
         let before = [
             reads(&cluster, &titles, true),
             reads(&cluster, &titles, false),
         ];
         assert!(before[0][0].contains(&1) && before[0][5].contains(&4));
+        assert!(before[0][8].contains(&6), "K={num_shards}");
 
         cluster
-            .import_alias_synonyms("nycat => ny catalog\nbargain => pkg deal")
+            .import_alias_synonyms("nycat => ny catalog\nbargain => pkg deal\nrfd => red fox den")
             .expect("import");
         for (scope, before) in [true, false].into_iter().zip(&before) {
             let after = reads(&cluster, &titles, scope);
@@ -178,6 +184,13 @@ fn a_cluster_keeps_every_match_across_a_chain_of_imports() {
         let got = cluster.percolate("deal package").expect("percolate");
         assert!(
             got.contains(&5),
+            "K={num_shards}: the title carries the form"
+        );
+        // A form that contains an earlier alias is carried under what a query takes that
+        // alias for.
+        let got = cluster.percolate("den of the vixen").expect("percolate");
+        assert!(
+            got.contains(&7),
             "K={num_shards}: the title carries the form"
         );
 

@@ -181,7 +181,6 @@ impl RemoteShard {
             adopted_tag,
             adopted_replicate_all,
             adopted_atomic_replace,
-            adopted_alias_form_words,
             adopted_generation,
             adopted_num_shards,
             adopted_coordinator,
@@ -194,7 +193,6 @@ impl RemoteShard {
                     r.tag_dict_fingerprint,
                     r.broad_replicate_all,
                     r.atomic_replace,
-                    r.alias_form_words,
                     r.placement_generation,
                     r.num_shards,
                     r.coordinator_id,
@@ -254,12 +252,7 @@ impl RemoteShard {
         // A populated pre-ADR-080 server whose dict matches ours would adopt as an idempotent
         // no-op and pass the fingerprint checks above, yet hold broad only on shard 0 — refuse it
         // (see `connect`), because our broad routing assumes every shard holds the replicated lane.
-        require_shard_capabilities(
-            endpoint,
-            adopted_replicate_all,
-            adopted_atomic_replace,
-            adopted_alias_form_words,
-        )?;
+        require_shard_capabilities(endpoint, adopted_replicate_all, adopted_atomic_replace)?;
         if adopted_compiler_semantics != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
             return Err(ShardError::Remote(format!(
                 "compiler semantics mismatch after adopt: coordinator {} != server {}",

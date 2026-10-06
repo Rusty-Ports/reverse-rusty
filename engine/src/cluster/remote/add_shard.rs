@@ -121,7 +121,6 @@ impl RemoteShard {
             added_tag,
             added_replicate_all,
             added_atomic_replace,
-            added_alias_form_words,
             added_generation,
             added_num_shards,
             added_coordinator,
@@ -134,7 +133,6 @@ impl RemoteShard {
                     r.tag_dict_fingerprint,
                     r.broad_replicate_all,
                     r.atomic_replace,
-                    r.alias_form_words,
                     r.placement_generation,
                     r.num_shards,
                     r.coordinator_id,
@@ -177,12 +175,7 @@ impl RemoteShard {
         }
         // A populated pre-ADR-080 server would hold broad only on shard 0; our broad routing assumes
         // every shard holds the replicated lane, so refuse it (see `connect_and_adopt`).
-        require_shard_capabilities(
-            endpoint,
-            added_replicate_all,
-            added_atomic_replace,
-            added_alias_form_words,
-        )?;
+        require_shard_capabilities(endpoint, added_replicate_all, added_atomic_replace)?;
         if added_compiler_semantics != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
             return Err(ShardError::Remote(format!(
                 "compiler semantics mismatch after add_shard: coordinator {} != server {}",

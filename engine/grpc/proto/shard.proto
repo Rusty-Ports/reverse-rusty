@@ -627,11 +627,6 @@ message DictFingerprintReply {
   // A pre-ADR-185 server omits this (proto3 false) and is refused at connect, because a
   // cluster upsert against it could only fall back to the reader-visible delete-then-insert.
   bool atomic_replace = 9;
-  // ADR-205: the server's positive title view holds a multi-word alias form whenever it holds
-  // every word of the form. A coordinator routes by that view and the shard verifies by its
-  // own, so a server without it (proto3 false) would leave out matches the coordinator
-  // promises, and is refused at connect.
-  bool alias_form_words = 10;
 }
 
 // The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
@@ -671,8 +666,6 @@ message AdoptDictReply {
   // ADR-185 capability attestation — see `DictFingerprintReply.atomic_replace`. Carried on every
   // handshake reply, because a coordinator normally connects through this one and never probes.
   bool atomic_replace = 8;
-  // ADR-205 capability attestation — see `DictFingerprintReply.alias_form_words`.
-  bool alias_form_words = 9;
 }
 
 // Create a co-located slot on a node that has ALREADY adopted the dict (ADR-093 Stage 2). No dict
@@ -698,8 +691,6 @@ message AddShardReply {
   uint32 compiler_semantics_version = 7;
   // ADR-185 capability attestation, as on `AdoptDictReply`.
   bool atomic_replace = 8;
-  // ADR-205 capability attestation, as on `AdoptDictReply`.
-  bool alias_form_words = 9;
 }
 
 // ---- peer recovery (ADR-035/036) ----

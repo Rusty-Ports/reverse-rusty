@@ -135,12 +135,7 @@ impl RemoteShard {
                 reply.tag_dict_fingerprint
             )));
         }
-        require_shard_capabilities(
-            endpoint,
-            reply.broad_replicate_all,
-            reply.atomic_replace,
-            reply.alias_form_words,
-        )?;
+        require_shard_capabilities(endpoint, reply.broad_replicate_all, reply.atomic_replace)?;
         if reply.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
             return Err(ShardError::Remote(format!(
                 "compiler semantics mismatch at connect: coordinator {} != server {}",

@@ -542,15 +542,10 @@ fn legacy_broad_layout_err(endpoint: &str) -> ShardError {
 /// - `atomic_replace` (ADR-185): against a server without the per-shard replace an upsert could
 ///   only be the reader-visible delete-then-insert, and the missing RPC would surface after
 ///   other shards had already applied the write.
-/// - `alias_form_words` (ADR-205): the coordinator routes a title by a positive view that
-///   holds a multi-word alias form whenever it holds the form's words, and each shard
-///   verifies by its own view. A server whose view lacks the rule would answer without the
-///   matches the rule adds, and nothing in the reply would say so.
 fn require_shard_capabilities(
     endpoint: &str,
     broad_replicate_all: bool,
     atomic_replace: bool,
-    alias_form_words: bool,
 ) -> Result<(), ShardError> {
     if !broad_replicate_all {
         return Err(legacy_broad_layout_err(endpoint));
@@ -559,12 +554,6 @@ fn require_shard_capabilities(
         return Err(ShardError::Remote(format!(
             "shard server {endpoint} predates the atomic per-shard replace (ADR-185); \
              upgrade the shard nodes before the coordinator"
-        )));
-    }
-    if !alias_form_words {
-        return Err(ShardError::Remote(format!(
-            "shard server {endpoint} predates the title view that carries a multi-word alias \
-             form by its words (ADR-205); upgrade the shard nodes before the coordinator"
         )));
     }
     Ok(())

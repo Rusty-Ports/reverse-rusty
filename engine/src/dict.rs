@@ -49,6 +49,44 @@ pub fn synthetic_id(name: &str) -> FeatureId {
 /// identity. Empty by default ⇒ expansion is a no-op ⇒ the default path is byte-identical.
 pub type EquivMap = FastMap<FeatureId, Vec<FeatureId>>;
 
+/// The identity of a feature name where names are compared without strings: on the title
+/// side, where a view's names are kept as hashes (ADR-205). Two names with one hash are
+/// taken for each other, which can only make a title appear to carry more than it does.
+#[inline]
+pub(crate) fn name_hash(name: &str) -> u64 {
+    crate::util::fnv1a64(name.as_bytes())
+}
+
+/// What a vocabulary's equivalence groups resolve to: the classes by `FeatureId`, which the
+/// compile-time expansion reads (it dereferences to that [`EquivMap`]), and the same classes
+/// by feature name, which the title side reads (ADR-205). Both are built by
+/// [`Vocab::resolve_equivalences`](crate::vocab::Vocab::resolve_equivalences) and installed
+/// together, so the two sides cannot hold different equivalences.
+#[derive(Clone, Debug, Default)]
+pub struct Equivalences {
+    by_feature: EquivMap,
+    /// [`name_hash`] of a member's name -> the name hashes of its whole class, itself
+    /// included.
+    by_name: FastMap<u64, std::sync::Arc<[u64]>>,
+}
+
+impl Equivalences {
+    pub(crate) fn new(by_feature: EquivMap, by_name: FastMap<u64, std::sync::Arc<[u64]>>) -> Self {
+        Self {
+            by_feature,
+            by_name,
+        }
+    }
+}
+
+impl std::ops::Deref for Equivalences {
+    type Target = EquivMap;
+
+    fn deref(&self) -> &EquivMap {
+        &self.by_feature
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureKind {
     Year,
@@ -110,7 +148,7 @@ pub struct Dict {
     /// Resolved equivalence groups for the compile-time expansion pass (ADR-054).
     /// Transient — re-derived from the vocab when applied; not serialized, not in
     /// `fingerprint`. Empty by default ⇒ no expansion.
-    equivalences: EquivMap,
+    equivalences: Equivalences,
 }
 
 impl Dict {
@@ -122,14 +160,14 @@ impl Dict {
             freq: Vec::new(),
             mask_bit: Vec::new(),
             finalized: false,
-            equivalences: fast_map(),
+            equivalences: Equivalences::default(),
         }
     }
 
     /// Install the resolved equivalence groups consulted by the compile-time expansion
     /// pass (ADR-054). Replaces any previous set. Empty ⇒ expansion is a no-op. Transient:
     /// not serialized and not part of [`fingerprint`](Self::fingerprint).
-    pub fn set_equivalences(&mut self, equiv: EquivMap) {
+    pub fn set_equivalences(&mut self, equiv: Equivalences) {
         self.equivalences = equiv;
     }
 
@@ -137,6 +175,20 @@ impl Dict {
     #[inline]
     pub fn equivalences(&self) -> &EquivMap {
         &self.equivalences
+    }
+
+    /// The names a query treats as the same as `name`, by [`name_hash`], `name` included.
+    /// `None` when the name is in no equivalence class.
+    #[inline]
+    pub(crate) fn equivalent_names(&self, name: u64) -> Option<&[u64]> {
+        self.equivalences.by_name.get(&name).map(|class| &**class)
+    }
+
+    /// Whether any name has an equivalent. False for every engine without equivalences,
+    /// which then pays nothing for looking.
+    #[inline]
+    pub(crate) fn has_equivalent_names(&self) -> bool {
+        !self.equivalences.by_name.is_empty()
     }
 
     /// Intern a feature, creating it if new. `kind` is recorded on first sight.

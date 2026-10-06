@@ -33,60 +33,78 @@ on a cluster. To the system that consumes the candidates the lost matches are fa
 
 ## Decision
 
-**The positive title view holds a multi-word alias form's entity whenever it holds every word
-of the form, wherever the words stand.**
+**The positive title view holds a multi-word alias form's entity whenever it holds some reading
+of the form's text, wherever the pieces stand.** For a form of plain words that is: whenever it
+holds every word.
 
-1. **What counts as holding a word.** The view holds `term:<token>` for every cleaned token
-   of the title, whatever its context makes of the token, so a word written in the title
-   counts. So does whatever the word compiles to as a token of its own: a synonym's canonical,
-   a year. A title that says `refurbished unit` therefore carries the form `refurb unit` when
-   `refurb` is a synonym of `refurbished`, and `unit #1995` carries `1995 unit`. And so does
-   anything a query would accept in the word's place: with `pkg ≡ package` active, a query
-   that says `pkg` asks for either, so `deal package` carries the form `pkg deal`; with
-   `ny ≡ new york` active, a title that carries `new york` carries the word `ny` of the form
-   `ny catalog`. The equivalents are the vocabulary's effective equivalence groups, resolved
-   to feature names by the rules that resolve them to feature ids for the compiler. The words
-   are looked for in the complete view, including what an overlapping phrase contributes, and
-   the rule is applied until it adds nothing: a form the title carries is itself in the view,
-   and may be a word of another form.
+1. **A reading, and what counts as holding a piece.** A reading cuts the form's text into
+   pieces: single words, and phrases the vocabulary already has for several of the words.
+   Those are the ways a query could have asked for the text before the form existed.
+   - The view holds a *word* when it holds `term:<word>`, which it holds for every cleaned
+     token of the title whatever its context makes of the token, or whatever the word compiles
+     to as a token of its own (a synonym's canonical, a year). `refurbished unit` carries the
+     form `refurb unit` when `refurb` is a synonym of `refurbished`, and `unit #1995` carries
+     `1995 unit`.
+   - The view holds a *phrase* when it holds the phrase's feature.
+   - And it holds either when it holds a name a query takes for it. With `pkg ≡ package`
+     active, `deal package` carries the form `pkg deal`. With `ny ≡ new york`, a title that
+     carries `new york` carries the word `ny` of the form `ny catalog`. With
+     `new york ≡ big apple`, `big seasonal apple catalog` carries the form `new york catalog`.
+
+   The pieces are looked for in the complete view, including what an overlapping phrase
+   contributes, and the rule is applied until it adds nothing: a form the title carries is
+   itself in the view, and may be a piece of another form.
 2. **Only the positive view.** The canonical view, which negation reads, keeps the adjacent
    reading: `inventory -(new york, boston)` rejects `new york inventory` and still accepts a
    title that has the two words apart. A quoted `"new york"` is checked against positions and
    keeps requiring adjacency (ADR-120).
-3. **Nothing stored changes.** Query compilation, plans, cost classes, cluster placement, the
-   feature-model fingerprint and the compiler-semantics version are as they were. The rule
-   takes effect for every stored query at once, in both server modes.
+3. **Nothing stored changes, and each kind of data has one home.** Query compilation, plans,
+   cost classes, cluster placement, the feature-model fingerprint and the compiler-semantics
+   version are as they were. The rule takes effect for every stored query at once, in both
+   server modes. A form's readings are built from the normalizer's phrases, so the normalizer
+   still holds nothing outside its fingerprint. The equivalents are read where the compiler
+   reads them: `Vocab::resolve_equivalences` now resolves each class by feature name as well
+   as by feature id, and the two are installed on the dictionary together. A title is widened
+   through the classes of whatever dictionary it is matched against.
 4. **One place.** Every title path builds its positive view in `match_features_dual` when a
    multi-word alias is active. Every feature enters that view through one function, which also
-   notes the feature's name. When the view is complete, the forms whose words it holds add
+   notes the feature's name. When the view is complete, the forms it holds a reading of add
    their entities. With no multi-word alias nothing is noted and the path is not taken.
-5. **The work follows the forms a title touches.** Each form is keyed on the one of its
-   words that the fewest forms share, and is not looked at before that word is in the view.
-   Ten thousand forms `wireless <model>` cost nothing to a title that says `wireless`, or
-   that gets `wireless` from a form `wire less`; a title that names a model looks at that
-   model's form. A name enters the view once, from the title or as the entity of a completed
-   form, and one thing is done with it: the forms keyed on it are examined, and so are the
-   forms an earlier look found waiting on it. A form that lacks a word only another form can
-   supply waits on that word, and is noted there once. What the completion remembers for a
-   title is empty until the title touches a form, so a scratch made for one title (cluster
-   routing makes one per request) costs nothing to size or clear, whatever the number of
-   forms. A title's names are reduced to the distinct ones first and compared by a 64-bit
-   hash, so they are kept without strings; a collision could only add a candidate.
-6. **A remote shard must have the rule.** The coordinator routes a title by its positive
-   view and each shard verifies by its own. A shard server on an older binary would answer
-   without the matches the rule adds, and nothing in its reply would say so. Every handshake
-   reply therefore attests `alias_form_words`, and a coordinator refuses a shard server that
-   does not, the way it refuses one without the atomic replace (ADR-185).
+5. **The work follows the forms a title touches.** Every reading crosses each gap between two
+   of the form's tokens with exactly one piece. A form is keyed on the pieces over one gap,
+   the gap whose names the fewest forms share, and is not looked at before one of those names
+   is in the view. Ten thousand forms `wireless <model>` cost nothing to a title that says
+   `wireless`, or that gets `wireless` from a form `wire less`; a title that names a model
+   looks at that model's form. A name enters the view once, from the title or from a
+   completed form, and one thing is done with it: the forms keyed on it are examined, and so
+   are the forms an earlier look found waiting on it. A form that lacks a piece only another
+   form can supply waits on it, and is noted once. What the completion remembers for a title
+   is empty until the title touches a form, so a scratch made for one title (cluster routing
+   makes one per request) costs nothing to size or clear, whatever the number of forms. A
+   title's names are reduced to the distinct ones first and compared by a 64-bit hash, so
+   they are kept without strings; a collision could only add a candidate.
 
-**Why no match is lost.** Take a title that matched a query before the alias, and a form the
-query spells out. Before the alias the query required, for each word of the form, the feature
-the word compiled to there, or one of that feature's equivalents. If the feature was a
-synonym's canonical or a year, it is what the word compiles to alone. Otherwise it came from a
-token equal to the word (a plain term, a number its context left untyped) or from a phrase
-whose tokens include the word; either way a title that holds it has the word as a token, and
-the view holds `term:<word>`. And if the title held an equivalent instead, the rule counts the
-word under it. Every word of the form is counted, the view gets the entity, and the entity
-satisfies the rewritten query.
+**Why no match is lost.** Take a query that spells a form out and a title that matched it
+before the form existed. What the query compiled that text to was a reading: words, and phrases
+the vocabulary had then, each as its feature or one of the feature's equivalents. A title that
+held a word's feature has the word as a token, or holds what the word compiles to alone. A title
+that held a phrase's feature holds it still. An equivalent is counted as such. So the view holds
+that reading, gets the entity, and the entity satisfies the rewritten query. Readings only
+accumulate as forms are added, so the order in which aliases are activated does not matter.
+
+## What remains
+
+One shape still narrows, and the title side cannot repair it. A new form that *cuts through* a
+phrase an earlier compile used changes what the query asks for outside the form. With
+`yc ≡ york city` active, the stored query `new york city` asks for `new` and for `york city`
+or `yc`, and matches the title `new yc`. Activate `ny ≡ new york`: the query's text is now read
+as the form `new york` followed by the word `city`, and `new yc` has no `city`. Titles that have
+the words, together or apart, keep matching.
+
+Repairing it on the title side would mean that a title carrying a phrase under another name
+also carries the phrase's words, so that `yc` matched a query for `city` or for `york`. That is
+a far wider reading than the one this decision takes, and it is left as a separate question. A
+test pins the present behaviour (`a_form_that_cuts_through_an_earlier_phrase_can_still_narrow`).
 
 ## Alternatives considered
 
@@ -106,63 +124,63 @@ satisfies the rewritten query.
 
 ## Consequences
 
-- Activating a multi-word alias never removes a match from a stored query. The statements to
-  that effect in the reference documents and in ADR-102, ADR-103, ADR-152 and ADR-158 now hold
-  for multi-word forms; each carries a dated note.
+- Activating a multi-word alias removes no match from a stored query, except in the shape
+  under "What remains". The statements to that effect in the reference documents and in
+  ADR-102, ADR-103, ADR-152 and ADR-158 now hold for multi-word forms with that exception;
+  each carries a dated note.
 - **A wider reading than the query-side one.** A query that names only another form of the
   alias (`ny catalog`) now also matches a title that has the words of `new york` apart
   (`new seasonal york catalog`). The engine is a recall-first candidate generator and the
   consumer's own matcher decides; an alias form made of very common words will add candidates.
 - While a multi-word alias is active a title pays one hash per feature of its positive view,
-  a sort of those hashes and one lookup per distinct name, and nothing otherwise. On 200,000
-  generated queries with three aliases active that was 2.11–2.20 µs per title against
-  1.89–1.91 µs before (Apple M4 Max, release build, alternating runs); classes and candidates
-  per title were identical.
-- No migration: stored rows, the manifest, the feature-model fingerprint and the
-  compiler-semantics version are unchanged. The word table is built from the vocabulary's
-  phrases and equivalence groups whenever the vocabulary becomes a normalizer; it is title-side
-  state, and no stored row depends on it.
-- **Upgrade order for a remote cluster: shard servers before the coordinator**, as for
-  ADR-185. A new coordinator refuses a shard server that does not attest the rule. An old
-  coordinator in front of new shard servers keeps answering what it answered before the
-  upgrade, at least: it routes by the old view, and a shard's wider view can only add.
-- A normalizer assembled by hand with `NormalizerBuilder` and alias forms gets the
-  equivalents only if it is told the groups (`add_equivalent_forms`). `Vocab::to_normalizer`,
-  which every server and cluster path uses, passes them.
+  a sort of those hashes, one equivalence lookup and one form lookup per distinct name, and
+  nothing otherwise. On 200,000 generated queries with three aliases active that was
+  2.24–2.30 µs per title against 1.89–1.91 µs before (Apple M4 Max, release build); classes
+  and candidates per title were identical.
+- No migration and no upgrade order: stored rows, the manifest and the wire formats are
+  unchanged.
+- **Remote clusters are not affected.** A remote cluster runs the stock vocabulary on every
+  node and refuses any other (ADR-076), so it has no multi-word alias and the rule is never
+  active there. When vocabularies are shipped across processes, the title view and the
+  equivalence classes have to be shipped and fenced with them; the roadmap item says so.
+- `Dict::set_equivalences` takes the `Equivalences` that `Vocab::resolve_equivalences`
+  returns, which dereferences to the map by feature id it used to be.
 
 ## Proven
 
 - `normalize/alias_words_tests.rs`: the positive view gets the entity for words apart,
   reordered, written through a synonym, typed by their context, consumed by another phrase in
   the canonical view, and restored by an overlapping phrase; not for a missing word, and not
-  through an unrelated phrase; the canonical view is unchanged; forms that share an entity,
-  nested forms, forms built on one another, and a repeated word; no multi-word alias, no
-  change. The work is counted: a title with the shared word of five thousand forms examines
-  none; a chain of two thousand forms is examined once each; a word repeated fifty thousand
-  times is looked at once; an entity that ten thousand forms share as a word wakes none of
-  them; a form that waits on a word is looked at once when the word arrives; a title that
-  touches no form leaves the completion's scratch unallocated; and nothing of one title is
-  left for the next. A word counts under its equivalents, through groups that share a member,
-  and not through a form that is not one feature.
+  through an unrelated phrase; the canonical view is unchanged; a piece counts under what a
+  query takes it for, through classes that share a member, and not when the dictionary holds
+  no such class; a phrase inside a form is a piece, alias or not; no multi-word alias, no
+  change.
+- `normalize/alias_words_tests/completion.rs` counts the work: a title with the shared word
+  of five thousand forms examines none; a chain of two thousand forms is examined once each;
+  a word repeated fifty thousand times is looked at once; an entity that ten thousand forms
+  share as a word wakes none of them; a form that waits on a piece is looked at once when the
+  piece arrives, also when an equivalent brings it; a title that touches no form leaves the
+  completion's scratch unallocated; and nothing of one title is left for the next.
 - `tests/oracle/alias_components.rs`: every match a query set had before `wireless mouse =>
   cordless mouse` and `ny => new york` survives activation, over titles with the words
   adjacent, apart and reordered; the alias matches; one word of a form does not; quoted and
   negated forms keep their results; the engine equals a brute-force evaluation of every stored
   query; a form over an existing additive or collapse phrase; a number typed by its context;
   a later alias whose form overlaps an earlier one, or is built on its entity, removes no
-  match; a chain of ordinary imports (`ny => new york`, then `nycat => ny catalog`) and a
-  form over a single-word alias or a declared equivalence remove none either;
-  queries written under the alias keep the class and default visibility they have on `main`;
-  and the same at scale on generated queries the aliases rewrite, against the no-alias brute
-  force.
+  match; queries written under the alias keep the class and default visibility they have on
+  `main`; and the same at scale on generated queries the aliases rewrite, against the
+  no-alias brute force.
+- `tests/oracle/alias_chains.rs`: a chain of ordinary imports (`ny => new york`, then
+  `nycat => ny catalog`), a form over a single-word alias or a declared equivalence, and a
+  form that contains an earlier alias (`new york => big apple`, then `nyc => new york
+  catalog`, in either order) remove no match; and the shape under "What remains" is pinned.
 - `tests/independent_oracle/aliases.rs`: the engine equals the independent reference matcher,
-  which applies the rule with plain scans and shares no code with the engine, with no false
-  negative and no false positive, on fixed and randomized corpora.
+  which applies the rule with plain loops and shares no code with the engine, with no false
+  negative and no false positive, on fixed and randomized corpora, including words carried
+  through equivalences, forms that contain a phrase, and a number typed by its context.
 - `tests/cluster_oracle/alias_components.rs`: the same through a cluster rebuild and live
-  writes, and through a chain of imports, at one, three and eight shards, in both scopes,
+  writes, and through chains of imports, at one, three and eight shards, in both scopes,
   equal to a single engine.
-- `tests/cluster_grpc_oracle/capability_handshake.rs`: probe, adopt and add-shard each
-  refuse a shard server that does not attest the rule, and accept one that does.
 - `tests/oracle/alias_feedback.rs` and `alias_discovery.rs`: a pair with a multi-word form,
   activated by feedback and by the operator.
 

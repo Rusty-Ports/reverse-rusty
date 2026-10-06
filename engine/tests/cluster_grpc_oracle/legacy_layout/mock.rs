@@ -22,8 +22,6 @@ pub(crate) struct LegacyOwnershipServer {
     pub(crate) top_k_delay: Option<Duration>,
     /// ADR-185 attestation; `false` models a pre-ADR-185 shard server.
     pub(crate) atomic_replace: bool,
-    /// ADR-205 attestation; `false` models a shard server whose title view predates it.
-    pub(crate) alias_form_words: bool,
     /// `Some(n)`: answer `NumQueries` with `n`, as every released node does. `None`: that RPC
     /// is unimplemented too.
     pub(crate) stored_queries: Option<u64>,
@@ -39,7 +37,6 @@ impl LegacyOwnershipServer {
             num_shards: 1,
             top_k_delay: None,
             atomic_replace: true,
-            alias_form_words: true,
             stored_queries: None,
         }
     }
@@ -85,7 +82,6 @@ impl ShardService for LegacyOwnershipServer {
             compiler_semantics_version: current_compiler_semantics_version(),
             retired_operation: 0,
             atomic_replace: self.atomic_replace,
-            alias_form_words: self.alias_form_words,
         }))
     }
 
@@ -110,7 +106,6 @@ impl ShardService for LegacyOwnershipServer {
             coordinator_id,
             compiler_semantics_version: current_compiler_semantics_version(),
             atomic_replace: self.atomic_replace,
-            alias_form_words: self.alias_form_words,
         }))
     }
 
@@ -135,7 +130,6 @@ impl ShardService for LegacyOwnershipServer {
             coordinator_id,
             compiler_semantics_version: current_compiler_semantics_version(),
             atomic_replace: self.atomic_replace,
-            alias_form_words: self.alias_form_words,
         }))
     }
     async fn percolate(

@@ -173,11 +173,6 @@ pre-upgrade backup:
   pending transition when no same-coordinator retry remains. An existing exclusive client
   reconnecting to a restarted durable shard uses the read-only fingerprint claim and does not
   create a replacement slot.
-- **ADR-205 alias forms by their words:** upgrade every shard server before the coordinator. A
-  coordinator routes a title by a positive view that holds a multi-word alias form whenever it
-  holds the form's words, and refuses to connect to a shard server that does not attest the same
-  view (`alias_form_words` on every handshake reply). Until the coordinator is upgraded the
-  cluster answers as it did before. No durable or wire format changes.
 - **ADR-185 reader-atomic upsert:** upgrade every shard server before the coordinator. The
   coordinator now replaces a query with the additive `ReplaceExtracted` RPC and refuses to connect
   to a shard server that does not attest it (`DictFingerprintReply.atomic_replace`), because

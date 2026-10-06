@@ -17,6 +17,7 @@
 mod harness;
 
 mod alias;
+mod alias_chains;
 mod alias_components;
 mod alias_discovery;
 mod alias_edges;

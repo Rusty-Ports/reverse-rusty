@@ -261,8 +261,6 @@ impl ShardService for ShardServer {
             retired_operation: self.retired_operation(),
             // ADR-185: this binary serves the atomic per-shard replace.
             atomic_replace: true,
-            // ADR-205: this binary's title view completes multi-word alias forms.
-            alias_form_words: true,
         }))
     }
 

@@ -3,97 +3,129 @@
 //! A query that spells a form out (`wireless mouse`) is compiled to the form's entity, so
 //! that the alias's other forms match it too. Before the alias existed the same query asked
 //! for each word, and matched a title that had them apart or in another order. The title
-//! side keeps that true: the positive view gets a form's entity whenever it holds all of the
-//! form's words, wherever they stand. Stored queries are not touched, and the canonical view
-//! that negation reads is not either.
+//! side keeps that true: the positive view gets a form's entity whenever it holds some
+//! parse of the form's text, wherever the pieces stand. A piece is a word, or a phrase the
+//! vocabulary already had for several of the words, and it is held under its own name or
+//! under one a query treats as the same. Stored queries are not touched, and the canonical
+//! view that negation reads is not either.
 
-use crate::dict::{Dict, FeatureId};
-use crate::util::{fast_map, fnv1a64, FastMap, FastSet};
+use crate::dict::{name_hash, Dict, FeatureId};
+use crate::util::{fast_map, FastMap, FastSet};
 
-/// The identity of a feature name here. Names are compared by this hash, so that a title's
-/// names can be kept and searched without holding strings. A collision could only make a
-/// title appear to carry a word it lacks, which adds a candidate and never removes one.
-#[inline]
-pub(in crate::normalize) fn name_hash(name: &str) -> u64 {
-    fnv1a64(name.as_bytes())
+/// One way a query could have asked for a stretch of a form's text before the form
+/// existed: a single word, or a phrase of the vocabulary that covers several of them.
+pub(in crate::normalize) struct UnitSpec {
+    /// The token positions the unit spans, `from..to`.
+    pub(in crate::normalize) from: usize,
+    pub(in crate::normalize) to: usize,
+    /// The feature names a title may carry the unit under. For a word: `term:<word>`, which
+    /// the positive view holds for every cleaned token, and whatever the word compiles to as
+    /// a token of its own (a synonym's canonical, a typed number). For a phrase: its feature.
+    pub(in crate::normalize) names: Vec<String>,
 }
 
-/// One word of a form.
-struct Word {
-    /// The names a title may carry the word under, sorted.
+/// One multi-word alias form: its entity, how many tokens it has, and its units.
+pub(in crate::normalize) struct FormSpec {
+    pub(in crate::normalize) entity: String,
+    pub(in crate::normalize) len: usize,
+    pub(in crate::normalize) units: Vec<UnitSpec>,
+}
+
+struct Unit {
+    from: u32,
+    to: u32,
+    /// Sorted.
     names: Vec<u64>,
-    /// Whether one of those names is the entity of a form, so that the completion itself
-    /// can put the word in the view.
-    suppliable: bool,
 }
 
 struct Form {
     entity: String,
     entity_name: u64,
-    words: Vec<Word>,
+    len: u32,
+    /// Sorted by `from`, so one pass over them finds every position the view reaches.
+    units: Vec<Unit>,
 }
 
-/// The words of every multi-word alias form.
+/// The multi-word alias forms, as the parses of their text.
 pub(in crate::normalize) struct AliasWords {
     forms: Vec<Form>,
-    /// Name -> the forms keyed on it. A form is listed under the names of ONE of its words,
-    /// the word the fewest forms share, and is looked at only once that word is in the
-    /// view. Ten thousand forms `wireless <model>` cost a title that says `wireless`
+    /// Name -> the forms keyed on it. Every parse of a form crosses each gap between two of
+    /// its tokens with exactly one unit, so a title that carries the form carries a unit
+    /// over any one gap. A form is listed under the names of the units over ONE gap, the gap
+    /// whose names the fewest forms share, and is not looked at before one of them is in
+    /// the view. Ten thousand forms `wireless <model>` cost a title that says `wireless`
     /// nothing; they are keyed on their model.
     keyed: FastMap<u64, Vec<u32>>,
+    /// The names of every form's entity: what the completion itself can put in a view.
+    entities: FastSet<u64>,
 }
 
 /// What the completion of one title remembers (ADR-205). Empty between titles. It grows
 /// with what a title touches and never with the number of forms, so a scratch made for a
-/// single title costs nothing until the title carries a form's key word.
+/// single title costs nothing until the title carries a form's key.
 #[derive(Debug, Default)]
 pub(in crate::normalize) struct AliasScratch {
     /// Every feature name of the title's positive view, as [`name_hash`] values.
     pub(in crate::normalize) names: Vec<u64>,
-    /// The entity names the completion has put in the view.
+    /// The names the completion has put in the view: entities, and their equivalents.
     entered: FastSet<u64>,
     /// The same names in the order they entered; each is visited once.
     queue: Vec<u64>,
-    /// Form -> the word it was last found waiting on, or [`DONE`].
-    looked: FastMap<u64, u32>,
-    /// Name -> the forms found waiting on a word the view may yet get under that name.
+    /// The forms that are done with, by [`DONE`], or waiting for a name, by [`WAITING`].
+    looked: FastMap<u64, u8>,
+    /// Name -> the forms found waiting on a unit the view may yet get under that name.
     waiting: FastMap<u64, Vec<u32>>,
+    /// Which token positions of the form under examination the view reaches.
+    reach: Vec<bool>,
 }
 
 /// The form is in the view; nothing is left to look at.
-const DONE: u32 = u32::MAX;
+const DONE: u8 = 1;
+/// The form is noted under every name that could still complete it.
+const WAITING: u8 = 2;
 
 impl AliasWords {
-    /// `forms` gives, for each alias form, its entity and, for each of its words, the
-    /// feature names a title carries the word under: `term:<word>`, which the positive view
-    /// holds for every cleaned token, and whatever the word compiles to as a token of its
-    /// own (a synonym's canonical, a typed number).
-    pub(in crate::normalize) fn new(forms: Vec<(String, Vec<Vec<String>>)>) -> Option<Self> {
-        let forms: Vec<(String, Vec<Vec<u64>>)> = forms
+    pub(in crate::normalize) fn new(specs: Vec<FormSpec>) -> Option<Self> {
+        let forms: Vec<Form> = specs
             .into_iter()
-            .filter(|(_, words)| !words.is_empty())
-            .map(|(entity, words)| {
-                let words = words
-                    .iter()
-                    .map(|names| {
-                        let mut hashes: Vec<u64> =
-                            names.iter().map(|name| name_hash(name)).collect();
-                        hashes.sort_unstable();
-                        hashes.dedup();
-                        hashes
+            .filter(|spec| spec.len > 0)
+            .filter_map(|spec| {
+                let mut units: Vec<Unit> = spec
+                    .units
+                    .into_iter()
+                    .filter(|unit| unit.from < unit.to && unit.to <= spec.len)
+                    .map(|unit| {
+                        let mut names: Vec<u64> =
+                            unit.names.iter().map(|name| name_hash(name)).collect();
+                        names.sort_unstable();
+                        names.dedup();
+                        Some(Unit {
+                            from: u32::try_from(unit.from).ok()?,
+                            to: u32::try_from(unit.to).ok()?,
+                            names,
+                        })
                     })
-                    .collect();
-                (entity, words)
+                    .collect::<Option<_>>()?;
+                units.sort_by_key(|unit| (unit.from, unit.to));
+                Some(Form {
+                    entity_name: name_hash(&spec.entity),
+                    entity: spec.entity,
+                    len: u32::try_from(spec.len).ok()?,
+                    units,
+                })
             })
             .collect();
         if forms.is_empty() {
             return None;
         }
-        let entities: FastSet<u64> = forms.iter().map(|(entity, _)| name_hash(entity)).collect();
         // How many forms carry each name, counted once per form.
         let mut shared: FastMap<u64, u32> = fast_map();
-        for (_, words) in &forms {
-            let mut names: Vec<u64> = words.iter().flatten().copied().collect();
+        for form in &forms {
+            let mut names: Vec<u64> = form
+                .units
+                .iter()
+                .flat_map(|unit| unit.names.iter().copied())
+                .collect();
             names.sort_unstable();
             names.dedup();
             for name in names {
@@ -101,49 +133,57 @@ impl AliasWords {
             }
         }
         let mut keyed: FastMap<u64, Vec<u32>> = fast_map();
-        for (index, (_, words)) in forms.iter().enumerate() {
+        for (index, form) in forms.iter().enumerate() {
             let index = u32::try_from(index).ok()?;
-            let key = words.iter().min_by_key(|names| {
+            let over = |gap: u32| {
+                let mut names: Vec<u64> = form
+                    .units
+                    .iter()
+                    .filter(|unit| unit.from <= gap && gap < unit.to)
+                    .flat_map(|unit| unit.names.iter().copied())
+                    .collect();
+                names.sort_unstable();
+                names.dedup();
+                names
+            };
+            let key = (0..form.len).map(over).min_by_key(|names| {
                 names
                     .iter()
                     .map(|name| u64::from(shared.get(name).copied().unwrap_or(0)))
                     .sum::<u64>()
             })?;
-            for &name in key {
+            for name in key {
                 keyed.entry(name).or_default().push(index);
             }
         }
-        let forms = forms
-            .into_iter()
-            .map(|(entity, words)| Form {
-                entity_name: name_hash(&entity),
-                entity,
-                words: words
-                    .into_iter()
-                    .map(|names| Word {
-                        suppliable: names.iter().any(|name| entities.contains(name)),
-                        names,
-                    })
-                    .collect(),
-            })
-            .collect();
-        Some(Self { forms, keyed })
+        let entities = forms.iter().map(|form| form.entity_name).collect();
+        Some(Self {
+            forms,
+            keyed,
+            entities,
+        })
     }
 
-    /// Append the entity of every form all of whose words the title carries, to a fixed
-    /// point: a form the title carries puts its entity in the view, and that entity may be a
-    /// word of another form. Returns how many times a form was examined.
+    /// Append the entity of every form the title carries, to a fixed point: a form the title
+    /// carries puts its entity in the view, and that entity may be a unit of another form.
+    /// Returns how many times a form was examined.
+    ///
+    /// A title carries a form when its view holds, for some way of cutting the form's text
+    /// into words and phrases of the vocabulary, every piece: under one of the piece's own
+    /// names, or under a name the dictionary's equivalences make a query take for it. Those
+    /// are the ways a query could have asked for the text before the form existed.
     ///
     /// `scratch.names` is the title's complete positive view by name, in any order and with
-    /// repeats; it is left sorted and distinct. The rest of the scratch is empty on entry
-    /// and on return. An entity the dictionary has not interned resolves to its synthetic
-    /// id, as everywhere on the title side (ADR-046). `out` may receive an entity twice.
+    /// repeats; it is left sorted, distinct, and widened by the equivalents of its names.
+    /// The rest of the scratch is empty on entry and on return. An entity the dictionary has
+    /// not interned resolves to its synthetic id, as everywhere on the title side (ADR-046).
+    /// `out` may receive an entity twice.
     ///
-    /// A name enters the view once, from the title or as the entity of a completed form,
-    /// and there is one thing done with it: the forms keyed on it are examined, and so are
-    /// the forms an earlier look found waiting on it. A form is therefore never examined
-    /// before its key word is in the view, and the work follows the forms a title touches
-    /// and not the number of forms.
+    /// A name enters the view once, from the title or from a completed form, and there is
+    /// one thing done with it: the forms keyed on it are examined, and so are the forms an
+    /// earlier look found waiting on it. A form is therefore never examined before a name of
+    /// its key is in the view, and the work follows the forms a title touches and not the
+    /// number of forms.
     pub(in crate::normalize) fn complete_into(
         &self,
         scratch: &mut AliasScratch,
@@ -153,13 +193,27 @@ impl AliasWords {
         // A title that repeats a word a thousand times carries it once.
         scratch.names.sort_unstable();
         scratch.names.dedup();
+        // A title that carries a name carries, for this rule, every name a query treats as
+        // the same.
+        if dict.has_equivalent_names() {
+            let carried = scratch.names.len();
+            for at in 0..carried {
+                if let Some(class) = dict.equivalent_names(scratch.names[at]) {
+                    scratch.names.extend_from_slice(class);
+                }
+            }
+            if scratch.names.len() != carried {
+                scratch.names.sort_unstable();
+                scratch.names.dedup();
+            }
+        }
         debug_assert!(scratch.is_clear());
         let mut examined = 0usize;
         for at in 0..scratch.names.len() {
             let name = scratch.names[at];
             self.enter(name, scratch, dict, out, &mut examined);
         }
-        // Each entity that entered the view is a name like any other, in the order they
+        // Each name that entered the view is a name like any other, in the order they
         // entered.
         let mut next = 0;
         while next < scratch.queue.len() {
@@ -198,9 +252,9 @@ impl AliasWords {
         }
     }
 
-    /// Put the form's entity in the view if the view holds every word of the form. If it
-    /// does not, and the word that is missing is one the completion could still supply,
-    /// note the form under that word's names.
+    /// Put the form's entity in the view if the view holds some parse of the form. If it
+    /// does not, note the form under every name the completion could still supply for a
+    /// piece that is missing.
     fn examine(
         &self,
         form: u32,
@@ -210,38 +264,71 @@ impl AliasWords {
         examined: &mut usize,
     ) {
         *examined += 1;
-        let looked = scratch.looked.get(&u64::from(form)).copied();
-        if looked == Some(DONE) {
+        let AliasScratch {
+            names,
+            entered,
+            queue,
+            looked,
+            waiting,
+            reach,
+        } = scratch;
+        let state = looked.get(&u64::from(form)).copied();
+        if state == Some(DONE) {
             return;
         }
         let candidate = &self.forms[form as usize];
-        let has = |name: &u64| {
-            scratch.names.binary_search(name).is_ok() || scratch.entered.contains(name)
-        };
-        let missing = candidate
-            .words
-            .iter()
-            .position(|word| !word.names.iter().any(has));
-        let Some(missing) = missing else {
-            scratch.looked.insert(u64::from(form), DONE);
-            out.push(dict.get_or_synthetic(&candidate.entity));
-            // A name the title already carries has had its forms examined.
-            let name = candidate.entity_name;
-            if scratch.names.binary_search(&name).is_err() && scratch.entered.insert(name) {
-                scratch.queue.push(name);
-            }
-            return;
-        };
-        let word = &candidate.words[missing];
-        let at = u32::try_from(missing).unwrap_or(DONE - 1);
-        // Words only ever enter the view, so the first missing word only moves forward:
-        // a form is noted under each of its words at most once.
-        if word.suppliable && looked != Some(at) {
-            scratch.looked.insert(u64::from(form), at);
-            for &name in &word.names {
-                scratch.waiting.entry(name).or_default().push(form);
+        let has = |name: &u64| names.binary_search(name).is_ok() || entered.contains(name);
+        reach.clear();
+        reach.resize(candidate.len as usize + 1, false);
+        reach[0] = true;
+        for unit in &candidate.units {
+            if reach[unit.from as usize] && !reach[unit.to as usize] && unit.names.iter().any(has) {
+                reach[unit.to as usize] = true;
             }
         }
+        if reach[candidate.len as usize] {
+            looked.insert(u64::from(form), DONE);
+            out.push(dict.get_or_synthetic(&candidate.entity));
+            // The entity is in the view, and with it every name a query takes for it. A
+            // name the title already carries has had its forms examined.
+            let entity = [candidate.entity_name];
+            let class = dict.equivalent_names(candidate.entity_name);
+            for &name in class.unwrap_or(&entity) {
+                if names.binary_search(&name).is_err() && entered.insert(name) {
+                    queue.push(name);
+                }
+            }
+            return;
+        }
+        if state == Some(WAITING) {
+            // Already noted under every name that could still arrive: pieces only ever
+            // enter the view, so the missing ones are among those missing at the first look.
+            return;
+        }
+        let mut noted = false;
+        for unit in &candidate.units {
+            if unit.names.iter().any(has) {
+                continue;
+            }
+            for &name in &unit.names {
+                if self.can_supply(name, dict) {
+                    waiting.entry(name).or_default().push(form);
+                    noted = true;
+                }
+            }
+        }
+        if noted {
+            looked.insert(u64::from(form), WAITING);
+        }
+    }
+
+    /// Whether the completion could put `name` in a view: it is a form's entity, or a query
+    /// takes it for one.
+    fn can_supply(&self, name: u64, dict: &Dict) -> bool {
+        self.entities.contains(&name)
+            || dict
+                .equivalent_names(name)
+                .is_some_and(|class| class.iter().any(|same| self.entities.contains(same)))
     }
 
     /// How many forms a title that carries `name` has to look at.
@@ -260,8 +347,9 @@ impl AliasScratch {
             && self.waiting.is_empty()
     }
 
-    /// The memory held for the completion itself, in entries. A title that touches no form
-    /// must leave it at zero.
+    /// The memory held for what a title's completion remembers, in entries. A title that
+    /// touches no form, or only forms that lack a piece nothing can supply, must leave it at
+    /// zero. (`reach` is not counted: it is as long as one form.)
     #[cfg(test)]
     pub(in crate::normalize) fn held(&self) -> usize {
         self.entered.capacity()
