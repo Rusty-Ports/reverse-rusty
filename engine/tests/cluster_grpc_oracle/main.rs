@@ -37,6 +37,7 @@ mod gc_readopt;
 mod handoff;
 mod health;
 mod hot;
+mod large_payload;
 mod legacy_layout;
 mod live_sources;
 mod logical_ids;

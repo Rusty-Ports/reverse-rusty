@@ -4,7 +4,7 @@ use super::{
     CoordinatorLease, Dict, EngineConfig, HashMap, LocalShard, Normalizer, PathBuf, RwLock,
     ServerSecurity, ServerState, Shard, ShardError, ShardServer, ShardSlot,
     DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS, DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
-    DEFAULT_MAX_GRPC_RESULT_BYTES,
+    DEFAULT_MAX_GRPC_REQUEST_BYTES, DEFAULT_MAX_GRPC_RESULT_BYTES,
 };
 
 impl ShardServer {
@@ -40,6 +40,7 @@ impl ShardServer {
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            max_grpc_request_bytes: DEFAULT_MAX_GRPC_REQUEST_BYTES,
             logical_id_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
@@ -67,6 +68,7 @@ impl ShardServer {
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            max_grpc_request_bytes: DEFAULT_MAX_GRPC_REQUEST_BYTES,
             logical_id_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
@@ -158,6 +160,7 @@ impl ShardServer {
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            max_grpc_request_bytes: DEFAULT_MAX_GRPC_REQUEST_BYTES,
             logical_id_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
@@ -186,6 +189,7 @@ impl ShardServer {
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            max_grpc_request_bytes: DEFAULT_MAX_GRPC_REQUEST_BYTES,
             logical_id_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
@@ -242,6 +246,7 @@ impl ShardServer {
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            max_grpc_request_bytes: DEFAULT_MAX_GRPC_REQUEST_BYTES,
             logical_id_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
