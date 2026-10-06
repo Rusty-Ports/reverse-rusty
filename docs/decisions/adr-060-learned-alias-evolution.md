@@ -114,3 +114,8 @@
   the ADR-054 primitive. It initially retained multi-word aliases as review candidates; ADR-061 later
   made declared/manual multi-word groups match-active. The default path (empty registry) remained
   byte-identical.
+
+- **Outcome update (2026-10-05).** The FN-safety argument above assumed `include_broad = true`. An
+  activation could still remove a query from default reads by leaving it only a top-64 anchor;
+  see [ADR-187](adr-187-anyof-cover-and-visible-rebuilds.md), which closes that on the single-node
+  engine.

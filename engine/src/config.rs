@@ -430,6 +430,7 @@ impl EngineConfig {
             accept_class_d: self.accept_class_d,
             hot_anchor_threshold: self.hot_anchor_threshold,
             dedup_bodies: self.dedup_bodies,
+            keep_visible: false,
         }
     }
 

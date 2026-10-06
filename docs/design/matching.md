@@ -41,11 +41,15 @@ a learned weighted score:
 1. If the query has ordinary required features, sort them by query frequency. A non-top-64 rarest
    feature becomes one arity-1 anchor (class A), unless an enabled θ threshold moves that
    default-visible work to H. If the rarest feature is in the frozen top-64 mask, pair it with the
-   next-rarest required feature (class B). A lone top-64 required feature becomes class C.
-2. If there is no ordinary required feature, select the any-of proxy group whose **most frequent
-   member** is least frequent. Emit one arity-1 anchor for every member, so every satisfying branch
-   reaches the query. The worst member determines B, C, or H. Complete multi-feature members remain
-   in the exact predicate program; their proxy is necessary, never sufficient (ADR-119).
+   next-rarest required feature (class B). A lone top-64 required feature falls through to rule 2,
+   and becomes class C only if that finds no cover.
+2. **The any-of cover** (ADR-187). Among the any-of proxy groups with **no top-64 member**, select
+   the one whose most frequent member is least frequent, and emit one arity-1 anchor for every
+   member, so every satisfying branch reaches the query: class B, or H when θ is on and the worst
+   member reaches it. Qualification is read from the frozen mask, never from frequency order, so
+   two compiles of one body agree on visibility. If every group has a top-64 member, a query with
+   no required feature is class C on its most selective group. Complete multi-feature members
+   remain in the exact predicate program; their proxy is necessary, never sufficient (ADR-119).
 3. A required phrase may supply a default-visible family of arity-1 candidate-only label proxies
    (class B). Exact positioned graph matching still decides whether the phrase is present (ADR-120).
 4. A query with no positive requirement receives the empty universal broad signature (class D).
@@ -188,6 +192,11 @@ Since ADR-105 the classification answers TWO independent questions — **who can
 | **C** | broad — only a **top-64** anchor available (`pro`, `new`) | **opt-in** (`include_broad`) | broad lane, columnar batch |
 | **D** | negation-only (only forbidden clauses) | opt-in, and rejected at ingest by default (`accept_class_d` stores it as an **always-candidate**, ADR-068) | broad lane, universal signature |
 | **H** | **θ-hot anchor** (frequency ≥ `hot_anchor_threshold`, *no* top-64 mask bit — the ADR-104 rank-cliff population) | **default-visible** — probed on every request | **hot index**, columnar batch (per-title inline on the scalar path) |
+
+A stored query does not leave the default-visible cell on its own. Compaction keeps its cover when
+a re-plan would be opt-in (ADR-056), and a single-node rebuild (a vocabulary change, a
+compiler-semantics migration) stores such a query's top-64 signatures in the main lane instead of
+the broad lane (ADR-187). Only a new write of the query takes the lane its current plan gives it.
 
 ### 4.1 The two-axis placement rule (ADR-105 — an architecture invariant)
 

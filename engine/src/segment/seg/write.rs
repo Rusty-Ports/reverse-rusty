@@ -226,7 +226,10 @@ impl Segment {
         source_generation: u64,
         knobs: CompileKnobs,
     ) -> Option<AddedCompiled> {
-        let plan = build_signatures(ex, dict, knobs.hot_anchor_threshold);
+        let mut plan = build_signatures(ex, dict, knobs.hot_anchor_threshold);
+        if knobs.keep_visible {
+            plan.pin_visible();
+        }
         if rejects_class_d(plan.class, ex, knobs.accept_class_d) {
             return None;
         }

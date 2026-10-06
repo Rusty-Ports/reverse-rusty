@@ -70,6 +70,49 @@ fn placement_by_cost_class() {
     );
 }
 
+/// ADR-187: a query whose only required term is top-64 anchors on its selective
+/// any-of group, so it ring-places like the group alone instead of joining the
+/// opt-in replicated lane, and a default read returns it on any shard count.
+#[test]
+fn a_top64_required_term_with_a_selective_group_places_selectively() {
+    let (queries, _titles) = build_corpus();
+    let mixed = "standard (rareentity0,rareentity1000)";
+    for num_shards in [1usize, 8] {
+        let cfg = ClusterConfig {
+            num_shards,
+            include_broad: false,
+            ..ClusterConfig::default()
+        };
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        // Precondition: on its own the required term is opt-in.
+        assert_eq!(
+            cluster.add_query(9_100_000, "standard").unwrap(),
+            AddOutcome::Replicated
+        );
+        match cluster.add_query(9_100_001, mixed).unwrap() {
+            AddOutcome::Placed { shards } => assert!(
+                (1..=2).contains(&shards.len()),
+                "K={num_shards}: one shard per group member, got {shards:?}"
+            ),
+            other => panic!("K={num_shards}: expected Placed, got {other:?}"),
+        }
+        for title in ["standard rareentity0", "rareentity1000 extra standard"] {
+            let default = cluster.percolate_with_broad(title, false).expect("read");
+            assert!(
+                default.contains(&9_100_001) && !default.contains(&9_100_000),
+                "K={num_shards}: {title:?} default read returned {default:?}"
+            );
+            let broad = cluster.percolate_with_broad(title, true).expect("read");
+            assert!(broad.contains(&9_100_001) && broad.contains(&9_100_000));
+        }
+        // The required term is still required.
+        let without = cluster
+            .percolate_with_broad("rareentity0 alone", true)
+            .expect("read");
+        assert!(!without.contains(&9_100_001), "K={num_shards}: {without:?}");
+    }
+}
+
 #[test]
 fn anyof_query_can_place_on_multiple_shards() {
     let (queries, _titles) = build_corpus();

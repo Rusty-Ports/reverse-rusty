@@ -153,8 +153,9 @@ pub(super) fn drop_shard(
         }
         None => 0,
     };
-    // Re-check the fence under the map WRITE lock, then atomically quarantine the durable dir
-    // before removing the slot. A rename failure restores the fence and leaves the slot hosted.
+    // Tombstone the fence, remember the drop (ADR-189), then under the map WRITE lock atomically
+    // quarantine the durable dir and remove the slot. A failure restores the fence and leaves
+    // the slot hosted.
     let trash = server.remove_slot_if_fenced_at_with(
         req.shard_id,
         req.expected_fence_generation,
