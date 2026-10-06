@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use reverse_rusty::cluster::{
     DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS, DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
-    DEFAULT_MAX_GRPC_RESULT_BYTES,
+    DEFAULT_MAX_GRPC_REQUEST_BYTES, DEFAULT_MAX_GRPC_RESULT_BYTES,
 };
 use reverse_rusty::config::EngineConfig;
 
@@ -37,6 +37,9 @@ pub(crate) struct ShardServerArgs {
     /// Exact protobuf bound for every result-bearing unary reply and each FetchMatches stream
     /// item. The builder enforces the hard 4 MiB ceiling.
     pub(crate) max_grpc_result_bytes: usize,
+    /// The largest inbound request this node decodes (ADR-193). It bounds the dictionary a
+    /// coordinator can ship; bulk ingest arrives in smaller requests whatever this is.
+    pub(crate) max_grpc_request_bytes: usize,
     /// Node-local backpressure bounds for ADR-114 exhaustive streams. These are independent
     /// of the coordinator's HTTP admission because direct mesh callers and multiple
     /// coordinators share this process.
@@ -83,6 +86,7 @@ pub(crate) fn parse(args: &[String]) -> Result<ShardServerArgs, String> {
         metrics_addr: None,
         ranking_profiles_file: None,
         max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+        max_grpc_request_bytes: DEFAULT_MAX_GRPC_REQUEST_BYTES,
         max_concurrent_exhaustive_streams: DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
         max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
         engine: EngineConfig::default(),
@@ -175,6 +179,11 @@ pub(crate) fn parse(args: &[String]) -> Result<ShardServerArgs, String> {
                         .parse()
                         .map_err(|e| format!("--max-grpc-result-bytes {v}: {e}"))?;
                 }
+                i += 1;
+            }
+            "--max-grpc-request-bytes" => {
+                out.max_grpc_request_bytes =
+                    parsed(args, i, "--max-grpc-request-bytes", "a byte count")?;
                 i += 1;
             }
             "--max-concurrent-exhaustive-streams" => {
@@ -291,6 +300,30 @@ mod tests {
         assert!(!engine.tag_segment_skipping);
         assert!(!engine.broad_columnar);
         assert!(!engine.broad_materialize);
+    }
+
+    #[test]
+    fn the_request_limit_is_a_flag_with_a_default() {
+        use reverse_rusty::cluster::DEFAULT_MAX_GRPC_REQUEST_BYTES;
+        let parsed = parse(&args(&["--pending"])).expect("valid arguments");
+        assert_eq!(
+            parsed.max_grpc_request_bytes,
+            DEFAULT_MAX_GRPC_REQUEST_BYTES
+        );
+        let parsed = parse(&args(&["--max-grpc-request-bytes", "134217728"])).expect("valid");
+        assert_eq!(parsed.max_grpc_request_bytes, 134_217_728);
+        for bad in [
+            &["--max-grpc-request-bytes"][..],
+            &["--max-grpc-request-bytes", "64MiB"],
+        ] {
+            let error = parse(&args(bad)).err();
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("--max-grpc-request-bytes")),
+                "{bad:?}: {error:?}"
+            );
+        }
     }
 
     #[test]

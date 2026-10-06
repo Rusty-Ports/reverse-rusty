@@ -233,6 +233,10 @@ to the deployment-mode RPO in
 - A replica failure marks that copy out of sync; it does **not** fail an already successful primary
   write. There is no quorum-ack query-write mode.
 - Reads use the primary and fail over on a transport failure only to a replica marked in sync.
+- The mark is the coordinator's memory. A remote coordinator earns it at connect by proving each
+  replica's content fingerprint equal to its primary's (ADR-195); a replica that is not proven
+  starts out of sync and is left as it is unless the operator asked for divergent replicas to
+  be recovered from their primaries.
 - Aggregation, source fetch, checkpoint identity, and content fingerprints remain
   primary-authoritative.
 
@@ -248,9 +252,12 @@ fingerprints rather than attaching a partial corpus.
 
 ### 5.1 Cross-position partial apply
 
-A coordinator mutation may target several positions. It is logged before fan-out, but a remote RPC
-can fail after another position applied. The coordinator reports the partial state, emits an event,
-and records the failed targets for `resync`; replay of the durable coordinator log is the backstop.
+A coordinator mutation may target several positions, and a remote RPC can fail after another
+position applied. The coordinator answers the write as a retryable failure (ADR-194), emits an
+event, and records the failed targets in memory for `resync`. Only a durable in-process coordinator
+has a log to replay, and its shard writes do not fail part-way; a remote coordinator has none, so
+the repair queue stops with its process and the writer's retry is what converges the write. A
+re-drive replaces the id on each position, because a refused write may have been applied.
 Reads that promise exact exhaustive completion refuse while repairs are pending. The in-process RF=1
 path is infallible at that seam. The strict native REST boundary runs one independently supervised,
 admission-bounded pass and reports any still-unreachable mutations explicitly; it is not an alias for

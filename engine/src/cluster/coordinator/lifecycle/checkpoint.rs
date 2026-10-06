@@ -25,7 +25,34 @@ impl ClusterEngine {
     /// written `.seg` are orphans (not in the old registry) recovered via log replay, so
     /// no double-apply and no loss. A crash AFTER it (before truncation) loads the new
     /// segments and replays only the (now shorter) tail — also correct.
+    ///
+    /// Excludes every mutation for its whole duration (ADR-197): it takes the exclusive side
+    /// of the mutation barrier, which every write holds shared from before its log append
+    /// until its shard fan-out is complete. In-flight writes finish first and new ones wait,
+    /// so the log position the manifest records and the segments it lists describe the same
+    /// set of writes. PIT opens, exhaustive delivery, `flush` and other checkpoints wait too;
+    /// ordinary reads do not. Lock order: this barrier, then a logical-id lock, then a shard.
     pub fn checkpoint(&self) -> Result<(), ShardError> {
+        let _quiesced = self.quiesce_mutations();
+        self.checkpoint_quiesced()
+    }
+
+    /// Take the exclusive side of the mutation barrier: wait for every write that has been
+    /// admitted to finish its fan-out, and hold back new ones, until the guard is dropped.
+    pub(in crate::cluster::coordinator) fn quiesce_mutations(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, ()> {
+        self.pit_open_barrier
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// [`Self::checkpoint`] for a caller that already excludes every mutation. It must do
+    /// one of these: hold [`Self::quiesce_mutations`]; hold the barrier shared together with
+    /// the bulk logical-id guard (a bulk load, which is itself the only writer); have
+    /// `&mut self`; or own an engine that has not been shared yet. Taking the barrier here
+    /// would deadlock the first two.
+    pub(in crate::cluster::coordinator) fn checkpoint_quiesced(&self) -> Result<(), ShardError> {
         let Some(dir) = self.data_dir.clone() else {
             if self.is_remote() {
                 for shard in &self.shards {

@@ -158,6 +158,27 @@ service ShardService {
   // Lift a retirement recorded by exactly this operation, once the control plane proves its
   // resize did not commit. Idempotent: an unretired node reports `was_retired = false`.
   rpc Unretire (UnretireRequest) returns (UnretireReply);
+
+  // ---- unfinished bulk load (ADR-196) ----
+  // Record that a bulk load into this slot has begun and not completed, or clear that record.
+  // A coordinator marks every slot before it sends the first bucket of a bulk load and clears
+  // the marks after the last one has landed, so a load that stops part-way is remembered by
+  // the nodes. Durable on a durable node before the reply. A peer without it fails
+  // UNIMPLEMENTED, and the coordinator refuses to start a load it could not mark.
+  rpc SetBulkLoadState (SetBulkLoadStateRequest) returns (BulkLoadStateReply);
+  // Whether a bulk load into this slot began and did not complete. A coordinator that
+  // connects asks every slot and refuses to serve a cluster that holds such a load. A peer
+  // without the RPC cannot hold the record, so UNIMPLEMENTED reads as "no".
+  rpc BulkLoadState (ShardRef) returns (BulkLoadStateReply);
+}
+
+message SetBulkLoadStateRequest {
+  uint32 shard_id = 1;
+  bool incomplete = 2;
+}
+
+message BulkLoadStateReply {
+  bool incomplete = 1;
 }
 
 message Empty {}

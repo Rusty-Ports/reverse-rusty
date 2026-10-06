@@ -85,10 +85,11 @@ pub enum DurabilityOp {
     ReplicaDesync,
     /// A cluster multi-shard mutation (a selective Add or a Remove) applied to SOME but not
     /// all of its target shards: a remote shard write failed mid-fan-out (ADR-047). The
-    /// mutation is durably logged (so it WILL converge on `ClusterEngine::resync` or reopen)
-    /// and the failed shards are queued for repair — but until then the query is only
-    /// partially visible: a transient FALSE-NEGATIVE window on the un-applied shards. Data at
-    /// risk (a missed match is this system's worst outcome). Distributed layer only; the
+    /// write was answered as a failure and the failed shards are queued for repair in the
+    /// coordinator's memory (ADR-194): a retry of the write or `ClusterEngine::resync`
+    /// converges it, and a remote coordinator that stops first loses the queue. Until then the
+    /// query is only partially visible: a FALSE-NEGATIVE window on the un-applied shards. Data
+    /// at risk (a missed match is this system's worst outcome). Distributed layer only; the
     /// in-process / RF=1 path never produces it (its `LocalShard` writes are infallible).
     ClusterPartialApply,
     /// Reconstructing remote create-only admission failed. No mutation or match
