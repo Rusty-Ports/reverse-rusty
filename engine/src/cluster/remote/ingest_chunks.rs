@@ -1,15 +1,49 @@
-//! Splitting one shard's bulk bucket into requests a shard node accepts (ADR-193).
+//! The messages one shard's bulk bucket is sent as (ADR-193).
 //!
 //! A bucket holds every query bound for one shard, so its encoded size grows with the
 //! corpus. gRPC refuses an inbound message above the server's limit (4 MiB unless raised),
-//! and one request per bucket stopped working once a bucket passed it. The coordinator
-//! sends the bucket as consecutive requests of bounded size instead.
+//! and one request per bucket stopped working once a bucket passed it. The bucket travels on
+//! the `StageIngest` stream instead, as consecutive messages of bounded size. (A remote
+//! resize bounds its own batches before it sends them.)
 
 use reverse_rusty_shard_proto::encoded_len;
 
 use super::super::proto;
 use super::super::shard::ShardError;
-use crate::segment::IngestReport;
+use super::refuse_wire_tag_ids;
+use crate::segment::PlacedQuery;
+
+/// A batch as the wire carries it: raw DSL and raw tags, which the node compiles against its
+/// own frozen dictionary.
+pub(super) fn wire_items(items: &[PlacedQuery]) -> Vec<proto::AddItem> {
+    items
+        .iter()
+        .map(|q| proto::AddItem {
+            logical_id: q.logical,
+            dsl: q.dsl.clone(),
+            version: q.version,
+            tags: proto::tags_to_proto(&q.tags),
+            placement: Some(proto::placement_to_proto(&q.placement)),
+        })
+        .collect()
+}
+
+/// The messages a bucket travels as: in order, each within
+/// [`crate::cluster::INGEST_REQUEST_BUDGET_BYTES`]. An empty bucket is one empty message, so
+/// the node still checks that it serves the slot.
+pub(super) fn bounded_requests(
+    items: &[PlacedQuery],
+) -> Result<Vec<Vec<proto::AddItem>>, ShardError> {
+    refuse_wire_tag_ids(items)?;
+    let mut requests = split_by_encoded_size(
+        wire_items(items),
+        crate::cluster::INGEST_REQUEST_BUDGET_BYTES,
+    )?;
+    if requests.is_empty() {
+        requests.push(Vec::new());
+    }
+    Ok(requests)
+}
 
 /// What one item costs inside `IngestRequest.items` beyond its own bytes: the field tag and
 /// a length prefix of up to five bytes.
@@ -18,7 +52,7 @@ const ITEM_FRAMING_BYTES: usize = 1 + 5;
 /// Split `items` into consecutive groups whose encoded size stays within `budget`. Order is
 /// preserved, so applying the groups in turn is applying the bucket. An item that exceeds
 /// the budget on its own cannot be sent in any group, and fails here with its id.
-pub(super) fn split_by_encoded_size(
+fn split_by_encoded_size(
     items: Vec<proto::AddItem>,
     budget: usize,
 ) -> Result<Vec<Vec<proto::AddItem>>, ShardError> {
@@ -47,18 +81,11 @@ pub(super) fn split_by_encoded_size(
     Ok(groups)
 }
 
-/// Add one request's reply to the bucket's report: the bucket's outcome is the sum of its
-/// requests' outcomes.
-pub(super) fn add_reply(report: &mut IngestReport, reply: &proto::IngestReply) {
-    report.ingested += reply.ingested as usize;
-    report.rejected_parse += reply.rejected_parse as usize;
-    report.rejected_class_d += reply.rejected_class_d as usize;
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{add_reply, split_by_encoded_size, ITEM_FRAMING_BYTES};
+    use super::{bounded_requests, split_by_encoded_size, ITEM_FRAMING_BYTES};
     use crate::cluster::proto;
+    use crate::segment::PlacedQuery;
     use reverse_rusty_shard_proto::encoded_len;
 
     fn item(id: u64, dsl_len: usize) -> proto::AddItem {
@@ -117,31 +144,72 @@ mod tests {
             .is_empty());
     }
 
-    #[test]
-    fn a_buckets_report_is_the_sum_of_its_requests() {
-        let mut report = crate::segment::IngestReport {
-            ingested: 0,
-            rejected_parse: 0,
-            rejected_class_d: 0,
-        };
-        for (ingested, rejected_parse, rejected_class_d) in [(10, 1, 0), (7, 0, 2), (3, 4, 5)] {
-            add_reply(
-                &mut report,
-                &proto::IngestReply {
-                    ingested,
-                    rejected_parse,
-                    rejected_class_d,
-                },
-            );
+    fn placed(logical: u64, dsl: &str, tag_ids: Vec<crate::tagdict::TagId>) -> PlacedQuery {
+        let norm = crate::normalize::Normalizer::default_vocab().expect("vocab");
+        let mut dict = crate::dict::Dict::new();
+        let mut lc = String::new();
+        let ast = crate::dsl::parse("1994 north star").expect("parse");
+        PlacedQuery {
+            logical,
+            // The wire carries the raw query; the compiled form stays with the coordinator.
+            ex: crate::compile::extract(&ast, &norm, &mut dict, &mut lc),
+            dsl: dsl.to_string(),
+            version: 3,
+            source_generation: None,
+            tags: vec![("tier".into(), "gold".into())],
+            tag_ids,
+            rank: crate::rank::RankValues::default(),
+            placement: crate::ownership::QueryPlacement::standalone(),
         }
-        assert_eq!(
-            (
-                report.ingested,
-                report.rejected_parse,
-                report.rejected_class_d
-            ),
-            (20, 5, 7)
-        );
+    }
+
+    #[test]
+    fn a_batch_travels_as_raw_queries_in_order() {
+        let batch = [
+            placed(7, "+nike", Vec::new()),
+            placed(9, "+sony", Vec::new()),
+        ];
+        let requests = bounded_requests(&batch).expect("requests");
+        assert_eq!(requests.len(), 1);
+        let sent: Vec<(u64, &str, u32)> = requests[0]
+            .iter()
+            .map(|item| (item.logical_id, item.dsl.as_str(), item.version))
+            .collect();
+        assert_eq!(sent, vec![(7, "+nike", 3), (9, "+sony", 3)]);
+        assert!(requests[0]
+            .iter()
+            .all(|item| item.tags.len() == 1 && item.placement.is_some()));
+    }
+
+    #[test]
+    fn an_empty_batch_is_one_empty_message() {
+        let requests = bounded_requests(&[]).expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].is_empty());
+    }
+
+    #[test]
+    fn a_batch_over_the_budget_is_several_messages_that_each_fit() {
+        let dsl = "x".repeat(8_000);
+        let batch: Vec<PlacedQuery> = (0..1_000).map(|id| placed(id, &dsl, Vec::new())).collect();
+        let requests = bounded_requests(&batch).expect("requests");
+        assert!(requests.len() > 1, "8 MB cannot travel as one message");
+        for request in &requests {
+            assert!(request_bytes(request) <= crate::cluster::INGEST_REQUEST_BUDGET_BYTES);
+        }
+        let ids: Vec<u64> = requests.iter().flatten().map(|i| i.logical_id).collect();
+        assert_eq!(ids, (0..1_000).collect::<Vec<u64>>());
+    }
+
+    #[test]
+    fn pre_resolved_tag_ids_never_reach_the_wire() {
+        let error = bounded_requests(&[placed(
+            1,
+            "+nike",
+            vec![crate::tagdict::synthetic_tag_id("region", "emea")],
+        )])
+        .expect_err("refused");
+        assert!(error.to_string().contains("tag ids"), "{error}");
     }
 
     #[test]

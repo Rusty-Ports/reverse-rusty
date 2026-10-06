@@ -1,4 +1,6 @@
-//! `StageIngest` client (ADR-180): stream a remote-resize load into one fresh target slot.
+//! `StageIngest` client (ADR-180): stream a load into one slot. A remote resize fills each fresh
+//! target this way, in batches its caller bounds, and a bulk load sends each shard's bucket this
+//! way, split into bounded messages here (ADR-193).
 
 use std::time::Instant;
 
@@ -8,6 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::segment::{IngestReport, PlacedQuery};
 
+use super::ingest_chunks::{bounded_requests, wire_items};
 use super::{proto, refuse_wire_tag_ids, rpc_err, RemoteShard, RpcMethod, RpcOutcome, ShardError};
 
 type StageReply = Result<proto::IngestReply, tonic::Status>;
@@ -21,11 +24,38 @@ pub(crate) struct StagedLoad<'a> {
     reply: Option<JoinHandle<StageReply>>,
     started: Instant,
     deadline: Instant,
+    /// The transport-metrics row this load is recorded under.
+    method: RpcMethod,
 }
 
 impl RemoteShard {
     /// Open a staged load onto this slot, bounded by `deadline` end to end.
     pub(crate) fn open_staged_load(&self, deadline: Instant) -> StagedLoad<'_> {
+        self.open_load(RpcMethod::StageIngest, deadline)
+    }
+
+    /// Bulk-load one bucket through a staged load (ADR-193): the node seals segments of its own
+    /// flush threshold as the messages arrive, and compacts and writes its source store once at
+    /// the end. Sending the bucket as separate `IngestExtracted` requests would instead leave one
+    /// segment, and one rewrite of the whole source store, per request. The budget is one write
+    /// timeout per message plus one for the node to finish.
+    pub(super) fn bulk_load(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
+        let requests = bounded_requests(items)?;
+        let rounds = u32::try_from(requests.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let deadline = Instant::now()
+            .checked_add(self.transport.write_timeout.saturating_mul(rounds))
+            .ok_or_else(|| ShardError::Config("bulk load deadline overflows".into()))?;
+        // Recorded as `ingest`, one call per bucket, as it was when a bucket was one request.
+        let mut load = self.open_load(RpcMethod::Ingest, deadline);
+        for request in requests {
+            load.send_request(request)?;
+        }
+        load.finish()
+    }
+
+    fn open_load(&self, method: RpcMethod, deadline: Instant) -> StagedLoad<'_> {
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
         let mut client = self.client.clone();
         let mut request = tonic::Request::new(ReceiverStream::new(receiver));
@@ -42,6 +72,7 @@ impl RemoteShard {
             reply: Some(reply),
             started: Instant::now(),
             deadline,
+            method,
         }
     }
 }
@@ -51,17 +82,12 @@ impl StagedLoad<'_> {
     /// target has already ended the call, the call's own error is returned.
     pub(crate) fn send(&mut self, items: &[PlacedQuery]) -> Result<(), ShardError> {
         refuse_wire_tag_ids(items)?;
+        self.send_request(wire_items(items))
+    }
+
+    fn send_request(&mut self, items: Vec<proto::AddItem>) -> Result<(), ShardError> {
         let request = proto::IngestRequest {
-            items: items
-                .iter()
-                .map(|q| proto::AddItem {
-                    logical_id: q.logical,
-                    dsl: q.dsl.clone(),
-                    version: q.version,
-                    tags: proto::tags_to_proto(&q.tags),
-                    placement: Some(proto::placement_to_proto(&q.placement)),
-                })
-                .collect(),
+            items,
             shard_id: self.shard.shard_id,
         };
         let sender = self
@@ -125,7 +151,7 @@ impl StagedLoad<'_> {
         };
         self.shard
             .metrics
-            .record(RpcMethod::StageIngest, outcome, self.started.elapsed(), 0);
+            .record(self.method, outcome, self.started.elapsed(), 0);
     }
 }
 

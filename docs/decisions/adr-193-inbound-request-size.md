@@ -22,13 +22,15 @@ limit: the gRPC oracle loads 4,000 queries, and the scale soak builds in-process
 
 ## Decision
 
-1. **Bulk ingest is sent as bounded requests.** `RemoteShard::ingest_extracted` splits a
-   bucket into consecutive requests of at most `INGEST_REQUEST_BUDGET_BYTES` (3 MiB of encoded
-   size), sends them in order and sums their reports. The budget is below tonic's default, so
-   a shard node of any version or configuration accepts them; there is no wire change and no
-   upgrade order. A replica receives the bucket through the same client, so it gets the same
-   requests. A single query that exceeds the budget on its own fails before anything is sent,
-   naming the query.
+1. **A bulk bucket is one staged load of bounded messages.** `RemoteShard::ingest_extracted`
+   sends a bucket on the `StageIngest` stream that a remote resize already uses to fill a
+   target (ADR-180), split into messages of at most `INGEST_REQUEST_BUDGET_BYTES` (3 MiB of
+   encoded size). The node seals segments of its own flush threshold as the messages arrive,
+   and when the stream closes it compacts to its segment policy, writes its source store once
+   and then its checkpoint sidecar. The budget is below tonic's default, so no node setting
+   bounds a load. A replica receives the bucket through the same client. A single query that
+   exceeds the budget on its own fails before anything is sent, naming the query. The load's
+   deadline is one write timeout per message plus one for the node to finish.
 2. **A shard node's inbound limit is a named setting.** `shardserver
    --max-grpc-request-bytes` (default 64 MiB) is applied as the service's decode limit. It
    bounds the dictionary a coordinator can ship, and what one caller can make the node buffer.
@@ -44,9 +46,11 @@ limit: the gRPC oracle loads 4,000 queries, and the scale soak builds in-process
 
 - **Only raise the limit.** It moves the cliff. A bucket's size has no natural bound; a
   bounded request does.
-- **A client-streaming ingest RPC** that builds one segment per shard. Cleaner on the shard
-  (chunked requests leave one base segment per request until compaction merges them), but it
-  is a wire change that needs capability negotiation and a fallback for old nodes.
+- **Separate bounded `IngestExtracted` requests,** which was the first cut of this change and
+  needs nothing from the node. Each request is its own bulk ingest: it seals one segment and
+  rewrites the node's whole source store, so a bucket of N requests writes the store N times
+  (quadratic in the bucket), and nothing compacts the N segments, because a node that only
+  bulk-loads never flushes a memtable. The staged load already solved both for resize.
 - **A chunked or streamed `AdoptDict`,** so no single message bounds the dictionary. The right
   long-term shape; the configurable limit covers dictionaries two orders of magnitude larger
   than the default did without a wire change.
@@ -59,11 +63,14 @@ limit: the gRPC oracle loads 4,000 queries, and the scale soak builds in-process
 
 ## Consequences
 
-- The remote `--load-file` bootstrap works for buckets of any size. A bulk load is no longer
-  one request per shard: if a later request fails, earlier ones on that shard have been
-  applied. The coordinator already treats a failed bulk load as not converged.
-- A shard that bulk-loads a large bucket starts with one base segment per request (about one
-  per 3 MiB of DSL) until compaction merges them.
+- The remote `--load-file` bootstrap works for buckets of any size, and leaves each shard with
+  the segments its own policy allows and one write of its source store.
+- A bulk load that fails part-way leaves the rows it had sealed in the slot's memory, outside
+  the slot's checkpoint sidecar and source store. The coordinator already treats a failed bulk
+  load as not converged; wipe the shard nodes and load again.
+- The coordinator's `ingest` transport metric is one call per bucket, as it was. The node's
+  `ingest` latency histogram times the unary RPC only, which this coordinator no longer sends.
+- The unary `IngestExtracted` RPC stays for a coordinator that predates this change.
 - Dictionaries up to the configured limit can be adopted. Past it the operator gets a message
   naming the flag. Shard nodes that predate this change still refuse a dictionary over 4 MiB:
   upgrade the shard nodes before a coordinator whose dictionary needs the larger limit.
@@ -72,15 +79,20 @@ limit: the gRPC oracle loads 4,000 queries, and the scale soak builds in-process
 ## Proven
 
 - `tests/cluster_grpc_oracle/large_payload.rs`, over real loopback gRPC: a 30,000-query bucket
-  (about 9 MB encoded) loads on a node with the default limit and on one held at 4 MiB, and
-  the loaded cluster answers like an in-process build; with a replica, both copies hold the
-  whole bucket; a dictionary of about 11 MB is adopted, and re-adopted by a second connect to
-  the populated node; a dictionary above a node's limit is refused with a configuration error
-  that names `--max-grpc-request-bytes` and the limit. The first and third failed with
-  `OutOfRange` before this change.
-- `cluster/remote/ingest_chunks.rs`: every request stays within the budget, order is kept,
-  requests are filled before a new one starts, an empty bucket yields none, and an item above
-  the budget is refused by id.
+  (about 9 MB encoded) loads on a node with the default limit and on one held at 4 MiB, as one
+  `ingest` call, and the loaded cluster answers like an in-process build; a durable node with a
+  2,000-row flush threshold and a two-segment policy ends that load with at most two segments;
+  with a replica, both copies hold the whole bucket; a dictionary of about 11 MB is adopted,
+  and re-adopted by a second connect to the populated node; a dictionary above a node's limit
+  is refused with a configuration error that names `--max-grpc-request-bytes` and the limit.
+  The bulk load and the dictionary adoption failed with `OutOfRange` before this change.
+- `cluster/remote/ingest_chunks.rs`: every message stays within the budget, order is kept,
+  messages are filled before a new one starts, an empty batch is one empty message, an item
+  above the budget is refused by id, and pre-resolved tag ids are refused.
+- `cluster/server/tests/stage_ingest.rs` (ADR-180) already proves the node's half: segments of
+  the flush threshold, the source store written once when the stream closes, compaction to
+  the policy, and a failed sidecar write failing the load.
 
-**See also:** ADR-110 (the result cap, the outbound half), ADR-034 (dictionary shipping),
+**See also:** ADR-180 (the staged load), ADR-110 (the result cap, the outbound half), ADR-034
+(dictionary shipping),
 ADR-071 (mesh token), ADR-085 (transport hardening).

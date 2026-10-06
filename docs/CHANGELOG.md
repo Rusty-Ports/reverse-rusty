@@ -13,9 +13,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
 
 - Fix the remote `--load-file` bootstrap failing with `OutOfRange` once a shard's bucket passed
   4 MiB: the coordinator sent each bucket as one request, and a shard node accepts at most
-  tonic's default. Buckets are now sent as consecutive requests of at most 3 MiB
-  ([ADR-193](decisions/adr-193-inbound-request-size.md)). No wire change; works against shard
-  nodes of any version.
+  tonic's default. A bucket is now one staged load, the stream a remote resize already uses,
+  in messages of at most 3 MiB ([ADR-193](decisions/adr-193-inbound-request-size.md)). The
+  node compacts to its segment policy and writes its source store once when the load ends.
 - Fix a coordinator being unable to connect, or restart, once its dictionary serialized to more
   than 4 MiB: `AdoptDict` ships the dictionary in one request. Shard nodes now accept requests
   up to `shardserver --max-grpc-request-bytes` (default 64 MiB; Helm

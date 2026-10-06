@@ -1,9 +1,9 @@
 use super::{
     block_on_timeout_in_context, grpc_deadline_status, no_live_coordinator_lease_status, proto,
-    ranked_rpc_err, refuse_wire_tag_ids, remaining_micros, BatchTitleRequest, CallKind,
-    ClusterMutation, Duration, Extracted, FetchedMatch, IngestReport, Instant, LogPos, MatchStats,
-    PlacedQuery, RemoteShard, RpcMethod, RpcOutcome, Shard, ShardBatchRankedMatch, ShardError,
-    ShardRankedMatch, ShardRankedTitle, TagPredicate,
+    ranked_rpc_err, remaining_micros, BatchTitleRequest, CallKind, ClusterMutation, Duration,
+    Extracted, FetchedMatch, IngestReport, Instant, LogPos, MatchStats, PlacedQuery, RemoteShard,
+    RpcMethod, RpcOutcome, Shard, ShardBatchRankedMatch, ShardError, ShardRankedMatch,
+    ShardRankedTitle, TagPredicate,
 };
 use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus};
 
@@ -826,54 +826,7 @@ impl Shard for RemoteShard {
     }
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
-        refuse_wire_tag_ids(items)?;
-        // Send raw DSL + raw tags, NOT the pre-extracted feature ids: the server re-compiles
-        // read-only against its own frozen dict + resolves tags against its adopted frozen tag
-        // space (dict-/tag-agnostic wire). The coordinator's `Extracted` was only for placement.
-        let items: Vec<proto::AddItem> = items
-            .iter()
-            .map(|q| proto::AddItem {
-                logical_id: q.logical,
-                dsl: q.dsl.clone(),
-                version: q.version,
-                tags: proto::tags_to_proto(&q.tags),
-                placement: Some(proto::placement_to_proto(&q.placement)),
-            })
-            .collect();
-        // One request per bucket grows with the corpus and stops fitting in a gRPC message.
-        // Send the bucket as consecutive bounded requests (ADR-193); each is its own write
-        // call, with its own deadline. An empty bucket is still one request, as before.
-        let mut requests = super::ingest_chunks::split_by_encoded_size(
-            items,
-            crate::cluster::INGEST_REQUEST_BUDGET_BYTES,
-        )?;
-        if requests.is_empty() {
-            requests.push(Vec::new());
-        }
-        let mut report = IngestReport {
-            ingested: 0,
-            rejected_parse: 0,
-            rejected_class_d: 0,
-        };
-        for items in requests {
-            let req = proto::IngestRequest {
-                items,
-                shard_id: self.shard_id,
-            };
-            let client = self.client.clone();
-            let reply = self.call(RpcMethod::Ingest, CallKind::Write, move || {
-                let mut client = client.clone();
-                let req = req.clone();
-                async move {
-                    client
-                        .ingest_extracted(req)
-                        .await
-                        .map(tonic::Response::into_inner)
-                }
-            })?;
-            super::ingest_chunks::add_reply(&mut report, &reply);
-        }
-        Ok(report)
+        self.bulk_load(items)
     }
 
     fn insert_extracted_with_tags(

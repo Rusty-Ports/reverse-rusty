@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardError, ShardGroup, ShardServer};
+use reverse_rusty::cluster::{
+    ClusterConfig, ClusterEngine, ShardError, ShardGroup, ShardMetricsSource, ShardServer,
+};
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::{Dict, FeatureKind};
 use reverse_rusty::normalize::Normalizer;
@@ -26,6 +28,10 @@ fn start_node(rt: &Runtime, norm: &Arc<Normalizer>, request_limit: Option<usize>
             .with_max_grpc_request_bytes(limit)
             .expect("request limit");
     }
+    serve(rt, server)
+}
+
+fn serve(rt: &Runtime, server: ShardServer) -> String {
     let _enter = rt.enter();
     let incoming =
         tonic::transport::server::TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
@@ -33,6 +39,26 @@ fn start_node(rt: &Runtime, norm: &Arc<Normalizer>, request_limit: Option<usize>
     rt.spawn(server.serve_with_incoming(incoming));
     wait_until_listening(addr);
     format!("http://{addr}")
+}
+
+/// How many `ingest` calls this coordinator has made: one per bulk bucket.
+fn ingest_calls(cluster: &ClusterEngine) -> u64 {
+    cluster
+        .transport_metrics()
+        .methods
+        .iter()
+        .find(|row| row.method == "ingest")
+        .map_or(0, |row| row.calls)
+}
+
+/// What the node's `/_metrics` reports as slot 0's sealed segments.
+fn base_segments(metrics: &ShardMetricsSource) -> Option<u64> {
+    metrics.render().lines().find_map(|line| {
+        line.strip_prefix("reverse_rusty_base_segments{shard=\"0\"} ")?
+            .trim()
+            .parse()
+            .ok()
+    })
 }
 
 fn single_shard() -> ClusterConfig {
@@ -88,9 +114,9 @@ fn padded_bucket() -> Vec<(u64, String)> {
 }
 
 /// The remote bootstrap sends each shard its whole bucket. With one shard and this corpus
-/// that was a single request about twice the default limit. It is sent as bounded requests
-/// now, so it loads on a node with the raised default and on one still at tonic's 4 MiB (a
-/// node that has not been upgraded), and the loaded cluster answers like an in-process one.
+/// that was a single request about twice the default limit. It is one stream of bounded
+/// messages now, so it loads on a node with the raised default and on one held at tonic's
+/// 4 MiB, and the loaded cluster answers like an in-process one.
 #[test]
 fn grpc_bulk_ingest_larger_than_one_default_message() {
     let queries = padded_bucket();
@@ -105,6 +131,7 @@ fn grpc_bulk_ingest_larger_than_one_default_message() {
             .ingest(&queries)
             .unwrap_or_else(|error| panic!("bulk ingest with limit {request_limit:?}: {error}"));
         assert_eq!(cluster.num_queries().expect("count"), queries.len());
+        assert_eq!(ingest_calls(&cluster), 1, "a bucket is one call");
         for id in (0..30_000).step_by(1_499) {
             let title = padded_title(id);
             assert_eq!(
@@ -117,8 +144,48 @@ fn grpc_bulk_ingest_larger_than_one_default_message() {
     }
 }
 
+/// However many messages a bucket needs, the node ends with the segments its own policy
+/// allows. Sending the bucket as separate requests left one segment per request, each of
+/// which also rewrote the node's whole source store, and nothing compacted them: a node that
+/// only ever bulk-loads never flushes a memtable, which is where compaction otherwise runs.
+#[test]
+fn grpc_a_bulk_load_ends_within_the_nodes_segment_policy() {
+    let queries = padded_bucket();
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let rt = Runtime::new().expect("runtime");
+    let policy = EngineConfig {
+        memtable_flush_threshold: 2_000,
+        max_segments: 2,
+        ..EngineConfig::default()
+    };
+    let server = ShardServer::pending_durable(
+        Arc::clone(&norm),
+        policy,
+        server_dir("large_payload_segment_policy"),
+    );
+    let metrics = server.metrics_source();
+    let endpoint = serve(&rt, server);
+    let cluster = connect(&rt, &norm, &dict, &endpoint);
+    cluster.ingest(&queries).expect("bulk ingest");
+
+    assert_eq!(ingest_calls(&cluster), 1, "a bucket is one call");
+    let segments = base_segments(&metrics).expect("the node reports its segments");
+    assert!(
+        (1..=2).contains(&segments),
+        "{segments} segments after a bulk load, with a policy of 2"
+    );
+    assert_eq!(cluster.num_queries().expect("count"), queries.len());
+    for id in [0, 1_999, 2_000, 17_531, 29_999] {
+        assert_eq!(
+            cluster.percolate(&padded_title(id)).expect("percolate"),
+            vec![id]
+        );
+    }
+}
+
 /// A replica receives the same bucket through the same client, so it is sent the same
-/// bounded requests and ends up holding every query.
+/// bounded messages and ends up holding every query.
 #[test]
 fn grpc_replicated_bulk_ingest_larger_than_one_default_message() {
     let queries = padded_bucket();
