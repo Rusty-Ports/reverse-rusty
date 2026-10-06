@@ -73,3 +73,4 @@ fn write_v2_sources(path: &std::path::Path, entries: &[(u64, &str)]) {
 mod commit;
 mod formats;
 mod recovery;
+mod unchanged;

@@ -9,6 +9,16 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — A merge no longer rewrites the stored documents
+
+- A standalone commit that changed no stored document now selects the source sidecar it already
+  has ([ADR-200](decisions/adr-200-keep-an-exact-source-sidecar.md)). A compaction used to write
+  every stored document to a new file under the write lock, and a flush or bulk load that also
+  merged wrote them twice. A flush and a bulk load of new ids still write them once.
+- New event `SourceCommit` and metrics `source_commits_total`, `source_commit_bytes_total`,
+  `source_commit_time_seconds_total`: each complete write of the stored documents, which
+  `flush_time_seconds_total` never included.
+
 ## 2026-10-06 — The request limit is per endpoint, and the record now says so
 
 - No behaviour change. The 256-request limit has always applied to each endpoint (a route and

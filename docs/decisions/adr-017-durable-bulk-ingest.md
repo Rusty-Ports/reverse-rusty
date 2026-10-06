@@ -53,3 +53,11 @@
   longer a best-effort action after the match-data commit. Bulk prepares an immutable complete
   source sidecar first, and manifest v7 selects it with the new segment; source failure rejects and
   rolls back the batch.
+
+## Later outcome — 2026-10-06
+
+The cost paragraph defers the per-call source rewrite to "audit P2-14", which was never tracked
+anywhere. [ADR-200](adr-200-keep-an-exact-source-sidecar.md) removes the second rewrite a bulk
+load paid when it merged. The first one, proportional to the corpus on every bulk load of new
+ids, remains; the work to make it proportional to the batch is on the
+[roadmap](../roadmap.md) as "Source commits proportional to the change".

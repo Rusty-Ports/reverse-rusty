@@ -308,6 +308,16 @@ async fn main() {
                     "engine.compaction"
                 );
             }
+            EngineEvent::SourceCommit {
+                bytes,
+                duration_secs,
+            } => {
+                info!(
+                    bytes = bytes,
+                    duration_secs = duration_secs,
+                    "engine.source_commit"
+                );
+            }
             EngineEvent::SegmentCleanupFailed { path, error } => {
                 warn!(
                     path = ?path,

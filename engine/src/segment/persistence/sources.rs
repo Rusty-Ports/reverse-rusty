@@ -17,6 +17,7 @@ impl Engine {
             return;
         };
         let path = dir.join(&self.source_file_name);
+        let started = std::time::Instant::now();
         if let Err(e) = self.query_store.write_to(&path) {
             self.persistence_healthy = false;
             self.emit(crate::events::EngineEvent::DurabilityFailure {
@@ -26,6 +27,7 @@ impl Engine {
             });
             return;
         }
+        self.emit_source_commit(&path, started);
         // Lazy mode: re-map the freshly written file so reads hit it and the
         // in-memory overlay resets (reclaiming the post-flush deltas). Resident
         // mode keeps its in-RAM map as the source of truth (no re-map needed).
@@ -76,11 +78,22 @@ impl Engine {
             }
         };
         let path = dir.join(&name);
+        let started = std::time::Instant::now();
         if let Err(e) = self.query_store.write_to_with_updates(updates, &path) {
             self.record_source_write_failure("writing immutable query-source candidate", &e);
             return Err(e);
         }
+        self.emit_source_commit(&path, started);
         Ok(Some(StagedSources { name, path }))
+    }
+
+    /// Report one complete write of the source corpus: its size and how long it took.
+    fn emit_source_commit(&mut self, path: &std::path::Path, started: std::time::Instant) {
+        let bytes = std::fs::metadata(path).map_or(0, |file| file.len());
+        self.emit(crate::events::EngineEvent::SourceCommit {
+            bytes,
+            duration_secs: started.elapsed().as_secs_f64(),
+        });
     }
 
     pub(in crate::segment) fn discard_staged_sources(&self, staged: Option<StagedSources>) {

@@ -102,7 +102,12 @@ when any item failed:
 ```
 
 Standalone fresh, unique, default-version IDs retain the direct immutable-segment bulk-build path:
-valid entries compile into one segment and commit atomically. A repeated or existing ID, or a source
+valid entries compile into one segment and commit atomically. That commit writes the engine's
+whole source sidecar, every stored document and not only the batch, so its cost grows with the
+corpus whatever the size of the request
+([ADR-200](../../../decisions/adr-200-keep-an-exact-source-sidecar.md)). Load in large batches, or
+seed an empty engine with `--load-file`; `source_commit_time_seconds_total` shows what the
+writes cost. A repeated or existing ID, or a source
 version other than 1, uses ordered WAL-backed live writes so `index` remains a true replacement and
 `create` can conflict. A direct segment commit failure rejects the whole request with 503; an
 ordered WAL failure is a per-item 503 after any earlier successful items. Cluster mode uses its

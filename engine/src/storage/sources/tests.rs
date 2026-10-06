@@ -279,3 +279,57 @@ fn source_generation_prevents_replay_from_rolling_document_backward() {
 
     std::fs::remove_file(path).expect("remove test sources");
 }
+
+/// The content version is what lets a commit keep a sidecar it already wrote (ADR-200):
+/// it must change at every write to the store, and only then.
+#[test]
+fn the_content_version_changes_with_every_write_and_with_nothing_else() {
+    let dir = std::env::temp_dir().join(format!("rr_source_version_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for retain in [true, false] {
+        let store = SourceStore::empty(retain);
+        let mut seen = vec![store.content_version()];
+        let mut expect_changed = |store: &SourceStore, what: &str| {
+            let version = store.content_version();
+            assert!(!seen.contains(&version), "retain={retain}: {what}");
+            seen.push(version);
+        };
+
+        store.insert(1, "wireless mouse".to_string());
+        expect_changed(&store, "an insert");
+        store.insert(1, "wireless mouse silver".to_string());
+        expect_changed(&store, "a replacement");
+        store.remove(1);
+        expect_changed(&store, "a removal");
+        store.remove(7);
+        expect_changed(
+            &store,
+            "a removal of an absent id may have changed the store",
+        );
+        store.insert(2, "desk lamp".to_string());
+        expect_changed(&store, "a second insert");
+
+        let before = store.content_version();
+        let _ = store.get(2);
+        let _ = store.get_document(2);
+        let _ = store.len();
+        let _ = store.resident_bytes();
+        store.for_each_live(|_, _| {});
+        let path = dir.join(format!("sources_{retain}.dat"));
+        store.write_to(&path).unwrap();
+        assert_eq!(
+            store.content_version(),
+            before,
+            "retain={retain}: reading or writing the file out is not a change"
+        );
+
+        // A store read back from that file is a different store, and so is an empty one.
+        let reopened = SourceStore::open(&path, retain).unwrap();
+        assert!(!seen.contains(&reopened.content_version()));
+        assert_ne!(
+            SourceStore::empty(retain).content_version(),
+            SourceStore::empty(retain).content_version()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

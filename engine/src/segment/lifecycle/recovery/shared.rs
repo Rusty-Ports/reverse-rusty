@@ -150,6 +150,7 @@ impl Engine {
             query_store,
             source_file_name: source_file_name.to_string(),
             source_commit_state: SourceCommitState::Ready,
+            selected_source_version: None,
             vocab_epoch: 0,
             committed_wal_watermark: 0,
             owns_manifest: false,
