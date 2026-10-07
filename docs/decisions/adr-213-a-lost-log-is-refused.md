@@ -35,20 +35,23 @@ removed, opened without complaint and without the second write.
 
 ## Decision
 
-1. **The log exists before anything says it does.** `ClusterEngine::build` creates the
-   cluster log and then writes the manifest. It wrote the manifest first. A crash between the
-   two now leaves a log and no manifest, which is not a cluster, and the build runs again.
-   The other three stores already created their log before their first commit record.
+1. **Nothing says the log exists before it does.** `ClusterEngine::build` writes its manifest
+   at epoch 0, creates the cluster log, and then ends with a checkpoint, which writes the
+   manifest again at epoch 1. A checkpoint has always needed the log open and bumped the
+   epoch. So a manifest at epoch 1 or later was written with its log in place, and epoch 0
+   means only "the build has not finished". The other three stores already created their log
+   before their first commit record.
 2. **The commit record says whether its log exists.**
    - *Single node:* a manifest was written after the log was opened, always.
    - *Shard node:* a checkpoint file was written after the translog existed, always.
    - *Control node:* a vote, committed index, purge point or snapshot was written after the
      log was created, always.
-   - *Cluster:* `build` writes its manifest at **epoch 1** (it wrote 0), and a checkpoint has
-     always needed the log open and bumped the epoch. So a manifest at epoch 1 or later was
-     written with its log in place, and epoch 0 means a manifest that a release before this
-     one wrote before it created the log. `ClusterManifest::written_with_its_log` is that
-     test, and the reopen and the backup both ask it.
+   - *Cluster:* `ClusterManifest::written_with_its_log` (epoch 1 or later), which the reopen
+     and the backup both ask. A reopen that finds epoch 0 is looking at a build that stopped
+     part-way, or at a cluster from a release before this one that never checkpointed. It
+     creates the log if there is none, finishes one that is shorter than its header
+     (ADR-212), and then makes the checkpoint the build did not. Such a cluster is lenient
+     about its log for that one start and not after it.
 3. **A store whose commit record says the log exists refuses to open without it,** and a
    refusal touches nothing. No log is created in the lost one's place, and the coordinator
    checks its log before it attaches a single shard: attaching resets a shard's translog,
@@ -100,9 +103,10 @@ removed, opened without complaint and without the second write.
   from a snapshot.
 - **Do not delete a log to get a node started.** It was never safe; now it also does not
   work.
-- A cluster built by this release starts at epoch 1, and its first checkpoint is epoch 2.
-  The epoch is reported by `ClusterEngine::epoch` and in the shutdown log line; nothing reads
-  it as a count.
+- A cluster built by this release is at epoch 1 when `build` returns (it was 0), and its
+  next checkpoint is epoch 2. A cluster from an earlier release that is still at epoch 0
+  takes one checkpoint the first time this release opens it. The epoch is reported by
+  `ClusterEngine::epoch` and in the shutdown log line; nothing reads it as a count.
 - No format change. An older release reads an epoch-1 manifest as it reads any other.
 - `GET /_settings` shows `accept_lost_log`. It is a startup setting.
 - `durability_failures_total` has a new `op` value, `log_lost`. The existing zero-tolerance
@@ -120,11 +124,16 @@ removed, opened without complaint and without the second write.
   three logs and a new field in three commit records, with the compatibility fences that go
   with them. This decision needs no format change and closes the silent loss; the identity
   is on the [roadmap](../roadmap.md#a-log-has-an-identity).
-- **Keep the manifest first and end `build` with a checkpoint,** so that a built cluster is
-  at epoch 1 by the usual route. It writes the manifest twice and still leaves a window in
-  which a manifest exists and a log does not.
+- **Create the log before the manifest,** so that a manifest by itself means a log. This
+  was the first form of the change and review found what it breaks. A build that fails to
+  create the log (a full disk) then leaves shard state and no manifest; the next start
+  builds again over that state, each shard restores the rows its own checkpoint file lists,
+  and the corpus is ingested a second time on top of them. With the manifest first, the same
+  failure leaves an epoch-0 manifest and the next start opens it and finishes. (A build that
+  stops before its *first* manifest has that problem in any order; it is older than this
+  decision and is on the [roadmap](../roadmap.md#an-interrupted-first-build).)
 - **A new manifest field** that says "written with the log". The epoch already says it: only
-  `build` ever wrote 0.
+  `build` ever wrote 0, and a checkpoint always moves past it.
 - **Refuse an epoch-0 manifest with no log as well.** It cannot be told from a build that an
   older release left unfinished, which has never served and is harmless to start.
 - **An offline tool instead of a start-up flag,** as PostgreSQL's `pg_resetwal` and
@@ -141,9 +150,11 @@ removed, opened without complaint and without the second write.
 
 - A lost log is an outage until someone decides, where it used to be silent data loss.
 - **What this leaves:**
-  - A cluster from a release before this one that has taken writes and has never completed
-    a checkpoint still has an epoch-0 manifest, so a lost log there is still recreated. A
-    graceful stop makes a checkpoint, so this is a cluster that has only ever been killed.
+  - A cluster from a release before this one that has taken writes and never completed a
+    checkpoint has an epoch-0 manifest. If its log is lost before its first start on this
+    release, that start still recreates it; the start then moves the cluster to epoch 1 and
+    the case is closed. A graceful stop makes a checkpoint, so this is a cluster that has
+    only ever been killed.
   - A log that is deleted while the store is running goes unnoticed until the next start.
     The store keeps acknowledging writes into the unlinked file. The next start now refuses
     instead of hiding it, but those writes are already gone.
@@ -171,10 +182,12 @@ removed, opened without complaint and without the second write.
   and reports `log_lost` once; it then reopens with or without the setting and reports
   nothing. A directory with no manifest and no log starts.
 - `cluster/coordinator/tests/log_creation.rs`: the same for a durable cluster, built only and
-  after a checkpoint; the setting changes nothing when the log is there; a manifest at
-  epoch 0 with no log, or with a log cut short, opens as before; a log cut short under a
+  after a checkpoint; the setting changes nothing when the log is there; a built cluster is
+  at epoch 1; a manifest at epoch 0 with no log, or with a log cut short, opens, is moved to
+  epoch 1 by that open, and refuses a lost log from then on; a log cut short under a
   manifest at epoch 1 or 2 is refused with or without the setting; a build that cannot
-  create its log leaves no manifest, and the directory is not a cluster.
+  create its log fails with an epoch-0 manifest, and the next start opens it, finishes the
+  build, and holds the same rows as a build that was never disturbed.
 - `cluster/shard/tests/recovery.rs`: the same for a restarting shard and its translog.
 - `cluster/translog.rs`: a translog reset that cannot finish leaves the old translog as it
   was; before, the old file was already gone.

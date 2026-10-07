@@ -296,6 +296,12 @@ fn a_built_cluster_has_a_manifest_that_says_its_log_exists() {
     assert_eq!(epoch_on_disk(&dir), 1);
     assert_eq!(std::fs::read(dir.join(CLUSTER_LOG_FILE)).unwrap().len(), 8);
     drop(built);
+    // That checkpoint is made once. A reopen of a cluster that is past epoch 0 makes none.
+    for start in 1..=2 {
+        let reopened = open(&dir, &cfg, "reopen");
+        assert_eq!(reopened.epoch(), 1, "start {start} made a checkpoint");
+        assert_eq!(epoch_on_disk(&dir), 1, "start {start} made a checkpoint");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -23,10 +23,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   that says what was lost. For one start; both binaries say at every start that it is set. It changes nothing when the log
   is there and does not make a damaged log acceptable. A control node has no such flag: its data
   directory is restored from a snapshot.
-- **`build` creates the cluster log before it writes the manifest,** and writes that manifest at
-  epoch 1. A manifest at epoch 1 or later therefore means its log existed; epoch 0 is what
-  earlier releases wrote before the log, and is still opened as before. A cluster built by this
-  release reports epoch 1 where it reported 0.
+- **`build` ends with a checkpoint,** which writes the manifest that says the cluster log exists
+  (epoch 1). The manifest `build` writes first, before it creates the log, stays at epoch 0, and
+  a reopen that finds epoch 0 (a build that stopped part-way, or a cluster from an earlier
+  release that never checkpointed) creates the log if there is none and makes that checkpoint
+  itself. A cluster built by this release reports epoch 1 where it reported 0.
 - **A backup of a store whose log is gone is refused,** and a backup directory without its log
   does not verify.
 - **A shard node reports durability events.** It gave its shards no event sink, so nothing they

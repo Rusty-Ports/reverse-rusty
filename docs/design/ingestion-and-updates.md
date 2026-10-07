@@ -115,8 +115,8 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   a Raft log on a node with no other Raft state.
 - **A lost log is refused** ([ADR-213](../decisions/adr-213-a-lost-log-is-refused.md)). Each
   store's commit record is written after its log exists: the single-node manifest, the cluster
-  manifest (from epoch 1; `build` creates the log first), a shard's checkpoint file, a control
-  node's vote. A store that finds that record and no log does not open, because an empty log in
+  manifest from epoch 1 on (`build` writes epoch 0, creates the log, and ends with the
+  checkpoint that writes epoch 1), a shard's checkpoint file, a control node's vote. A store that finds that record and no log does not open, because an empty log in
   its place would drop every write acknowledged since the record without a word.
   `accept_lost_log` starts it once from that record and reports a `log_lost` durability event.
   A control node has no override: its data directory is restored from a snapshot.
