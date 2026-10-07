@@ -262,9 +262,13 @@ those places; a log that is missing is the same loss.
 
 **Direction.** Refuse a missing log wherever its owner holds evidence that it existed, with an
 error that names the evidence. For the coordinator, create the log before the manifest in
-`build`, so that a manifest always means a log. Established systems record which logs must exist
-and check them at open (RocksDB tracks its write-ahead logs in the manifest for this reason;
-etcd refuses to start a member whose log is gone).
+`build`, so that a manifest always means a log. Established systems make the commit record name the log it
+expects and check it at open: RocksDB can track its write-ahead logs in the manifest
+(`track_and_verify_wals_in_manifest`, added because a missing log was otherwise recovered
+from silently), Elasticsearch ties each Lucene commit to its translog by a UUID and refuses a
+shard whose translog is missing, and PostgreSQL refuses to start without the log segment its
+control file's checkpoint points at. Each keeps going only through an explicit tool that says
+data may be lost.
 
 **Completion.** Each of the three owners refuses a missing log when its other state says one
 existed, the error names what to do, and a test deletes the log of a store that holds

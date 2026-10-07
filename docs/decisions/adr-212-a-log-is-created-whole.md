@@ -157,10 +157,14 @@ established way, and so is refusing to guess about a log that might have held da
 - **PostgreSQL** `durable_rename` syncs the source, renames it, and syncs the directory, so
   that either the old or the new file exists after a crash
   (`src/backend/storage/file/fd.c`).
-- **Raft** lists the current term, the vote and the log as state a server writes to stable
+- **Raft.** The current term, the vote and the log are state a server writes to stable
   storage before it answers (Ongaro and Ousterhout, "In Search of an Understandable Consensus
-  Algorithm", figure 2). etcd refuses to start a member whose log is gone instead of
-  recreating it. That is why the control node's repair looks at the rest of its state first.
+  Algorithm", figure 2). Ongaro's thesis is explicit about losing it: "If a server loses any
+  of its persistent state, it cannot safely rejoin the cluster with its prior identity."
+  openraft, which the control plane runs on, says of its storage that if "the raft logs are
+  lost … the resulting behavior is undefined", and it does not detect the case. So the check
+  has to be in the store, and that is why the control node's repair looks at the rest of its
+  state first.
 
 What is not taken: these systems have always created their logs this way, so none of them
 needs to recognise a short file. Items 2 to 4 exist only for nodes that an earlier release of
