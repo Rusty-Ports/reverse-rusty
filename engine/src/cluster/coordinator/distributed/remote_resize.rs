@@ -9,8 +9,8 @@
 //!    current layout at the storage layer (each retirement also proves its slots did not change
 //!    since the export), record `Ready`, and commit the new shard count, generation, and
 //!    assignments together;
-//! 2. **install** (`&mut self`, no network call): swap the serving ring and shards to the
-//!    committed layout and lower the fence;
+//! 2. **install** (`&self`, no network call): publish the committed layout's ring and shards
+//!    under the maintenance lock and the mutation barrier, and lower the fence;
 //! 3. **finish** (`&self`): finish the intent.
 //!
 //! Layout authority is enforced by the data nodes, not by this coordinator's memory: from the
@@ -20,7 +20,6 @@
 //! Coordinator startup resolves whatever a crash, cancellation, or lost reply left behind.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::Ordering;
 
 use crate::cluster::control::{
     normalized_move_endpoint, ClusterState, ClusterStateChange, MoveCommandOutcome, NodeDescriptor,
@@ -102,16 +101,17 @@ pub struct RetiredRemoteLayout {
 }
 
 impl ClusterEngine {
-    /// Run a complete remote resize while holding `&mut self` (ADR-180). A server that wants reads
-    /// to continue during the copy calls [`Self::prepare_remote_resize`] under a shared lock and
-    /// the install/finish steps separately.
+    /// Run a complete remote resize (ADR-180): prepare, install, finish. Reads continue
+    /// throughout; writes are refused from the start of the copy until the install.
     pub fn resize_remote(
-        &mut self,
+        &self,
         request: &RemoteResizeRequest,
     ) -> Result<RemoteResizeReport, ShardError> {
-        let prepared = self.prepare_remote_resize_in(&self.layout(), request)?;
+        // Three operations in a row, each on the layout published when it starts: the
+        // install publishes the one the finish runs on.
+        let prepared = self.prepare_remote_resize(request)?;
         let retired = self.install_remote_resize(prepared)?;
-        self.finish_remote_resize_in(&self.layout(), retired)
+        self.finish_remote_resize(retired)
     }
 
     /// Build, prove, and commit the new layout while the old one keeps serving reads. Writes are
@@ -240,11 +240,11 @@ impl ClusterEngine {
     }
 
     /// Swap the serving ring and shards to a committed staged layout and reopen writes. It makes no
-    /// network call: it runs under the exclusive cluster lock that request threads may wait on.
+    /// network call. Operations that loaded the old layout finish on it.
     /// Preparation already confirmed the commit (an applied proposal or a matching read-back), and
     /// the recorded intent keeps every other layout change out until `Finish`.
     pub fn install_remote_resize(
-        &mut self,
+        &self,
         prepared: PreparedRemoteResize,
     ) -> Result<RetiredRemoteLayout, ShardError> {
         let PreparedRemoteResize {
@@ -262,10 +262,14 @@ impl ClusterEngine {
         // restores create-only admission and exhaustive-delivery convergence even when this
         // coordinator attached to populated shards without either. A failure leaves the retired
         // old nodes refusing every request, so nothing answers from the superseded layout.
+        // No checkpoint, flush or other layout change runs across the swap, and no frozen
+        // view, point-in-time open or exhaustive read straddles it.
+        let _maintenance = self.maintenance();
+        let _quiet = self.quiesce_mutations();
         self.replace_logical_ids(logical_ids)?;
         let staged_layout = staged.layout();
         let current = self.layout();
-        self.layout.store(Arc::new(Layout {
+        self.publish_layout(Layout {
             norm: Arc::clone(&current.norm),
             dict: Arc::clone(&current.dict),
             vocab: current.vocab.clone(),
@@ -274,7 +278,7 @@ impl ClusterEngine {
             source_files: staged_layout.source_files.clone(),
             handoffs: staged_layout.handoffs.clone(),
             generation,
-        }));
+        });
         self.transport_metrics
             .store(staged.transport_metrics.load_full());
         self.pending_repair
@@ -282,7 +286,7 @@ impl ClusterEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.clear_pits();
-        self.resize_write_fence.store(false, Ordering::Release);
+        self.lower_write_fence();
         Ok(RetiredRemoteLayout {
             operation_id,
             old_num_shards,
@@ -464,34 +468,6 @@ impl ClusterEngine {
             .map_err(|error| ShardError::ControlPlane(error.to_string()))
     }
 
-    /// Raise the write fence, then take the mutation barrier exclusively so every mutation that
-    /// passed the fence check before it was raised has finished applying to the old layout.
-    ///
-    /// Refuses, leaving the fence untouched, when it is already raised: another resize is still
-    /// preparing or awaiting install, or an earlier one failed after proposing `Commit` without
-    /// proof that it did not apply. This attempt did not raise that fence and cannot know its
-    /// outcome, so lowering it on failure could accept writes the committed layout never receives.
-    fn raise_resize_write_fence(&self) -> Result<(), ShardError> {
-        if self
-            .resize_write_fence
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(ShardError::ControlPlane(
-                "writes are paused by another remote resize, or by an earlier one whose commit \
-                 outcome is unresolved; wait for it, or restart the coordinator to resolve the \
-                 recorded intent, before resizing again"
-                    .into(),
-            ));
-        }
-        drop(
-            self.pit_open_barrier
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        Ok(())
-    }
-
     /// Resolve a failed preparation.
     ///
     /// Only this coordinator's `Commit` can make the new layout the layout of record: startup aborts
@@ -532,7 +508,7 @@ impl ClusterEngine {
         }
         self.unretire_all(handle, operation_id, &retired);
         let _aborted = self.propose_resize(ResizeCommand::Abort { operation_id });
-        self.resize_write_fence.store(false, Ordering::Release);
+        self.lower_write_fence();
         failure
     }
 

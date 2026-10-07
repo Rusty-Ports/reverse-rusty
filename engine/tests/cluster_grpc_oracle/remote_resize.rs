@@ -113,7 +113,7 @@ fn matches(cluster: &ClusterEngine, titles: &[String]) -> Vec<HashSet<u64>> {
 fn grpc_remote_resize_moves_the_corpus_with_zero_false_negatives() {
     let Fixture {
         rt: _rt,
-        mut cluster,
+        cluster,
         targets,
         mut queries,
         titles,
@@ -187,7 +187,7 @@ fn grpc_remote_resize_moves_the_corpus_with_zero_false_negatives() {
 fn grpc_remote_resize_pauses_writes_until_the_new_layout_is_installed() {
     let Fixture {
         rt: _rt,
-        mut cluster,
+        cluster,
         targets,
         ..
     } = fixture(2);
@@ -250,7 +250,7 @@ fn grpc_remote_resize_pauses_writes_until_the_new_layout_is_installed() {
 fn grpc_remote_resize_refuses_colocated_or_dirty_targets_and_keeps_serving() {
     let Fixture {
         rt: _rt,
-        mut cluster,
+        cluster,
         targets,
         titles,
         ..
@@ -346,7 +346,7 @@ fn grpc_remote_resize_preserves_admitted_class_d_rows_when_the_knob_is_off() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::connect_remote_exclusive(
+    let cluster = ClusterEngine::connect_remote_exclusive(
         Arc::clone(&norm),
         Arc::clone(&dict),
         empty_tag_dict(),
@@ -459,7 +459,7 @@ fn grpc_remote_resize_restores_logical_id_convergence_for_an_attached_coordinato
                 .expect("blue endpoint")
         })
         .collect();
-    let mut attached = ClusterEngine::connect_remote_exclusive(
+    let attached = ClusterEngine::connect_remote_exclusive(
         Arc::clone(&norm),
         frozen_dict_over(&queries, &norm),
         empty_tag_dict(),
@@ -495,7 +495,7 @@ fn grpc_remote_resize_restores_logical_id_convergence_for_an_attached_coordinato
 fn grpc_remote_resize_refuses_routing_that_disagrees_with_the_committed_layout() {
     let Fixture {
         rt: _rt,
-        mut cluster,
+        cluster,
         targets,
         ..
     } = fixture(2);

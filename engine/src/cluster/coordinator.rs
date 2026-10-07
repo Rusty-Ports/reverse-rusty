@@ -362,6 +362,12 @@ pub struct ClusterEngine {
     /// Held by one layout change, checkpoint, flush or backup at a time. See
     /// [`Self::maintenance`].
     maintenance: Mutex<()>,
+    /// Layouts that have been replaced and may still be held by a running operation. Their
+    /// files are removed only once they are released.
+    retired_layouts: Mutex<Vec<std::sync::Weak<layout::Layout>>>,
+    /// Called between the two steps of a mutation's admission, by a test of their order.
+    #[cfg(test)]
+    admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Exact manifest a pending alias-import checkpoint attempted to publish.
     /// This is populated before the atomic write so a retry can distinguish a
     /// completed rename whose parent-directory sync failed from any divergent

@@ -197,7 +197,7 @@ fn rebuild_preserves_stored_query_version() {
         ..Default::default()
     };
     let seed = vec![(1u64, "1994 acme".to_string())];
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
 
     // Upsert id 5 at a non-default version, then confirm the gather sees version 42.
     cluster

@@ -97,7 +97,7 @@ pub(crate) async fn cluster_put_vocab(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let admission = work_state.write_admission.write();
-        lock_for_rebuild(&work_state, &admission).and_then(|mut cluster| cluster.set_vocab(vocab))
+        lock_for_rebuild(&work_state, &admission).and_then(|cluster| cluster.set_vocab(vocab))
     });
     match worker.await {
         Ok(rebuilt) => {
@@ -151,7 +151,7 @@ pub(crate) async fn cluster_learn_and_apply_vocab(
         let _permit = permit;
         let admission = work_state.write_admission.write();
         lock_for_rebuild(&work_state, &admission)
-            .and_then(|mut cluster| cluster.learn_and_apply_with(&config))
+            .and_then(|cluster| cluster.learn_and_apply_with(&config))
     });
     let response = match worker.await {
         Ok(Ok(recompiled)) => {
@@ -218,7 +218,7 @@ pub(crate) async fn cluster_import_aliases(
         let (synonyms, rules) = payload.validate()?;
         let admission = work_state.write_admission.write();
         let report = lock_for_rebuild(&work_state, &admission)
-            .and_then(|mut cluster| cluster.import_alias_synonyms(&synonyms));
+            .and_then(|cluster| cluster.import_alias_synonyms(&synonyms));
         Ok::<_, String>((rules, report))
     });
     let response = match worker.await {
@@ -266,7 +266,7 @@ pub(crate) async fn cluster_learn_aliases(
         let _permit = permit;
         let admission = work_state.write_admission.write();
         lock_for_rebuild(&work_state, &admission)
-            .and_then(|mut cluster| cluster.learn_aliases_and_apply(min_count))
+            .and_then(|cluster| cluster.learn_aliases_and_apply(min_count))
     });
     let response = match worker.await {
         Ok(Ok(report)) => {

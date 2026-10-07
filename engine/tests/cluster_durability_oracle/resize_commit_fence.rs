@@ -22,7 +22,7 @@ fn seeded(dir: &std::path::Path) -> ClusterEngine {
 #[test]
 fn uncommitted_resize_pauses_placed_writes_until_crash_recovery_is_safe() {
     let dir = unique_dir("resize_commit_fence_crash");
-    let mut cluster = seeded(&dir);
+    let cluster = seeded(&dir);
 
     let failed = cluster.resize(5);
     assert!(
@@ -63,7 +63,7 @@ fn uncommitted_resize_pauses_placed_writes_until_crash_recovery_is_safe() {
 #[test]
 fn same_count_retry_commits_the_layout_and_reopens_writes() {
     let dir = unique_dir("resize_commit_fence_retry");
-    let mut cluster = seeded(&dir);
+    let cluster = seeded(&dir);
     assert!(cluster.resize(5).is_err(), "first control proposal fails");
     assert!(cluster.add_query(3, "brass compass").is_err());
 
@@ -83,7 +83,7 @@ fn same_count_retry_commits_the_layout_and_reopens_writes() {
 #[test]
 fn uncommitted_vocabulary_rebuild_pauses_placed_writes() {
     let dir = unique_dir("vocab_commit_fence");
-    let mut cluster = seeded(&dir);
+    let cluster = seeded(&dir);
     let failed = cluster.import_alias_synonyms("package, pkg");
     assert!(
         matches!(failed, Err(ShardError::ControlPlane(_))),
@@ -102,7 +102,7 @@ fn uncommitted_vocabulary_rebuild_pauses_placed_writes() {
 #[test]
 fn a_later_checkpoint_commits_the_serving_layout() {
     let dir = unique_dir("resize_commit_fence_checkpoint");
-    let mut cluster = seeded(&dir);
+    let cluster = seeded(&dir);
     assert!(cluster.resize(5).is_err(), "first control proposal fails");
     cluster
         .checkpoint()
@@ -150,7 +150,7 @@ fn source_sidecars(dir: &std::path::Path) -> Vec<String> {
 fn committed_rebuilds_do_not_accumulate_superseded_source_sidecars() {
     let dir = unique_dir("resize_sidecar_gc");
     let (queries, _) = build_corpus();
-    let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+    let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
         .expect("durable build");
     for k in [4, 2, 5, 3] {
         cluster.resize(k).expect("resize");
@@ -198,7 +198,7 @@ fn sidecar_reclamation_keeps_peer_recovered_replica_sources() {
         ..Default::default()
     };
     {
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("durable build");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("durable build");
         cluster.resize(2).expect("resize");
     }
     // Reopen: each replica is peer-recovered into its canonical `sources.dat`, while the

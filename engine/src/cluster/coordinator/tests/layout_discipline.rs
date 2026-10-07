@@ -5,11 +5,11 @@
 //! the layout is one of three kinds, and this test keeps each to its rule by reading the
 //! coordinator's source:
 //!
-//! - a **helper** is handed `layout: &Layout` and never loads another;
+//! - a **helper** is handed `layout: &Layout`, or runs inside a layout change it is handed
+//!   (`change: &LayoutChange`), and never loads the layout itself;
 //! - an **operation** loads once, at its entry, and calls no other method that loads (a
 //!   mutation loads through `admit_mutation`, after it holds the mutation barrier);
-//! - a **writer** (`&mut self`, or the engine by value) holds the engine alone and may load
-//!   whenever it likes.
+//! - **assembly** (the engine by value, before it is shared) may load whenever it likes.
 
 use std::path::{Path, PathBuf};
 
@@ -148,6 +148,11 @@ fn every_operation_loads_the_layout_once_and_helpers_never_do() {
         let place = format!("{}::{}", function.file, function.name);
         if function.signature.contains("layout:&Layout") && count > 0 {
             violations.push(format!("{place} is handed a layout and loads another"));
+        }
+        if function.signature.contains("change:&LayoutChange") && count > 0 {
+            violations.push(format!(
+                "{place} runs inside a layout change and loads outside it"
+            ));
         }
         if count == 0 || is_writer(function) {
             continue;

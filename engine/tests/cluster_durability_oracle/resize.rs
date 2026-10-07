@@ -59,7 +59,7 @@ fn resize_grow_survives_checkpoint_and_reopen() {
     for &(k0, k1) in &[(1usize, 4usize), (3, 8)] {
         let dir = unique_dir(&format!("resize_grow_{k0}to{k1}"));
         let pre: Vec<HashSet<u64>> = {
-            let mut cluster =
+            let cluster =
                 ClusterEngine::build(vocab(), &durable_cfg(k0, dir.clone(), false), &queries)
                     .expect("durable build");
             let rebuilt = cluster.resize(k1).expect("resize (internally checkpoints)");
@@ -90,7 +90,7 @@ fn resize_shrink_survives_reopen_and_removes_orphan_dirs() {
     for &(k0, k1) in &[(8usize, 3usize), (3, 1)] {
         let dir = unique_dir(&format!("resize_shrink_{k0}to{k1}"));
         let pre: Vec<HashSet<u64>> = {
-            let mut cluster =
+            let cluster =
                 ClusterEngine::build(vocab(), &durable_cfg(k0, dir.clone(), false), &queries)
                     .expect("durable build");
             cluster.resize(k1).expect("resize shrink");
@@ -153,7 +153,7 @@ fn shrink_then_regrow_does_not_resurrect_deleted_queries() {
 
     let dir = unique_dir("shrink_regrow_delete");
     let pre: Vec<HashSet<u64>> = {
-        let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &full)
+        let cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &full)
             .expect("durable build k8");
         for (id, d) in &delenda {
             assert!(
@@ -195,7 +195,7 @@ fn resize_preserves_dict_fingerprint() {
     // control-plane fingerprint and the recovery handshakes).
     let (queries, _titles) = build_corpus();
     let dir = unique_dir("resize_fp");
-    let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+    let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
         .expect("durable build");
     let fp_before = read_cluster_manifest(&dir.join(MANIFEST))
         .expect("manifest after build")
@@ -227,7 +227,7 @@ fn resize_preserves_dict_fingerprint_for_unsorted_corpus_with_post_freeze_add() 
         (50u64, "xray uniquecharlie".to_string()),
     ];
     let dir = unique_dir("resize_fp_unsorted");
-    let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(2, dir.clone(), false), &queries)
+    let cluster = ClusterEngine::build(vocab(), &durable_cfg(2, dir.clone(), false), &queries)
         .expect("durable build (ids out of order)");
     cluster
         .add_query(70, "zzbrandnewterm uniquedelta")
@@ -257,7 +257,7 @@ fn same_count_resize_recommits_on_a_durable_cluster() {
     // which is exactly what heals an un-committed prior resize; it still rebuilds nothing.
     let (queries, _titles) = build_corpus();
     let dir = unique_dir("resize_same_k");
-    let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+    let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
         .expect("durable build");
     let epoch_before = cluster.epoch();
     let rebuilt = cluster.resize(3).expect("same-count resize");
@@ -281,9 +281,8 @@ fn resize_then_live_add_survives_reopen() {
     let newq = 9_800_001u64;
     let newtitle = "1994 vertex zznewentity pro";
     {
-        let mut cluster =
-            ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
-                .expect("durable build");
+        let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+            .expect("durable build");
         cluster.resize(6).expect("resize"); // checkpoints at K=6
         cluster
             .add_query(newq, "1994 vertex zznewentity")
@@ -308,7 +307,7 @@ fn tagged_resize_carries_tags_across_reopen() {
     let brute = Brute::build(&queries);
     let dir = unique_dir("resize_tags");
     {
-        let mut cluster = ClusterEngine::build_with_tags(
+        let cluster = ClusterEngine::build_with_tags(
             vocab(),
             &durable_cfg(3, dir.clone(), false),
             &queries,
@@ -353,9 +352,8 @@ fn vocab_survives_resize_and_reopen() {
     let title = "1994 vertex zzcanon pro";
     let dir = unique_dir("resize_vocab");
     {
-        let mut cluster =
-            ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
-                .expect("durable build");
+        let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+            .expect("durable build");
         cluster.set_vocab(alias_vocab()).expect("set_vocab");
         assert!(
             cluster.percolate(title).unwrap().contains(&qid),

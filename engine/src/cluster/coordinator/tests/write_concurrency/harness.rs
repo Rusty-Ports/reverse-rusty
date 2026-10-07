@@ -10,6 +10,8 @@ pub(super) enum WriteCall {
     Bulk,
     /// A checkpoint is about to seal this shard.
     Seal,
+    /// A rebuild is about to read this shard's live corpus.
+    Gather,
 }
 
 pub(super) type WriteHook = Arc<dyn Fn(usize, WriteCall) -> Result<(), ShardError> + Send + Sync>;
@@ -197,6 +199,22 @@ impl Shard for ObservedShard {
 
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
         self.inner.segment_filenames()
+    }
+
+    // What a rebuild asks of the shards it replaces.
+    fn is_local(&self) -> bool {
+        self.inner.is_local()
+    }
+
+    fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
+        self.inner.live_sources()
+    }
+
+    fn live_sources_tagged(
+        &self,
+    ) -> Result<Vec<crate::cluster::shard::LiveTaggedQuery>, ShardError> {
+        (self.hook)(self.position, WriteCall::Gather)?;
+        self.inner.live_sources_tagged()
     }
 
     fn next_seg_id(&self) -> Result<u64, ShardError> {

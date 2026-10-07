@@ -121,6 +121,9 @@ impl ClusterEngine {
             data_dir: durable.data_dir,
             pending_alias_import_predecessor: Mutex::new(None),
             maintenance: Mutex::new(()),
+            retired_layouts: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            admission_hook: Mutex::new(None),
             pending_alias_import_manifest: Mutex::new(None),
             committed_placement_generation: AtomicU64::new(
                 durable
@@ -560,14 +563,19 @@ impl ClusterEngine {
                     }
                 }
             }
-            let next_generation = engine
-                .placement_generation()
+            let change = engine.begin_layout_change()?;
+            let current = change.current();
+            let next_generation = current
+                .generation
                 .next()
                 .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
-            engine.rebuild_from_corpus(
+            let (norm, ring) = (Arc::clone(&current.norm), current.ring.clone());
+            drop(current);
+            let (_rebuilt, migrated) = engine.rebuild_from_corpus(
+                &change,
                 live.into_values().collect(),
-                Arc::clone(&engine.layout().norm),
-                engine.layout().ring.clone(),
+                norm,
+                ring,
                 None,
                 next_generation,
                 true,
@@ -575,9 +583,9 @@ impl ClusterEngine {
             engine
                 .control
                 .propose(ClusterStateChange::BumpModelVersion {
-                    dict_fingerprint: engine.layout().dict.fingerprint(),
+                    dict_fingerprint: migrated.dict.fingerprint(),
                 })?;
-            engine.checkpoint_quiesced(&engine.layout())?;
+            engine.checkpoint_quiesced(&migrated)?;
         } else {
             let layout = engine.layout();
             for (_pos, mutation) in replay.entries {

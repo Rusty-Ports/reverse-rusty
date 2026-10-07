@@ -18,6 +18,7 @@ mod harness;
 
 mod alias_components;
 mod class_d;
+mod concurrent_rebuild;
 mod differential;
 mod dynamic_vocab;
 mod feature_model;

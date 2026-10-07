@@ -61,9 +61,9 @@ impl ClusterEngine {
 
     /// [`Self::checkpoint`] for a caller that already excludes every mutation. It must do
     /// one of these: hold [`Self::quiesce_mutations`]; hold the barrier shared together with
-    /// the bulk logical-id guard (a bulk load, which is itself the only writer); have
-    /// `&mut self`; or own an engine that has not been shared yet. Taking the barrier here
-    /// would deadlock the first two.
+    /// the bulk logical-id guard (a bulk load, which is itself the only writer); hold a
+    /// layout change, whose fence refuses every write; or own an engine that has not been
+    /// shared yet. Taking the barrier here would deadlock the first two.
     pub(in crate::cluster::coordinator) fn checkpoint_quiesced(
         &self,
         layout: &Layout,
@@ -162,8 +162,15 @@ impl ClusterEngine {
                 error: e.to_string(),
             });
         }
-        self.gc_orphan_segments(&dir, &segment_registry);
-        self.gc_superseded_source_sidecars(&dir, layout.shards.len(), layout.generation.0);
+        // Files the committed layout no longer names belong to a layout that was replaced.
+        // An operation that loaded that layout may still open one (a lazily mapped source
+        // sidecar, for one), so they stay until every such operation has returned. Whatever
+        // is left is never selected and goes at the next checkpoint.
+        if self.retired_layouts_released() {
+            self.gc_orphan_segments(&dir, &segment_registry);
+            self.gc_superseded_source_sidecars(&dir, layout.shards.len(), layout.generation.0);
+            self.remove_shard_dirs_at_or_above(layout.shards.len());
+        }
         self.compact_logical_ids();
         Ok(())
     }
@@ -211,6 +218,41 @@ impl ClusterEngine {
         )))
     }
 
+    /// Raise the write fence, then take the mutation barrier exclusively so every mutation that
+    /// passed the fence check before it was raised has finished applying to the old layout.
+    ///
+    /// Refuses, leaving the fence untouched, when it is already raised: another resize is still
+    /// preparing or awaiting install, or an earlier one failed after proposing `Commit` without
+    /// proof that it did not apply. This attempt did not raise that fence and cannot know its
+    /// outcome, so lowering it on failure could accept writes the committed layout never receives.
+    pub(in crate::cluster::coordinator) fn raise_resize_write_fence(
+        &self,
+    ) -> Result<(), ShardError> {
+        if self
+            .resize_write_fence
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ShardError::ControlPlane(
+                "writes are paused by a remote resize, or by an earlier one whose commit outcome \
+                 is unresolved; wait for it, or restart the coordinator to resolve the recorded \
+                 intent, before changing the layout again"
+                    .into(),
+            ));
+        }
+        drop(
+            self.pit_open_barrier
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        Ok(())
+    }
+
+    /// Let writes in again.
+    pub(in crate::cluster::coordinator) fn lower_write_fence(&self) {
+        self.resize_write_fence.store(false, Ordering::Release);
+    }
+
     /// Refuse any mutation while a remote resize is copying the corpus onto its new layout
     /// (ADR-180). Callers check this while holding the PIT/mutation barrier, which the resize
     /// takes exclusively after raising the fence, so every accepted write lands before the export
@@ -220,8 +262,8 @@ impl ClusterEngine {
     pub fn ensure_resize_write_fence_open(&self) -> Result<(), ShardError> {
         if self.resize_write_fence.load(Ordering::Acquire) {
             return Err(ShardError::ControlPlane(
-                "writes are paused while a remote resize copies the corpus to its new layout; \
-                 retry after the resize completes"
+                "writes are paused while the cluster's layout is rebuilt (a resize or a \
+                 vocabulary change); retry after it completes"
                     .into(),
             ));
         }

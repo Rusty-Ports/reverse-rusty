@@ -48,7 +48,7 @@ fn unbind_then_rebuild_does_not_lose_the_moved_querys_tags() {
     let title = "1994 vertex zzmovea pro";
 
     let dir = unique_dir("tagloss_unbind");
-    let mut cluster = ClusterEngine::build_with_tags(
+    let cluster = ClusterEngine::build_with_tags(
         vocab(),
         &durable_cfg(8, dir.clone(), false),
         &queries,
@@ -116,7 +116,7 @@ fn rebuild_does_not_resurrect_a_moved_then_deleted_query() {
     let q = 9_500_002u64;
     queries.push((q, "1994 vertex zzmovea".into()));
     let dir = unique_dir("resurrect_moved");
-    let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &queries)
+    let cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &queries)
         .expect("durable build");
     cluster
         .set_vocab(equiv_vocab("zzmovea", "zzcanona"))
@@ -208,7 +208,7 @@ fn source_generations_coexist_across_the_rebuild_commit() {
     );
     // Fail the control transition after the green swap, so the blue manifest stays the
     // authoritative commit point while the complete green generation already exists on disk.
-    let mut cluster = FailFirstProposal::install(cluster);
+    let cluster = FailFirstProposal::install(cluster);
     assert!(
         cluster
             .set_vocab(equiv_vocab("zzmovea", "zzcanona"))

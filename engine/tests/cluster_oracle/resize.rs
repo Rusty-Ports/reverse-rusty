@@ -62,7 +62,7 @@ fn resize_grow_matches_oracle_and_single_node() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
         let rebuilt = cluster.resize(k1).expect("resize grow");
         assert_eq!(cluster.num_shards(), k1, "{k0}->{k1}: num_shards updated");
         assert!(
@@ -100,7 +100,7 @@ fn resize_shrink_matches_oracle_and_single_node() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
         cluster.resize(k1).expect("resize shrink");
         assert_eq!(cluster.num_shards(), k1, "{k0}->{k1}: num_shards updated");
         let cc = cluster.class_counts().unwrap();
@@ -134,7 +134,7 @@ fn repeated_resize_round_trips_preserve_recall() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
     let mut generation = cluster.placement_generation();
     for &k in &[8usize, 2, 8, 1, 5] {
         cluster.resize(k).expect("resize");
@@ -170,7 +170,7 @@ fn resize_preserves_tags() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags)
+        let cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags)
             .expect("build tagged cluster");
         cluster.resize(k1).expect("resize");
 
@@ -215,7 +215,7 @@ fn resize_noop_and_invalid_are_safe() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
     let generation = cluster.placement_generation();
     assert_eq!(
         cluster.resize(4).expect("no-op"),
@@ -248,7 +248,7 @@ fn resize_to_recommended_grows_and_preserves_recall() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
 
     // A low threshold so each ~6k-query shard is over it ⇒ recommend K + (#over) > K.
     let ac = AutoscaleConfig {

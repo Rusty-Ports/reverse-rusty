@@ -193,7 +193,7 @@ fn set_vocab_carries_live_synthetic_tags_through_rebuild() {
     };
     // Built UNTAGGED ⇒ tag_dict stays empty + frozen ⇒ every live tag below is synthetic.
     let seed = vec![(1u64, "1994 acme".to_string())];
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
     cluster
         .add_query_with_tags(
             100,
@@ -314,7 +314,7 @@ fn set_vocab_preserves_tags_through_tagged_rebuild() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags)
+        let cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags)
             .expect("tagged cluster build");
         cluster
             .add_query_with_tags(live_id, live_dsl, &live_tag())

@@ -61,6 +61,55 @@ impl Layout {
     }
 }
 
+/// How long a layout change waits, once it has published, for the operations still running on
+/// the layout it replaced. After that it leaves that layout's files for a later checkpoint.
+const RETIRED_LAYOUT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One change of the layout in progress. Until it is dropped no other change, checkpoint,
+/// flush or backup runs, and every write is refused. Reads go on, on the layout that is
+/// published when they load.
+pub(in crate::cluster::coordinator) struct LayoutChange<'a> {
+    engine: &'a super::ClusterEngine,
+    _maintenance: std::sync::MutexGuard<'a, ()>,
+}
+
+impl LayoutChange<'_> {
+    /// The layout being replaced: the published one until this change publishes another.
+    pub(in crate::cluster::coordinator) fn current(&self) -> Arc<Layout> {
+        self.engine.layout.load_full()
+    }
+
+    /// Publish `next` in one step and return it. Operations that loaded the previous layout
+    /// finish on it; it is released when the last of them returns.
+    ///
+    /// `with_it` runs just before the swap and is for what must change together with the
+    /// layout (the logical-id directory). Both, and the release of the old layout's
+    /// point-in-time pins, happen on the exclusive side of the mutation barrier. A frozen read
+    /// view, a point-in-time open and an exhaustive read hold that side for as long as they
+    /// run, so each of them sees one layout, one directory and its own pins from its first
+    /// step to its last.
+    pub(in crate::cluster::coordinator) fn publish(
+        &self,
+        next: Layout,
+        with_it: impl FnOnce() -> Result<(), ShardError>,
+    ) -> Result<Arc<Layout>, ShardError> {
+        let _quiet = self.engine.quiesce_mutations();
+        with_it()?;
+        let next = self.engine.publish_layout(next);
+        // ADR-113: the old shards' pins can only fail their generation gate now. Drop them
+        // (which frees their slots) without resetting the id counter, so a stale cursor can
+        // never name a later point in time.
+        self.engine.clear_pits();
+        Ok(next)
+    }
+}
+
+impl Drop for LayoutChange<'_> {
+    fn drop(&mut self) {
+        self.engine.lower_write_fence();
+    }
+}
+
 /// A mutation that holds the mutation barrier shared. Its layout stays the published one
 /// until this is dropped. See [`ClusterEngine::admit_mutation`](super::ClusterEngine).
 pub(in crate::cluster::coordinator) struct Admitted<'a> {
@@ -88,9 +137,59 @@ impl super::ClusterEngine {
             .pit_open_barrier
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(test)]
+        self.pause_admission();
         Admitted {
             layout: self.layout.load_full(),
             _barrier: barrier,
+        }
+    }
+
+    /// Begin a change of the layout: one at a time, with every write held out.
+    ///
+    /// It takes the maintenance lock, raises the write fence, and takes the mutation barrier
+    /// exclusively once, so every mutation admitted before the fence has applied. From here
+    /// the corpus is still, and the layout published now stays published until this change
+    /// replaces it. A change that fails before it publishes leaves that layout serving.
+    pub(in crate::cluster::coordinator) fn begin_layout_change(
+        &self,
+    ) -> Result<LayoutChange<'_>, ShardError> {
+        let maintenance = self.maintenance();
+        self.raise_resize_write_fence()?;
+        Ok(LayoutChange {
+            engine: self,
+            _maintenance: maintenance,
+        })
+    }
+
+    /// Swap in `next` and remember the layout it replaces until its last holder lets go.
+    pub(in crate::cluster::coordinator) fn publish_layout(&self, next: Layout) -> Arc<Layout> {
+        let next = Arc::new(next);
+        let previous = self.layout.swap(Arc::clone(&next));
+        self.retired_layouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::downgrade(&previous));
+        next
+    }
+
+    /// Whether every layout that was replaced has been released by the operations that held
+    /// it. Until then its files stay: an operation still running on it may open one.
+    pub(in crate::cluster::coordinator) fn retired_layouts_released(&self) -> bool {
+        let mut retired = self
+            .retired_layouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retired.retain(|layout| layout.strong_count() > 0);
+        retired.is_empty()
+    }
+
+    /// Give the operations still running on a replaced layout a moment to finish, so that the
+    /// checkpoint that follows can remove its files. The caller holds no handle on it.
+    pub(in crate::cluster::coordinator) fn await_retired_layouts(&self) {
+        let deadline = std::time::Instant::now() + RETIRED_LAYOUT_GRACE;
+        while !self.retired_layouts_released() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 
@@ -124,5 +223,18 @@ impl super::ClusterEngine {
             .ok()
             .expect("no other layout shares the shards");
         self.edit_layout(|layout| layout.shards = Arc::new(wrap(shards)));
+    }
+
+    /// Run the test's hook between the two steps of an admission.
+    #[cfg(test)]
+    fn pause_admission(&self) {
+        let hook = self
+            .admission_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }

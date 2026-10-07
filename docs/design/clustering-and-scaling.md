@@ -300,6 +300,15 @@ and a vocabulary change or a resize publishes a new one, so no operation routes 
 matches in another
 ([ADR-208](../decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)).
 
+A layout change (a vocabulary change or an in-process resize) takes shared access. It holds the
+maintenance lock, which checkpoint, flush and backup also take, and refuses writes with the write
+fence while it reads the corpus and builds the new layout beside the old one. Reads continue on the
+layout they loaded. A mutation takes the mutation barrier before it loads the layout, and a layout
+is published on the barrier's exclusive side, so no write lands in a layout that has been replaced
+and no frozen read view sees two. The files of a replaced layout stay until the last operation
+running on it has returned
+([ADR-209](../decisions/adr-209-a-layout-change-holds-writes-out-not-reads.md)).
+
 The served coordinator's search pool has a gate. A search holds it shared for as long as its work
 is in the pool. A vocabulary change, an in-process resize and a remote resize's cutover hold it
 alone before they ask for the cluster's write lock, so they wait for the search requests in flight

@@ -189,7 +189,7 @@ fn multiword_alias_survives_durable_checkpoint_and_reopen() {
         ..ClusterConfig::default()
     };
     {
-        let mut cluster =
+        let cluster =
             ClusterEngine::build(vocab(), &cfg, &[(1, "ny".into())]).expect("durable build");
         cluster
             .set_vocab(vocab_with_multiword_alias())

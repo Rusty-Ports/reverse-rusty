@@ -358,6 +358,7 @@ impl ChunkSink for RecordingExhaustiveSink {
 mod basic;
 mod directory;
 mod exhaustive;
+mod layout_change;
 mod layout_discipline;
 mod repair;
 mod retry_contract;

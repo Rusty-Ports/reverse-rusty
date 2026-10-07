@@ -351,7 +351,7 @@ fn resize_worker(
     drop(targets);
     let _permit = permit;
     let cluster = state.try_write_cluster_until(&writes, (!no_wait).then_some(deadline));
-    let Some(mut cluster) = cluster else {
+    let Some(cluster) = cluster else {
         return not_started();
     };
     if !begin_cluster_resize(gate, deadline, no_wait) {

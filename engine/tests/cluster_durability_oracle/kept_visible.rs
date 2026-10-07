@@ -64,7 +64,7 @@ fn a_kept_row_survives_reopen_and_a_rebuild_after_it() {
     for &k in &[1usize, 3] {
         let dir = unique_dir(&format!("kept_visible_k{k}"));
         let (before, replicated) = {
-            let mut cluster =
+            let cluster =
                 ClusterEngine::build(vocab(), &durable_cfg(k, dir.clone(), false), &queries)
                     .expect("durable cluster builds");
             let before = default_reads(&cluster, &titles);
@@ -78,7 +78,7 @@ fn a_kept_row_survives_reopen_and_a_rebuild_after_it() {
             "k={k}: the rebuild kept rows on every shard"
         );
 
-        let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+        let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
         let after_reopen = default_reads(&reopened, &titles);
         assert_nothing_hidden(&format!("k={k} reopen"), &titles, &before, &after_reopen);
         // Sealed segments report the same replicated share, so a restart does not turn kept

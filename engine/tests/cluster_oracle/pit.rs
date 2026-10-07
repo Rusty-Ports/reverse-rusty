@@ -504,8 +504,7 @@ fn resize_set_vocab_and_reopen_stale_open_pits() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster =
-        ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags).expect("build");
+    let cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags).expect("build");
     let program = cluster
         .compile_rank_program(&rank_program())
         .expect("program");
@@ -548,8 +547,7 @@ fn resize_set_vocab_and_reopen_stale_open_pits() {
         .expect("fresh pit serves");
 
     // set_vocab ⇒ StalePit.
-    let mut cluster =
-        ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags).expect("build");
+    let cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags).expect("build");
     let program = cluster
         .compile_rank_program(&rank_program())
         .expect("program");

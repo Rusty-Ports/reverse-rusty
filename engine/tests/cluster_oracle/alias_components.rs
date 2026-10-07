@@ -55,7 +55,7 @@ fn a_cluster_keeps_every_match_across_a_multiword_alias() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
         let before = [
             reads(&cluster, &titles, true),
             reads(&cluster, &titles, false),
@@ -153,7 +153,7 @@ fn a_cluster_keeps_every_match_across_a_chain_of_imports() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
         cluster
             .import_alias_synonyms("ny => new york\npkg => package\nred fox => vixen")
             .expect("import");
@@ -241,7 +241,7 @@ fn equivalents_survive_two_names_that_share_a_synthetic_id() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("build");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("build");
         for (id, dsl) in &queries {
             cluster.add_query(*id, dsl).expect("add");
         }

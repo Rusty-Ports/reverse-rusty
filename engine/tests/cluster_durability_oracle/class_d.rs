@@ -207,7 +207,7 @@ fn resize_with_knob_off_preserves_sealed_class_d() {
 
     // Reopen with the knob OFF, then resize (a rebuild that re-places every stored query).
     let cfg_off = durable_cfg(3, dir.clone(), false);
-    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg_off)).expect("reopen");
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg_off)).expect("reopen");
     assert!(
         reopened.class_counts().expect("cc")[3] > 0,
         "sealed class-D present after the knob-off reopen"

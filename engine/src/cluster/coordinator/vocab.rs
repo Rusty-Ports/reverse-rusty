@@ -8,9 +8,10 @@
 //! live corpus so feature frequencies/hotness reflect the post-change
 //! distribution, exactly as [`ClusterEngine::build`] does.
 //!
-//! The swap is atomic under `&mut self` (no reader observes a half-state — reads
-//! take `&self`), so both surface forms of an alias resolve to one feature with
-//! **zero false negatives**.
+//! The new layout is published in one step (no reader observes a half-state: a read
+//! runs on the layout it loaded, ADR-208), so both surface forms of an alias resolve
+//! to one feature with **zero false negatives**. Writes are refused while it is built
+//! (ADR-209).
 //!
 //! **In-process only.** An alias is a normalizer operation and is NOT shipped to a
 //! `RemoteShard` in v1, so [`ClusterEngine::set_vocab`] refuses a non-local cluster
@@ -32,7 +33,7 @@ use crate::vocab::{CorpusLearnConfig, Vocab};
 
 use super::{ClusterEngine, CLUSTER_MANIFEST_FILE};
 use crate::cluster::control::ClusterStateChange;
-use crate::cluster::coordinator::layout::Layout;
+use crate::cluster::coordinator::layout::{Layout, LayoutChange};
 use crate::cluster::shard::ShardError;
 
 type LiveTaggedMetadata = (
@@ -57,14 +58,25 @@ impl ClusterEngine {
     /// set under the new normalizer: re-mints the shared dict, re-places every
     /// query (an alias can move a query's anchor, hence its shard), and re-ingests —
     /// carrying each query's stored tags with it (ADR-074; the tag space is
-    /// preserved unchanged). Atomic under `&mut self`; a durable cluster commits the
+    /// preserved unchanged). Published in one step; a durable cluster commits the
     /// rebuild via [`checkpoint`](Self::checkpoint). Returns the number of live
     /// queries rebuilt.
     ///
     /// Refuses (errors) if any shard is non-local or handoff-wrapped. A vocabulary
     /// that activates a multi-word alias is supported (ADR-076: P(T)-aware routing).
-    pub fn set_vocab(&mut self, vocab: Vocab) -> Result<usize, ShardError> {
-        let before = self.layout();
+    pub fn set_vocab(&self, vocab: Vocab) -> Result<usize, ShardError> {
+        let change = self.begin_layout_change()?;
+        self.set_vocab_in(&change, vocab)
+    }
+
+    /// [`Self::set_vocab`] inside a layout change the caller began, so that reading the
+    /// current vocabulary and replacing it are one step.
+    pub(in crate::cluster::coordinator) fn set_vocab_in(
+        &self,
+        change: &LayoutChange<'_>,
+        vocab: Vocab,
+    ) -> Result<usize, ShardError> {
+        let before = change.current();
         // 1. Correctness boundary: in-process only (see module doc). On a
         //    non-distributed build every shard is local, so this never fires — but
         //    it is always compiled, so a future non-local shard can't slip past it.
@@ -119,19 +131,19 @@ impl ClusterEngine {
 
         // 3. Rebuild the cluster from its live source set under the new normalizer, KEEPING the
         //    ring (same shard count). The shared blue/green core (ADR-046/078) re-mints the dict,
-        //    re-places every query, builds fresh shards, and atomically swaps under `&mut self`.
+        //    re-places every query, builds fresh shards, and publishes them in one step.
         //    `Some(vocab)` installs the new vocabulary and uses ITS equivalence groups; per-query
         //    tags carry through as stored `TagId`s (ADR-074). The resize path (ADR-078) calls the
         //    SAME core with a fresh ring instead of a new vocab.
-        let next_generation = self
-            .placement_generation()
+        let next_generation = before
+            .generation
             .next()
             .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
         let ring = before.ring.clone();
         // The old layout is released before the rebuild, which holds a second corpus.
         drop(before);
-        let rebuilt = self.rebuild_from_live(new_norm, ring, Some(vocab), next_generation)?;
-        let after = self.layout();
+        let (rebuilt, after) =
+            self.rebuild_from_live(change, new_norm, ring, Some(vocab), next_generation)?;
 
         self.control.propose(ClusterStateChange::BumpModelVersion {
             dict_fingerprint: after.dict.fingerprint(),
@@ -141,6 +153,9 @@ impl ClusterEngine {
         //    new manifest (re-minted dict + serialized vocab + green segment registry — the atomic
         //    commit point), truncate the log, and GC the superseded old segment files.
         if self.data_dir.is_some() {
+            // Operations that loaded the old layout finish on it. Its files go once they
+            // have, here or at a later checkpoint.
+            self.await_retired_layouts();
             self.checkpoint_quiesced(&after)?;
         }
         Ok(rebuilt)
@@ -159,7 +174,7 @@ impl ClusterEngine {
     ///
     /// A thin wrapper over [`learn_and_apply_with`](Self::learn_and_apply_with) with the
     /// default configuration: expansion, no NPMI phrase induction.
-    pub fn learn_and_apply(&mut self, min_count: usize) -> Result<usize, ShardError> {
+    pub fn learn_and_apply(&self, min_count: usize) -> Result<usize, ShardError> {
         self.learn_and_apply_with(&CorpusLearnConfig {
             anyof_min_count: min_count,
             ..Default::default()
@@ -244,43 +259,48 @@ impl ClusterEngine {
     /// supported per ADR-076). Returns the engine-shaped apply report (`recompiled` =
     /// queries rebuilt).
     pub fn import_alias_synonyms(
-        &mut self,
+        &self,
         solr_text: &str,
     ) -> Result<crate::segment::AliasApplyReport, ShardError> {
-        let mut vocab = self.layout().vocab.as_deref().cloned().unwrap_or_default();
+        // Reading the vocabulary and replacing it are one step: two imports must not both
+        // start from the same vocabulary.
+        let change = self.begin_layout_change()?;
+        let current = change.current();
+        let mut vocab = current.vocab.as_deref().cloned().unwrap_or_default();
         let before = vocab.aliases().clone();
         let activated = vocab
-            .import_solr_aliases(solr_text, &self.layout().norm, &self.layout().dict)
+            .import_solr_aliases(solr_text, &current.norm, &current.dict)
             .map_err(|error| ShardError::Config(error.to_string()))?;
         let changed = vocab.aliases() != &before;
         if !changed {
-            self.finish_pending_alias_import_commit()?;
+            self.finish_pending_alias_import_commit(&current)?;
             return Ok(crate::segment::AliasApplyReport {
                 applied: false,
                 activated,
                 recompiled: 0,
-                summary: self
-                    .layout()
+                summary: current
                     .vocab
                     .as_deref()
                     .map(Vocab::alias_summary)
                     .unwrap_or_default(),
             });
         }
-        let predecessor = self.capture_alias_import_predecessor(&self.layout())?;
+        let predecessor = self.capture_alias_import_predecessor(&current)?;
         *self.alias_import_predecessor() = predecessor;
         *self
             .pending_alias_import_manifest
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let rebuilt = self.set_vocab(vocab)?;
+        // The old layout is released before the rebuild, which holds a second corpus.
+        drop(current);
+        let rebuilt = self.set_vocab_in(&change, vocab)?;
         self.clear_pending_alias_import_identity();
         Ok(crate::segment::AliasApplyReport {
             applied: true,
             activated,
             recompiled: rebuilt,
-            summary: self
-                .layout()
+            summary: change
+                .current()
                 .vocab
                 .as_deref()
                 .map(Vocab::alias_summary)
@@ -291,11 +311,10 @@ impl ClusterEngine {
     /// Complete the post-swap commits a prior `set_vocab` attempt may have
     /// failed before publishing. A fully committed import remains a read-only
     /// no-op; incompatibility and attestation failures stay fail-loud.
-    fn finish_pending_alias_import_commit(&mut self) -> Result<(), ShardError> {
-        let layout = self.layout();
-        let generation = self.placement_generation();
+    fn finish_pending_alias_import_commit(&self, layout: &Layout) -> Result<(), ShardError> {
+        let generation = layout.generation;
         let dict_fingerprint = layout.dict.fingerprint();
-        let manifest_state = self.alias_import_manifest_state(&layout, generation)?;
+        let manifest_state = self.alias_import_manifest_state(layout, generation)?;
         let state = self.control.cluster_state()?;
         let live_shards = u32::try_from(layout.ring.num_shards()).map_err(|_| {
             ShardError::ControlPlane(
@@ -363,7 +382,7 @@ impl ClusterEngine {
                 self.record_committed_manifest(*manifest);
             }
             AliasImportManifestState::ImmediatePredecessor => {
-                self.checkpoint_quiesced(&layout)?;
+                self.checkpoint_quiesced(layout)?;
             }
         }
         self.clear_pending_alias_import_identity();
@@ -380,7 +399,7 @@ impl ClusterEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn clear_pending_alias_import_identity(&mut self) {
+    fn clear_pending_alias_import_identity(&self) {
         *self.alias_import_predecessor() = None;
         *self
             .pending_alias_import_manifest
@@ -574,24 +593,24 @@ impl ClusterEngine {
     /// clear single-token variants auto-activate; everything else stays a review
     /// candidate. Rebuilds via [`Self::set_vocab`] (all refusals hold).
     pub fn learn_aliases_and_apply(
-        &mut self,
+        &self,
         min_count: usize,
     ) -> Result<crate::segment::AliasApplyReport, ShardError> {
-        let corpus = Self::live_corpus(&self.layout())?;
-        let mut vocab = self.layout().vocab.as_deref().cloned().unwrap_or_default();
-        let activated = vocab.learn_aliases_from_queries(
-            &corpus,
-            min_count,
-            &self.layout().norm,
-            &self.layout().dict,
-        );
-        let rebuilt = self.set_vocab(vocab)?;
+        // Learning from the corpus and replacing the vocabulary are one step.
+        let change = self.begin_layout_change()?;
+        let current = change.current();
+        let corpus = Self::live_corpus(&current)?;
+        let mut vocab = current.vocab.as_deref().cloned().unwrap_or_default();
+        let activated =
+            vocab.learn_aliases_from_queries(&corpus, min_count, &current.norm, &current.dict);
+        drop(current);
+        let rebuilt = self.set_vocab_in(&change, vocab)?;
         Ok(crate::segment::AliasApplyReport {
             applied: true,
             activated,
             recompiled: rebuilt,
-            summary: self
-                .layout()
+            summary: change
+                .current()
                 .vocab
                 .as_deref()
                 .map(Vocab::alias_summary)
@@ -607,16 +626,20 @@ impl ClusterEngine {
     /// hence its shard). With `corpus_phrases = false` this is identical to
     /// `learn_and_apply(cfg.anyof_min_count)`. Phrases only — never aliases — so the
     /// same-normalizer gluing is lossless-cover safe. Refuses a non-local cluster.
-    pub fn learn_and_apply_with(&mut self, cfg: &CorpusLearnConfig) -> Result<usize, ShardError> {
-        let corpus = Self::live_corpus(&self.layout())?;
+    pub fn learn_and_apply_with(&self, cfg: &CorpusLearnConfig) -> Result<usize, ShardError> {
+        // Learning from the corpus and replacing the vocabulary are one step.
+        let change = self.begin_layout_change()?;
+        let current = change.current();
+        let corpus = Self::live_corpus(&current)?;
         let learned = crate::vocab::learn_vocab_from_corpus(&corpus, cfg);
         // Merge learned rules UNDER the current vocab (declared aliases win), then rebuild.
         let mut merged = Vocab::new();
-        if let Some(v) = &self.layout().vocab {
+        if let Some(v) = &current.vocab {
             merged.merge(v);
         }
         merged.merge(&learned);
-        self.set_vocab(merged)
+        drop(current);
+        self.set_vocab_in(&change, merged)
     }
 
     /// The vocabulary behind the current normalizer, if one was installed via

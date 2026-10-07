@@ -218,7 +218,7 @@ fn global_threshold_overflow_and_generation_drift_fail_closed() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("cluster build");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("cluster build");
     let program = cluster
         .compile_rank_program(&RankProgramSpec {
             profile: None,
