@@ -350,14 +350,7 @@ fn resize_worker(
     #[cfg(not(feature = "distributed"))]
     drop(targets);
     let _permit = permit;
-    let _writes = writes;
-    let cluster = if no_wait {
-        state.cluster.try_write()
-    } else {
-        deadline
-            .checked_duration_since(Instant::now())
-            .and_then(|budget| state.cluster.try_write_for(budget))
-    };
+    let cluster = state.try_write_cluster_until(&writes, (!no_wait).then_some(deadline));
     let Some(mut cluster) = cluster else {
         return not_started();
     };

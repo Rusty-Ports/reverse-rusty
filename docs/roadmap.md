@@ -250,6 +250,26 @@ rank metadata, fully sorts already-sorted shard runs, and clones request groups 
 **Completion.** Preserve exact ordering, totals, ownership, and winner-source behavior while
 `rankbench` demonstrates lower allocation and coordinator CPU at fixed K.
 
+### In-process rebuilds that keep serving
+
+**Problem.** An in-process resize and every vocabulary or alias change rebuild the live corpus
+while the coordinator holds the cluster's write lock, so searches, writes and health probes wait
+for the whole rebuild and its checkpoint. A search holds the cluster lock for each title it
+matches, which is also why the search pool needs a gate
+([ADR-207](decisions/adr-207-cluster-writers-wait-outside-the-search-pool.md)).
+
+**Direction.** Serve from a published snapshot, as single-node mode does: split the cluster's
+serving layout (normalizer, dictionaries, ring, shards) from its coordination state, let a request
+pin one layout for its whole run, build the new layout beside the old one, and swap. First measure
+a rebuild's time and peak memory per phase at scale. Give the exclusive step a wait budget, so a
+change that cannot start soon gives up instead of holding searches behind it.
+
+**Completion.** While a resize or vocabulary change rebuilds, searches and health probes answer
+within their normal deadlines, each result equals the oracle before the swap or after it and never
+a mix, and a mutation that lands during the build is either carried into the new layout or makes
+the change fail without losing an acknowledged query. The cluster read lock and the pool's gate
+are gone from the search path.
+
 ## Priority 4 — feature-model evolution and parity
 
 ### Versioned feature models with blue/green re-materialization

@@ -293,6 +293,12 @@ exhaustive job) takes it alone
 its shards one after another, and a remote position that does not answer costs each write that
 touches it the write deadline.
 
+The served coordinator's search pool has a gate. A search holds it shared for as long as its work
+is in the pool. A vocabulary change, an in-process resize and a remote resize's cutover hold it
+alone before they ask for the cluster's write lock, so they wait for the search requests in flight
+and no worker of the pool waits for them
+([ADR-207](../decisions/adr-207-cluster-writers-wait-outside-the-search-pool.md)).
+
 The lock order is PIT/exhaustive mutation barrier, then bulk-load barrier, then ID lock. Individual
 mutations hold the bulk barrier's shared side; initial bulk ingest holds its exclusive side across
 the empty check, directory installation, and all shard writes. Bulk never acquires individual ID

@@ -163,7 +163,9 @@ impl RankedBackendError for ClusterRankedError {
 /// permit race, metrics, and epilogue for both.
 pub(super) trait RankedSearchCtx {
     fn prom(&self) -> &PrometheusMetrics;
-    fn pool(&self) -> &rayon::ThreadPool;
+    /// Run `work` in the search pool. The coordinator's pool is entered through its gate
+    /// (ADR-207).
+    fn run_in_pool<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T;
     fn ranked_search_permits(&self) -> &Arc<tokio::sync::Semaphore>;
     fn max_ranked_enrichment_bytes(&self) -> usize;
     fn slow_query_threshold_ms(&self) -> u64;
@@ -173,8 +175,8 @@ impl RankedSearchCtx for AppState {
     fn prom(&self) -> &PrometheusMetrics {
         &self.prom
     }
-    fn pool(&self) -> &rayon::ThreadPool {
-        &self.pool
+    fn run_in_pool<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
+        self.pool.install(work)
     }
     fn ranked_search_permits(&self) -> &Arc<tokio::sync::Semaphore> {
         &self.ranked_search_permits
@@ -191,8 +193,8 @@ impl RankedSearchCtx for ClusterAppState {
     fn prom(&self) -> &PrometheusMetrics {
         &self.prom
     }
-    fn pool(&self) -> &rayon::ThreadPool {
-        &self.pool
+    fn run_in_pool<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
+        self.pool.run(work)
     }
     fn ranked_search_permits(&self) -> &Arc<tokio::sync::Semaphore> {
         &self.ranked_search_permits
@@ -540,7 +542,7 @@ where
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             if install_pool {
-                state_inner.pool().install(work)
+                state_inner.run_in_pool(work)
             } else {
                 work()
             }

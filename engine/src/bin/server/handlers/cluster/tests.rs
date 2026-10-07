@@ -46,7 +46,7 @@ fn state_from_cluster_with_rebalance_topology(
         .expect("pool");
     let prom = PrometheusMetrics::new();
     Arc::new(ClusterAppState {
-        cluster: RwLock::new(cluster),
+        cluster: crate::state::ClusterLock::new(cluster),
         topology_guard: RwLock::new(()),
         write_admission: RwLock::new(()),
         write_permits: Arc::new(tokio::sync::Semaphore::new(
@@ -79,7 +79,7 @@ fn state_from_cluster_with_rebalance_topology(
         stats_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_STATS,
         )),
-        pool,
+        pool: crate::state::SearchPool::new(pool),
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
         exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
@@ -444,6 +444,7 @@ mod metrics;
 mod node_deregister;
 mod node_register;
 mod pit;
+mod pool_gate;
 mod ranked;
 mod read_admission;
 mod reassign;

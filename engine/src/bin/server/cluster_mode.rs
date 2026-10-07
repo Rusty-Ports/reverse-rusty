@@ -356,7 +356,7 @@ pub(crate) async fn run(
     });
 
     let state = Arc::new(ClusterAppState {
-        cluster: RwLock::new(cluster),
+        cluster: crate::state::ClusterLock::new(cluster),
         topology_guard: RwLock::new(()),
         write_admission: RwLock::new(()),
         write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
@@ -403,7 +403,7 @@ pub(crate) async fn run(
         stats_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_STATS,
         )),
-        pool,
+        pool: crate::state::SearchPool::new(pool),
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
         ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),

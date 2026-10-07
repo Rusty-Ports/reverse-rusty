@@ -9,6 +9,27 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — A vocabulary change or resize no longer stops a coordinator that is searching
+
+- **Fixed: a coordinator could stop for good when a vocabulary change or a resize arrived
+  while a search batch was running**
+  ([ADR-207](decisions/adr-207-cluster-writers-wait-outside-the-search-pool.md)). The search
+  pool's workers read the cluster lock for each title, and a worker waiting on one title's
+  shard fan-out picks up other titles meanwhile. With a writer queued for the lock, those
+  waited for the writer and the writer waited for them. Every search then waited for the pool,
+  and writes waited for the vocabulary change. It needed a batch whose titles route to more
+  than one shard; a restart was the only way out.
+- The search pool now has a gate. A search holds it while its work is in the pool, and a
+  vocabulary change, an in-process resize and a remote resize's cutover close it before they
+  ask for the cluster's write lock.
+- **Behaviour change:** a vocabulary change or resize waits for the search requests in flight,
+  where it could run between two titles of one batch before. A source-free `/_search` batch is
+  therefore matched under one vocabulary and one shard layout throughout. The wait is bounded
+  by the search timeout.
+- The cutover of a remote resize now holds write admission alone, like every other operation
+  that takes the cluster's write lock.
+- Single-node mode is not affected.
+
 ## 2026-10-06 — Coordinator writes run beside each other
 
 - **In coordinator mode, writes no longer run one at a time**
