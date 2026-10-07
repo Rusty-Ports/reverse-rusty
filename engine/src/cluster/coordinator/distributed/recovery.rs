@@ -22,7 +22,7 @@ impl ClusterEngine {
     ) -> Result<(u64, u64), ShardError> {
         // Bound on the convergence loop (a safety cap, not a correctness requirement).
         const FINALIZE_PASSES: usize = 8;
-        let expected = self.dict.fingerprint();
+        let expected = self.layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Pin the source's tail BEFORE the segment-copy seal trims it (ADR-040). Held across the
         // whole recovery; released below whether it converges or errors.
@@ -41,7 +41,7 @@ impl ClusterEngine {
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
         let recover = || -> Result<(u64, u64), ShardError> {
-            let dict_bytes = crate::storage::serialize_dict(&self.dict);
+            let dict_bytes = crate::storage::serialize_dict(&self.layout.dict);
             // Ship the dict + frozen tag space so the fresh node attaches segments against the right
             // feature + tag space (ADR-055).
             let target = crate::cluster::remote::RemoteShard::
@@ -67,7 +67,11 @@ impl ClusterEngine {
             let mut hwm = LogPos(p);
             for _ in 0..FINALIZE_PASSES {
                 let next = crate::cluster::replica::catch_up_replica(
-                    &target, &source, &self.norm, &self.dict, hwm,
+                    &target,
+                    &source,
+                    &self.layout.norm,
+                    &self.layout.dict,
+                    hwm,
                 )?;
                 source.renew_retention_lease(lease, next)?;
                 if next == hwm {
@@ -107,7 +111,7 @@ impl ClusterEngine {
         after: u64,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
-        let expected = self.dict.fingerprint();
+        let expected = self.layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Catch up the target's slot `shard_id` from the source's same slot (ADR-093).
         let source = crate::cluster::remote::RemoteShard::connect_for_coordinator_with_security(
@@ -133,8 +137,8 @@ impl ClusterEngine {
         let hwm = crate::cluster::replica::catch_up_replica(
             &target,
             &source,
-            &self.norm,
-            &self.dict,
+            &self.layout.norm,
+            &self.layout.dict,
             LogPos(after),
         )?;
         Ok(hwm.0)

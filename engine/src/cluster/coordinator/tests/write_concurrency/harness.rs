@@ -15,8 +15,8 @@ pub(super) enum WriteCall {
 pub(super) type WriteHook = Arc<dyn Fn(usize, WriteCall) -> Result<(), ShardError> + Send + Sync>;
 
 pub(super) fn instrument(cluster: &mut ClusterEngine, hook: WriteHook) {
-    let shard_count = cluster.shards.len();
-    cluster.shards = std::mem::take(&mut cluster.shards)
+    let shard_count = cluster.layout.shards.len();
+    cluster.layout.shards = std::mem::take(&mut cluster.layout.shards)
         .into_iter()
         .enumerate()
         .zip(std::iter::repeat_n(hook, shard_count))

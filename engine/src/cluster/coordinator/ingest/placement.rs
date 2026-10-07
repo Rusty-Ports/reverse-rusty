@@ -6,8 +6,8 @@ impl ClusterEngine {
     /// the cluster value exists.
     pub(super) fn placement(&self, ex: &Extracted) -> Target {
         placement_of(
-            &self.dict,
-            &self.ring,
+            &self.layout.dict,
+            &self.layout.ring,
             ex,
             self.per_shard.accept_class_d,
             self.per_shard.hot_anchor_threshold,

@@ -164,19 +164,26 @@ impl ClusterEngine {
         let mut lc = String::new();
         let mut sc = crate::normalize::NormScratch::new();
         let mut feats: Vec<FeatureId> = Vec::new();
-        if self.norm.has_multiword_aliases() {
+        if self.layout.norm.has_multiword_aliases() {
             let mut neg: Vec<FeatureId> = Vec::new();
-            self.norm
-                .match_features_dual(title, &self.dict, &mut lc, &mut sc, &mut neg, &mut feats);
+            self.layout.norm.match_features_dual(
+                title,
+                &self.layout.dict,
+                &mut lc,
+                &mut sc,
+                &mut neg,
+                &mut feats,
+            );
         } else {
-            self.norm
-                .match_features(title, &self.dict, &mut lc, &mut sc, &mut feats);
+            self.layout
+                .norm
+                .match_features(title, &self.layout.dict, &mut lc, &mut sc, &mut feats);
         }
         // Selective targets: the shard owning each anchor-eligible (non-hot) feature.
         let mut targets: Vec<usize> = Vec::with_capacity(feats.len() + 1);
         for &f in &feats {
-            if !is_hot(&self.dict, f) {
-                targets.push(self.ring.lookup(f));
+            if !is_hot(&self.layout.dict, f) {
+                targets.push(self.layout.ring.lookup(f));
             }
         }
         targets.sort_unstable();
@@ -189,7 +196,7 @@ impl ClusterEngine {
         // shard it probes, and that shard holds the complete (replicated) broad lane.
         let h = crate::util::fnv1a64(title.as_bytes());
         let broad_eval_shard = if targets.is_empty() {
-            let s = (h % self.ring.num_shards() as u64) as usize;
+            let s = (h % self.layout.ring.num_shards() as u64) as usize;
             targets.push(s);
             s
         } else {
@@ -290,7 +297,7 @@ impl ClusterEngine {
         let (targets, broad_eval_shard) = self.route(title);
         let ownership = crate::ownership::OwnershipContext::new(
             self.placement_generation(),
-            self.shards.len() as u32,
+            self.layout.shards.len() as u32,
             targets.iter().map(|&position| position as u32).collect(),
             include_broad.then_some(broad_eval_shard as u32),
         )?;
@@ -303,7 +310,7 @@ impl ClusterEngine {
             targets
                 .iter()
                 .map(|&s| {
-                    self.shards[s].percolate_filtered_owned(
+                    self.layout.shards[s].percolate_filtered_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
@@ -317,7 +324,7 @@ impl ClusterEngine {
             targets
                 .par_iter()
                 .map(|&s| {
-                    self.shards[s].percolate_filtered_owned(
+                    self.layout.shards[s].percolate_filtered_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
@@ -396,7 +403,7 @@ impl ClusterEngine {
         let (targets, broad_eval_shard) = self.route(title);
         let ownership = crate::ownership::OwnershipContext::new(
             self.placement_generation(),
-            self.shards.len() as u32,
+            self.layout.shards.len() as u32,
             targets.iter().map(|&position| position as u32).collect(),
             include_broad.then_some(broad_eval_shard as u32),
         )?;
@@ -406,7 +413,7 @@ impl ClusterEngine {
             targets
                 .iter()
                 .map(|&s| {
-                    self.shards[s].percolate_filtered_ranked_owned(
+                    self.layout.shards[s].percolate_filtered_ranked_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
@@ -421,7 +428,7 @@ impl ClusterEngine {
             targets
                 .par_iter()
                 .map(|&s| {
-                    self.shards[s].percolate_filtered_ranked_owned(
+                    self.layout.shards[s].percolate_filtered_ranked_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
@@ -459,7 +466,7 @@ impl ClusterEngine {
 
     /// Number of shards.
     pub fn num_shards(&self) -> usize {
-        self.ring.num_shards()
+        self.layout.ring.num_shards()
     }
 
     /// How many replicas, across all positions, reads may not fail over to: a replicated write
@@ -467,7 +474,8 @@ impl ClusterEngine {
     /// Redundancy is reduced by that many copies until they are recovered. 0 without replicas.
     #[must_use]
     pub fn out_of_sync_replicas(&self) -> usize {
-        self.shards
+        self.layout
+            .shards
             .iter()
             .map(|shard| shard.out_of_sync_replicas())
             .sum()
@@ -483,12 +491,12 @@ impl ClusterEngine {
     /// Total physical query count across shards (a replicated/any-of query is
     /// counted once per shard holding it — physical, not distinct-logical).
     pub fn num_queries(&self) -> Result<usize, ShardError> {
-        self.shards.iter().map(|s| s.num_queries()).sum()
+        self.layout.shards.iter().map(|s| s.num_queries()).sum()
     }
 
     /// Per-shard physical query counts (introspection / tests).
     pub fn shard_query_counts(&self) -> Result<Vec<usize>, ShardError> {
-        self.shards.iter().map(|s| s.num_queries()).collect()
+        self.layout.shards.iter().map(|s| s.num_queries()).collect()
     }
 
     /// Cluster-wide per-class entry tally `[A, B, C, D, H]`, summed across shards
@@ -497,7 +505,7 @@ impl ClusterEngine {
     /// actually exercised.
     pub fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         let mut total = [0u64; 5];
-        for s in &self.shards {
+        for s in &self.layout.shards {
             let c = s.class_counts()?;
             for i in 0..5 {
                 total[i] += c[i];
@@ -527,7 +535,7 @@ impl ClusterEngine {
     /// report a false "not found" (ADR-070).
     pub fn get_source(&self, logical: u64) -> Result<Option<String>, ShardError> {
         let mut first_err: Option<ShardError> = None;
-        for s in &self.shards {
+        for s in &self.layout.shards {
             match s.source_of(logical) {
                 Ok(Some(dsl)) => return Ok(Some(dsl)),
                 Ok(None) => {}
@@ -550,7 +558,7 @@ impl ClusterEngine {
         logical: u64,
     ) -> Result<Option<crate::storage::StoredSource>, ShardError> {
         let mut first_err: Option<ShardError> = None;
-        for shard in &self.shards {
+        for shard in &self.layout.shards {
             match shard.document_of(logical) {
                 Ok(Some(document)) => return Ok(Some(document)),
                 Ok(None) => {}
@@ -571,7 +579,7 @@ impl ClusterEngine {
     /// prevents a definitive negative and therefore fails loud.
     pub fn document_exists(&self, logical: u64) -> Result<bool, ShardError> {
         let mut first_err: Option<ShardError> = None;
-        for shard in &self.shards {
+        for shard in &self.layout.shards {
             match shard.has_live_query(logical) {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}

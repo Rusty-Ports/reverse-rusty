@@ -155,9 +155,9 @@ impl ClusterEngine {
             }
             for &s in targets {
                 if let Err(e) = crate::cluster::shard::apply_mutation(
-                    self.shards[s].as_ref(),
-                    &self.norm,
-                    &self.dict,
+                    self.layout.shards[s].as_ref(),
+                    &self.layout.norm,
+                    &self.layout.dict,
                     &redrive,
                     Some(s as u32),
                 ) {
@@ -265,7 +265,7 @@ impl ClusterEngine {
     /// checkpoint's registry snapshot and its orphan sweep would have that file deleted.
     pub fn flush(&self) -> Result<(), ShardError> {
         let _quiesced = self.quiesce_mutations();
-        for s in &self.shards {
+        for s in &self.layout.shards {
             s.flush()?;
         }
         self.compact_logical_ids();

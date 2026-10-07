@@ -259,7 +259,7 @@ impl ClusterEngine {
             };
             let from_ep = addr_of(from)?;
             let tgt_ep = addr_of(to)?;
-            let handoff = self.handoffs.get(position).ok_or_else(|| {
+            let handoff = self.layout.handoffs.get(position).ok_or_else(|| {
                 ShardError::Config(format!(
                     "reassign_and_move: shard position {position} is not handoff-capable (the \
                      cluster was not built via connect_remote/connect_replicated)"
@@ -375,6 +375,7 @@ impl ClusterEngine {
                 )));
             }
             let live_generation = self
+                .layout
                 .handoffs
                 .get(position)
                 .ok_or_else(|| {
@@ -469,7 +470,7 @@ impl ClusterEngine {
                 )
             }
             HandoffRoute::Move => {
-                let handoff = self.handoffs.get(position).ok_or_else(|| {
+                let handoff = self.layout.handoffs.get(position).ok_or_else(|| {
                     ShardError::Config(format!(
                         "reassign_and_move: shard position {position} is not handoff-capable"
                     ))
@@ -550,7 +551,7 @@ impl ClusterEngine {
                     if let Ok(source) = RemoteShard::connect_for_coordinator_with_security(
                         &live_ep,
                         handle.clone(),
-                        self.dict.fingerprint(),
+                        self.layout.dict.fingerprint(),
                         self.tag_dict.fingerprint(),
                         pos,
                         self.coordinator_id,

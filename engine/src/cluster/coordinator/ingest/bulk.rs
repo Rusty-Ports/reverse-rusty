@@ -76,7 +76,7 @@ impl ClusterEngine {
     /// start. A mark that cannot be taken back stays: the next coordinator then refuses the
     /// cluster, which is the safe side.
     fn mark_bulk_load_begun(&self) -> Result<(), ShardError> {
-        for (position, shard) in self.shards.iter().enumerate() {
+        for (position, shard) in self.layout.shards.iter().enumerate() {
             if let Err(error) = shard.set_bulk_load_incomplete(true) {
                 self.take_back_bulk_load_marks(position + 1);
                 return Err(error);
@@ -89,7 +89,7 @@ impl ClusterEngine {
     /// Best effort: a mark that cannot be cleared stays, and the next coordinator refuses
     /// the cluster, which is the safe side.
     fn take_back_bulk_load_marks(&self, marked: usize) {
-        for shard in &self.shards[..marked] {
+        for shard in &self.layout.shards[..marked] {
             drop(shard.set_bulk_load_incomplete(false));
         }
     }
@@ -97,7 +97,7 @@ impl ClusterEngine {
     /// Clear the marks once every bucket has landed. A shard whose mark cannot be cleared
     /// fails the load: its mark would make the next coordinator refuse a complete cluster.
     fn mark_bulk_load_complete(&self) -> Result<(), ShardError> {
-        for shard in &self.shards {
+        for shard in &self.layout.shards {
             shard.set_bulk_load_incomplete(false)?;
         }
         Ok(())
@@ -106,7 +106,7 @@ impl ClusterEngine {
     /// The first shard position that still carries the mark of a bulk load that began and
     /// was never completed (ADR-196), or `None`. Such a cluster holds part of a corpus.
     pub fn unfinished_bulk_load(&self) -> Result<Option<usize>, ShardError> {
-        for (position, shard) in self.shards.iter().enumerate() {
+        for (position, shard) in self.layout.shards.iter().enumerate() {
             if shard.bulk_load_incomplete()? {
                 return Ok(Some(position));
             }
@@ -137,18 +137,19 @@ impl ClusterEngine {
     /// byte-identical to the original build. (Recovery no longer re-ingests; [`Self::open`]
     /// attaches each shard's committed segments instead — ADR-032.)
     fn bucket_and_ingest(&self, entries: &[TaggedEntry]) -> Result<(), ShardError> {
-        let mut buckets: Vec<Vec<PlacedQuery>> =
-            (0..self.ring.num_shards()).map(|_| Vec::new()).collect();
+        let mut buckets: Vec<Vec<PlacedQuery>> = (0..self.layout.ring.num_shards())
+            .map(|_| Vec::new())
+            .collect();
         let mut lc = String::new();
         let mut accepted_ids = Vec::with_capacity(entries.len());
         for (logical, version, text, qtags) in entries {
             let Ok(ast) = crate::dsl::parse(text) else {
                 continue;
             };
-            let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+            let ex = extract_readonly(&ast, &self.layout.norm, &self.layout.dict, &mut lc);
             let target = self.placement(&ex);
             let placement =
-                target.placement(self.placement_generation(), self.shards.len() as u32)?;
+                target.placement(self.placement_generation(), self.layout.shards.len() as u32)?;
             if !matches!(&target, Target::Reject) {
                 accepted_ids.push(*logical);
             }
@@ -201,12 +202,12 @@ impl ClusterEngine {
         // replace this directory with the same corpus and continue.
         if let Err(error) = self.replace_logical_ids(accepted_ids) {
             // Still nothing loaded.
-            self.take_back_bulk_load_marks(self.shards.len());
+            self.take_back_bulk_load_marks(self.layout.shards.len());
             return Err(error);
         }
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
-                if let Err(error) = self.shards[s].ingest_extracted(&bucket) {
+                if let Err(error) = self.layout.shards[s].ingest_extracted(&bucket) {
                     // Unlike incremental writes, this initial base-segment fan-out
                     // has no per-logical repair record. Earlier shards may already
                     // hold their buckets, and a transport failure cannot prove the

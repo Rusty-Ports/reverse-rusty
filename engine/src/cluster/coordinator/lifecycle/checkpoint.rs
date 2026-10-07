@@ -55,7 +55,7 @@ impl ClusterEngine {
     pub(in crate::cluster::coordinator) fn checkpoint_quiesced(&self) -> Result<(), ShardError> {
         let Some(dir) = self.data_dir.clone() else {
             if self.is_remote() {
-                for shard in &self.shards {
+                for shard in &self.layout.shards {
                     shard.seal_for_checkpoint()?;
                 }
             }
@@ -69,16 +69,16 @@ impl ClusterEngine {
 
         // 1. Seal each shard: memtable → base segment, then bake base-segment tombstones
         //    onto disk. After this every shard's on-disk segments reflect live state ≤ up_to.
-        for s in &self.shards {
+        for s in &self.layout.shards {
             s.seal_for_checkpoint()?;
         }
 
         // 2. Collect the per-shard segment registry + next-seg-ids. An error here (e.g. a
         //    segment write fell back to in-memory) aborts BEFORE the commit, leaving the
         //    old manifest authoritative — nothing is lost.
-        let mut segment_registry = Vec::with_capacity(self.shards.len());
-        let mut next_seg_ids = Vec::with_capacity(self.shards.len());
-        for s in &self.shards {
+        let mut segment_registry = Vec::with_capacity(self.layout.shards.len());
+        let mut next_seg_ids = Vec::with_capacity(self.layout.shards.len());
+        for s in &self.layout.shards {
             segment_registry.push(s.segment_filenames()?);
             next_seg_ids.push(s.next_seg_id()?);
         }
@@ -88,9 +88,9 @@ impl ClusterEngine {
         //    verified to reopen as the serving normalizer (ADR-184); a vocabulary that
         //    cannot be recorded fails the checkpoint loudly rather than writing a
         //    manifest the next open would refuse or mis-serve.
-        let vocab_data = match &self.vocab {
+        let vocab_data = match &self.layout.vocab {
             Some(v) => v
-                .recordable_json(&self.norm, &self.dict)
+                .recordable_json(&self.layout.norm, &self.layout.dict)
                 .map_err(|e| ShardError::Log(format!("recording cluster vocab: {e}")))?
                 .into_bytes(),
             None => Vec::new(),
@@ -98,8 +98,8 @@ impl ClusterEngine {
         let manifest = crate::storage::ClusterManifest {
             epoch: new_epoch,
             snapshot_pos: up_to.0,
-            dict_fingerprint: self.dict.fingerprint(),
-            num_shards: self.ring.num_shards() as u32,
+            dict_fingerprint: self.layout.dict.fingerprint(),
+            num_shards: self.layout.ring.num_shards() as u32,
             vnodes: self.vnodes,
             include_broad: self.include_broad,
             // ADR-080 replicate-to-all layout marker (always set by this binary — broad on every
@@ -110,14 +110,14 @@ impl ClusterEngine {
             segment_registry: segment_registry.clone(),
             next_seg_ids,
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
-            source_files: self.source_files.clone(),
-            dict_data: crate::storage::serialize_dict(&self.dict),
+            source_files: self.layout.source_files.clone(),
+            dict_data: crate::storage::serialize_dict(&self.layout.dict),
             vocab_data,
             // The frozen per-query tag space (ADR-049/055) — re-persisted so the filter resolves to
             // the same `TagId`s on the next reopen. Empty + finalized for an untagged cluster.
             tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
             // ADR-184: the feature model of the committed base and log tail, checked on reopen.
-            feature_model_fingerprint: Some(self.norm.fingerprint()),
+            feature_model_fingerprint: Some(self.layout.norm.fingerprint()),
         };
         // An alias import retains the exact manifest it is attempting before
         // publication. `write_cluster_manifest` can report an error after the
@@ -148,7 +148,11 @@ impl ClusterEngine {
             });
         }
         self.gc_orphan_segments(&dir, &segment_registry);
-        self.gc_superseded_source_sidecars(&dir, self.shards.len(), self.placement_generation().0);
+        self.gc_superseded_source_sidecars(
+            &dir,
+            self.layout.shards.len(),
+            self.placement_generation().0,
+        );
         self.compact_logical_ids();
         Ok(())
     }

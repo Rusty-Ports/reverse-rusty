@@ -116,7 +116,7 @@ impl ClusterEngine {
         let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;
         let pred = self.compile_tag_predicate(filter);
         let generation = self.placement_generation();
-        let num_shards = self.shards.len();
+        let num_shards = self.layout.shards.len();
 
         // Route every title independently; group titles by shard so each shard
         // is called ONCE with its sub-batch + index-aligned contexts.
@@ -173,7 +173,7 @@ impl ClusterEngine {
                 && title_indices
                     .iter()
                     .any(|&index| contexts[index].broad_evaluator() == Some(*position as u32));
-            self.shards[*position]
+            self.layout.shards[*position]
                 .percolate_top_k_batch_owned(
                     &requests,
                     shard_broad,
@@ -282,7 +282,7 @@ impl ClusterEngine {
     ) -> Result<Vec<Vec<String>>, ClusterRankedError> {
         check_deadline(deadline)?;
         if self.placement_generation() != ranked.placement_generation
-            || self.shards.len() as u32 != ranked.num_shards
+            || self.layout.shards.len() as u32 != ranked.num_shards
         {
             return Err(ClusterRankedError::InvalidShardReply {
                 position: 0,
@@ -293,7 +293,7 @@ impl ClusterEngine {
         // Distinct winners, first-observed owner (any owner serves an
         // identical source), grouped per shard.
         let mut owner_of: FastMap<u64, usize> = fast_map();
-        let mut groups: Vec<Vec<u64>> = (0..self.shards.len()).map(|_| Vec::new()).collect();
+        let mut groups: Vec<Vec<u64>> = (0..self.layout.shards.len()).map(|_| Vec::new()).collect();
         for title in &ranked.titles {
             for hit in &title.hits {
                 let position = hit.owner_position as usize;
@@ -326,14 +326,15 @@ impl ClusterEngine {
         let mut remaining = max_source_bytes;
         for (position, group_ids) in &active {
             for ids in group_ids.chunks(crate::result::MAX_TOP_K) {
-                let rows = match self.shards[*position].fetch_matches(ids, remaining, deadline) {
-                    Err(ShardError::EnrichmentLimit { .. }) => {
-                        return Err(ClusterRankedError::EnrichmentLimit {
-                            limit: max_source_bytes,
-                        });
-                    }
-                    other => other.map_err(ClusterRankedError::from)?,
-                };
+                let rows =
+                    match self.layout.shards[*position].fetch_matches(ids, remaining, deadline) {
+                        Err(ShardError::EnrichmentLimit { .. }) => {
+                            return Err(ClusterRankedError::EnrichmentLimit {
+                                limit: max_source_bytes,
+                            });
+                        }
+                        other => other.map_err(ClusterRankedError::from)?,
+                    };
                 if rows.len() != ids.len() {
                     return Err(ClusterRankedError::InvalidShardReply {
                         position: *position,

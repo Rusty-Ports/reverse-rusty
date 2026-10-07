@@ -43,8 +43,8 @@ fn create_waits_for_a_provisional_reservation_to_commit_or_roll_back() {
     };
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
-    let norm = Arc::clone(&real.norm);
-    let dict = Arc::clone(&real.dict);
+    let norm = Arc::clone(&real.layout.norm);
+    let dict = Arc::clone(&real.layout.dict);
     let tag_dict = Arc::clone(&real.tag_dict);
     let shards: Vec<Box<dyn Shard>> = (0..cfg.num_shards)
         .map(|_| {

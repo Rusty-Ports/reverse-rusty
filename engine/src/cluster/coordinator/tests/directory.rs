@@ -196,8 +196,8 @@ fn owned_read_paths_fail_loud_on_unrouted_position() {
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let shard = LocalShard::new(
-        Arc::clone(&real.norm),
-        Arc::clone(&real.dict),
+        Arc::clone(&real.layout.norm),
+        Arc::clone(&real.layout.dict),
         Arc::clone(&real.tag_dict),
         cfg.per_shard.clone(),
     );
@@ -330,8 +330,8 @@ fn resync_releases_reservation_after_repairing_a_remove() {
     };
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
-    let norm = Arc::clone(&real.norm);
-    let dict = Arc::clone(&real.dict);
+    let norm = Arc::clone(&real.layout.norm);
+    let dict = Arc::clone(&real.layout.dict);
     let tag_dict = Arc::clone(&real.tag_dict);
 
     let fail = Arc::new(AtomicBool::new(false));
@@ -454,8 +454,8 @@ fn resync_converges_an_upsert_queued_at_a_delete_only_shard() {
     };
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
-    let norm = Arc::clone(&real.norm);
-    let dict = Arc::clone(&real.dict);
+    let norm = Arc::clone(&real.layout.norm);
+    let dict = Arc::clone(&real.layout.dict);
     let tag_dict = Arc::clone(&real.tag_dict);
 
     let fail = Arc::new(AtomicBool::new(false));

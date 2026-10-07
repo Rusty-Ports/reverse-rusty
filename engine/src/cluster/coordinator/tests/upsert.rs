@@ -261,12 +261,16 @@ fn legacy_tail_is_folded_before_current_placement_validation() {
     // clause, so `new york` collapsed as one query-side alias entity.
     let mut lc = String::new();
     let mut legacy = crate::compile::Extracted {
-        required: cluster
-            .norm
-            .compile_features_readonly("new york", &cluster.dict, &mut lc),
-        forbidden: cluster
-            .norm
-            .compile_features_readonly("used", &cluster.dict, &mut lc),
+        required: cluster.layout.norm.compile_features_readonly(
+            "new york",
+            &cluster.layout.dict,
+            &mut lc,
+        ),
+        forbidden: cluster.layout.norm.compile_features_readonly(
+            "used",
+            &cluster.layout.dict,
+            &mut lc,
+        ),
         anyof: Vec::new(),
         semantic_anyof_groups: 0,
         semantic_anyof_terms: 0,
@@ -279,14 +283,15 @@ fn legacy_tail_is_folded_before_current_placement_validation() {
     legacy.required.dedup();
     legacy.forbidden.sort_unstable();
     legacy.forbidden.dedup();
-    legacy.expand_equivalences(cluster.dict.equivalences());
+    legacy.expand_equivalences(cluster.layout.dict.equivalences());
 
     let ast = crate::dsl::parse("new -used york").expect("current query");
-    let current = crate::compile::extract_readonly(&ast, &cluster.norm, &cluster.dict, &mut lc);
+    let current =
+        crate::compile::extract_readonly(&ast, &cluster.layout.norm, &cluster.layout.dict, &mut lc);
     let generation = cluster.placement_generation();
     let legacy_placement = placement_of(
-        &cluster.dict,
-        &cluster.ring,
+        &cluster.layout.dict,
+        &cluster.layout.ring,
         &legacy,
         true,
         cluster.per_shard.hot_anchor_threshold,
@@ -294,8 +299,8 @@ fn legacy_tail_is_folded_before_current_placement_validation() {
     .placement(generation, cfg.num_shards as u32)
     .expect("legacy placement");
     let current_placement = placement_of(
-        &cluster.dict,
-        &cluster.ring,
+        &cluster.layout.dict,
+        &cluster.layout.ring,
         &current,
         true,
         cluster.per_shard.hot_anchor_threshold,

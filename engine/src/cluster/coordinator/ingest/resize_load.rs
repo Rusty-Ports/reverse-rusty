@@ -43,29 +43,30 @@ impl ClusterEngine {
         entries: &[TaggedEntry],
         emit: &mut PositionSink<'_>,
     ) -> Result<(), ShardError> {
-        let mut buckets: Vec<Vec<PlacedQuery>> =
-            (0..self.ring.num_shards()).map(|_| Vec::new()).collect();
+        let mut buckets: Vec<Vec<PlacedQuery>> = (0..self.layout.ring.num_shards())
+            .map(|_| Vec::new())
+            .collect();
         let mut lc = String::new();
         for (logical, version, text, tags) in entries {
             let Ok(ast) = crate::dsl::parse_for_recovery(text) else {
                 return Err(unplaceable(*logical));
             };
-            let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+            let ex = extract_readonly(&ast, &self.layout.norm, &self.layout.dict, &mut lc);
             // Re-place an already-admitted corpus the way apply/replay does: force-accept, so a
             // stored class-D query survives even when the current front-door knob is off.
             let target = placement_of(
-                &self.dict,
-                &self.ring,
+                &self.layout.dict,
+                &self.layout.ring,
                 &ex,
                 true,
                 self.per_shard.hot_anchor_threshold,
             );
             let placement =
-                target.placement(self.placement_generation(), self.shards.len() as u32)?;
+                target.placement(self.placement_generation(), self.layout.shards.len() as u32)?;
             let positions: Vec<usize> = match target {
                 Target::Reject => return Err(unplaceable(*logical)),
                 Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
-                    (0..self.shards.len()).collect()
+                    (0..self.layout.shards.len()).collect()
                 }
                 Target::Selective(positions) => positions,
             };

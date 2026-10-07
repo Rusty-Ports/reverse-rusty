@@ -47,6 +47,7 @@ mod autoscale;
 mod control_plane;
 mod exhaustive;
 mod ingest;
+mod layout;
 mod lifecycle;
 mod logical_ids;
 mod matching;
@@ -101,16 +102,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::config::EngineConfig;
-use crate::dict::Dict;
 use crate::events::EngineEvent;
-use crate::normalize::Normalizer;
 use crate::tagdict::TagDict;
 
 use super::clog::{ClusterLog, ClusterMutation, NullClusterLog};
 use super::control::{ControlPlane, InMemoryControlPlane};
-#[cfg(feature = "distributed")]
-use super::handoff::HandoffShard;
-use super::ring::{HashRing, DEFAULT_VNODES};
+use super::ring::DEFAULT_VNODES;
 use super::shard::{LocalShard, Shard, ShardError};
 use super::transport_metrics::TransportMetrics;
 
@@ -314,9 +311,8 @@ impl ClusterDurable {
 
 /// An in-process multi-shard reverse query matcher.
 pub struct ClusterEngine {
-    /// The one shared feature space (frozen after [`Self::build`]).
-    norm: Arc<Normalizer>,
-    dict: Arc<Dict>,
+    /// What reads and writes are routed and matched by. See [`layout::Layout`].
+    layout: layout::Layout,
     /// The one shared, frozen per-query tag space (ADR-049/055), the `TagDict` analogue of `dict`:
     /// shared read-only into every shard so a tagged write and a percolate filter resolve a given
     /// `(key,value)` to the SAME `TagId` everywhere. Built over the corpus tags at
@@ -334,13 +330,6 @@ pub struct ClusterEngine {
     /// write path; restored on `open` from a non-empty `tag_dict`. `Relaxed` suffices — a
     /// monotonic latch, never the hot path.
     tags_present: AtomicBool,
-    /// The vocabulary behind the current normalizer, if one was installed via
-    /// [`Self::set_vocab`] (ADR-046). `None` when the cluster was built directly
-    /// from a `Normalizer`. Retained so a durable cluster can persist it and a
-    /// re-learn can merge into it.
-    vocab: Option<Arc<crate::vocab::Vocab>>,
-    ring: HashRing,
-    shards: Vec<Box<dyn Shard>>,
     /// Exact live logical-id directory. Distributed bounded ranking requires one
     /// live query row per logical id; content-derived placement cannot co-route
     /// arbitrary duplicate-id rows to one emission owner.
@@ -353,9 +342,6 @@ pub struct ClusterEngine {
     log: Box<dyn ClusterLog>,
     /// Checkpoint generation / log epoch (manifest-resident; bumped on `checkpoint`).
     epoch: AtomicU64,
-    /// Monotonic placement identity. Changes only on vocabulary or shard-count
-    /// blue/green rebuilds, never on checkpoints or physical data movement.
-    placement_generation: AtomicU64,
     /// Ring vnode count (for re-deriving the ring in the manifest on checkpoint).
     vnodes: u32,
     /// Replication factor (copies per shard position) — retained so a vocabulary
@@ -366,9 +352,6 @@ pub struct ClusterEngine {
     per_shard: EngineConfig,
     /// Durable-artifact directory (`Some` ⇔ durable).
     data_dir: Option<PathBuf>,
-    /// Per-shard source-sidecar basenames selected by the current coordinator
-    /// manifest. Index-aligned with `shards`.
-    source_files: Vec<String>,
     /// Exact durable predecessor captured before an alias import swaps the live
     /// model. Retained only while that import's control/manifest commit is
     /// incomplete, so an identical retry can overwrite precisely that commit
@@ -430,13 +413,6 @@ pub struct ClusterEngine {
     /// cluster-wide. All-zero on the in-process / RF=1 path (no `RemoteShard` is built), so
     /// the default behavior is byte-identical. Read via [`Self::transport_metrics`].
     transport_metrics: Arc<TransportMetrics>,
-    /// Per-position handoff handles (ADR-043), index-aligned with `shards`. Empty on the
-    /// in-process/default path (no position is handoff-wrapped ⇒ byte-identical to pre-6a);
-    /// populated by the gRPC builders, which wrap each position's backing in a [`HandoffShard`]
-    /// so a position can be re-pointed at a new owner at runtime (Stage 6b's `execute_handoff`)
-    /// without downcasting `dyn Shard`. `handoffs[i]` and `shards[i]` share one `HandoffShard`.
-    #[cfg(feature = "distributed")]
-    handoffs: Vec<Arc<HandoffShard>>,
     /// Live-handoff drain caps (ADR-044/048), retained from `ClusterConfig` by the gRPC builders so
     /// `execute_handoff` can read them. Defaults (8 / 1024) on the in-process path, which never
     /// hands off; the gRPC builders override them via `with_handoff_caps`. Overridable so an

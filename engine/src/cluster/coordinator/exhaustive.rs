@@ -147,7 +147,7 @@ impl ClusterEngine {
         let (targets, broad_eval_shard) = self.route(title);
         let ownership = crate::ownership::OwnershipContext::new(
             self.placement_generation(),
-            self.shards.len() as u32,
+            self.layout.shards.len() as u32,
             targets.iter().map(|&position| position as u32).collect(),
             include_broad.then_some(broad_eval_shard as u32),
         )?;
@@ -171,7 +171,7 @@ impl ClusterEngine {
                 observed_checksum: DeliveryChecksum::default(),
                 protocol_error: None,
             };
-            let part: ExhaustiveMatchResult = self.shards[position].percolate_all_owned(
+            let part: ExhaustiveMatchResult = self.layout.shards[position].percolate_all_owned(
                 title,
                 include_broad && position == broad_eval_shard,
                 &pred,
@@ -209,7 +209,7 @@ impl ClusterEngine {
 
     fn ensure_exhaustive_converged(&self) -> Result<(), ShardError> {
         #[cfg(feature = "distributed")]
-        if !self.handoffs.is_empty() && self.coordinator_id.is_none() {
+        if !self.layout.handoffs.is_empty() && self.coordinator_id.is_none() {
             return Err(ShardError::Protocol(
                 "exact exhaustive delivery over remote shards requires an exclusive \
                  coordinator lease; assemble the cluster with \

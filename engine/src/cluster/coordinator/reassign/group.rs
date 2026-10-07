@@ -170,6 +170,7 @@ impl ClusterEngine {
                     )));
                 }
                 let generation = self
+                    .layout
                     .handoffs
                     .get(position)
                     .ok_or_else(|| {
@@ -291,6 +292,7 @@ impl ClusterEngine {
             .collect();
 
         let handoff = self
+            .layout
             .handoffs
             .get(position)
             .ok_or_else(|| {
@@ -316,7 +318,7 @@ impl ClusterEngine {
         )?;
         let cutover_started = Cell::new(false);
         let abortable = Cell::new(true);
-        let expected = self.dict.fingerprint();
+        let expected = self.layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         let drain_passes = self.handoff_drain_passes;
         let final_drain_cap = self.handoff_final_drain_cap;
@@ -354,7 +356,7 @@ impl ClusterEngine {
         let (lease, pinned) = source.acquire_retention_lease()?;
 
         let do_move = || -> Result<u64, ShardError> {
-            let dict_bytes = crate::storage::serialize_dict(&self.dict);
+            let dict_bytes = crate::storage::serialize_dict(&self.layout.dict);
             let tag_bytes = crate::storage::serialize_tagdict(&self.tag_dict);
 
             // ---- Phase 2 (pre-fence): establish FRESH members, writes still flowing ----
@@ -398,7 +400,8 @@ impl ClusterEngine {
                 let (_segments, _nq, p) = t.recover_from(&cp_ep, expected)?;
                 let mut hwm = LogPos(p);
                 for _ in 0..drain_passes {
-                    let next = catch_up_replica(&t, &source, &self.norm, &self.dict, hwm)?;
+                    let next =
+                        catch_up_replica(&t, &source, &self.layout.norm, &self.layout.dict, hwm)?;
                     source.renew_retention_lease(lease, floor_with(&established, next))?;
                     if next == hwm {
                         break;
@@ -482,7 +485,7 @@ impl ClusterEngine {
                         let hwm = established[i].2;
                         let next = {
                             let (_, t, _) = &established[i];
-                            catch_up_replica(t, &source, &self.norm, &self.dict, hwm)?
+                            catch_up_replica(t, &source, &self.layout.norm, &self.layout.dict, hwm)?
                         };
                         established[i].2 = next;
                         source.renew_retention_lease(lease, floor_with(&established, next))?;
@@ -540,7 +543,13 @@ impl ClusterEngine {
                     }
                     let (_segments, _nq, p) = t.recover_from(&cp_ep, expected)?;
                     // Verify: the copy of a frozen source must have NO tail past its seal point.
-                    let verify = catch_up_replica(&t, &source, &self.norm, &self.dict, LogPos(p))?;
+                    let verify = catch_up_replica(
+                        &t,
+                        &source,
+                        &self.layout.norm,
+                        &self.layout.dict,
+                        LogPos(p),
+                    )?;
                     if verify != LogPos(p) {
                         return Err(ShardError::Remote(format!(
                             "reassign_group_and_move: retained member re-established from the \

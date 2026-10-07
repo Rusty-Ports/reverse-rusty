@@ -54,13 +54,13 @@ impl ClusterEngine {
     /// the pinned one: any vocab change bumps the placement generation, which
     /// stales the PIT first).
     pub fn normalizer(&self) -> &crate::normalize::Normalizer {
-        &self.norm
+        &self.layout.norm
     }
 
     /// The shared frozen dict — the fingerprint's feature-id space (same
     /// pinned-≡-current argument as [`Self::normalizer`]).
     pub fn dict(&self) -> &crate::dict::Dict {
-        &self.dict
+        &self.layout.dict
     }
 
     /// Open an index-wide PIT: reap expired entries (releasing their shard
@@ -88,15 +88,15 @@ impl ClusterEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let meta = ClusterPitMeta {
             generation: self.placement_generation(),
-            num_shards: self.shards.len() as u32,
+            num_shards: self.layout.shards.len() as u32,
         };
         let pit = self
             .lock_pits()
             .open(meta, keep_alive, cfg, now)
             .map_err(ClusterPitError::Admission)?;
-        for (position, shard) in self.shards.iter().enumerate() {
+        for (position, shard) in self.layout.shards.iter().enumerate() {
             if let Err(error) = shard.open_pit(pit.0) {
-                for pinned in &self.shards[..position] {
+                for pinned in &self.layout.shards[..position] {
                     pinned.close_pit(pit.0).ok();
                 }
                 self.lock_pits().close(pit);
@@ -115,7 +115,7 @@ impl ClusterEngine {
         self.reap_pits(now);
         let existed = self.lock_pits().close(pit).is_some();
         if existed {
-            for shard in &self.shards {
+            for shard in &self.layout.shards {
                 shard.close_pit(pit.0).ok();
             }
         }
@@ -138,7 +138,7 @@ impl ClusterEngine {
             None => return Err(ClusterRankedError::StalePit),
         };
         if meta.generation != self.placement_generation()
-            || meta.num_shards != self.shards.len() as u32
+            || meta.num_shards != self.layout.shards.len() as u32
         {
             self.lock_pits().close(pit);
             return Err(ClusterRankedError::StalePit);
@@ -176,7 +176,7 @@ impl ClusterEngine {
     fn reap_pits(&self, now: Instant) {
         let reaped = self.lock_pits().reap_expired(now);
         for (pit, _) in reaped {
-            for shard in &self.shards {
+            for shard in &self.layout.shards {
                 shard.close_pit(pit.0).ok();
             }
         }

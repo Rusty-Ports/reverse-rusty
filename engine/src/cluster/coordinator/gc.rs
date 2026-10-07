@@ -179,9 +179,14 @@ impl ClusterEngine {
         let state = self.control_state()?;
 
         // The live-routing keep-set: each position's endpoints as routing currently reaches them.
-        let live_eps: Vec<Vec<String>> = self.shards.iter().map(|s| s.live_endpoints()).collect();
+        let live_eps: Vec<Vec<String>> = self
+            .layout
+            .shards
+            .iter()
+            .map(|s| s.live_endpoints())
+            .collect();
 
-        let expected = self.dict.fingerprint();
+        let expected = self.layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         for (node, addr) in data_nodes {
             // A node-level client (slot binding irrelevant for the LISTING; drops connect their
@@ -287,7 +292,7 @@ impl ClusterEngine {
         let client = RemoteShard::connect_for_coordinator_with_security(
             addr,
             handle.clone(),
-            self.dict.fingerprint(),
+            self.layout.dict.fingerprint(),
             self.tag_dict.fingerprint(),
             listing.shard_id,
             self.coordinator_id,

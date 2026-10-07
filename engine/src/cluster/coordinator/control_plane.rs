@@ -139,15 +139,15 @@ impl ClusterEngine {
                 "add_replica requires a durable cluster (no on-disk segments to copy)".into(),
             ));
         };
-        let shard = self.shards.get(position).ok_or_else(|| {
+        let shard = self.layout.shards.get(position).ok_or_else(|| {
             ShardError::Config(format!(
                 "add_replica: shard position {position} out of range"
             ))
         })?;
         let primary_dir = shard_dir(base, position);
         shard.add_recovered_replica(
-            &self.norm,
-            &self.dict,
+            &self.layout.norm,
+            &self.layout.dict,
             &self.tag_dict,
             EngineConfig::default(),
             &primary_dir,
@@ -173,7 +173,7 @@ impl ClusterEngine {
         // Fan the observer into each shard as an event sink, so a `ReplicatedShard` surfaces its
         // degraded-redundancy (`ReplicaDesync`) events through the same observer (ADR-035). A
         // plain shard's default `set_event_sink` is a no-op.
-        for shard in &self.shards {
+        for shard in &self.layout.shards {
             shard.set_event_sink(Arc::clone(&observer));
         }
         *self

@@ -20,7 +20,7 @@
 //! **Durable for free.** The only durable change is `num_shards` growing/shrinking + a
 //! correspondingly longer/shorter per-shard segment registry — both already expressible in
 //! the existing `ClusterManifest` (no format bump). [`checkpoint`](ClusterEngine::checkpoint)
-//! writes `num_shards = self.ring.num_shards()` and [`open`](ClusterEngine::open) re-derives
+//! writes `num_shards = self.layout.ring.num_shards()` and [`open`](ClusterEngine::open) re-derives
 //! `HashRing::new(num_shards, vnodes)`, so a resized cluster reopens byte-identically.
 //!
 //! **Dict + vocab + tags preserved.** A resize does not touch the feature space: the normalizer
@@ -95,7 +95,7 @@ impl ClusterEngine {
         // cross-process false negative. Checked BEFORE the no-op short-circuit so the boundary is
         // consistent even for a same-K call. Always compiled, so a future non-local shard can't
         // slip past it on a non-distributed build (where this never fires).
-        if self.shards.iter().any(|s| !s.is_local()) {
+        if self.layout.shards.iter().any(|s| !s.is_local()) {
             return Err(ShardError::Config(
                 "resize is in-process only: a cross-process (remote) shard is not rebuilt under \
                  the new ring in v1 (it would be a silent false negative)"
@@ -103,7 +103,7 @@ impl ClusterEngine {
             ));
         }
         #[cfg(feature = "distributed")]
-        if !self.handoffs.is_empty() {
+        if !self.layout.handoffs.is_empty() {
             return Err(ShardError::Config(
                 "resize is in-process only: a handoff-wrapped (movable) shard position is not \
                  supported by a resize in v1"
@@ -116,7 +116,7 @@ impl ClusterEngine {
         // can advance the live generation twice while a later successful
         // SetShardCount advances the control document only once.
         self.finish_pending_resize_control_commit()?;
-        if new_num_shards == self.ring.num_shards() {
+        if new_num_shards == self.layout.ring.num_shards() {
             // The LIVE ring already has this many shards — a full rebuild would change nothing.
             // But a PRIOR resize may have swapped the ring in RAM and then FAILED to update the
             // control plane or checkpoint, leaving one or both at the old count. A bare `Ok(0)`
@@ -144,8 +144,8 @@ impl ClusterEngine {
             .clear();
 
         // Rebuild under the new ring, reusing the current normalizer + vocab (None ⇒ preserve
-        // self.vocab and re-resolve ITS equivalences onto the re-minted dict).
-        let new_norm = Arc::clone(&self.norm);
+        // self.layout.vocab and re-resolve ITS equivalences onto the re-minted dict).
+        let new_norm = Arc::clone(&self.layout.norm);
         let next_generation = self
             .placement_generation()
             .next()
@@ -183,7 +183,7 @@ impl ClusterEngine {
     ) -> Result<Option<usize>, ShardError> {
         let snapshot = self.collect_load(config)?;
         match recommended_shard_count(&snapshot, config) {
-            Some(k) if k != self.ring.num_shards() => self.resize(k).map(|_| Some(k)),
+            Some(k) if k != self.layout.ring.num_shards() => self.resize(k).map(|_| Some(k)),
             _ => Ok(None),
         }
     }
@@ -197,7 +197,7 @@ impl ClusterEngine {
     ///
     /// `new_vocab`: `Some(v)` (a [`set_vocab`](Self::set_vocab) call) installs `v` and uses its
     /// equivalence groups; `None` (a [`resize`](Self::resize) call) PRESERVES the existing
-    /// `self.vocab` (its equivalences are already installed on the reused dict).
+    /// `self.layout.vocab` (its equivalences are already installed on the reused dict).
     pub(super) fn rebuild_from_live(
         &mut self,
         new_norm: Arc<Normalizer>,
@@ -255,9 +255,9 @@ impl ClusterEngine {
         //    expand the new vocab's equivalence groups onto it.
         let mut lc = String::new();
         let mut extracted: Vec<RebuildExtractedQuery> = Vec::with_capacity(live.len());
-        let same_normalizer = Arc::ptr_eq(&new_norm, &self.norm);
+        let same_normalizer = Arc::ptr_eq(&new_norm, &self.layout.norm);
         let new_dict = if same_normalizer && !append_missing_features {
-            let dict = Arc::clone(&self.dict);
+            let dict = Arc::clone(&self.layout.dict);
             for (logical, text, version, source_generation, raw_tags, tag_ids, rank, placement) in
                 live
             {
@@ -291,7 +291,7 @@ impl ClusterEngine {
             // bits are durability semantics: changing the top-64 membership can
             // change class C visibility. Newly appended features keep the counts
             // observed in this complete live corpus and receive no mask bit.
-            let mut dict = self.dict.as_ref().clone();
+            let mut dict = self.layout.dict.as_ref().clone();
             let old_len = dict.len();
             let old_freqs: Vec<u32> = (0..old_len)
                 .map(|id| dict.freq(id as crate::dict::FeatureId))
@@ -320,7 +320,7 @@ impl ClusterEngine {
 
             // Newly interned equivalence members must be resolved against their
             // dense IDs before the final read-only materialization pass.
-            if let Some(vocab) = new_vocab.as_ref().or(self.vocab.as_deref()) {
+            if let Some(vocab) = new_vocab.as_ref().or(self.layout.vocab.as_deref()) {
                 let equiv = vocab.resolve_equivalences(&new_norm, &dict);
                 dict.set_equivalences(equiv);
             }
@@ -385,10 +385,10 @@ impl ClusterEngine {
             // rebuild's re-placement + ingest use the FN-safe widened form — a query whose anchor
             // is now an any-of fans to every member's shard), then install the map on the dict so
             // future incremental adds expand through `extract`. The groups come from `new_vocab`
-            // (set_vocab) or, when preserving, the EXISTING `self.vocab`. No groups ⇒ no-op.
+            // (set_vocab) or, when preserving, the EXISTING `self.layout.vocab`. No groups ⇒ no-op.
             let equiv = new_vocab
                 .as_ref()
-                .or(self.vocab.as_deref())
+                .or(self.layout.vocab.as_deref())
                 .map(|v| v.resolve_equivalences(&new_norm, &dict));
             if let Some(equiv) = equiv {
                 for (_, ex, _, _, _, _, _, _, _) in &mut extracted {
@@ -482,7 +482,7 @@ impl ClusterEngine {
         //    `sources.dat` would shadow the green ingest), then build a fresh durable shard —
         //    exactly `build`'s path. The post-commit `remove_orphan_shard_dirs` keeps the
         //    invariant "a resize commit leaves exactly shard_000..shard_{K′-1} on disk".
-        let old_num_shards = self.shards.len();
+        let old_num_shards = self.layout.shards.len();
         let rf = self.replication_factor.max(1);
         let data_dir = self.data_dir.clone();
         let green_source_file = format!("sources_g{:020}.dat", new_generation.0);
@@ -522,7 +522,7 @@ impl ClusterEngine {
                         }
                         if s < old_num_shards {
                             // Existing position: coexist green segments above the old ones.
-                            let next_seg = self.shards[s].next_seg_id()?;
+                            let next_seg = self.layout.shards[s].next_seg_id()?;
                             LocalShard::open_segments_with_source_file(
                                 Arc::clone(&new_norm),
                                 Arc::clone(&new_dict),
@@ -573,22 +573,21 @@ impl ClusterEngine {
         // this race-free with every per-ID writer.
         self.replace_logical_ids(accepted_ids)?;
         // Atomic swap (under `&mut self`, so no read observes a half-state). The normalizer is
-        // `new_norm` (the SAME instance on a resize); `self.vocab` is replaced only when a new
+        // `new_norm` (the SAME instance on a resize); `self.layout.vocab` is replaced only when a new
         // vocab was supplied (set_vocab) — a resize passes `None` and preserves it.
-        self.norm = new_norm;
-        self.dict = new_dict;
-        self.ring = new_ring;
-        self.shards = shards;
-        self.source_files = vec![green_source_file; num_shards];
-        self.placement_generation
-            .store(new_generation.0, std::sync::atomic::Ordering::Release);
+        self.layout.norm = new_norm;
+        self.layout.dict = new_dict;
+        self.layout.ring = new_ring;
+        self.layout.shards = shards;
+        self.layout.source_files = vec![green_source_file; num_shards];
+        self.layout.generation = new_generation;
         // ADR-113: the old shards (and their PIT pins) are gone; every open
         // registry entry can only ever fail its generation gate now. Drop them
         // eagerly (frees cap slots) WITHOUT resetting the id counter — a
         // reused id would let a stale cursor alias a post-rebuild PIT.
         self.clear_pits();
         if let Some(vocab) = new_vocab {
-            self.vocab = Some(Arc::new(vocab));
+            self.layout.vocab = Some(Arc::new(vocab));
         }
         Ok(rebuilt)
     }

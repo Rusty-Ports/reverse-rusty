@@ -49,7 +49,7 @@ impl ClusterEngine {
         visit: &mut (dyn FnMut(ExportedQuery) -> Result<(), ShardError> + Send),
     ) -> Result<u64, ShardError> {
         let mut seen: HashMap<u64, u64> = HashMap::new();
-        for shard in &self.shards {
+        for shard in &self.layout.shards {
             shard.visit_live_sources(&mut |(logical_id, dsl, version, tags)| {
                 let digest = copy_digest(&dsl, version, &tags);
                 match seen.entry(logical_id) {
@@ -101,8 +101,8 @@ mod tests {
     fn put(cluster: &ClusterEngine, shard: usize, logical: u64, version: u32, dsl: &str) {
         let ast = crate::dsl::parse(dsl).expect("dsl");
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &cluster.norm, &cluster.dict, &mut lc);
-        cluster.shards[shard]
+        let ex = extract_readonly(&ast, &cluster.layout.norm, &cluster.layout.dict, &mut lc);
+        cluster.layout.shards[shard]
             .insert_extracted_with_tags(&ex, logical, version, dsl, &[])
             .expect("insert");
     }

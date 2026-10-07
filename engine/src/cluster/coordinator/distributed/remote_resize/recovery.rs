@@ -17,19 +17,19 @@ impl ClusterEngine {
     pub fn attest_committed_layout(&self) -> Result<(), ShardError> {
         let state = self.control_state()?;
         let generation = self.placement_generation().0;
-        if state.num_shards as usize != self.shards.len()
+        if state.num_shards as usize != self.layout.shards.len()
             || state.placement_generation != generation
         {
             return Err(ShardError::ControlPlane(format!(
                 "this coordinator serves placement generation {generation} with {} shards, but \
                  the committed layout is generation {} with {} shards; restart it with \
                  --route-by-assignments to route to the committed layout",
-                self.shards.len(),
+                self.layout.shards.len(),
                 state.placement_generation,
                 state.num_shards
             )));
         }
-        for (position, shard) in self.shards.iter().enumerate() {
+        for (position, shard) in self.layout.shards.iter().enumerate() {
             let committed = state
                 .assignments
                 .iter()

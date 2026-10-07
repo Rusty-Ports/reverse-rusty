@@ -240,13 +240,12 @@ impl ClusterEngine {
         // coordinator attached to populated shards without either. A failure leaves the retired
         // old nodes refusing every request, so nothing answers from the superseded layout.
         self.replace_logical_ids(logical_ids)?;
-        self.ring = staged.ring;
-        self.shards = staged.shards;
-        self.handoffs = staged.handoffs;
-        self.source_files = staged.source_files;
+        self.layout.ring = staged.layout.ring;
+        self.layout.shards = staged.layout.shards;
+        self.layout.handoffs = staged.layout.handoffs;
+        self.layout.source_files = staged.layout.source_files;
         self.transport_metrics = staged.transport_metrics;
-        self.placement_generation
-            .store(generation.0, Ordering::Release);
+        self.layout.generation = generation;
         self.pending_repair
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -283,7 +282,7 @@ impl ClusterEngine {
         );
         Ok(RemoteResizeReport {
             old_num_shards,
-            num_shards: self.ring.num_shards(),
+            num_shards: self.layout.ring.num_shards(),
             placement_generation: self.placement_generation().0,
             exported,
             loaded,
@@ -316,7 +315,7 @@ impl ClusterEngine {
             && state.num_shards == prior.desired.num_shards
             && state.placement_generation == prior.desired.placement_generation
             && state.assignments == prior.desired.assignments
-            && self.ring.num_shards() == prior.desired.num_shards as usize
+            && self.layout.ring.num_shards() == prior.desired.num_shards as usize
             && self.placement_generation().0 == prior.desired.placement_generation;
         if !serving_committed {
             return Err(ShardError::ControlPlane(format!(
@@ -355,7 +354,7 @@ impl ClusterEngine {
                 "remote resize supports replication factor 1; rebalance replicas afterwards".into(),
             ));
         }
-        if self.handoffs.len() != self.shards.len() || self.data_dir.is_some() {
+        if self.layout.handoffs.len() != self.layout.shards.len() || self.data_dir.is_some() {
             return Err(ShardError::Config(
                 "remote resize requires a remote, assignment-routed cluster".into(),
             ));
@@ -478,7 +477,7 @@ impl ClusterEngine {
             );
             aborted
                 && self.control_state().is_ok_and(|state| {
-                    state.num_shards as usize == self.ring.num_shards()
+                    state.num_shards as usize == self.layout.ring.num_shards()
                         && state.placement_generation == self.placement_generation().0
                         && state.moves.resize.is_none()
                 })

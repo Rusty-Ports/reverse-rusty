@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::cluster::clog::{ClusterMutation, FileClusterLog, LogPos};
 use crate::cluster::control::{ClusterStateChange, InMemoryControlPlane};
+use crate::cluster::coordinator::layout::Layout;
 use crate::cluster::coordinator::{
     into_shard, replica_dir, shard_dir, ClusterConfig, ClusterDurable, ClusterEngine,
     CLUSTER_LOG_FILE, CLUSTER_MANIFEST_FILE,
@@ -47,7 +48,7 @@ impl ClusterEngine {
     /// Current logical placement generation (ADR-109). Physical checkpoints,
     /// compaction, replication, handoff, and node reassignment never change it.
     pub fn placement_generation(&self) -> crate::ownership::PlacementGeneration {
-        crate::ownership::PlacementGeneration(self.placement_generation.load(Ordering::Acquire))
+        self.layout.generation
     }
 
     /// Assemble a cluster from pre-built parts — the construction seam shared by
@@ -92,14 +93,20 @@ impl ClusterEngine {
         // on; ADR-076 records that trust model and keeps LIVE vocab changes on a
         // remote cluster refused (`set_vocab` non-local guard).
         let engine = ClusterEngine {
-            norm,
-            dict,
+            layout: Layout {
+                norm,
+                dict,
+                vocab: None,
+                ring,
+                shards,
+                source_files: durable.source_files,
+                #[cfg(feature = "distributed")]
+                handoffs: Vec::new(),
+                generation: durable.placement_generation,
+            },
             tag_dict,
             // Untagged by default; the tagged write paths + `open` latch it (ADR-055).
             tags_present: AtomicBool::new(false),
-            vocab: None,
-            ring,
-            shards,
             logical_ids: std::sync::RwLock::new(
                 super::super::logical_ids::LogicalIdDirectory::default(),
             ),
@@ -109,10 +116,8 @@ impl ClusterEngine {
             per_shard,
             log: durable.log,
             epoch: AtomicU64::new(durable.epoch),
-            placement_generation: AtomicU64::new(durable.placement_generation.0),
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
-            source_files: durable.source_files,
             pending_alias_import_predecessor: None,
             pending_alias_import_manifest: Mutex::new(None),
             committed_placement_generation: AtomicU64::new(
@@ -138,8 +143,6 @@ impl ClusterEngine {
             move_fence: crate::cluster::coordinator::move_fence::MoveFence::default(),
             // No position is handoff-wrapped by default; the gRPC builders install handles via
             // `with_handoffs`. Empty here ⇒ the in-process/default path is byte-identical (ADR-043).
-            #[cfg(feature = "distributed")]
-            handoffs: Vec::new(),
             // Handoff drain caps default here (the in-process path never hands off); the gRPC
             // builders override them from `ClusterConfig` via `with_handoff_caps` (ADR-044/048).
             #[cfg(feature = "distributed")]
@@ -415,7 +418,7 @@ impl ClusterEngine {
             durable,
         )?;
         // Retain the vocab restored from the manifest so a later checkpoint re-persists it.
-        engine.vocab = restored_vocab;
+        engine.layout.vocab = restored_vocab;
         // Latch tags_present (ADR-055) from the restored tag space; the log-tail replay below
         // (`apply_add` → `note_tags`) additionally latches it for any un-checkpointed tagged add.
         if !engine.tag_dict.is_empty() {
@@ -434,7 +437,7 @@ impl ClusterEngine {
         // so serving works while `add_query` fails closed toward `upsert_query`,
         // and surface the degradation as a durability event.
         let mut committed_ids = Some(Vec::new());
-        for shard in &engine.shards {
+        for shard in &engine.layout.shards {
             match (shard.live_logical_ids(), &mut committed_ids) {
                 (Ok(ids), Some(collected)) => collected.extend(ids),
                 (Ok(_), None) => {}
@@ -559,8 +562,8 @@ impl ClusterEngine {
                 .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
             engine.rebuild_from_corpus(
                 live.into_values().collect(),
-                Arc::clone(&engine.norm),
-                engine.ring.clone(),
+                Arc::clone(&engine.layout.norm),
+                engine.layout.ring.clone(),
                 None,
                 next_generation,
                 true,
@@ -568,7 +571,7 @@ impl ClusterEngine {
             engine
                 .control
                 .propose(ClusterStateChange::BumpModelVersion {
-                    dict_fingerprint: engine.dict.fingerprint(),
+                    dict_fingerprint: engine.layout.dict.fingerprint(),
                 })?;
             engine.checkpoint_quiesced()?;
         } else {

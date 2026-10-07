@@ -63,7 +63,7 @@ impl ClusterEngine {
     }
 
     fn live_num_shards_for_control(&self) -> Result<u32, ShardError> {
-        u32::try_from(self.ring.num_shards()).map_err(|_| {
+        u32::try_from(self.layout.ring.num_shards()).map_err(|_| {
             ShardError::ControlPlane(
                 "serving shard count exceeds the control-plane representation".into(),
             )
@@ -71,14 +71,16 @@ impl ClusterEngine {
     }
 
     fn attest_resize_control_identity(&self, control: &ClusterState) -> Result<(), ShardError> {
-        if control.vnodes != self.vnodes || control.dict_fingerprint != self.dict.fingerprint() {
+        if control.vnodes != self.vnodes
+            || control.dict_fingerprint != self.layout.dict.fingerprint()
+        {
             return Err(ShardError::ControlPlane(format!(
                 "resize control identity diverged: control has {} vnodes/fingerprint {}, serving \
                  state has {} vnodes/fingerprint {}",
                 control.vnodes,
                 control.dict_fingerprint,
                 self.vnodes,
-                self.dict.fingerprint()
+                self.layout.dict.fingerprint()
             )));
         }
         if control.assignments.len() != control.num_shards as usize

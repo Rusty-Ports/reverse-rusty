@@ -28,7 +28,7 @@ impl ClusterEngine {
         // rows: top-64 pairs, phrase proxies, and class-C plans a rebuild kept in default reads
         // (ADR-203). Each shard counts its own; the per-shard size is the total / num_shards.
         let mut replicated = 0u64;
-        for shard in &self.shards {
+        for shard in &self.layout.shards {
             replicated += shard.replicated_rows()?;
         }
         let num_shards = u64::from(state.num_shards).max(1);

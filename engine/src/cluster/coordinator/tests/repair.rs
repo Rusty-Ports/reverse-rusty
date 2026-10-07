@@ -15,8 +15,8 @@ fn partial_apply_is_detected_then_resync_converges() {
     // A throwaway build gives a frozen norm + dict that already know the query's tokens.
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
-    let norm = Arc::clone(&real.norm);
-    let dict = Arc::clone(&real.dict);
+    let norm = Arc::clone(&real.layout.norm);
+    let dict = Arc::clone(&real.layout.dict);
     let tag_dict = Arc::clone(&real.tag_dict);
 
     // A from_parts cluster over fault-injectable shards sharing that frozen feature space.
@@ -145,8 +145,8 @@ fn resync_requeues_when_shard_still_failing() {
     };
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
-    let norm = Arc::clone(&real.norm);
-    let dict = Arc::clone(&real.dict);
+    let norm = Arc::clone(&real.layout.norm);
+    let dict = Arc::clone(&real.layout.dict);
     let tag_dict = Arc::clone(&real.tag_dict);
 
     let make_cluster = || {

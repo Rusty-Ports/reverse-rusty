@@ -61,8 +61,8 @@ impl ClusterEngine {
             ..ClusterConfig::default()
         };
         let staged = Self::connect_remote_with_security_mode(
-            Arc::clone(&self.norm),
-            Arc::clone(&self.dict),
+            Arc::clone(&self.layout.norm),
+            Arc::clone(&self.layout.dict),
             Arc::clone(&self.tag_dict),
             &config,
             target_endpoints,
@@ -144,7 +144,7 @@ impl ClusterEngine {
     ) -> Result<(Vec<u64>, Vec<u64>), ShardError> {
         // Each source position's export may take up to its own export bound; the streams stay
         // open across all of them, plus one more bound to finish.
-        let rounds = u32::try_from(self.shards.len())
+        let rounds = u32::try_from(self.layout.shards.len())
             .unwrap_or(u32::MAX)
             .saturating_add(1);
         let deadline = Instant::now()
@@ -250,7 +250,7 @@ impl ClusterEngine {
         RemoteShard::connect_for_coordinator_with_security(
             endpoint,
             handle.clone(),
-            self.dict.fingerprint(),
+            self.layout.dict.fingerprint(),
             self.tag_dict.fingerprint(),
             position as u32,
             self.coordinator_id,

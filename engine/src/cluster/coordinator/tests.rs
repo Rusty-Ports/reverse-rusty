@@ -2,7 +2,10 @@
 //! `log` field), kept in-module rather than in the integration oracles.
 
 use super::*;
+use crate::cluster::ring::HashRing;
 use crate::compile::Extracted;
+use crate::dict::Dict;
+use crate::normalize::Normalizer;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;

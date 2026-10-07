@@ -24,8 +24,8 @@ fn faulty_cluster() -> Faulty {
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let (norm, dict, tag_dict) = (
-        Arc::clone(&real.norm),
-        Arc::clone(&real.dict),
+        Arc::clone(&real.layout.norm),
+        Arc::clone(&real.layout.dict),
         Arc::clone(&real.tag_dict),
     );
     let fail = Arc::new(AtomicBool::new(false));
@@ -77,7 +77,7 @@ fn matches(cluster: &ClusterEngine, title: &str) -> Vec<u64> {
 /// two live rows for one id, so this also proves there is no such pair.
 fn live_rows(cluster: &ClusterEngine) -> Vec<u64> {
     let mut rows = Vec::new();
-    for shard in &cluster.shards {
+    for shard in &cluster.layout.shards {
         rows.extend(
             shard
                 .live_logical_ids()

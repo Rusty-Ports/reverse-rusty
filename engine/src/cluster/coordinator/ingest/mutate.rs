@@ -92,7 +92,7 @@ impl ClusterEngine {
         // single-node "the WAL records only accepted mutations" (ADR-068); the apply/replay funnel
         // then forces accept=true, so replay reproduces the writer's decision regardless of config.
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        let ex = extract_readonly(&ast, &self.layout.norm, &self.layout.dict, &mut lc);
         // Reject a column-overflowing compiled query before the log too: it would
         // truncate the shards' u16 exact-store counts on apply (a false negative).
         if let Err(e) = Self::check_column_limit(&ex) {
@@ -102,7 +102,8 @@ impl ClusterEngine {
         if matches!(target, Target::Reject) {
             return Ok(AddOutcome::RejectedClassD);
         }
-        let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        let placement =
+            target.placement(self.placement_generation(), self.layout.shards.len() as u32)?;
         self.ensure_serving_layout_committed()?;
         // Global lock order is PIT/mutation barrier -> logical-ID lock. Resync
         // uses the same order; taking the ID lock first can deadlock behind a
@@ -235,7 +236,7 @@ impl ClusterEngine {
         // tombstone pass. Same config-independent-replay discipline as add (codex review): the
         // log holds only accepted mutations, and apply/replay forces accept=true.
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        let ex = extract_readonly(&ast, &self.layout.norm, &self.layout.dict, &mut lc);
         // Reject a column-overflowing compiled query before the log (and before any
         // tombstone): it would truncate the shards' u16 exact-store counts on apply.
         // A failed replace never deletes, so the prior version stays live (0 replaced).
@@ -246,7 +247,8 @@ impl ClusterEngine {
         if matches!(target, Target::Reject) {
             return Ok((0, AddOutcome::RejectedClassD));
         }
-        let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        let placement =
+            target.placement(self.placement_generation(), self.layout.shards.len() as u32)?;
         self.ensure_serving_layout_committed()?;
         // Keep the same barrier -> logical-ID order as add/remove/resync.
         // The barrier spans the log append and the whole shard fan-out.
@@ -338,7 +340,7 @@ impl ClusterEngine {
         let mut failed = Vec::new();
         let mut first_err: Option<ShardError> = None;
         for &s in shards {
-            match self.shards[s]
+            match self.layout.shards[s]
                 .insert_extracted_with_placement(ex, id, version, dsl, tags, placement)
             {
                 Ok(_) => applied.push(s),
@@ -390,19 +392,20 @@ impl ClusterEngine {
             ))
         })?;
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        let ex = extract_readonly(&ast, &self.layout.norm, &self.layout.dict, &mut lc);
         // Force accept=true (same only-accepted-writes invariant as apply_upsert): apply/replay
         // reproduces the writer's decision regardless of the current knob, so a knob flip on
         // reopen cannot drop or resurrect a class-D write (codex review). Rejected writes never
         // reach the log (classified out in add_query), so the Reject arm is defensive.
         let (target, class) = planned(
-            &self.dict,
-            &self.ring,
+            &self.layout.dict,
+            &self.layout.ring,
             &ex,
             true,
             self.per_shard.hot_anchor_threshold,
         );
-        let expected = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        let expected =
+            target.placement(self.placement_generation(), self.layout.shards.len() as u32)?;
         if &expected != placement {
             return Err(crate::ownership::OwnershipError::PlacementDecisionMismatch.into());
         }
@@ -415,7 +418,7 @@ impl ClusterEngine {
             // is queued for repair rather than a silent partial. In-process inserts are infallible
             // ⇒ the outcome is byte-identical save that the entry now lands on every shard.
             Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
-                let all: Vec<usize> = (0..self.shards.len()).collect();
+                let all: Vec<usize> = (0..self.layout.shards.len()).collect();
                 self.insert_on_shards(
                     &all,
                     &ex,
@@ -458,7 +461,7 @@ impl ClusterEngine {
         let mut removed = 0usize;
         let mut failed = Vec::new();
         let mut first_err: Option<ShardError> = None;
-        for (s, shard) in self.shards.iter().enumerate() {
+        for (s, shard) in self.layout.shards.iter().enumerate() {
             match shard.delete_by_logical_id(id) {
                 Ok(n) => removed += n,
                 Err(e) => {
@@ -468,7 +471,7 @@ impl ClusterEngine {
             }
         }
         if !failed.is_empty() {
-            let applied: Vec<usize> = (0..self.shards.len())
+            let applied: Vec<usize> = (0..self.layout.shards.len())
                 .filter(|s| !failed.contains(s))
                 .collect();
             return Err(self.note_partial(

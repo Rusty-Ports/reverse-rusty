@@ -149,7 +149,7 @@ impl ClusterEngine {
         source_endpoint: &str,
         target_endpoint: &str,
     ) -> Result<HandoffRoute, ShardError> {
-        let handoff = self.handoffs.get(position).ok_or_else(|| {
+        let handoff = self.layout.handoffs.get(position).ok_or_else(|| {
             ShardError::Config(format!(
                 "execute_handoff: shard position {position} is not handoff-capable (the cluster \
                  was not built via connect_remote/connect_replicated)"
@@ -221,6 +221,7 @@ impl ClusterEngine {
         let drain_passes = self.handoff_drain_passes;
         let final_drain_cap = self.handoff_final_drain_cap;
         let handoff = self
+            .layout
             .handoffs
             .get(position)
             .ok_or_else(|| {
@@ -231,7 +232,7 @@ impl ClusterEngine {
             })?
             .clone();
         let new_gen = handoff.generation() + 1;
-        let expected = self.dict.fingerprint();
+        let expected = self.layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
 
         // Connect to the source and pin its un-sealed tail for the WHOLE move, so the segment-copy
@@ -252,7 +253,7 @@ impl ClusterEngine {
         let do_move = || -> Result<u64, ShardError> {
             // Ship the dict + frozen tag space + drive the target to pull the source's segments at
             // snapshot `P` (the source keeps serving + writing — no quiesce).
-            let dict_bytes = crate::storage::serialize_dict(&self.dict);
+            let dict_bytes = crate::storage::serialize_dict(&self.layout.dict);
             let target = crate::cluster::remote::RemoteShard::
                 connect_and_adopt_for_coordinator_with_security(
                 target_endpoint,
@@ -277,7 +278,11 @@ impl ClusterEngine {
             let mut hwm = LogPos(p);
             for _ in 0..drain_passes {
                 let next = crate::cluster::replica::catch_up_replica(
-                    &target, &source, &self.norm, &self.dict, hwm,
+                    &target,
+                    &source,
+                    &self.layout.norm,
+                    &self.layout.dict,
+                    hwm,
                 )?;
                 source.renew_retention_lease(lease, next)?;
                 if next == hwm {
@@ -322,7 +327,11 @@ impl ClusterEngine {
                 let mut converged = false;
                 for _ in 0..final_drain_cap {
                     let next = crate::cluster::replica::catch_up_replica(
-                        &target, &source, &self.norm, &self.dict, hwm,
+                        &target,
+                        &source,
+                        &self.layout.norm,
+                        &self.layout.dict,
+                        hwm,
                     )?;
                     source.renew_retention_lease(lease, next)?;
                     if next == hwm {

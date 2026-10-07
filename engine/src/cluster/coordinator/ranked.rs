@@ -187,13 +187,13 @@ impl ClusterEngine {
         let (targets, broad_eval_shard) = self.route(title);
         let ownership = crate::ownership::OwnershipContext::new(
             self.placement_generation(),
-            self.shards.len() as u32,
+            self.layout.shards.len() as u32,
             targets.iter().map(|&position| position as u32).collect(),
             include_broad.then_some(broad_eval_shard as u32),
         )?;
 
         let collect_one = |&position: &usize| {
-            let shard = &self.shards[position];
+            let shard = &self.layout.shards[position];
             let broad_here = include_broad && position == broad_eval_shard;
             match pit {
                 None => shard.percolate_top_k_owned(
@@ -312,7 +312,7 @@ impl ClusterEngine {
     ) -> Result<Vec<String>, ClusterRankedError> {
         check_deadline(deadline)?;
         if self.placement_generation() != ranked.placement_generation
-            || self.shards.len() as u32 != ranked.num_shards
+            || self.layout.shards.len() as u32 != ranked.num_shards
         {
             return Err(ClusterRankedError::InvalidShardReply {
                 position: 0,
@@ -321,7 +321,7 @@ impl ClusterEngine {
             });
         }
         let mut groups: Vec<Vec<(usize, u64)>> =
-            (0..self.shards.len()).map(|_| Vec::new()).collect();
+            (0..self.layout.shards.len()).map(|_| Vec::new()).collect();
         let mut seen = FastSet::default();
         seen.reserve(ranked.hits.len());
         for (index, hit) in ranked.hits.iter().enumerate() {
@@ -345,7 +345,7 @@ impl ClusterEngine {
             .collect();
         let fetch_one = |(position, requested): &(usize, Vec<(usize, u64)>), limit: usize| {
             let ids: Vec<u64> = requested.iter().map(|&(_, id)| id).collect();
-            self.shards[*position]
+            self.layout.shards[*position]
                 .fetch_matches(&ids, limit, deadline)
                 .map(|fetched| (*position, requested.clone(), fetched))
                 .map_err(ClusterRankedError::from)
@@ -440,14 +440,17 @@ impl ClusterEngine {
         let compiled = crate::compile::compile_one_readonly(
             source,
             logical_id,
-            &self.norm,
-            &self.dict,
+            &self.layout.norm,
+            &self.layout.dict,
             &mut lc,
             self.per_shard.hot_anchor_threshold,
         )
         .ok()?;
         Some(crate::explain::explain_match_structured(
-            &compiled, title, &self.norm, &self.dict,
+            &compiled,
+            title,
+            &self.layout.norm,
+            &self.layout.dict,
         ))
     }
 }
