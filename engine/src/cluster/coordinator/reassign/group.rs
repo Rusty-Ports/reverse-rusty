@@ -119,7 +119,8 @@ impl ClusterEngine {
         desired: &ShardAssignment,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
-        self.reassign_group_and_move_in(&self.layout(), position, desired, handle)
+        let stable = self.stable();
+        self.reassign_group_and_move_in(&stable.layout, position, desired, handle)
     }
 
     pub(in crate::cluster::coordinator) fn reassign_group_and_move_in(
@@ -343,7 +344,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         if resumes_ready {
             // A retry of this exact Ready intent must preserve the write-quiescent interval under
             // which its evidence was recorded. `Begin` above proved the immutable identity is the
@@ -401,7 +402,7 @@ impl ClusterEngine {
                     self.coordinator_id,
                     &self.client_security,
                 )?
-                .with_metrics(Arc::clone(&self.transport_metrics));
+                .with_metrics(self.transport_metrics.load_full());
                 // A fresh member may RE-ENTER a group it was dropped from (its slot preserved a
                 // stale fence through RecoverFrom) — clear it or the committed member would
                 // reject every write / desync on first fan-out.
@@ -535,7 +536,7 @@ impl ClusterEngine {
                         self.coordinator_id,
                         &self.client_security,
                     )?
-                    .with_metrics(Arc::clone(&self.transport_metrics));
+                    .with_metrics(self.transport_metrics.load_full());
                     // Same stale-fence hazard as a fresh member: a committed replica can carry a
                     // fence from a move that dropped it as this position's PRIMARY long ago (map
                     // edits can re-add it replica-first). Clear it — post-swap it must accept
@@ -623,7 +624,7 @@ impl ClusterEngine {
                         self.coordinator_id,
                         &self.client_security,
                     )?
-                    .with_metrics(Arc::clone(&self.transport_metrics));
+                    .with_metrics(self.transport_metrics.load_full());
                     Ok(Box::new(t))
                 };
                 let mut members = d_members.iter();
@@ -653,7 +654,9 @@ impl ClusterEngine {
                     .unwrap_or_else(PoisonError::into_inner)
                     .as_ref()
                 {
-                    backing.set_event_sink(Arc::clone(obs));
+                    for event in backing.set_event_sink(Arc::clone(obs)) {
+                        obs(&event);
+                    }
                 }
                 handoff.swap_backing(backing, new_gen);
                 Ok(new_gen)
@@ -721,6 +724,7 @@ impl ClusterEngine {
                 if abortable.get() {
                     intent::abort(
                         self,
+                        layout,
                         &move_intent,
                         "reassign_group_and_move: abort clean preparation",
                     );

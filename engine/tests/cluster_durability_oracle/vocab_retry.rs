@@ -85,7 +85,7 @@ fn identical_alias_retry_does_not_overwrite_an_unreadable_manifest() {
     let dir = unique_dir("alias_retry_corrupt_manifest");
     let cfg = durable_cfg(3, dir.clone(), false);
     let manifest_path = dir.join("cluster_manifest.bin");
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+    let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
     cluster
         .import_alias_synonyms("package, pkg")
@@ -116,7 +116,7 @@ fn identical_alias_retry_does_not_overwrite_incompatible_persisted_vocab() {
     let dir = unique_dir("alias_retry_incompatible_vocab");
     let cfg = durable_cfg(3, dir.clone(), false);
     let manifest_path = dir.join("cluster_manifest.bin");
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+    let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
     cluster
         .import_alias_synonyms("package, pkg")
@@ -148,7 +148,7 @@ fn identical_alias_retry_does_not_overwrite_a_newer_manifest() {
     let dir = unique_dir("alias_retry_newer_manifest");
     let cfg = durable_cfg(3, dir.clone(), false);
     let manifest_path = dir.join("cluster_manifest.bin");
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+    let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
     cluster
         .import_alias_synonyms("package, pkg")
@@ -184,7 +184,7 @@ fn identical_alias_retry_rejects_same_generation_topology_drift() {
     let dir = unique_dir("alias_retry_topology_drift");
     let cfg = durable_cfg(3, dir.clone(), false);
     let manifest_path = dir.join("cluster_manifest.bin");
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+    let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
     cluster
         .import_alias_synonyms("package, pkg")
@@ -216,7 +216,7 @@ fn identical_alias_retry_rejects_same_generation_recovery_identity_drift() {
     let dir = unique_dir("alias_retry_recovery_identity_drift");
     let cfg = durable_cfg(3, dir.clone(), false);
     let manifest_path = dir.join("cluster_manifest.bin");
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
+    let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "package adapter".into())])
         .expect("durable cluster");
     cluster
         .import_alias_synonyms("package, pkg")

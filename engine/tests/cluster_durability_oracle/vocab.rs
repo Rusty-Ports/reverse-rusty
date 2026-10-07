@@ -34,7 +34,7 @@ fn declared_alias_survives_reopen() {
 
         // Build durable, declare the alias (rebuild + checkpoint), snapshot, then "crash".
         let pre_crash: Vec<HashSet<u64>> = {
-            let mut cluster =
+            let cluster =
                 ClusterEngine::build(vocab(), &durable_cfg(k, dir.clone(), false), &queries)
                     .expect("durable cluster builds");
             cluster
@@ -129,7 +129,7 @@ fn declared_equivalence_survives_reopen() {
         let dir = unique_dir(&format!("equiv_k{k}"));
 
         let pre_crash: Vec<HashSet<u64>> = {
-            let mut cluster =
+            let cluster =
                 ClusterEngine::build(vocab(), &durable_cfg(k, dir.clone(), false), &queries)
                     .expect("durable cluster builds");
             cluster
@@ -219,7 +219,7 @@ fn tagged_set_vocab_carries_tags_across_checkpoint_reopen_and_rebuild() {
     }
 
     // Reopen #1, then the vocabulary change on the reopened cluster.
-    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
     let rebuilt = reopened
         .set_vocab(alias_vocab("zzabbr", "term:zzcanon"))
         .expect("set_vocab on a reopened tagged cluster (ADR-074)");
@@ -327,7 +327,7 @@ fn set_vocab_after_reopen_rebuilds_from_persisted_sources() {
             .expect("build");
         cluster.checkpoint().expect("checkpoint");
     }
-    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
     let rebuilt = reopened
         .set_vocab(alias_vocab("zzabbr", "term:zzcanon"))
         .expect("set_vocab after reopen");
@@ -376,7 +376,7 @@ fn set_vocab_after_delete_and_checkpoint_does_not_resurrect() {
         // exact shape that used to skip the sources rewrite.
         cluster.checkpoint().expect("checkpoint after delete");
     }
-    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
     assert!(
         !reopened
             .percolate("1995 vertex zzentitytwo alpha")
@@ -428,7 +428,7 @@ fn synthetic_only_tags_survive_set_vocab_after_reopen() {
         cluster.checkpoint().expect("checkpoint");
     }
 
-    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
     reopened
         .set_vocab(alias_vocab("zzabbr", "term:zzcanon"))
         .expect("set_vocab on a reopened synthetic-only-tagged cluster");
@@ -475,9 +475,8 @@ fn declared_alias_rebind_survives_reopen() {
     let title_two = "1994 vertex zztwo pro";
 
     {
-        let mut cluster =
-            ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
-                .expect("durable cluster builds");
+        let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+            .expect("durable cluster builds");
         // First binding: zzabbr → zzone.
         cluster
             .set_vocab(alias_vocab("zzabbr", "term:zzone"))

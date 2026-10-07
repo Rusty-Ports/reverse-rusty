@@ -34,9 +34,9 @@ impl ClusterEngine {
     /// set of writes. PIT opens, exhaustive delivery, `flush` and other checkpoints wait too;
     /// ordinary reads do not. Lock order: this barrier, then a logical-id lock, then a shard.
     pub fn checkpoint(&self) -> Result<(), ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
         let _quiesced = self.quiesce_mutations();
-        self.checkpoint_quiesced(layout)
+        self.checkpoint_quiesced(&stable.layout)
     }
 
     /// Take the exclusive side of the mutation barrier: wait for every write that has been
@@ -51,9 +51,9 @@ impl ClusterEngine {
 
     /// [`Self::checkpoint`] for a caller that already excludes every mutation. It must do
     /// one of these: hold [`Self::quiesce_mutations`]; hold the barrier shared together with
-    /// the bulk logical-id guard (a bulk load, which is itself the only writer); have
-    /// `&mut self`; or own an engine that has not been shared yet. Taking the barrier here
-    /// would deadlock the first two.
+    /// the bulk logical-id guard (a bulk load, which is itself the only writer); hold a
+    /// layout change, whose fence refuses every write; or own an engine that has not been
+    /// shared yet. Taking the barrier here would deadlock the first two.
     pub(in crate::cluster::coordinator) fn checkpoint_quiesced(
         &self,
         layout: &Layout,
@@ -129,7 +129,7 @@ impl ClusterEngine {
         // rename succeeds but the parent-directory sync fails; the next
         // identical request may acknowledge that document only when every
         // recovery-defining field matches this retained identity.
-        if self.pending_alias_import_predecessor.is_some() {
+        if self.alias_import_predecessor().is_some() {
             *self
                 .pending_alias_import_manifest
                 .lock()
@@ -152,8 +152,15 @@ impl ClusterEngine {
                 error: e.to_string(),
             });
         }
-        self.gc_orphan_segments(&dir, &segment_registry);
-        self.gc_superseded_source_sidecars(&dir, layout.shards.len(), layout.generation.0);
+        // Files the committed layout no longer names belong to a layout that was replaced.
+        // An operation that loaded that layout may still open one (a lazily mapped source
+        // sidecar, for one), so they stay until every such operation has returned. Whatever
+        // is left is never selected and goes at the next checkpoint.
+        if self.retired_layouts_released() {
+            self.gc_orphan_segments(&dir, &segment_registry);
+            self.gc_superseded_source_sidecars(&dir, layout.shards.len(), layout.generation.0);
+            self.remove_shard_dirs_at_or_above(layout.shards.len());
+        }
         self.compact_logical_ids();
         Ok(())
     }

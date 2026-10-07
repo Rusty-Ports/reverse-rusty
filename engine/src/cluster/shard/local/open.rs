@@ -26,6 +26,7 @@ impl LocalShard {
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         LocalShard {
             engine: Mutex::new(engine),
+            storage_frozen: std::sync::atomic::AtomicBool::new(false),
             snapshot,
             translog: translog::null(),
             retention: Mutex::new(RetentionLeases::default()),
@@ -87,6 +88,7 @@ impl LocalShard {
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         Ok(LocalShard {
             engine: Mutex::new(engine),
+            storage_frozen: std::sync::atomic::AtomicBool::new(false),
             snapshot,
             translog,
             retention: Mutex::new(RetentionLeases::default()),
@@ -243,6 +245,7 @@ impl LocalShard {
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         Ok(LocalShard {
             engine: Mutex::new(engine),
+            storage_frozen: std::sync::atomic::AtomicBool::new(false),
             snapshot,
             translog,
             retention: Mutex::new(RetentionLeases::default()),
@@ -313,6 +316,7 @@ impl LocalShard {
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         let shard = LocalShard {
             engine: Mutex::new(engine),
+            storage_frozen: std::sync::atomic::AtomicBool::new(false),
             snapshot,
             translog,
             retention: Mutex::new(RetentionLeases::default()),

@@ -35,6 +35,9 @@ use super::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
 /// `norm`/`dict`) supplies them to [`apply_mutation`](super::apply_mutation) — the shard need not retain them.
 pub(crate) struct LocalShard {
     engine: Mutex<Engine>,
+    /// Set while a layout change is replacing this shard, and for good once it has
+    /// (ADR-209). See [`Shard::set_storage_frozen`].
+    storage_frozen: std::sync::atomic::AtomicBool,
     snapshot: ArcSwap<EngineSnapshot>,
     translog: Box<translog::ShardLog>,
     /// Open peer-recovery retention leases (ADR-040): while any is held, `seal_for_checkpoint`

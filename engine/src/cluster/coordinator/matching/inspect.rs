@@ -37,7 +37,7 @@ impl ClusterEngine {
     /// call counts, errors, timeouts, retries, and summed latency. All-zero for an
     /// in-process cluster (no remote RPCs). Off the hot path — introspection / scraping.
     pub fn transport_metrics(&self) -> crate::cluster::TransportMetricsSnapshot {
-        self.transport_metrics.snapshot()
+        self.transport_metrics.load().snapshot()
     }
 
     /// Total physical query count across shards (a replicated/any-of query is

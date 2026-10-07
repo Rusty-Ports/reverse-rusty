@@ -21,8 +21,8 @@ impl ClusterEngine {
     /// empty query, or a parse error) is classified out BEFORE the log, so the log holds only
     /// accepted mutations and replay is configuration-independent (codex review).
     pub fn add_query(&self, id: u64, dsl: &str) -> Result<AddOutcome, ShardError> {
-        let layout = &*self.layout();
-        self.add_query_with_tags_in(layout, id, dsl, &[])
+        let admitted = self.admit_mutation();
+        self.add_query_with_tags_in(&admitted.layout, id, dsl, &[])
     }
 
     /// [`add_query`](Self::add_query) carrying per-query metadata tags (ADR-049/055). The raw tags
@@ -36,7 +36,8 @@ impl ClusterEngine {
         dsl: &str,
         tags: &[(String, String)],
     ) -> Result<AddOutcome, ShardError> {
-        self.add_query_with_tags_in(&self.layout(), id, dsl, tags)
+        let admitted = self.admit_mutation();
+        self.add_query_with_tags_in(&admitted.layout, id, dsl, tags)
     }
 
     pub(in crate::cluster::coordinator) fn add_query_with_tags_in(
@@ -64,7 +65,8 @@ impl ClusterEngine {
         version: u32,
         tags: &[(String, String)],
     ) -> Result<AddOutcome, ShardError> {
-        self.create_query_with_tags_in(&self.layout(), id, dsl, version, tags)
+        let admitted = self.admit_mutation();
+        self.create_query_with_tags_in(&admitted.layout, id, dsl, version, tags)
     }
 
     pub(in crate::cluster::coordinator) fn create_query_with_tags_in(
@@ -85,12 +87,6 @@ impl ClusterEngine {
         // result. This is still only an early conflict return, never an absence
         // proof — the second check below closes a create arriving during compilation.
         if self.logical_ids_authoritative() {
-            // Preserve the global mutation lock order: PIT barrier, then logical
-            // ID lock. Resync/exhaustive mutation code relies on this order.
-            let _pit_barrier = self
-                .pit_open_barrier
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _logical_guard = self.logical_write_guard(id);
             if let Some(conflict) = self.create_conflict(layout, id) {
                 return Err(conflict);
@@ -127,14 +123,6 @@ impl ClusterEngine {
         }
         let placement = target.placement(layout.generation, layout.shards.len() as u32)?;
         self.ensure_serving_layout_committed(layout)?;
-        // Global lock order is PIT/mutation barrier -> logical-ID lock. Resync
-        // uses the same order; taking the ID lock first can deadlock behind a
-        // queued exhaustive writer on writer-preferring RwLock implementations.
-        // Hold the barrier through the durable append and complete shard fan-out.
-        let _pit_barrier = self
-            .pit_open_barrier
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.ensure_resize_write_fence_open()?;
         // ADR-110's bounded merge requires one live distributed row per logical id.
         // Content-derived placement cannot guarantee a common owner for two different
@@ -225,8 +213,8 @@ impl ClusterEngine {
         dsl: &str,
         version: u32,
     ) -> Result<(usize, AddOutcome), ShardError> {
-        let layout = &*self.layout();
-        self.upsert_query_with_tags_in(layout, id, dsl, version, &[])
+        let admitted = self.admit_mutation();
+        self.upsert_query_with_tags_in(&admitted.layout, id, dsl, version, &[])
     }
 
     /// [`upsert_query`](Self::upsert_query) carrying per-query metadata tags for the NEW
@@ -241,7 +229,8 @@ impl ClusterEngine {
         version: u32,
         tags: &[(String, String)],
     ) -> Result<(usize, AddOutcome), ShardError> {
-        self.upsert_query_with_tags_in(&self.layout(), id, dsl, version, tags)
+        let admitted = self.admit_mutation();
+        self.upsert_query_with_tags_in(&admitted.layout, id, dsl, version, tags)
     }
 
     pub(in crate::cluster::coordinator) fn upsert_query_with_tags_in(
@@ -283,12 +272,6 @@ impl ClusterEngine {
         }
         let placement = target.placement(layout.generation, layout.shards.len() as u32)?;
         self.ensure_serving_layout_committed(layout)?;
-        // Keep the same barrier -> logical-ID order as add/remove/resync.
-        // The barrier spans the log append and the whole shard fan-out.
-        let _pit_barrier = self
-            .pit_open_barrier
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.ensure_resize_write_fence_open()?;
         // Serialize against an insert-only add/remove for the same id. An upsert
         // keeps the id present; a fresh upsert reserves it before the log append so
@@ -321,13 +304,10 @@ impl ClusterEngine {
     /// or any-of query may live on several shards; a re-add may have moved it).
     /// WAL-first, like [`Self::add_query`].
     pub fn remove_query(&self, id: u64) -> Result<usize, ShardError> {
-        let layout = &*self.layout();
-        // Canonical barrier -> logical-ID order; see add/upsert. Keeping
-        // this guard through append + fan-out excludes torn exhaustive/PIT views.
-        let _pit_barrier = self
-            .pit_open_barrier
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The barrier is held through the append and the fan-out, which also keeps a torn
+        // view from an exhaustive or point-in-time read.
+        let admitted = self.admit_mutation();
+        let layout = &*admitted.layout;
         self.ensure_resize_write_fence_open()?;
         let _logical_guard = self.logical_write_guard(id);
         let m = ClusterMutation::Remove { logical: id };

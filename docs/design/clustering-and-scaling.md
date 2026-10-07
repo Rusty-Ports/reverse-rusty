@@ -300,6 +300,16 @@ and a vocabulary change or a resize publishes a new one, so no operation routes 
 matches in another
 ([ADR-208](../decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)).
 
+A layout change (a vocabulary change or an in-process resize) takes shared access to the engine
+and holds the layout lock alone. Every operation that is not a search holds that lock shared, so
+writes, checkpoints, recoveries, exhaustive reads and load snapshots wait for the change, as they
+did when it had the engine to itself. A search does not take the lock and runs throughout, on the
+layout it loaded; which operations count as searches is an allow-list that a test enforces. The new
+layout is built beside the old one and published under the mutation barrier, so a search that
+returns sources sees one layout. The old shards refuse to write from the moment the build starts,
+and their files stay until the last search running on them has returned
+([ADR-209](../decisions/adr-209-only-a-search-runs-beside-a-layout-change.md)).
+
 The served coordinator's search pool has a gate. A search holds it shared for as long as its work
 is in the pool. A vocabulary change, an in-process resize and a remote resize's cutover hold it
 alone before they ask for the cluster's write lock, so they wait for the search requests in flight

@@ -266,8 +266,9 @@ impl Shard for RecordingShard {
         Ok(Vec::new())
     }
     // DEFAULTED in the trait — override to record that the wrapper FORWARDED it.
-    fn set_event_sink(&self, _sink: EventSink) {
+    fn set_event_sink(&self, _sink: EventSink) -> Vec<EngineEvent> {
         self.sink_installed.store(true, Ordering::Release);
+        Vec::new()
     }
 }
 
@@ -291,7 +292,8 @@ fn forwards_defaulted_methods_to_backing() {
 
     // The defaulted method forwards too (the shared flag flips on the backing).
     let sink: EventSink = Arc::new(|_ev: &EngineEvent| {});
-    h.set_event_sink(sink);
+    let buffered = h.set_event_sink(sink);
+    assert!(buffered.is_empty());
     assert!(
         flag.load(Ordering::Acquire),
         "set_event_sink must FORWARD to the backing, not inherit the no-op default"

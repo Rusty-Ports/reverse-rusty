@@ -31,47 +31,25 @@
 //! them), and per-query tags carry through as stored `TagId`s exactly as
 //! [`set_vocab`](ClusterEngine::set_vocab) does (ADR-074).
 
-use std::path::Path;
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 use crate::cluster::autoscale::{AutoscaleConfig, LoadSnapshot};
 use crate::cluster::control::ClusterStateChange;
 use crate::cluster::ring::HashRing;
-use crate::cluster::shard::{LocalShard, Shard, ShardError};
-use crate::compile::{extract, extract_readonly, Extracted};
-use crate::dict::Dict;
+use crate::cluster::shard::ShardError;
 use crate::events::{DurabilityOp, EngineEvent};
-use crate::normalize::Normalizer;
-use crate::ownership::PlacementGeneration;
-use crate::segment::PlacedQuery;
-use crate::tagdict::TagId;
-use crate::vocab::Vocab;
 
-use super::{into_shard, replica_dir, shard_dir, ClusterEngine, Target};
+use super::ClusterEngine;
+use crate::cluster::coordinator::layout::LayoutChange;
 
 mod control;
+mod rebuild;
 mod visibility;
-
-use crate::cluster::coordinator::layout::Layout;
-use visibility::{rebuild_placement_of, was_default_visible};
-
-type RebuildExtractedQuery = (
-    u64,
-    Extracted,
-    String,
-    u32,
-    u64,
-    Vec<(String, String)>,
-    Vec<TagId>,
-    crate::rank::RankValues,
-    // Whether a default read could return the row before this rebuild (ADR-203).
-    bool,
-);
 
 impl ClusterEngine {
     /// Resize the cluster to `new_num_shards` positions (ADR-078) — a blue/green rebuild of
     /// the cluster under a fresh `HashRing::new(new_num_shards, vnodes)`: re-place every live
-    /// query, build fresh shards, atomically swap the ring + shards under `&mut self`, and
+    /// query, build fresh shards beside the old ones, publish them as one layout, and
     /// (for a durable cluster) commit the result via [`checkpoint`](Self::checkpoint). The
     /// vocabulary and dict are UNCHANGED (the normalizer is reused; the dict is re-minted
     /// identically; declared aliases + per-query tags carry through). Returns the number of
@@ -80,7 +58,18 @@ impl ClusterEngine {
     /// Refuses (errors) if `new_num_shards == 0`, or any shard is non-local / handoff-wrapped
     /// (the in-process-only boundary [`set_vocab`](Self::set_vocab) enforces). A no-op
     /// (`Ok(0)`) when `new_num_shards` already equals the current count.
-    pub fn resize(&mut self, new_num_shards: usize) -> Result<usize, ShardError> {
+    pub fn resize(&self, new_num_shards: usize) -> Result<usize, ShardError> {
+        let change = self.begin_layout_change()?;
+        self.resize_in(&change, new_num_shards)
+    }
+
+    /// [`Self::resize`] inside a layout change the caller began, so that deciding on a shard
+    /// count and resizing to it are one step.
+    pub(in crate::cluster::coordinator) fn resize_in(
+        &self,
+        change: &LayoutChange<'_>,
+        new_num_shards: usize,
+    ) -> Result<usize, ShardError> {
         if new_num_shards == 0 {
             return Err(ShardError::Config(
                 "resize: new_num_shards must be ≥ 1".into(),
@@ -91,7 +80,7 @@ impl ClusterEngine {
                 "resize: new_num_shards exceeds the control-plane representation".into(),
             )
         })?;
-        let before = self.layout();
+        let before = change.current();
         // In-process only (same correctness boundary as set_vocab): a remote shard would keep
         // its old placement while the coordinator routes under the new ring — a silent
         // cross-process false negative. Checked BEFORE the no-op short-circuit so the boundary is
@@ -128,34 +117,27 @@ impl ClusterEngine {
             // set, so a retry HEALS rather than masks either failure seam.
             if self.data_dir.is_some() {
                 self.checkpoint_quiesced(&before)?;
-                self.remove_shard_dirs_at_or_above(new_num_shards);
             }
             return Ok(0);
         }
 
         let new_ring = HashRing::new(new_num_shards, self.vnodes)?;
 
-        // Partial-apply repairs (ADR-047) index the OLD shard space; after a resize those
-        // indices are meaningless (and out of range on shrink). The rebuild below gathers the
-        // live corpus (every applied mutation folded in) and the durable backstop is the
-        // coordinator log, so drop the queue rather than carry stale shard indices. Empty on
-        // the in-process / RF=1 default path, so this is a no-op there.
-        self.pending_repair
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        // Queued partial-apply repairs (ADR-047) index the old shard space. They are dropped
+        // when the new layout is published, not before: until then reads still run on the
+        // old shards, and an exhaustive read must go on refusing while one is queued.
 
         // Rebuild under the new ring, reusing the current normalizer + vocab (None ⇒ preserve
         // before.vocab and re-resolve ITS equivalences onto the re-minted dict).
         let new_norm = Arc::clone(&before.norm);
-        let next_generation = self
-            .placement_generation()
+        let next_generation = before
+            .generation
             .next()
             .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
         // The old layout is released before the rebuild, which holds a second corpus.
         drop(before);
-        let rebuilt = self.rebuild_from_live(new_norm, new_ring, None, next_generation)?;
-        let after = self.layout();
+        let (rebuilt, after) =
+            self.rebuild_from_live(change, new_norm, new_ring, None, next_generation)?;
 
         // Keep the cluster-state document consistent with the new shard count so `collect_load`
         // / `assignment_for` (introspection + the autoscaler) see K′ positions, not a stale K.
@@ -171,8 +153,10 @@ impl ClusterEngine {
         // matters: the orphan dirs are still referenced by the OLD manifest until `checkpoint`
         // commits the new one, so deleting them earlier would break crash-recovery to the old K.
         if self.data_dir.is_some() {
+            // Operations that loaded the old layout finish on it. Its files go once they
+            // have, here or at a later checkpoint.
+            self.await_retired_layouts();
             self.checkpoint_quiesced(&after)?;
-            self.remove_shard_dirs_at_or_above(new_num_shards);
         }
         Ok(rebuilt)
     }
@@ -183,424 +167,23 @@ impl ClusterEngine {
     /// Returns the new shard count if a resize happened, else `None` (no recommendation, or it
     /// already equals the current count). Refuses a non-local cluster (the gather boundary).
     pub fn resize_to_recommended(
-        &mut self,
+        &self,
         config: &AutoscaleConfig,
     ) -> Result<Option<usize>, ShardError> {
+        // Measuring the load and resizing to what it recommends are one layout change: the
+        // recommendation is for the layout the resize then replaces, and for no other.
+        let change = self.begin_layout_change()?;
         let (snapshot, current_shards) = {
-            let layout = self.layout();
-            (self.collect_load_in(&layout, config)?, layout.num_shards())
+            let current = change.current();
+            (
+                self.collect_load_in(&current, config)?,
+                current.num_shards(),
+            )
         };
         match recommended_shard_count(&snapshot, config) {
-            Some(k) if k != current_shards => self.resize(k).map(|_| Some(k)),
+            Some(k) if k != current_shards => self.resize_in(&change, k).map(|_| Some(k)),
             _ => Ok(None),
         }
-    }
-
-    /// The shared blue/green rebuild core (ADR-046/078): gather the deduped live corpus, obtain a
-    /// dict (REUSE the frozen one when `new_norm` is the current normalizer — a resize — else
-    /// re-mint it — a `set_vocab`), re-place every query under `new_ring`, build fresh shards, and
-    /// atomically swap `norm`/`dict`/`ring`/`shards`. Does NOT checkpoint — the caller owns the
-    /// durable commit (so it can interleave control-plane + orphan-cleanup steps first). Returns
-    /// the number of live queries rebuilt.
-    ///
-    /// `new_vocab`: `Some(v)` (a [`set_vocab`](Self::set_vocab) call) installs `v` and uses its
-    /// equivalence groups; `None` (a [`resize`](Self::resize) call) PRESERVES the existing
-    /// the layout's vocabulary (its equivalences are already installed on the reused dict).
-    pub(super) fn rebuild_from_live(
-        &mut self,
-        new_norm: Arc<Normalizer>,
-        new_ring: HashRing,
-        new_vocab: Option<Vocab>,
-        new_generation: PlacementGeneration,
-    ) -> Result<usize, ShardError> {
-        // Gather the deduped live `(logical, dsl, tag_ids)` set across shards. A selective /
-        // any-of query lives on several shards but has ONE dsl (and one tag set — every
-        // fanned-out copy carries the same tags) — dedup by logical id. Tags ride as stored
-        // `TagId`s, NOT raw strings: the tag space is orthogonal to vocabulary AND to the ring,
-        // preserved unchanged through the rebuild, so a stored id — interned dense or post-freeze
-        // synthetic (which has no recoverable string) — stays valid and is carried verbatim to
-        // the query's new shard (ADR-074). Untagged ⇒ every tag vec is empty ⇒ byte-identical to
-        // the pre-tag rebuild.
-        let live = Self::live_corpus_tagged(&self.layout())?;
-        self.rebuild_from_corpus(live, new_norm, new_ring, new_vocab, new_generation, false)
-    }
-
-    /// Rebuild from an already-folded logical corpus. Recovery uses this seam to
-    /// fold a legacy coordinator-log tail without first validating its stale
-    /// placement decisions. `append_missing_features` is true for compiler-semantics
-    /// migrations because splitting the legacy clause stream can expose feature
-    /// names that the old frozen dictionary never interned. That path appends only:
-    /// existing frequencies and top-64 mask bits stay frozen so a recovery-only
-    /// compiler rewrite cannot change an unrelated query's visibility.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn rebuild_from_corpus(
-        &mut self,
-        live: Vec<crate::cluster::shard::LiveTaggedQuery>,
-        new_norm: Arc<Normalizer>,
-        new_ring: HashRing,
-        new_vocab: Option<Vocab>,
-        new_generation: PlacementGeneration,
-        append_missing_features: bool,
-    ) -> Result<usize, ShardError> {
-        let current = self.layout();
-        // Pass A — produce the (dict, extracted) the rebuild re-places. Two paths, keyed off
-        // whether the NORMALIZER changed (an `Arc::ptr_eq` against the current one):
-        //
-        //  - **Normalizer unchanged (a resize):** the feature space cannot have changed, so REUSE
-        //    the frozen dict verbatim — same dense ids, same hot-mask, same fingerprint. A resize
-        //    is a ring change, NOT a model change: reusing the dict keeps the manifest's dict
-        //    fingerprint invariant and the control-plane's `dict_fingerprint` valid (re-minting
-        //    would renumber ids if the live corpus order differed from the original build, or if
-        //    post-freeze terms were added — a spurious fingerprint change desyncing cluster
-        //    state). `extract_readonly` resolves each query against it, auto-expanding installed
-        //    equivalences (ADR-054) and resolving post-freeze terms to their stable synthetic ids
-        //    (ADR-046) — so placement is exactly the live cluster's, just re-distributed.
-        //  - **Compiler semantics changed, normalizer unchanged:** append newly exposed
-        //    features to the frozen dict, preserving every existing frequency and mask bit.
-        //    Re-ranking the top-64 mask could move an unrelated A query behind class C's
-        //    `include_broad` boundary merely because deletes preceded the recovery.
-        //  - **Normalizer changed (a `set_vocab`):** re-mint the dict over the live corpus under
-        //    `new_norm` (interning + frequencies + hot-mask), exactly as `build`, then resolve +
-        //    expand the new vocab's equivalence groups onto it.
-        let mut lc = String::new();
-        let mut extracted: Vec<RebuildExtractedQuery> = Vec::with_capacity(live.len());
-        let same_normalizer = Arc::ptr_eq(&new_norm, &current.norm);
-        let new_dict = if same_normalizer && !append_missing_features {
-            let dict = Arc::clone(&current.dict);
-            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, placement) in
-                live
-            {
-                let ast = crate::dsl::parse_for_recovery(&text).map_err(|error| {
-                    ShardError::Config(format!("stored query {logical} cannot be rebuilt: {error}"))
-                })?;
-                let ex = extract_readonly(&ast, &new_norm, &dict, &mut lc);
-                if let Some(width) = ex.column_overflow() {
-                    return Err(ShardError::Config(format!(
-                        "stored query {logical} exceeds the exact-store column limit \
-                         ({width} features) during rebuild"
-                    )));
-                }
-                extracted.push((
-                    logical,
-                    ex,
-                    text,
-                    version,
-                    source_generation,
-                    raw_tags,
-                    tag_ids,
-                    rank,
-                    was_default_visible(&placement),
-                ));
-            }
-            dict
-        } else if same_normalizer {
-            // ADR-118 migration is a compiler rewrite, not a vocabulary change.
-            // Discover component features exposed by splitting the legacy joint
-            // stream in an append-only clone. Existing IDs, frequencies, and mask
-            // bits are durability semantics: changing the top-64 membership can
-            // change class C visibility. Newly appended features keep the counts
-            // observed in this complete live corpus and receive no mask bit.
-            let mut dict = current.dict.as_ref().clone();
-            let old_len = dict.len();
-            let old_freqs: Vec<u32> = (0..old_len)
-                .map(|id| dict.freq(id as crate::dict::FeatureId))
-                .collect();
-            let old_masks: Vec<u8> = (0..old_len)
-                .map(|id| dict.mask_bit(id as crate::dict::FeatureId))
-                .collect();
-
-            for row in &live {
-                let logical = row.0;
-                let text = &row.1;
-                let ast = crate::dsl::parse_for_recovery(text).map_err(|error| {
-                    ShardError::Config(format!("stored query {logical} cannot be rebuilt: {error}"))
-                })?;
-                let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
-                if let Some(width) = ex.column_overflow() {
-                    return Err(ShardError::Config(format!(
-                        "stored query {logical} exceeds the exact-store column limit \
-                         ({width} features) during rebuild"
-                    )));
-                }
-            }
-            for id in 0..old_len {
-                dict.set_freq_and_mask(id as crate::dict::FeatureId, old_freqs[id], old_masks[id]);
-            }
-
-            // Newly interned equivalence members must be resolved against their
-            // dense IDs before the final read-only materialization pass.
-            if let Some(vocab) = new_vocab.as_ref().or(current.vocab.as_deref()) {
-                let equiv = vocab.resolve_equivalences(&new_norm, &dict);
-                dict.set_equivalences(equiv);
-            }
-
-            lc.clear();
-            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, placement) in
-                live
-            {
-                let ast = crate::dsl::parse_for_recovery(&text).map_err(|error| {
-                    ShardError::Config(format!("stored query {logical} cannot be rebuilt: {error}"))
-                })?;
-                let ex = extract_readonly(&ast, &new_norm, &dict, &mut lc);
-                if let Some(width) = ex.column_overflow() {
-                    return Err(ShardError::Config(format!(
-                        "stored query {logical} exceeds the exact-store column limit \
-                         ({width} features) during rebuild"
-                    )));
-                }
-                extracted.push((
-                    logical,
-                    ex,
-                    text,
-                    version,
-                    source_generation,
-                    raw_tags,
-                    tag_ids,
-                    rank,
-                    was_default_visible(&placement),
-                ));
-            }
-            Arc::new(dict)
-        } else {
-            let mut dict = Dict::new();
-            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, placement) in
-                live
-            {
-                let ast = crate::dsl::parse_for_recovery(&text).map_err(|error| {
-                    ShardError::Config(format!("stored query {logical} cannot be rebuilt: {error}"))
-                })?;
-                let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
-                if let Some(width) = ex.column_overflow() {
-                    return Err(ShardError::Config(format!(
-                        "stored query {logical} exceeds the exact-store column limit \
-                         ({width} features) during rebuild"
-                    )));
-                }
-                extracted.push((
-                    logical,
-                    ex,
-                    text,
-                    version,
-                    source_generation,
-                    raw_tags,
-                    tag_ids,
-                    rank,
-                    was_default_visible(&placement),
-                ));
-            }
-            dict.finalize_mask();
-            // Resolve declared/learned equivalence groups (ADR-054) against the freshly-minted
-            // dict and apply them via expansion: widen the already-extracted queries (so THIS
-            // rebuild's re-placement + ingest use the FN-safe widened form — a query whose anchor
-            // is now an any-of fans to every member's shard), then install the map on the dict so
-            // future incremental adds expand through `extract`. The groups come from `new_vocab`
-            // (set_vocab) or, when preserving, the EXISTING `current.vocab`. No groups ⇒ no-op.
-            let equiv = new_vocab
-                .as_ref()
-                .or(current.vocab.as_deref())
-                .map(|v| v.resolve_equivalences(&new_norm, &dict));
-            if let Some(equiv) = equiv {
-                for (_, ex, _, _, _, _, _, _, _) in &mut extracted {
-                    ex.expand_equivalences(&equiv);
-                }
-                dict.set_equivalences(equiv);
-            }
-            Arc::new(dict)
-        };
-        let rebuilt = extracted.len();
-
-        // Pass B — re-place each query under the NEW dict + NEW ring and bucket per shard. Tags
-        // travel with the query (`tag_ids`, the ADR-074 carry-through): a different shard count
-        // moves a query's anchor — hence its shard — and the filtered-read contract requires its
-        // tags on whichever shard now holds it.
-        let num_shards = new_ring.num_shards();
-        let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
-        let mut accepted_ids = Vec::new();
-        for (logical, ex, text, version, source_generation, raw_tags, tag_ids, rank, was_visible) in
-            extracted
-        {
-            // Re-placing ALREADY-STORED queries: a stored class-D was accepted when it was
-            // added, so a rebuild (resize / set_vocab) must never drop it via the current knob
-            // (mirrors the single-node ADR-068 vocab recompile, which passes accept=true
-            // unconditionally). The empty-forbidden guard in `placement_of` still rejects the
-            // never-stored empty query, so passing `true` cannot resurrect one.
-            //
-            // And a row that default reads could return must stay where they can (ADR-203):
-            // `rebuild_placement_of` keeps it always-visible when today's plan would put it
-            // in the opt-in broad lane.
-            let target = rebuild_placement_of(
-                &new_dict,
-                &new_ring,
-                &ex,
-                self.per_shard.hot_anchor_threshold,
-                was_visible,
-            );
-            let placement = target.placement(new_generation, num_shards as u32)?;
-            if !matches!(&target, Target::Reject) {
-                accepted_ids.push(logical);
-            }
-            match target {
-                Target::Reject => {}
-                Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
-                    // The broad lane is replicated to every shard (ADR-080). Carry the stored
-                    // version through the rebuild so a re-placed query keeps version N rather
-                    // than being reset to 1 (the version-preserving rebuild, ADR-074).
-                    for bucket in &mut buckets {
-                        bucket.push(PlacedQuery {
-                            logical,
-                            ex: ex.clone(),
-                            dsl: text.clone(),
-                            version,
-                            source_generation: Some(source_generation),
-                            tags: raw_tags.clone(),
-                            tag_ids: tag_ids.clone(),
-                            rank,
-                            placement: placement.clone(),
-                        });
-                    }
-                }
-                Target::Selective(shs) => {
-                    for &s in &shs {
-                        buckets[s].push(PlacedQuery {
-                            logical,
-                            ex: ex.clone(),
-                            dsl: text.clone(),
-                            version,
-                            source_generation: Some(source_generation),
-                            tags: raw_tags.clone(),
-                            tag_ids: tag_ids.clone(),
-                            rank,
-                            placement: placement.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Construct fresh shards sharing the new norm + rebuilt dict + unchanged tag space,
-        // `replication_factor` copies per position, ingesting each bucket into EVERY copy
-        // (identical op stream ⇒ copies set-equal, as in `build`). Two cases by position:
-        //
-        //  - EXISTING position (`s < old_num_shards`): rebuild in the SAME shard dir, numbering
-        //    green segments ABOVE the old ones (the set_vocab coexist path), so the new `.seg`
-        //    coexist with the still-committed old ones until the manifest commit — a crash before
-        //    the commit leaves the old manifest + old segments authoritative.
-        //  - NEW position (`s ≥ old_num_shards`, grow only): no old shard to coexist with.
-        //    FORCE-CLEAN the dir first so a stale orphan from a PRIOR shrink can't resurrect data
-        //    (its checkpoint sidecar would self-restart `new_durable` into an old corpus, or its
-        //    `sources.dat` would shadow the green ingest), then build a fresh durable shard —
-        //    exactly `build`'s path. The post-commit `remove_orphan_shard_dirs` keeps the
-        //    invariant "a resize commit leaves exactly shard_000..shard_{K′-1} on disk".
-        let old_num_shards = current.shards.len();
-        let rf = self.replication_factor.max(1);
-        let data_dir = self.data_dir.clone();
-        let green_source_file = format!("sources_g{:020}.dat", new_generation.0);
-        // The rebuild re-places ALREADY-STORED queries, so stored class-D must survive regardless
-        // of the current front-door knob: `placement_of(.., true)` above buckets it, and the shards
-        // are coordinator-gated storage that always accept (forced in `LocalShard`), so the fresh
-        // shards re-ingest it. NEW class-D adds stay gated at the coordinator by the unchanged
-        // `self.per_shard.accept_class_d`.
-        let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
-        for (s, bucket) in buckets.into_iter().enumerate() {
-            let mut copies = Vec::with_capacity(rf);
-            for r in 0..rf {
-                let copy = match &data_dir {
-                    Some(dir) => {
-                        let mut sc = self.per_shard.clone();
-                        let cdir = if r == 0 {
-                            shard_dir(dir, s)
-                        } else {
-                            replica_dir(dir, s, r)
-                        };
-                        sc.data_dir = Some(cdir.clone());
-                        // A failed prior attempt at this generation may have
-                        // left an uncommitted green sidecar. The old manifest
-                        // never selected it, so remove it before rebuilding the
-                        // complete corpus rather than merging stale overlay
-                        // records into this attempt.
-                        let green_source_path = cdir.join(&green_source_file);
-                        match std::fs::remove_file(&green_source_path) {
-                            Ok(()) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(e) => {
-                                return Err(ShardError::Log(format!(
-                                    "clearing uncommitted source sidecar {}: {e}",
-                                    green_source_path.display()
-                                )));
-                            }
-                        }
-                        if s < old_num_shards {
-                            // Existing position: coexist green segments above the old ones.
-                            let next_seg = current.shards[s].next_seg_id()?;
-                            LocalShard::open_segments_with_source_file(
-                                Arc::clone(&new_norm),
-                                Arc::clone(&new_dict),
-                                Arc::clone(&self.tag_dict),
-                                sc,
-                                &[],
-                                next_seg,
-                                &green_source_file,
-                            )?
-                        } else {
-                            // New position (grow): clean any stale dir, then attach
-                            // an empty green base with the generation-selected
-                            // source sidecar.
-                            clean_shard_dir(&cdir)?;
-                            LocalShard::open_segments_with_source_file(
-                                Arc::clone(&new_norm),
-                                Arc::clone(&new_dict),
-                                Arc::clone(&self.tag_dict),
-                                sc,
-                                &[],
-                                1,
-                                &green_source_file,
-                            )?
-                        }
-                    }
-                    None => LocalShard::new(
-                        Arc::clone(&new_norm),
-                        Arc::clone(&new_dict),
-                        Arc::clone(&self.tag_dict),
-                        self.per_shard.clone(),
-                    ),
-                };
-                if !bucket.is_empty() {
-                    copy.ingest_local(&bucket);
-                }
-                copies.push(copy);
-            }
-            let shard = into_shard(copies)?;
-            shard.validate_ownership(s as u32, new_generation, num_shards as u32)?;
-            shards.push(shard);
-        }
-
-        // The directory mirrors the rebuilt corpus exactly, like reopen's
-        // live-enumeration seeding: a query whose re-extraction under the new
-        // vocab flips to `Target::Reject` is dropped from every new shard, so
-        // keeping its reservation would 409 a re-add on the LIVE coordinator
-        // while a REOPENED one accepts it (review finding). `&mut self` makes
-        // this race-free with every per-ID writer.
-        self.replace_logical_ids(accepted_ids)?;
-        // One swap: no read observes a half-state. The normalizer is `new_norm` (the same
-        // instance on a resize). The vocabulary is replaced only when a new one was supplied
-        // (`set_vocab`); a resize passes `None` and keeps it.
-        self.layout.store(Arc::new(Layout {
-            norm: new_norm,
-            dict: new_dict,
-            vocab: new_vocab.map(Arc::new).or_else(|| current.vocab.clone()),
-            ring: new_ring,
-            shards: Arc::new(shards),
-            source_files: vec![green_source_file; num_shards],
-            #[cfg(feature = "distributed")]
-            handoffs: current.handoffs.clone(),
-            generation: new_generation,
-        }));
-        // ADR-113: the old shards (and their PIT pins) are gone; every open
-        // registry entry can only ever fail its generation gate now. Drop them
-        // eagerly (frees cap slots) WITHOUT resetting the id counter — a
-        // reused id would let a stale cursor alias a post-rebuild PIT.
-        self.clear_pits();
-        Ok(rebuilt)
     }
 
     /// Best-effort removal of every top-level `shard_NNN` directory whose index is `≥
@@ -611,7 +194,7 @@ impl ClusterEngine {
     /// and the heal path (a same-K retry after a failed checkpoint) re-asserts it too. Scans
     /// rather than taking an old count, so it is correct without knowing the prior shape. An
     /// orphan left behind is benign for correctness (`open` reads only `0..num_shards`).
-    fn remove_shard_dirs_at_or_above(&self, num_shards: usize) {
+    pub(in crate::cluster::coordinator) fn remove_shard_dirs_at_or_above(&self, num_shards: usize) {
         let Some(dir) = &self.data_dir else {
             return;
         };
@@ -645,20 +228,6 @@ impl ClusterEngine {
                 }),
             }
         }
-    }
-}
-
-/// Remove a shard directory and all its contents, treating "not found" as success. Used to
-/// guarantee a NEW position (grow) builds over a verified-clean dir — never self-restarting
-/// `LocalShard::new_durable` from a leftover checkpoint sidecar / `sources.dat`.
-fn clean_shard_dir(dir: &Path) -> Result<(), ShardError> {
-    match std::fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(ShardError::Log(format!(
-            "cleaning new shard dir {} before a grow: {e}",
-            dir.display()
-        ))),
     }
 }
 

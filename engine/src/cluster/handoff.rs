@@ -464,8 +464,8 @@ impl Shard for Arc<HandoffShard> {
         )
     }
 
-    fn set_event_sink(&self, sink: EventSink) {
-        self.current.load().set_event_sink(sink);
+    fn set_event_sink(&self, sink: EventSink) -> Vec<crate::events::EngineEvent> {
+        self.current.load().set_event_sink(sink)
     }
 
     fn out_of_sync_replicas(&self) -> usize {

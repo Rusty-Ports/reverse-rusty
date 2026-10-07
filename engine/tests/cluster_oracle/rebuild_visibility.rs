@@ -59,7 +59,7 @@ fn an_alias_rebuild_keeps_a_visible_query_visible() {
             include_broad: false,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
         let before = default_reads(&cluster, &titles);
         assert!(before[0].contains(&1), "precondition: query 1 is visible");
 
@@ -99,7 +99,7 @@ fn rebuilds_never_hide_a_query_on_a_generated_corpus() {
             include_broad: false,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
         let before = default_reads(&cluster, &titles);
 
         let planted = titles.len() - 40;
@@ -155,7 +155,7 @@ fn a_resize_changes_no_read_and_promotes_no_opt_in_row() {
         include_broad: false,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
     let broad_reads = |cluster: &ClusterEngine| -> Vec<HashSet<u64>> {
         titles
             .iter()
@@ -232,7 +232,7 @@ fn kept_rows_stay_exact_and_can_be_deleted() {
         include_broad: false,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
     cluster.set_vocab(aliased.clone()).expect("set_vocab");
 
     let brute = Brute::build_with_equiv(&queries, vocab(), &aliased);
@@ -290,7 +290,7 @@ fn a_compiler_migration_on_reopen_keeps_a_kept_row() {
         ..ClusterConfig::default()
     };
     let before = {
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
         let mut aliased = Vocab::new();
         aliased.add_equivalence(&["pkg", "package"]);
         cluster.set_vocab(aliased).expect("set_vocab");
@@ -329,7 +329,7 @@ fn kept_rows_do_not_drive_a_resize() {
             include_broad: false,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("build");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("build");
         for i in 0..60u64 {
             cluster
                 .add_query(i + 1, &format!("zzsolo{i}"))

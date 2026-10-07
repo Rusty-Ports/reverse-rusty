@@ -3,6 +3,7 @@ use super::*;
 mod bench;
 mod checkpoint;
 mod harness;
+mod layout_change;
 mod upsert_repair;
 mod visibility;
 use harness::{instrument, pause, WriteCall};

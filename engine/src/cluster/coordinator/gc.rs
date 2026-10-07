@@ -150,7 +150,8 @@ impl ClusterEngine {
     /// report and the sweep continues. An in-process / genesis cluster (no addr'd data nodes)
     /// returns the clean empty report.
     pub fn gc_orphan_slots(&self, handle: &Handle) -> Result<GcReport, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let state = self.control_state()?;
         let mut report = GcReport::default();
         let mut data_nodes = Vec::new();
@@ -198,7 +199,7 @@ impl ClusterEngine {
                 self.coordinator_id,
                 &self.client_security,
             ) {
-                Ok(c) => c.with_metrics(std::sync::Arc::clone(&self.transport_metrics)),
+                Ok(c) => c.with_metrics(self.transport_metrics.load_full()),
                 Err(e) => {
                     report.skipped_nodes.push((node, e.to_string()));
                     continue;
@@ -296,7 +297,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(std::sync::Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let probed = client.fence(0)?;
         let armed = if probed == 0 {
             // A restart cleared the fence (fences are not durable) — re-arm it. The epoch is a

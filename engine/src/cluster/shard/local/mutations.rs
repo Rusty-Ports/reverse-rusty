@@ -142,6 +142,23 @@ impl LocalShard {
         })
     }
 
+    /// Refuse to write while a layout change is replacing this shard, or after it has. The
+    /// new layout's shards live in this directory and share its segment numbers, its log and
+    /// its checkpoint sidecar, so anything written here now would damage them.
+    pub(super) fn ensure_storage_writable(&self) -> Result<(), ShardError> {
+        if self
+            .storage_frozen
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ShardError::Config(
+                "this shard is being replaced by a layout change (a resize or a vocabulary \
+                 change) and no longer accepts writes or maintenance; retry on the cluster"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Lock the engine, recovering the guard if a prior writer panicked: a poisoned
     /// shard mutex must not take down the whole cluster, and the engine state behind
     /// it is still self-consistent (writes are atomic at this layer).

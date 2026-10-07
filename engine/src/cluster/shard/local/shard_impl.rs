@@ -372,6 +372,7 @@ impl Shard for LocalShard {
     }
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
+        self.ensure_storage_writable()?;
         Ok(self.ingest_local(items))
     }
 
@@ -383,6 +384,7 @@ impl Shard for LocalShard {
         text: &str,
         tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
+        self.ensure_storage_writable()?;
         let mut eng = self.lock();
         // Log-first / fail-closed (ADR-039): durably record the mutation in this shard's
         // translog BEFORE applying it, under the engine lock so the log order equals the
@@ -412,6 +414,7 @@ impl Shard for LocalShard {
         tags: &[(String, String)],
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<Option<u32>, ShardError> {
+        self.ensure_storage_writable()?;
         placement.validate()?;
         let mut eng = self.lock();
         self.translog.append(&ClusterMutation::Add {
@@ -431,6 +434,7 @@ impl Shard for LocalShard {
         write: &PlacedWrite<'_>,
         mode: ReplaceMode,
     ) -> Result<ReplaceStatus, ShardError> {
+        self.ensure_storage_writable()?;
         write.placement.validate()?;
         let mut eng = self.lock();
         if mode == ReplaceMode::IfSamePlacement {
@@ -467,6 +471,7 @@ impl Shard for LocalShard {
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
+        self.ensure_storage_writable()?;
         let mut eng = self.lock();
         // Log-first (ADR-039): see `insert_extracted`. Idempotent on replay.
         self.translog.append(&ClusterMutation::Remove { logical })?;
@@ -477,6 +482,7 @@ impl Shard for LocalShard {
     }
 
     fn flush(&self) -> Result<(), ShardError> {
+        self.ensure_storage_writable()?;
         let mut eng = self.lock();
         eng.flush();
         let persistence_healthy = eng.persistence_healthy();
@@ -496,6 +502,7 @@ impl Shard for LocalShard {
     }
 
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
+        self.ensure_storage_writable()?;
         // Delegate to the clock-injectable core with the real wall clock. The split keeps the
         // whole seal path (including the ADR-048 lease reap) deterministically testable.
         self.seal_for_checkpoint_at(Instant::now())
@@ -561,14 +568,16 @@ impl Shard for LocalShard {
     /// Install the coordinator's observer and deliver buffered startup diagnostics.
     /// Callbacks run outside the engine and sink locks, so an observer can inspect
     /// the recovered shard while handling its event.
-    fn set_event_sink(&self, sink: EventSink) {
+    fn set_storage_frozen(&self, frozen: bool) {
+        self.storage_frozen
+            .store(frozen, std::sync::atomic::Ordering::Release);
+    }
+
+    fn set_event_sink(&self, sink: EventSink) -> Vec<crate::events::EngineEvent> {
         *self
             .event_sink
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&sink));
-        let pending = self.lock().take_recovery_events();
-        for event in &pending {
-            sink(event);
-        }
+            .unwrap_or_else(PoisonError::into_inner) = Some(sink);
+        self.lock().take_recovery_events()
     }
 }

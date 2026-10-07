@@ -55,7 +55,7 @@ impl ClusterEngine {
                 }
             }
         }
-        let mut cluster = Self::open(&data_dir, stock, config)?;
+        let cluster = Self::open(&data_dir, stock, config)?;
         let Some(seed) = seed else {
             let outcome = if legacy_bare {
                 VocabSeedOutcome::LegacyUnverified

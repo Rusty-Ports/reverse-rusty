@@ -9,8 +9,8 @@
 //!    current layout at the storage layer (each retirement also proves its slots did not change
 //!    since the export), record `Ready`, and commit the new shard count, generation, and
 //!    assignments together;
-//! 2. **install** (`&mut self`, no network call): swap the serving ring and shards to the
-//!    committed layout and lower the fence;
+//! 2. **install** (`&self`, no network call): publish the committed layout's ring and shards
+//!    under the maintenance lock and the mutation barrier, and lower the fence;
 //! 3. **finish** (`&self`): finish the intent.
 //!
 //! Layout authority is enforced by the data nodes, not by this coordinator's memory: from the
@@ -20,7 +20,6 @@
 //! Coordinator startup resolves whatever a crash, cancellation, or lost reply left behind.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::Ordering;
 
 use crate::cluster::control::{
     normalized_move_endpoint, ClusterState, ClusterStateChange, MoveCommandOutcome, NodeDescriptor,
@@ -38,6 +37,7 @@ mod retire;
 use crate::cluster::coordinator::layout::Layout;
 use plan::{expected_endpoints, member_endpoint, resize_intent};
 pub use recovery::{recover_durable_resize, ResizeRecovery};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// One remote resize request.
@@ -102,16 +102,17 @@ pub struct RetiredRemoteLayout {
 }
 
 impl ClusterEngine {
-    /// Run a complete remote resize while holding `&mut self` (ADR-180). A server that wants reads
-    /// to continue during the copy calls [`Self::prepare_remote_resize`] under a shared lock and
-    /// the install/finish steps separately.
+    /// Run a complete remote resize (ADR-180): prepare, install, finish. Reads continue
+    /// throughout; writes are refused from the start of the copy until the install.
     pub fn resize_remote(
-        &mut self,
+        &self,
         request: &RemoteResizeRequest,
     ) -> Result<RemoteResizeReport, ShardError> {
-        let prepared = self.prepare_remote_resize_in(&self.layout(), request)?;
+        // Three operations in a row, each on the layout published when it starts: the
+        // install publishes the one the finish runs on.
+        let prepared = self.prepare_remote_resize(request)?;
         let retired = self.install_remote_resize(prepared)?;
-        self.finish_remote_resize_in(&self.layout(), retired)
+        self.finish_remote_resize(retired)
     }
 
     /// Build, prove, and commit the new layout while the old one keeps serving reads. Writes are
@@ -120,15 +121,7 @@ impl ClusterEngine {
         &self,
         request: &RemoteResizeRequest,
     ) -> Result<PreparedRemoteResize, ShardError> {
-        self.prepare_remote_resize_in(&self.layout(), request)
-    }
-
-    pub(in crate::cluster::coordinator) fn prepare_remote_resize_in(
-        &self,
-        layout: &Layout,
-        request: &RemoteResizeRequest,
-    ) -> Result<PreparedRemoteResize, ShardError> {
-        self.prepare_remote_resize_then_in(layout, request, || {})
+        self.prepare_remote_resize_then(request, || {})
     }
 
     /// [`Self::prepare_remote_resize`], running `on_fenced` once the write fence is raised and
@@ -142,20 +135,27 @@ impl ClusterEngine {
         request: &RemoteResizeRequest,
         on_fenced: impl FnOnce(),
     ) -> Result<PreparedRemoteResize, ShardError> {
-        self.prepare_remote_resize_then_in(&self.layout(), request, on_fenced)
+        // Taking the layout lock for the copy and raising the fence are one step for a layout
+        // change that arrives meanwhile (ADR-209): it either sees the fence and is refused,
+        // or it has the lock already and this waits for it.
+        let admission = self.layout_admission();
+        let stable = self.stable();
+        self.prepare_remote_resize_then_in(&stable.layout, request, on_fenced, admission)
     }
 
-    pub(in crate::cluster::coordinator) fn prepare_remote_resize_then_in(
+    fn prepare_remote_resize_then_in(
         &self,
         layout: &Layout,
         request: &RemoteResizeRequest,
         on_fenced: impl FnOnce(),
+        admission: std::sync::MutexGuard<'_, ()>,
     ) -> Result<PreparedRemoteResize, ShardError> {
         let handle = self.handle.clone().ok_or_else(|| {
             ShardError::Config("remote resize requires a gRPC-connected cluster".into())
         })?;
         self.validate_remote_resize_request(layout, request)?;
         self.raise_resize_write_fence()?;
+        drop(admission);
         on_fenced();
         let progress = ResizeProgress::default();
         self.begin_and_build(layout, &handle, request, &progress)
@@ -172,7 +172,7 @@ impl ClusterEngine {
         request: &RemoteResizeRequest,
         progress: &ResizeProgress,
     ) -> Result<PreparedRemoteResize, ShardError> {
-        self.register_resize_targets(&request.targets)?;
+        self.register_resize_targets(layout, &request.targets)?;
         let state = self.control_state()?;
         let state = self.finish_prior_resize(layout, state, request.operation_id)?;
         let intent = resize_intent(&state, request)?;
@@ -203,7 +203,7 @@ impl ClusterEngine {
         // move onto either.
         let source_durable = self.layout_is_durable(layout, handle, &expected_endpoints)?;
 
-        match self.propose_resize(ResizeCommand::Begin(intent.clone()))? {
+        match self.propose_resize(layout, ResizeCommand::Begin(intent.clone()))? {
             MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => {}
             outcome => {
                 return Err(ShardError::ControlPlane(format!(
@@ -240,11 +240,11 @@ impl ClusterEngine {
     }
 
     /// Swap the serving ring and shards to a committed staged layout and reopen writes. It makes no
-    /// network call: it runs under the exclusive cluster lock that request threads may wait on.
+    /// network call. Operations that loaded the old layout finish on it.
     /// Preparation already confirmed the commit (an applied proposal or a matching read-back), and
     /// the recorded intent keeps every other layout change out until `Finish`.
     pub fn install_remote_resize(
-        &mut self,
+        &self,
         prepared: PreparedRemoteResize,
     ) -> Result<RetiredRemoteLayout, ShardError> {
         let PreparedRemoteResize {
@@ -262,25 +262,27 @@ impl ClusterEngine {
         // restores create-only admission and exhaustive-delivery convergence even when this
         // coordinator attached to populated shards without either. A failure leaves the retired
         // old nodes refusing every request, so nothing answers from the superseded layout.
-        self.replace_logical_ids(logical_ids)?;
+        // The swap is a layout change like an in-process one: nothing but searches runs
+        // across it, and it happens under the mutation barrier, with the directory, the
+        // repair queue and the point-in-time pins.
+        let change = self.begin_cutover();
+        let current = change.current();
         let staged_layout = staged.layout();
-        let current = self.layout();
-        self.layout.store(Arc::new(Layout {
-            norm: Arc::clone(&current.norm),
-            dict: Arc::clone(&current.dict),
-            vocab: current.vocab.clone(),
-            ring: staged_layout.ring.clone(),
-            shards: Arc::clone(&staged_layout.shards),
-            source_files: staged_layout.source_files.clone(),
-            handoffs: staged_layout.handoffs.clone(),
-            generation,
-        }));
-        self.transport_metrics = staged.transport_metrics;
-        self.pending_repair
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.clear_pits();
+        change.publish(
+            Layout {
+                norm: Arc::clone(&current.norm),
+                dict: Arc::clone(&current.dict),
+                vocab: current.vocab.clone(),
+                ring: staged_layout.ring.clone(),
+                shards: Arc::clone(&staged_layout.shards),
+                source_files: staged_layout.source_files.clone(),
+                handoffs: staged_layout.handoffs.clone(),
+                generation,
+            },
+            || self.replace_logical_ids(logical_ids),
+        )?;
+        self.transport_metrics
+            .store(staged.transport_metrics.load_full());
         self.resize_write_fence.store(false, Ordering::Release);
         Ok(RetiredRemoteLayout {
             operation_id,
@@ -299,7 +301,8 @@ impl ClusterEngine {
         &self,
         retired: RetiredRemoteLayout,
     ) -> Result<RemoteResizeReport, ShardError> {
-        self.finish_remote_resize_in(&self.layout(), retired)
+        let stable = self.stable();
+        self.finish_remote_resize_in(&stable.layout, retired)
     }
 
     // The shape of the public method it serves.
@@ -317,7 +320,7 @@ impl ClusterEngine {
             retired_slots,
         } = retired;
         let finished = matches!(
-            self.propose_resize(ResizeCommand::Finish { operation_id }),
+            self.propose_resize(layout, ResizeCommand::Finish { operation_id }),
             Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
         );
         Ok(RemoteResizeReport {
@@ -349,7 +352,7 @@ impl ClusterEngine {
         if prior.operation_id == operation_id
             && !matches!(prior.phase, ResizeIntentPhase::Committed(_))
         {
-            self.expect_resize_outcome(ResizeCommand::Abort { operation_id })?;
+            self.expect_resize_outcome(layout, ResizeCommand::Abort { operation_id })?;
             return self.control_state();
         }
         let serving_committed = matches!(prior.phase, ResizeIntentPhase::Committed(_))
@@ -365,9 +368,12 @@ impl ClusterEngine {
                 prior.operation_id
             )));
         }
-        self.expect_resize_outcome(ResizeCommand::Finish {
-            operation_id: prior.operation_id,
-        })?;
+        self.expect_resize_outcome(
+            layout,
+            ResizeCommand::Finish {
+                operation_id: prior.operation_id,
+            },
+        )?;
         self.control_state()
     }
 
@@ -434,7 +440,11 @@ impl ClusterEngine {
     }
 
     /// Register unknown targets; refuse a target id already registered at another endpoint.
-    fn register_resize_targets(&self, targets: &[NodeDescriptor]) -> Result<(), ShardError> {
+    fn register_resize_targets(
+        &self,
+        _layout: &Layout,
+        targets: &[NodeDescriptor],
+    ) -> Result<(), ShardError> {
         let state = self.control_state()?;
         for target in targets {
             let wanted = target.addr.as_deref().map(normalized_move_endpoint);
@@ -456,39 +466,16 @@ impl ClusterEngine {
         Ok(())
     }
 
-    fn propose_resize(&self, command: ResizeCommand) -> Result<MoveCommandOutcome, ShardError> {
+    /// Under the caller's hold of the layout lock, which `_layout` stands for.
+    fn propose_resize(
+        &self,
+        _layout: &Layout,
+        command: ResizeCommand,
+    ) -> Result<MoveCommandOutcome, ShardError> {
         self.control
             .propose_resize(command)
             .map(|result| result.outcome)
             .map_err(|error| ShardError::ControlPlane(error.to_string()))
-    }
-
-    /// Raise the write fence, then take the mutation barrier exclusively so every mutation that
-    /// passed the fence check before it was raised has finished applying to the old layout.
-    ///
-    /// Refuses, leaving the fence untouched, when it is already raised: another resize is still
-    /// preparing or awaiting install, or an earlier one failed after proposing `Commit` without
-    /// proof that it did not apply. This attempt did not raise that fence and cannot know its
-    /// outcome, so lowering it on failure could accept writes the committed layout never receives.
-    fn raise_resize_write_fence(&self) -> Result<(), ShardError> {
-        if self
-            .resize_write_fence
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(ShardError::ControlPlane(
-                "writes are paused by another remote resize, or by an earlier one whose commit \
-                 outcome is unresolved; wait for it, or restart the coordinator to resolve the \
-                 recorded intent, before resizing again"
-                    .into(),
-            ));
-        }
-        drop(
-            self.pit_open_barrier
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        Ok(())
     }
 
     /// Resolve a failed preparation.
@@ -515,7 +502,7 @@ impl ClusterEngine {
         let retired = progress.retired_endpoints.borrow().clone();
         let proven = !progress.commit_proposed.get() || {
             let aborted = matches!(
-                self.propose_resize(ResizeCommand::Abort { operation_id }),
+                self.propose_resize(layout, ResizeCommand::Abort { operation_id }),
                 Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
             );
             aborted
@@ -530,7 +517,7 @@ impl ClusterEngine {
             return failure;
         }
         self.unretire_all(handle, operation_id, &retired);
-        let _aborted = self.propose_resize(ResizeCommand::Abort { operation_id });
+        let _aborted = self.propose_resize(layout, ResizeCommand::Abort { operation_id });
         self.resize_write_fence.store(false, Ordering::Release);
         failure
     }
@@ -577,12 +564,44 @@ impl ClusterEngine {
         });
     }
 
-    fn expect_resize_outcome(&self, command: ResizeCommand) -> Result<(), ShardError> {
-        match self.propose_resize(command)? {
+    fn expect_resize_outcome(
+        &self,
+        layout: &Layout,
+        command: ResizeCommand,
+    ) -> Result<(), ShardError> {
+        match self.propose_resize(layout, command)? {
             MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => Ok(()),
             outcome => Err(ShardError::ControlPlane(format!(
                 "remote resize transition was refused ({outcome:?})"
             ))),
         }
+    }
+
+    /// Raise the write fence, then take the mutation barrier exclusively so every mutation that
+    /// passed the fence check before it was raised has finished applying to the old layout.
+    ///
+    /// Refuses, leaving the fence untouched, when it is already raised: another resize is still
+    /// preparing or awaiting install, or an earlier one failed after proposing `Commit` without
+    /// proof that it did not apply. This attempt did not raise that fence and cannot know its
+    /// outcome, so lowering it on failure could accept writes the committed layout never receives.
+    fn raise_resize_write_fence(&self) -> Result<(), ShardError> {
+        if self
+            .resize_write_fence
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ShardError::ControlPlane(
+                "writes are paused by another remote resize, or by an earlier one whose commit \
+                 outcome is unresolved; wait for it, or restart the coordinator to resolve the \
+                 recorded intent, before resizing again"
+                    .into(),
+            ));
+        }
+        drop(
+            self.pit_open_barrier
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        Ok(())
     }
 }

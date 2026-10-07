@@ -144,7 +144,7 @@ fn identical_alias_retry_accepts_an_exact_just_published_manifest() {
     // Model `write_cluster_manifest` returning after rename but before the
     // parent directory sync: the attempted manifest is visible, while the
     // process still remembers only the predecessor as committed.
-    let predecessor = cluster.pending_alias_import_predecessor.clone();
+    let predecessor = cluster.alias_import_predecessor().clone();
     *cluster
         .committed_manifest
         .lock()
@@ -161,7 +161,7 @@ fn identical_alias_retry_accepts_an_exact_just_published_manifest() {
         "retry must adopt the exact published manifest epoch"
     );
     assert!(
-        cluster.pending_alias_import_predecessor.is_none(),
+        cluster.alias_import_predecessor().is_none(),
         "successful repair clears the retained predecessor identity"
     );
     let later = cluster

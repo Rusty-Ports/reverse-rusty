@@ -414,7 +414,7 @@ fn rebuild_from_live_reseeds_the_logical_id_directory() {
         (1u64, "1994 acme appliance".to_string()),
         (2u64, "1995 vertex appliance".to_string()),
     ];
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
 
     // Plant a stale reservation with no live row (the leak shape).
     assert!(cluster.insert_logical_id(99));

@@ -164,7 +164,8 @@ impl ClusterEngine {
         to: NodeId,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
-        self.reassign_and_move_in(&self.layout(), position, to, handle)
+        let stable = self.stable();
+        self.reassign_and_move_in(&stable.layout, position, to, handle)
     }
 
     pub(in crate::cluster::coordinator) fn reassign_and_move_in(
@@ -197,7 +198,10 @@ impl ClusterEngine {
     where
         F: FnOnce() -> bool,
     {
-        let layout = &*self.layout();
+        let Some(stable) = self.stable_by(deadline) else {
+            return Ok(None);
+        };
+        let layout = &*stable.layout;
         self.reassign_and_move_with_start(layout, position, to, handle, Some(deadline), try_start)
     }
 
@@ -423,6 +427,7 @@ impl ClusterEngine {
             )?;
             intent::commit_live_authority(
                 self,
+                layout,
                 &reconcile_intent,
                 &live_ep,
                 handle,
@@ -519,6 +524,7 @@ impl ClusterEngine {
                 cutover.set(true);
                 intent::commit_live_authority(
                     self,
+                    layout,
                     &move_intent,
                     &tgt_ep,
                     handle,
@@ -575,6 +581,7 @@ impl ClusterEngine {
                         if source.fence(0).is_ok_and(|fence| fence == 0) {
                             intent::abort(
                                 self,
+                                layout,
                                 &move_intent,
                                 "reassign_and_move: abort clean preparation",
                             );
@@ -624,7 +631,8 @@ impl ClusterEngine {
         rf: usize,
         handle: &Handle,
     ) -> Result<RebalanceMoveReport, ShardError> {
-        self.rebalance_and_move_in(&self.layout(), rf, handle)
+        let stable = self.stable();
+        self.rebalance_and_move_in(&stable.layout, rf, handle)
     }
 
     pub(in crate::cluster::coordinator) fn rebalance_and_move_in(
@@ -656,7 +664,8 @@ impl ClusterEngine {
         max_parallel_moves: usize,
         handle: &Handle,
     ) -> Result<RebalanceMoveReport, ShardError> {
-        self.rebalance_and_move_with_in(&self.layout(), rf, max_parallel_moves, handle)
+        let stable = self.stable();
+        self.rebalance_and_move_with_in(&stable.layout, rf, max_parallel_moves, handle)
     }
 
     pub(in crate::cluster::coordinator) fn rebalance_and_move_with_in(

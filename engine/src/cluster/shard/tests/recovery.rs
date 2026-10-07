@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use crate::cluster::shard::{LocalShard, Shard};
+use crate::cluster::shard::{EventSink, LocalShard, Shard};
 use crate::cluster::translog::TRANSLOG_FILE;
 use crate::config::EngineConfig;
 use crate::dict::Dict;
@@ -67,7 +67,7 @@ fn self_restart_repairs_tail_reports_it_outside_locks_and_preserves_new_appends(
     let events = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&events);
     let weak = Arc::downgrade(&shard);
-    shard.set_event_sink(Arc::new(move |event| {
+    let sink: EventSink = Arc::new(move |event| {
         if let EngineEvent::DurabilityFailure {
             op: DurabilityOp::WalTornTail,
             error,
@@ -78,19 +78,24 @@ fn self_restart_repairs_tail_reports_it_outside_locks_and_preserves_new_appends(
             assert_eq!(weak.upgrade().unwrap().live_sources().unwrap().len(), 1);
             seen.lock().unwrap().push(error.clone());
         }
-    }));
+    });
+    // The shard hands its startup events back; whoever installed the sink delivers them.
+    for event in shard.set_event_sink(Arc::clone(&sink)) {
+        sink(&event);
+    }
     assert_eq!(*events.lock().unwrap(), vec!["8 bytes"]);
-    shard.set_event_sink(Arc::new(|_| {
-        panic!("startup event must drain exactly once")
-    }));
+    let again = shard.set_event_sink(Arc::new(|_| panic!("no event is expected after startup")));
+    assert!(again.is_empty(), "startup event must drain exactly once");
     shard
         .insert_extracted_with_tags(&queries[1].1, 2, 1, queries[1].0, &[])
         .unwrap();
     drop(shard);
     let shard = open();
-    shard.set_event_sink(Arc::new(|_| {
-        panic!("clean restart must not report another torn tail")
-    }));
+    let startup = shard.set_event_sink(Arc::new(|_| panic!("no event is expected")));
+    assert!(
+        startup.is_empty(),
+        "clean restart must not report another torn tail"
+    );
     let mut ids = shard.live_logical_ids().unwrap();
     ids.sort_unstable();
     assert_eq!(ids, vec![1, 2]);

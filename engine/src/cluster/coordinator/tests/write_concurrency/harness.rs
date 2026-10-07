@@ -10,6 +10,11 @@ pub(super) enum WriteCall {
     Bulk,
     /// A checkpoint is about to seal this shard.
     Seal,
+    /// A rebuild is about to read this shard's live corpus.
+    Gather,
+    /// An event sink is being installed. A hook that answers with an error gives the shard
+    /// one buffered event to hand back, carrying that error.
+    InstallSink,
 }
 
 pub(super) type WriteHook = Arc<dyn Fn(usize, WriteCall) -> Result<(), ShardError> + Send + Sync>;
@@ -197,6 +202,34 @@ impl Shard for ObservedShard {
 
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
         self.inner.segment_filenames()
+    }
+
+    fn set_event_sink(&self, sink: crate::cluster::shard::EventSink) -> Vec<EngineEvent> {
+        let mut buffered = self.inner.set_event_sink(sink);
+        if let Err(error) = (self.hook)(self.position, WriteCall::InstallSink) {
+            buffered.push(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::ReplicaDesync,
+                detail: "buffered by a shard".into(),
+                error: error.to_string(),
+            });
+        }
+        buffered
+    }
+
+    // What a rebuild asks of the shards it replaces.
+    fn is_local(&self) -> bool {
+        self.inner.is_local()
+    }
+
+    fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
+        self.inner.live_sources()
+    }
+
+    fn live_sources_tagged(
+        &self,
+    ) -> Result<Vec<crate::cluster::shard::LiveTaggedQuery>, ShardError> {
+        (self.hook)(self.position, WriteCall::Gather)?;
+        self.inner.live_sources_tagged()
     }
 
     fn next_seg_id(&self) -> Result<u64, ShardError> {

@@ -120,7 +120,7 @@ fn ttl_reaps_a_stuck_lease_so_the_seal_reclaims_the_tail_and_emits() {
     // Capture the reap event (ADR-021/048): a plain LocalShard now honors the coordinator's sink.
     let saw_reap = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&saw_reap);
-    primary.set_event_sink(Arc::new(move |ev: &EngineEvent| {
+    let buffered = primary.set_event_sink(Arc::new(move |ev: &EngineEvent| {
         if matches!(
             ev,
             EngineEvent::DurabilityFailure {
@@ -131,6 +131,7 @@ fn ttl_reaps_a_stuck_lease_so_the_seal_reclaims_the_tail_and_emits() {
             flag.store(true, Ordering::Release);
         }
     }));
+    assert!(buffered.is_empty(), "a new shard has nothing to report");
 
     primary
         .insert_extracted_with_tags(&corpus[0].1, 1, 1, &corpus[0].2, &[])

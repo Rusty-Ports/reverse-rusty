@@ -52,8 +52,8 @@ impl ClusterEngine {
     /// to each serving `RemoteShard`, so remote per-RPC stats aggregate on the engine (read via
     /// [`Self::transport_metrics`]). Replaces the empty one `from_parts` created. Only the gRPC
     /// builders call this; the in-process path keeps its all-zero collector.
-    pub(super) fn with_transport_metrics(mut self, metrics: Arc<TransportMetrics>) -> Self {
-        self.transport_metrics = metrics;
+    pub(super) fn with_transport_metrics(self, metrics: Arc<TransportMetrics>) -> Self {
+        self.transport_metrics.store(metrics);
         self
     }
 
@@ -63,7 +63,8 @@ impl ClusterEngine {
     /// advances a position's generation when it re-points it to a new owner; this is how a
     /// test/operator observes the live map.
     pub fn handoff_generations(&self) -> Vec<u64> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         layout.handoffs.iter().map(|h| h.generation()).collect()
     }
 

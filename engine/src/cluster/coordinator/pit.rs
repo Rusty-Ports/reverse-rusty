@@ -75,8 +75,26 @@ impl ClusterEngine {
         cfg: &PitConfig,
         now: Instant,
     ) -> Result<PitId, ClusterPitError> {
-        let layout = &*self.layout();
+        // Two operations: the reap runs on the layout published now, and the open on the
+        // one published once it holds the barrier.
+        self.reap_expired_pits(now);
+        self.open_pit_under_barrier(keep_alive, cfg, now)
+    }
+
+    /// Release the shard pins of every expired point in time.
+    fn reap_expired_pits(&self, now: Instant) {
+        let stable = self.stable();
+        let layout = &*stable.layout;
         self.reap_pits(layout, now);
+    }
+
+    fn open_pit_under_barrier(
+        &self,
+        keep_alive: Option<Duration>,
+        cfg: &PitConfig,
+        now: Instant,
+    ) -> Result<PitId, ClusterPitError> {
+        let stable = self.stable();
         // ADR-113 mutation barrier (WRITE side): every live mutation entry
         // point holds the read side from before its coordinator-log append
         // through the complete shard fan-out, so the pin fan below observes
@@ -89,6 +107,8 @@ impl ClusterEngine {
             .pit_open_barrier
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Loaded under the barrier, so the pins land on the layout the registry entry names.
+        let layout = &*stable.layout;
         let meta = ClusterPitMeta {
             generation: layout.generation,
             num_shards: layout.shards.len() as u32,
@@ -115,7 +135,8 @@ impl ClusterEngine {
     /// `false` = already gone (expired/closed/rebuilt) — the caller's goal
     /// state either way.
     pub fn close_pit(&self, pit: PitId, now: Instant) -> bool {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         self.reap_pits(layout, now);
         let existed = self.lock_pits().close(pit).is_some();
         if existed {

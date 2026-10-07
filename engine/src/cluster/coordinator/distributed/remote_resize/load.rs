@@ -123,12 +123,15 @@ impl ClusterEngine {
             &before,
             progress,
         )?;
-        self.expect_resize_outcome(ResizeCommand::MarkReady {
-            operation_id: request.operation_id,
-            evidence,
-        })?;
+        self.expect_resize_outcome(
+            layout,
+            ResizeCommand::MarkReady {
+                operation_id: request.operation_id,
+                evidence,
+            },
+        )?;
         progress.commit_proposed.set(true);
-        self.commit_resize(request.operation_id, &intent.desired)?;
+        self.commit_resize(layout, request.operation_id, &intent.desired)?;
         Ok(StagedBuild {
             staged,
             logical_ids,
@@ -208,8 +211,13 @@ impl ClusterEngine {
     }
 
     /// Commit, resolving an ambiguous proposal result by reading the committed layout back.
-    fn commit_resize(&self, operation_id: u64, desired: &ResizeLayout) -> Result<(), ShardError> {
-        let proposed = self.propose_resize(ResizeCommand::Commit { operation_id });
+    fn commit_resize(
+        &self,
+        layout: &Layout,
+        operation_id: u64,
+        desired: &ResizeLayout,
+    ) -> Result<(), ShardError> {
+        let proposed = self.propose_resize(layout, ResizeCommand::Commit { operation_id });
         if matches!(
             proposed,
             Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)

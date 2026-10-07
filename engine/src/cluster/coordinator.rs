@@ -358,7 +358,18 @@ pub struct ClusterEngine {
     /// model. Retained only while that import's control/manifest commit is
     /// incomplete, so an identical retry can overwrite precisely that commit
     /// point and no other CRC-valid manifest.
-    pending_alias_import_predecessor: Option<crate::storage::ClusterManifest>,
+    pending_alias_import_predecessor: Mutex<Option<crate::storage::ClusterManifest>>,
+    /// Held alone by a layout change for its whole run, and shared by every operation that is
+    /// not a search. See [`Self::stable`] and `layout::LayoutChange`.
+    layout_lock: RwLock<()>,
+    /// See [`Self::layout_admission`].
+    layout_admission: Mutex<()>,
+    /// Layouts that have been replaced and may still be held by a running operation. Their
+    /// files are removed only once they are released.
+    retired_layouts: Mutex<Vec<std::sync::Weak<layout::Layout>>>,
+    /// Called between the two steps of a mutation's admission, by a test of their order.
+    #[cfg(test)]
+    admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Exact manifest a pending alias-import checkpoint attempted to publish.
     /// This is populated before the atomic write so a retry can distinguish a
     /// completed rename whose parent-directory sync failed from any divergent
@@ -414,7 +425,7 @@ pub struct ClusterEngine {
     /// so a percolate's per-shard RPC latency / errors / timeouts / retries aggregate
     /// cluster-wide. All-zero on the in-process / RF=1 path (no `RemoteShard` is built), so
     /// the default behavior is byte-identical. Read via [`Self::transport_metrics`].
-    transport_metrics: Arc<TransportMetrics>,
+    transport_metrics: arc_swap::ArcSwap<TransportMetrics>,
     /// Live-handoff drain caps (ADR-044/048), retained from `ClusterConfig` by the gRPC builders so
     /// `execute_handoff` can read them. Defaults (8 / 1024) on the in-process path, which never
     /// hands off; the gRPC builders override them via `with_handoff_caps`. Overridable so an

@@ -375,6 +375,13 @@ pub(crate) trait Shard: Send + Sync {
         Ok(count)
     }
 
+    /// Freeze or thaw this shard's storage (ADR-209). A frozen shard refuses every operation
+    /// that would write to its directory or its log; reads are unaffected. A layout change
+    /// freezes the shards it is replacing, because the new layout is built in the same
+    /// directories, and they stay frozen once it has published. Only an in-process shard has
+    /// storage a layout change shares, so the default does nothing.
+    fn set_storage_frozen(&self, _frozen: bool) {}
+
     /// Whether this shard is backed by an in-process [`Engine`](crate::segment::Engine), so its normalizer
     /// can be swapped in place by a vocabulary change. `false` for a
     /// `RemoteShard`/`HandoffShard`, whose normalizer lives in another process and
@@ -590,7 +597,14 @@ pub(crate) trait Shard: Send + Sync {
     /// [`ReplicatedShard`](super::replica::ReplicatedShard) replica falling out of its
     /// in-sync set. Default: a no-op (a plain [`LocalShard`]/`RemoteShard` emits nothing
     /// here). The coordinator fans its observer in via `ClusterEngine::set_observer`.
-    fn set_event_sink(&self, _sink: EventSink) {}
+    ///
+    /// Returns the events the shard had buffered while it had no sink. The shard does not
+    /// deliver them itself: the sink is the embedder's code, and the caller installs sinks
+    /// under locks it must not hold while that code runs.
+    #[must_use = "the shard's buffered events are the caller's to deliver"]
+    fn set_event_sink(&self, _sink: EventSink) -> Vec<crate::events::EngineEvent> {
+        Vec::new()
+    }
 
     /// How many of this position's replicas reads may not fail over to (ADR-195). 0 for a
     /// position without replicas.

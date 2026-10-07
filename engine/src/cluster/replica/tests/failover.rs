@@ -140,7 +140,7 @@ fn replica_write_failure_is_tolerated_and_flagged() {
     // Capture surfaced events (avoid requiring EngineEvent: Clone — record a flag).
     let saw_desync = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&saw_desync);
-    rs.set_event_sink(Arc::new(move |ev: &EngineEvent| {
+    let buffered = rs.set_event_sink(Arc::new(move |ev: &EngineEvent| {
         if matches!(
             ev,
             EngineEvent::DurabilityFailure {
@@ -151,6 +151,7 @@ fn replica_write_failure_is_tolerated_and_flagged() {
             flag.store(true, Ordering::Release);
         }
     }));
+    assert!(buffered.is_empty(), "nothing has failed yet");
 
     let (id, ex, dsl) = &corpus[0];
     assert!(

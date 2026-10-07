@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::cluster::remote::RemoteShard;
 
-use super::{Arc, ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
+use super::{ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
 use crate::cluster::coordinator::layout::Layout;
 
 /// Clear a stale fence before a recovered target becomes live again.
@@ -89,7 +89,8 @@ impl ClusterEngine {
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let _ticket = self
             .move_ledger
             .reserve(&[source_endpoint, target_endpoint]);
@@ -125,7 +126,10 @@ impl ClusterEngine {
     where
         F: FnOnce() -> bool,
     {
-        let layout = &*self.layout();
+        let Some(stable) = self.stable_by(deadline) else {
+            return Ok(None);
+        };
+        let layout = &*stable.layout;
         let Some(_ticket) = self
             .move_ledger
             .reserve_until(&[source_endpoint, target_endpoint], deadline)
@@ -256,7 +260,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
         let do_move = || -> Result<u64, ShardError> {
@@ -277,7 +281,7 @@ impl ClusterEngine {
                 self.coordinator_id,
                 &self.client_security,
             )?
-            .with_metrics(Arc::clone(&self.transport_metrics));
+            .with_metrics(self.transport_metrics.load_full());
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
             // `RecoverFrom` replaces data but intentionally preserves the slot fence. A target that
             // was a previously demoted primary must be proven writable before it can become live

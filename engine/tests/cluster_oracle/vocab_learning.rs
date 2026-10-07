@@ -43,7 +43,7 @@ fn declared_alias_makes_both_surface_forms_match() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
         let generation_before = cluster.placement_generation();
 
         // Before the alias the two forms are distinct: the canonical-form title does
@@ -125,7 +125,7 @@ fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
 
     let title_new = "1994 vertex new pro";
     // Before learning, "pkg" and "new" are distinct features (the default vocab is empty).
@@ -189,7 +189,7 @@ fn learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
 
         // Before induction "zenith"/"zonk" are distinct synthetic features; gluing has
         // not happened, so the phrase-form title need not match yet — we only assert the
@@ -280,7 +280,7 @@ fn set_vocab_activates_multiword_alias_with_pt_aware_routing() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
         let rebuilt = cluster
             .set_vocab(vocab_with_multiword_alias())
             .expect("set_vocab must ACTIVATE a multi-word alias on a cluster (ADR-076)");
@@ -394,7 +394,7 @@ fn overlapping_aliases_match_nested_entity_titles_across_the_cluster() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
         cluster
             .set_vocab(two_alias_vocab())
             .expect("activate both overlapping multi-word aliases");
@@ -435,7 +435,7 @@ fn overlapping_aliases_match_nested_entity_titles_across_the_cluster() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
     cluster.set_vocab(two_alias_vocab()).expect("set_vocab");
     let placed = cluster.add_query(9_700_002, "ny").expect("add alias query");
     assert!(
@@ -543,7 +543,7 @@ fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
 
         // Before the equivalence, the two forms are distinct.
         assert!(
@@ -609,7 +609,7 @@ fn the_default_learner_hides_nothing_with_the_broad_lane_off() {
             include_broad: false,
             ..ClusterConfig::default()
         };
-        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
         let default_read = |cluster: &ClusterEngine, title: &str| -> HashSet<u64> {
             cluster
                 .percolate_with_broad(title, false)

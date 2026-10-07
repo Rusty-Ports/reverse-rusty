@@ -533,21 +533,30 @@ impl Shard for ReplicatedShard {
     }
 
     // ---- observability ----
-    fn set_event_sink(&self, sink: EventSink) {
-        let pending: Vec<EngineEvent> = {
-            let mut p = self
+    fn set_storage_frozen(&self, frozen: bool) {
+        self.primary.set_storage_frozen(frozen);
+        let replicas = self
+            .replicas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for replica in replicas {
+            replica.shard.set_storage_frozen(frozen);
+        }
+    }
+
+    fn set_event_sink(&self, sink: EventSink) -> Vec<EngineEvent> {
+        let pending = std::mem::take(
+            &mut *self
                 .pending_events
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            std::mem::take(&mut *p)
-        };
-        for ev in &pending {
-            sink(ev);
-        }
+                .unwrap_or_else(PoisonError::into_inner),
+        );
         *self
             .event_sink
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(sink);
+        pending
     }
 
     fn out_of_sync_replicas(&self) -> usize {

@@ -9,6 +9,26 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-07 — A search runs beside a cluster rebuild (library)
+
+- In the library, a search answers while a vocabulary change or an in-process resize rebuilds the
+  cluster ([ADR-209](decisions/adr-209-only-a-search-runs-beside-a-layout-change.md)). It returns
+  what the old layout returns or what the new one does, never a mix. Every other operation waits
+  for the rebuild, as before. **The served coordinator does not benefit yet**: it still holds its
+  own lock around a rebuild, which the next change removes.
+- Library: `ClusterEngine::resize`, `set_vocab`, `learn_and_apply`, `learn_and_apply_with`,
+  `import_alias_synonyms`, `learn_aliases_and_apply`, `resize_to_recommended`,
+  `install_remote_resize` and `resize_remote` take `&self`.
+- The files of a layout that a rebuild replaced are removed once no search is still running on
+  that layout, at the rebuild's own checkpoint or the next one.
+- Library: `rebalance`, `reassign_shard`, `register_node` and `deregister_node` wait for a
+  rebuild. A rebalance that overlapped a resize could commit assignments for shard positions
+  the resize had removed, after which every later resize was refused.
+- Library: an observer must not call back into the engine from inside an event. It runs on the
+  thread that raised the event, under that operation's locks, and a read other than a search
+  (`collect_load`, for one) now waits for a rebuild there. The events buffered before
+  `ClusterEngine::set_observer` are delivered after it has released its locks.
+
 ## 2026-10-07 — The coordinator's serving state is one published layout
 
 - Internal step towards serving searches during a vocabulary change or resize

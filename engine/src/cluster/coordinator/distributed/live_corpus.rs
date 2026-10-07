@@ -49,7 +49,8 @@ impl ClusterEngine {
         &self,
         visit: &mut (dyn FnMut(ExportedQuery) -> Result<(), ShardError> + Send),
     ) -> Result<u64, ShardError> {
-        Self::export_live_corpus_in(&self.layout(), visit)
+        let stable = self.stable();
+        Self::export_live_corpus_in(&stable.layout, visit)
     }
 
     pub(in crate::cluster::coordinator) fn export_live_corpus_in(

@@ -16,7 +16,8 @@ impl ClusterEngine {
     /// placement generation, and every position's primary endpoint. An assignment-routed
     /// coordinator checks this before serving, because its topology was read before it connected.
     pub fn attest_committed_layout(&self) -> Result<(), ShardError> {
-        self.attest_committed_layout_in(&self.layout())
+        let stable = self.stable();
+        self.attest_committed_layout_in(&stable.layout)
     }
 
     pub(in crate::cluster::coordinator) fn attest_committed_layout_in(

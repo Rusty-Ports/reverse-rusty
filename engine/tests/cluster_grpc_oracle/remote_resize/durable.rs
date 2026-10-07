@@ -36,7 +36,7 @@ fn grpc_remote_resize_of_a_durable_cluster_requires_durable_targets() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let mut cluster = ClusterEngine::connect_remote_exclusive(
+    let cluster = ClusterEngine::connect_remote_exclusive(
         Arc::clone(&norm),
         Arc::clone(&dict),
         empty_tag_dict(),

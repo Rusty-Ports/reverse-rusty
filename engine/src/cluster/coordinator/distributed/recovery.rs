@@ -1,4 +1,4 @@
-use super::{Arc, ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
+use super::{ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
 
 impl ClusterEngine {
     /// Cross-node peer recovery (ADR-036 + ADR-039 + ADR-040): bring a fresh, durable, **pending**
@@ -22,7 +22,8 @@ impl ClusterEngine {
     ) -> Result<(u64, u64), ShardError> {
         // Bound on the convergence loop (a safety cap, not a correctness requirement).
         const FINALIZE_PASSES: usize = 8;
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let expected = layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Pin the source's tail BEFORE the segment-copy seal trims it (ADR-040). Held across the
@@ -38,7 +39,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
         let recover = || -> Result<(u64, u64), ShardError> {
@@ -59,7 +60,7 @@ impl ClusterEngine {
                 self.coordinator_id,
                 &self.client_security,
             )?
-            .with_metrics(Arc::clone(&self.transport_metrics));
+            .with_metrics(self.transport_metrics.load_full());
             // Bulk copy: segments at snapshot position P (the source keeps serving + writing).
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
             // Tail replay + convergence: drain the source tail (> P) through the SAME apply funnel
@@ -112,7 +113,8 @@ impl ClusterEngine {
         after: u64,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let expected = layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Catch up the target's slot `shard_id` from the source's same slot (ADR-093).
@@ -125,7 +127,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let target = crate::cluster::remote::RemoteShard::connect_for_coordinator_with_security(
             target_endpoint,
             handle.clone(),
@@ -135,7 +137,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let hwm = crate::cluster::replica::catch_up_replica(
             &target,
             &source,

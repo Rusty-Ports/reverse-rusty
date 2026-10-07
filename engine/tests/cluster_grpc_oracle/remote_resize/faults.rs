@@ -139,7 +139,7 @@ fn grpc_remote_resize_keeps_writes_paused_when_the_commit_outcome_is_unknown() {
         targets,
         ..
     } = fixture(2);
-    let (mut cluster, faults, _) = Faulty::install(cluster);
+    let (cluster, faults, _) = Faulty::install(cluster);
     faults.lose_commit_reply.store(true, Ordering::SeqCst);
     let request = RemoteResizeRequest {
         operation_id: 31,
@@ -189,7 +189,7 @@ fn grpc_remote_resize_finishes_a_leftover_committed_intent_before_the_next_one()
         titles,
         ..
     } = fixture(5);
-    let (mut cluster, faults, _) = Faulty::install(cluster);
+    let (cluster, faults, _) = Faulty::install(cluster);
     faults.refuse_finish_once.store(true, Ordering::SeqCst);
     let before = matches(&cluster, &titles);
     let first = cluster
@@ -236,7 +236,7 @@ fn refused_as_retired<T: std::fmt::Debug>(result: &Result<T, ShardError>) -> boo
 fn grpc_remote_resize_retires_the_old_nodes_before_committing() {
     let Fixture {
         rt,
-        mut cluster,
+        cluster,
         targets,
         queries,
         titles,
@@ -304,7 +304,7 @@ fn grpc_startup_resolution_returns_an_uncommitted_resizes_old_nodes_to_service()
         titles,
         ..
     } = fixture(2);
-    let (mut cluster, faults, plane) = Faulty::install(cluster);
+    let (cluster, faults, plane) = Faulty::install(cluster);
     let before = matches(&cluster, &titles);
     // `Commit` never applies, but the coordinator cannot tell: the old nodes stay retired and
     // writes stay paused.
@@ -391,7 +391,7 @@ fn grpc_remote_resize_recovers_from_a_lost_begin_reply() {
         titles,
         ..
     } = fixture(2);
-    let (mut cluster, faults, _) = Faulty::install(cluster);
+    let (cluster, faults, _) = Faulty::install(cluster);
     let before = matches(&cluster, &titles);
     // `Begin` applies but its reply is lost, and the cleanup abort fails too.
     faults.lose_begin_reply.store(true, Ordering::SeqCst);
@@ -442,7 +442,7 @@ fn grpc_remote_resize_installs_without_a_control_plane_call() {
         titles,
         ..
     } = fixture(2);
-    let (mut cluster, faults, _) = Faulty::install(cluster);
+    let (cluster, faults, _) = Faulty::install(cluster);
     let before = matches(&cluster, &titles);
     let prepared = cluster
         .prepare_remote_resize(&RemoteResizeRequest {
@@ -476,7 +476,7 @@ fn grpc_remote_resize_serves_the_old_layout_again_after_a_refused_commit() {
         titles,
         ..
     } = fixture(2);
-    let (mut cluster, faults, _) = Faulty::install(cluster);
+    let (cluster, faults, _) = Faulty::install(cluster);
     let before = matches(&cluster, &titles);
     // `Commit` is refused without applying, and the read-back proves the old layout is still the
     // layout of record, so the reads stopped before the proposal serve again, as do writes.
@@ -527,7 +527,7 @@ fn grpc_remote_resize_returns_retired_nodes_to_service_after_a_failure_before_co
         titles,
         ..
     } = fixture(2);
-    let (mut cluster, faults, _) = Faulty::install(cluster);
+    let (cluster, faults, _) = Faulty::install(cluster);
     let before = matches(&cluster, &titles);
     // The old nodes are retired, then `MarkReady` fails: `Commit` was never proposed, so the old
     // layout is certainly still the layout of record and its nodes serve again.

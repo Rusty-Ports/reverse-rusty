@@ -124,17 +124,27 @@ impl ClusterEngine {
         deadline: Option<Instant>,
         sink: &mut dyn ChunkSink,
     ) -> Result<ClusterExhaustiveMatch, ShardError> {
-        let layout = &*self.layout();
         if chunk_size == 0 || chunk_size > MAX_MATCH_CHUNK_SIZE {
             return Err(ShardError::Config(format!(
                 "exhaustive chunk size {chunk_size} is outside 1..={MAX_MATCH_CHUNK_SIZE}"
             )));
         }
+        // A rebuild holds the layout lock for as long as it runs. This read has a deadline
+        // and can be cancelled, and gives up on either while it waits.
+        let stable = self.stable_while(|| {
+            sink.check_cancelled().map_err(|error| {
+                ShardError::Protocol(format!("exhaustive sink failed: {error}"))
+            })?;
+            check_deadline(deadline)
+        })?;
         // Every incremental shard mutation holds this barrier for its complete
         // fan-out. Taking the exclusive side gives direct library callers the
         // same coherent cross-shard view as the HTTP wrapper: an upsert cannot
         // move between owners while this sequential stream is being read.
         let _view = self.lock_exhaustive_view(sink, deadline)?;
+        // Loaded under the barrier: the repair queue and the directory checked below belong
+        // to the layout that is published while the barrier is held, and to no other.
+        let layout = &*stable.layout;
         // A queued partial apply means different shards may hold different live
         // versions of one logical id. Both versions can be ownership-valid for
         // their respective placements, so summing the otherwise-disjoint shard

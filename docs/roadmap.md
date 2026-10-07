@@ -260,12 +260,15 @@ matches, which is also why the search pool needs a gate
 
 **Done so far.** The serving layout (normalizer, dictionary, vocabulary, ring, shards, placement
 generation) is one published value, and every operation loads it once
-([ADR-208](decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)). A rebuild still
-runs with the engine held exclusively, so nothing is served during it yet.
+([ADR-208](decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)). In the library a
+rebuild now takes shared access and only searches run beside it
+([ADR-209](decisions/adr-209-only-a-search-runs-beside-a-layout-change.md)). The server still
+holds its cluster lock and the search pool's gate around a rebuild, so served searches still wait.
 
-**Direction.** Build the new layout beside the old one without holding the engine, exclude only
-writes while it is built, and publish it; then take the cluster lock and the search pool's gate off
-the search path in the server. First measure
+**Direction.** Take the cluster lock and the search pool's gate off the search path in the server,
+so that a served search and a health probe answer during a rebuild. Then measure a rebuild's time
+and peak memory per phase at scale. Later, if writes should stay available too, carry the writes
+that arrive during a rebuild into the new layout. First measure
 a rebuild's time and peak memory per phase at scale. Give the exclusive step a wait budget, so a
 change that cannot start soon gives up instead of holding searches behind it.
 

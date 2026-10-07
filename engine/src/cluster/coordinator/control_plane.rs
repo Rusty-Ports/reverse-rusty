@@ -13,6 +13,7 @@ use crate::cluster::shard::ShardError;
 use crate::config::EngineConfig;
 use crate::events::EngineEvent;
 
+use super::layout::Layout;
 use super::{shard_dir, ClusterEngine, ClusterObserver};
 
 impl ClusterEngine {
@@ -67,7 +68,11 @@ impl ClusterEngine {
     /// failover primitive. In-process this updates the committed map and bumps the
     /// control-plane epoch *without moving data* (physical movement on an assignment change
     /// — peer recovery — is a later increment). Errors propagate (fail-closed).
+    ///
+    /// Like every write to the control state, it waits for a layout change: the map is keyed
+    /// by shard position, and a layout change replaces the positions.
     pub fn reassign_shard(&self, assignment: ShardAssignment) -> Result<(), ShardError> {
+        let _stable = self.stable();
         self.control
             .propose(ClusterStateChange::AssignShard(assignment))?;
         Ok(())
@@ -78,6 +83,16 @@ impl ClusterEngine {
     /// exact committed application-state version. A subsequent [`Self::rebalance`] folds the node
     /// into the shard→node map.
     pub fn register_node(&self, node: NodeDescriptor) -> Result<StateVersion, ShardError> {
+        let stable = self.stable();
+        self.register_node_in(&stable.layout, node)
+    }
+
+    /// [`Self::register_node`] for a caller that already holds the layout lock.
+    pub(in crate::cluster::coordinator) fn register_node_in(
+        &self,
+        _layout: &Layout,
+        node: NodeDescriptor,
+    ) -> Result<StateVersion, ShardError> {
         Ok(self.control.propose(ClusterStateChange::AddNode(node))?)
     }
 
@@ -85,6 +100,16 @@ impl ClusterEngine {
     /// application-state version. Pruning it from the shard→node map is the separate
     /// [`Self::rebalance`] (exactly as removing a node is distinct from re-placing its shards).
     pub fn deregister_node(&self, id: NodeId) -> Result<StateVersion, ShardError> {
+        let stable = self.stable();
+        self.deregister_node_in(&stable.layout, id)
+    }
+
+    /// [`Self::deregister_node`] for a caller that already holds the layout lock.
+    pub(in crate::cluster::coordinator) fn deregister_node_in(
+        &self,
+        _layout: &Layout,
+        id: NodeId,
+    ) -> Result<StateVersion, ShardError> {
         Ok(self.control.propose(ClusterStateChange::RemoveNode(id))?)
     }
 
@@ -100,7 +125,20 @@ impl ClusterEngine {
     /// peer-recovery path ([`Self::peer_recover_replica`], ADR-036/039) and is the deployment wiring
     /// on top — an in-process cluster holds every shard locally, so the map is advisory there and
     /// matching is unaffected (the local shards do not move).
+    ///
+    /// It reads the map and commits its changes under one hold of the layout lock, so a resize
+    /// cannot replace the positions between the two.
     pub fn rebalance(&self, rf: usize) -> Result<usize, ShardError> {
+        let stable = self.stable();
+        self.rebalance_in(&stable.layout, rf)
+    }
+
+    /// [`Self::rebalance`] for a caller that already holds the layout lock.
+    pub(in crate::cluster::coordinator) fn rebalance_in(
+        &self,
+        _layout: &Layout,
+        rf: usize,
+    ) -> Result<usize, ShardError> {
         let state = self.control.cluster_state()?;
         let nodes: Vec<NodeId> = state.nodes.iter().map(|n| n.id).collect();
         if nodes.is_empty() {
@@ -134,7 +172,10 @@ impl ClusterEngine {
         replica_dir: &Path,
         max_passes: usize,
     ) -> Result<(), ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        // A recovery seals the primary, which writes into its directory: it is maintenance,
+        // and waits for a layout change like a checkpoint does.
+        let layout = &*stable.layout;
         let Some(base) = self.data_dir.as_deref() else {
             return Err(ShardError::Config(
                 "add_replica requires a durable cluster (no on-disk segments to copy)".into(),
@@ -158,30 +199,44 @@ impl ClusterEngine {
     }
 
     /// Register an observer for durability events (recovery torn-tail, append failures).
-    /// Any events buffered before this call are delivered immediately, mirroring the
+    /// Any events buffered before this call are delivered before it returns, mirroring the
     /// engine's `set_observer`.
+    ///
+    /// The observer is called on the thread that raised the event, inside the operation that
+    /// raised it, so it runs while the engine holds that operation's locks. It must be quick
+    /// and must not call back into the engine: hand the event to another thread to act on it.
+    /// The buffered events are the exception. This call delivers them itself, after it has
+    /// released everything it held.
     pub fn set_observer(&self, observer: ClusterObserver) {
-        let layout = &*self.layout();
-        let pending: Vec<EngineEvent> = {
-            let mut p = self
+        let deliver = Arc::clone(&observer);
+        let buffered = self.install_observer(observer);
+        for event in &buffered {
+            deliver(event);
+        }
+    }
+
+    /// Install `observer` here and on every shard of the published layout, and return what
+    /// was buffered for it. The observer is the embedder's code, so it is not called here,
+    /// under the layout lock.
+    fn install_observer(&self, observer: ClusterObserver) -> Vec<EngineEvent> {
+        let stable = self.stable();
+        let mut buffered = std::mem::take(
+            &mut *self
                 .pending_events
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::take(&mut *p)
-        };
-        for ev in &pending {
-            observer(ev);
-        }
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         // Fan the observer into each shard as an event sink, so a `ReplicatedShard` surfaces its
         // degraded-redundancy (`ReplicaDesync`) events through the same observer (ADR-035). A
         // plain shard's default `set_event_sink` is a no-op.
-        for shard in layout.shards.iter() {
-            shard.set_event_sink(Arc::clone(&observer));
+        for shard in stable.layout.shards.iter() {
+            buffered.extend(shard.set_event_sink(Arc::clone(&observer)));
         }
         *self
             .observer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+        buffered
     }
 
     /// Emit a durability event: deliver to the observer if set, else buffer it for
