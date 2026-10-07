@@ -1,9 +1,5 @@
-//! A layout change builds from a corpus that is still (ADR-209).
-//!
-//! A write that passed the fence check before the fence went up is still on its way to a
-//! shard. A rebuild that gathered the corpus now would build the new layout without it, and
-//! the write would then land in shards nothing reads any more. So raising the fence waits,
-//! once, for every such write.
+//! A layout change builds from a corpus that is still, and what changes with the layout
+//! changes at the same moment (ADR-209). These tests stop a write, or a rebuild, half-way.
 
 use super::*;
 
@@ -168,26 +164,85 @@ fn a_queued_repair_stays_until_the_new_layout_is_published() {
     failing.store(false, Ordering::SeqCst);
     assert_eq!(cluster.pending_repairs(), 1);
 
-    let (queued_while_building, read_while_building) = std::thread::scope(|scope| {
+    let (queued_while_building, read_beside_it, read) = std::thread::scope(|scope| {
         let resizer = scope.spawn(|| cluster.resize(6));
         gate.wait_until_entered();
         let queued = cluster.pending_repairs();
-        let read = exhaustive(&cluster, "zzredrive");
+        // An exhaustive read is not a search: it certifies a result, so it waits.
+        let reader = scope.spawn(|| exhaustive(&cluster, "zzredrive"));
+        std::thread::sleep(Duration::from_millis(200));
+        let read_beside_it = reader.is_finished();
         gate.release_first();
         resizer.join().expect("resizer").expect("resize");
-        (queued, read)
+        (queued, read_beside_it, reader.join().expect("reader"))
     });
     assert_eq!(
         queued_while_building, 1,
         "the repair queue was emptied while the old layout was still serving"
     );
     assert!(
-        read_while_building.is_err(),
-        "an exhaustive read certified {read_while_building:?} while a repair was queued"
+        !read_beside_it,
+        "an exhaustive read ran on the old layout while it was being replaced"
     );
     assert_eq!(cluster.pending_repairs(), 0);
     assert_eq!(
-        exhaustive(&cluster, "zzredrive").expect("exhaustive read on the rebuilt layout"),
+        read.expect("exhaustive read on the rebuilt layout"),
         vec![999]
     );
+}
+
+/// Measuring the load and resizing to what it recommends are one layout change. Measured
+/// first and applied later, a recommendation for three shards would be applied to the twelve
+/// another resize had just built, and shrink them.
+#[test]
+fn a_recommended_resize_is_decided_on_the_layout_it_replaces() {
+    use crate::cluster::autoscale::AutoscaleConfig;
+
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..Default::default()
+    };
+    let seeded: Vec<(u64, String)> = (1..=600u64)
+        .map(|id| (id, format!("zzitem{id} zzgroup{}", id % 7)))
+        .collect();
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seeded).expect("cluster");
+    // About 200 queries a shard at three shards, about 50 at twelve.
+    let autoscale = AutoscaleConfig {
+        enabled: true,
+        target_replication_factor: 1,
+        max_node_load_skew: 0.0,
+        split_corpus_threshold: 120,
+    };
+    let at_three = cluster.collect_load(&autoscale).expect("load");
+    assert!(
+        crate::cluster::recommended_shard_count(&at_three, &autoscale).is_some(),
+        "three shards of this corpus are over the threshold"
+    );
+    let gate = Arc::new(FirstAppendGate::default());
+    let once = Arc::new(AtomicBool::new(true));
+    instrument(&mut cluster, {
+        let gate = Arc::clone(&gate);
+        Arc::new(move |_position, call| {
+            if matches!(call, WriteCall::Gather) && once.swap(false, Ordering::SeqCst) {
+                pause(&gate);
+            }
+            Ok(())
+        })
+    });
+    let recommended = std::thread::scope(|scope| {
+        let resizer = scope.spawn(|| cluster.resize(12));
+        gate.wait_until_entered();
+        let recommender = scope.spawn(|| cluster.resize_to_recommended(&autoscale));
+        std::thread::sleep(Duration::from_millis(200));
+        gate.release_first();
+        resizer.join().expect("resizer").expect("resize");
+        recommender.join().expect("recommender")
+    });
+    assert_eq!(
+        cluster.num_shards(),
+        12,
+        "a recommendation measured before another resize was applied after it"
+    );
+    assert_eq!(recommended.expect("recommended resize"), None);
 }

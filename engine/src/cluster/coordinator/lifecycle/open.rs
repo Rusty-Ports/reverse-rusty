@@ -120,7 +120,7 @@ impl ClusterEngine {
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
             pending_alias_import_predecessor: Mutex::new(None),
-            maintenance: Mutex::new(()),
+            layout_lock: std::sync::RwLock::new(()),
             retired_layouts: Mutex::new(Vec::new()),
             #[cfg(test)]
             admission_hook: Mutex::new(None),

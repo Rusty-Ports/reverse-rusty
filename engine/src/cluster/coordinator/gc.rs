@@ -150,7 +150,8 @@ impl ClusterEngine {
     /// report and the sweep continues. An in-process / genesis cluster (no addr'd data nodes)
     /// returns the clean empty report.
     pub fn gc_orphan_slots(&self, handle: &Handle) -> Result<GcReport, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let state = self.control_state()?;
         let mut report = GcReport::default();
         let mut data_nodes = Vec::new();

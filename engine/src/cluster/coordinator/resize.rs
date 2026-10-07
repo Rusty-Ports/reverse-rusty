@@ -40,6 +40,7 @@ use crate::cluster::shard::ShardError;
 use crate::events::{DurabilityOp, EngineEvent};
 
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::LayoutChange;
 
 mod control;
 mod rebuild;
@@ -58,6 +59,17 @@ impl ClusterEngine {
     /// (the in-process-only boundary [`set_vocab`](Self::set_vocab) enforces). A no-op
     /// (`Ok(0)`) when `new_num_shards` already equals the current count.
     pub fn resize(&self, new_num_shards: usize) -> Result<usize, ShardError> {
+        let change = self.begin_layout_change()?;
+        self.resize_in(&change, new_num_shards)
+    }
+
+    /// [`Self::resize`] inside a layout change the caller began, so that deciding on a shard
+    /// count and resizing to it are one step.
+    pub(in crate::cluster::coordinator) fn resize_in(
+        &self,
+        change: &LayoutChange<'_>,
+        new_num_shards: usize,
+    ) -> Result<usize, ShardError> {
         if new_num_shards == 0 {
             return Err(ShardError::Config(
                 "resize: new_num_shards must be ≥ 1".into(),
@@ -68,7 +80,6 @@ impl ClusterEngine {
                 "resize: new_num_shards exceeds the control-plane representation".into(),
             )
         })?;
-        let change = self.begin_layout_change()?;
         let before = change.current();
         // In-process only (same correctness boundary as set_vocab): a remote shard would keep
         // its old placement while the coordinator routes under the new ring — a silent
@@ -126,7 +137,7 @@ impl ClusterEngine {
         // The old layout is released before the rebuild, which holds a second corpus.
         drop(before);
         let (rebuilt, after) =
-            self.rebuild_from_live(&change, new_norm, new_ring, None, next_generation)?;
+            self.rebuild_from_live(change, new_norm, new_ring, None, next_generation)?;
 
         // Keep the cluster-state document consistent with the new shard count so `collect_load`
         // / `assignment_for` (introspection + the autoscaler) see K′ positions, not a stale K.
@@ -159,12 +170,18 @@ impl ClusterEngine {
         &self,
         config: &AutoscaleConfig,
     ) -> Result<Option<usize>, ShardError> {
+        // Measuring the load and resizing to what it recommends are one layout change: the
+        // recommendation is for the layout the resize then replaces, and for no other.
+        let change = self.begin_layout_change()?;
         let (snapshot, current_shards) = {
-            let layout = self.layout();
-            (self.collect_load_in(&layout, config)?, layout.num_shards())
+            let current = change.current();
+            (
+                self.collect_load_in(&current, config)?,
+                current.num_shards(),
+            )
         };
         match recommended_shard_count(&snapshot, config) {
-            Some(k) if k != current_shards => self.resize(k).map(|_| Some(k)),
+            Some(k) if k != current_shards => self.resize_in(&change, k).map(|_| Some(k)),
             _ => Ok(None),
         }
     }

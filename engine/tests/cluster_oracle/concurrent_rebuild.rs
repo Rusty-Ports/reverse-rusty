@@ -1,8 +1,9 @@
-//! A resize or a vocabulary change runs beside reads and holds only writes out (ADR-209).
+//! A resize or a vocabulary change runs beside searches and holds everything else back
+//! (ADR-209).
 //!
-//! Every operation runs on the layout that was published when it started. So a read that
-//! overlaps a rebuild returns either what the old layout returns or what the new one does,
-//! never a mix of the two, and a write is either refused or lands in the layout that reads use
+//! A search runs on the layout that was published when it started. So one that overlaps a
+//! rebuild returns either what the old layout returns or what the new one does, never a mix
+//! of the two. A write waits for the rebuild and lands in the layout that searches use
 //! afterwards.
 
 use std::collections::BTreeSet;
@@ -152,7 +153,7 @@ fn a_read_across_a_vocabulary_change_sees_the_old_vocabulary_or_the_new_one() {
 }
 
 #[test]
-fn a_write_that_races_a_resize_is_refused_or_kept_never_lost() {
+fn a_write_that_races_a_resize_is_never_lost() {
     const SEEDED: u64 = 3_000;
     let cluster = cluster(3, &corpus(SEEDED));
     let done = AtomicBool::new(false);
@@ -171,7 +172,7 @@ fn a_write_that_races_a_resize_is_refused_or_kept_never_lost() {
                         Ok(AddOutcome::Placed { .. } | AddOutcome::Replicated { .. }) => {
                             acknowledged.lock().expect("acknowledged").push(id);
                         }
-                        // Refused while a rebuild holds writes out: the caller retries.
+                        // A remote resize refuses writes; an in-process one makes them wait.
                         Err(error) if error.to_string().contains("writes are paused") => {
                             refused.fetch_add(1, Ordering::SeqCst);
                         }

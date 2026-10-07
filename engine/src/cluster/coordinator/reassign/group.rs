@@ -119,7 +119,8 @@ impl ClusterEngine {
         desired: &ShardAssignment,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
-        self.reassign_group_and_move_in(&self.layout(), position, desired, handle)
+        let stable = self.stable();
+        self.reassign_group_and_move_in(&stable.layout, position, desired, handle)
     }
 
     pub(in crate::cluster::coordinator) fn reassign_group_and_move_in(

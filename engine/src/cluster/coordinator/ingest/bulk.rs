@@ -112,7 +112,8 @@ impl ClusterEngine {
     /// The first shard position that still carries the mark of a bulk load that began and
     /// was never completed (ADR-196), or `None`. Such a cluster holds part of a corpus.
     pub fn unfinished_bulk_load(&self) -> Result<Option<usize>, ShardError> {
-        Self::unfinished_bulk_load_in(&self.layout())
+        let stable = self.stable();
+        Self::unfinished_bulk_load_in(&stable.layout)
     }
 
     pub(in crate::cluster::coordinator) fn unfinished_bulk_load_in(

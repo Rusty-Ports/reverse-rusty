@@ -261,10 +261,9 @@ matches, which is also why the search pool needs a gate
 **Done so far.** The serving layout (normalizer, dictionary, vocabulary, ring, shards, placement
 generation) is one published value, and every operation loads it once
 ([ADR-208](decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)). In the library a
-rebuild now takes shared access, holds only writes out, and leaves reads running on the layout
-they loaded ([ADR-209](decisions/adr-209-a-layout-change-holds-writes-out-not-reads.md)). The
-server still holds its cluster lock and the search pool's gate around a rebuild, so served
-searches still wait.
+rebuild now takes shared access and only searches run beside it
+([ADR-209](decisions/adr-209-only-a-search-runs-beside-a-layout-change.md)). The server still
+holds its cluster lock and the search pool's gate around a rebuild, so served searches still wait.
 
 **Direction.** Take the cluster lock and the search pool's gate off the search path in the server,
 so that a served search and a health probe answer during a rebuild. Then measure a rebuild's time

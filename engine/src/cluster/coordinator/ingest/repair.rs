@@ -281,9 +281,9 @@ impl ClusterEngine {
     /// checkpoints while it runs (ADR-197): a flush that wrote a segment between a
     /// checkpoint's registry snapshot and its orphan sweep would have that file deleted.
     pub fn flush(&self) -> Result<(), ShardError> {
-        let _maintenance = self.maintenance();
+        let stable = self.stable();
         let _quiesced = self.quiesce_mutations();
-        let layout = &*self.layout();
+        let layout = &*stable.layout;
         for s in layout.shards.iter() {
             s.flush()?;
         }

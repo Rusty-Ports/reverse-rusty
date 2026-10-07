@@ -34,19 +34,9 @@ impl ClusterEngine {
     /// set of writes. PIT opens, exhaustive delivery, `flush` and other checkpoints wait too;
     /// ordinary reads do not. Lock order: this barrier, then a logical-id lock, then a shard.
     pub fn checkpoint(&self) -> Result<(), ShardError> {
-        let _maintenance = self.maintenance();
+        let stable = self.stable();
         let _quiesced = self.quiesce_mutations();
-        let layout = &*self.layout();
-        self.checkpoint_quiesced(layout)
-    }
-
-    /// One layout change, checkpoint, flush or backup at a time. A layout change holds this
-    /// for its whole run, so the others never seal or sweep a directory in which a new layout
-    /// is being built. Take it before the mutation barrier, and load the layout after both.
-    pub(in crate::cluster::coordinator) fn maintenance(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.maintenance
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.checkpoint_quiesced(&stable.layout)
     }
 
     /// Take the exclusive side of the mutation barrier: wait for every write that has been
@@ -218,41 +208,6 @@ impl ClusterEngine {
         )))
     }
 
-    /// Raise the write fence, then take the mutation barrier exclusively so every mutation that
-    /// passed the fence check before it was raised has finished applying to the old layout.
-    ///
-    /// Refuses, leaving the fence untouched, when it is already raised: another resize is still
-    /// preparing or awaiting install, or an earlier one failed after proposing `Commit` without
-    /// proof that it did not apply. This attempt did not raise that fence and cannot know its
-    /// outcome, so lowering it on failure could accept writes the committed layout never receives.
-    pub(in crate::cluster::coordinator) fn raise_resize_write_fence(
-        &self,
-    ) -> Result<(), ShardError> {
-        if self
-            .resize_write_fence
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(ShardError::ControlPlane(
-                "writes are paused by a remote resize, or by an earlier one whose commit outcome \
-                 is unresolved; wait for it, or restart the coordinator to resolve the recorded \
-                 intent, before changing the layout again"
-                    .into(),
-            ));
-        }
-        drop(
-            self.pit_open_barrier
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        Ok(())
-    }
-
-    /// Let writes in again.
-    pub(in crate::cluster::coordinator) fn lower_write_fence(&self) {
-        self.resize_write_fence.store(false, Ordering::Release);
-    }
-
     /// Refuse any mutation while a remote resize is copying the corpus onto its new layout
     /// (ADR-180). Callers check this while holding the PIT/mutation barrier, which the resize
     /// takes exclusively after raising the fence, so every accepted write lands before the export
@@ -262,8 +217,8 @@ impl ClusterEngine {
     pub fn ensure_resize_write_fence_open(&self) -> Result<(), ShardError> {
         if self.resize_write_fence.load(Ordering::Acquire) {
             return Err(ShardError::ControlPlane(
-                "writes are paused while the cluster's layout is rebuilt (a resize or a \
-                 vocabulary change); retry after it completes"
+                "writes are paused while a remote resize copies the corpus to its new layout; \
+                 retry after the resize completes"
                     .into(),
             ));
         }

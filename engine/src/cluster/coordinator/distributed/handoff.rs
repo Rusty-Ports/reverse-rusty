@@ -89,7 +89,8 @@ impl ClusterEngine {
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let _ticket = self
             .move_ledger
             .reserve(&[source_endpoint, target_endpoint]);
@@ -125,7 +126,8 @@ impl ClusterEngine {
     where
         F: FnOnce() -> bool,
     {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let Some(_ticket) = self
             .move_ledger
             .reserve_until(&[source_endpoint, target_endpoint], deadline)

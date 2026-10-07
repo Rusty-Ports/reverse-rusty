@@ -37,6 +37,7 @@ mod retire;
 use crate::cluster::coordinator::layout::Layout;
 use plan::{expected_endpoints, member_endpoint, resize_intent};
 pub use recovery::{recover_durable_resize, ResizeRecovery};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// One remote resize request.
@@ -120,7 +121,8 @@ impl ClusterEngine {
         &self,
         request: &RemoteResizeRequest,
     ) -> Result<PreparedRemoteResize, ShardError> {
-        self.prepare_remote_resize_in(&self.layout(), request)
+        let stable = self.stable();
+        self.prepare_remote_resize_in(&stable.layout, request)
     }
 
     pub(in crate::cluster::coordinator) fn prepare_remote_resize_in(
@@ -142,7 +144,8 @@ impl ClusterEngine {
         request: &RemoteResizeRequest,
         on_fenced: impl FnOnce(),
     ) -> Result<PreparedRemoteResize, ShardError> {
-        self.prepare_remote_resize_then_in(&self.layout(), request, on_fenced)
+        let stable = self.stable();
+        self.prepare_remote_resize_then_in(&stable.layout, request, on_fenced)
     }
 
     pub(in crate::cluster::coordinator) fn prepare_remote_resize_then_in(
@@ -262,31 +265,28 @@ impl ClusterEngine {
         // restores create-only admission and exhaustive-delivery convergence even when this
         // coordinator attached to populated shards without either. A failure leaves the retired
         // old nodes refusing every request, so nothing answers from the superseded layout.
-        // No checkpoint, flush or other layout change runs across the swap, and no frozen
-        // view, point-in-time open or exhaustive read straddles it.
-        let _maintenance = self.maintenance();
-        let _quiet = self.quiesce_mutations();
-        self.replace_logical_ids(logical_ids)?;
+        // The swap is a layout change like an in-process one: nothing but searches runs
+        // across it, and it happens under the mutation barrier, with the directory, the
+        // repair queue and the point-in-time pins.
+        let change = self.begin_cutover();
+        let current = change.current();
         let staged_layout = staged.layout();
-        let current = self.layout();
-        self.publish_layout(Layout {
-            norm: Arc::clone(&current.norm),
-            dict: Arc::clone(&current.dict),
-            vocab: current.vocab.clone(),
-            ring: staged_layout.ring.clone(),
-            shards: Arc::clone(&staged_layout.shards),
-            source_files: staged_layout.source_files.clone(),
-            handoffs: staged_layout.handoffs.clone(),
-            generation,
-        });
+        change.publish(
+            Layout {
+                norm: Arc::clone(&current.norm),
+                dict: Arc::clone(&current.dict),
+                vocab: current.vocab.clone(),
+                ring: staged_layout.ring.clone(),
+                shards: Arc::clone(&staged_layout.shards),
+                source_files: staged_layout.source_files.clone(),
+                handoffs: staged_layout.handoffs.clone(),
+                generation,
+            },
+            || self.replace_logical_ids(logical_ids),
+        )?;
         self.transport_metrics
             .store(staged.transport_metrics.load_full());
-        self.pending_repair
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.clear_pits();
-        self.lower_write_fence();
+        self.resize_write_fence.store(false, Ordering::Release);
         Ok(RetiredRemoteLayout {
             operation_id,
             old_num_shards,
@@ -304,7 +304,8 @@ impl ClusterEngine {
         &self,
         retired: RetiredRemoteLayout,
     ) -> Result<RemoteResizeReport, ShardError> {
-        self.finish_remote_resize_in(&self.layout(), retired)
+        let stable = self.stable();
+        self.finish_remote_resize_in(&stable.layout, retired)
     }
 
     // The shape of the public method it serves.
@@ -508,7 +509,7 @@ impl ClusterEngine {
         }
         self.unretire_all(handle, operation_id, &retired);
         let _aborted = self.propose_resize(ResizeCommand::Abort { operation_id });
-        self.lower_write_fence();
+        self.resize_write_fence.store(false, Ordering::Release);
         failure
     }
 
@@ -561,5 +562,33 @@ impl ClusterEngine {
                 "remote resize transition was refused ({outcome:?})"
             ))),
         }
+    }
+
+    /// Raise the write fence, then take the mutation barrier exclusively so every mutation that
+    /// passed the fence check before it was raised has finished applying to the old layout.
+    ///
+    /// Refuses, leaving the fence untouched, when it is already raised: another resize is still
+    /// preparing or awaiting install, or an earlier one failed after proposing `Commit` without
+    /// proof that it did not apply. This attempt did not raise that fence and cannot know its
+    /// outcome, so lowering it on failure could accept writes the committed layout never receives.
+    fn raise_resize_write_fence(&self) -> Result<(), ShardError> {
+        if self
+            .resize_write_fence
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ShardError::ControlPlane(
+                "writes are paused by another remote resize, or by an earlier one whose commit \
+                 outcome is unresolved; wait for it, or restart the coordinator to resolve the \
+                 recorded intent, before resizing again"
+                    .into(),
+            ));
+        }
+        drop(
+            self.pit_open_barrier
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        Ok(())
     }
 }

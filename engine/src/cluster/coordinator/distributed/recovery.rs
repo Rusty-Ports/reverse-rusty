@@ -22,7 +22,8 @@ impl ClusterEngine {
     ) -> Result<(u64, u64), ShardError> {
         // Bound on the convergence loop (a safety cap, not a correctness requirement).
         const FINALIZE_PASSES: usize = 8;
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let expected = layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Pin the source's tail BEFORE the segment-copy seal trims it (ADR-040). Held across the
@@ -112,7 +113,8 @@ impl ClusterEngine {
         after: u64,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let expected = layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Catch up the target's slot `shard_id` from the source's same slot (ADR-093).

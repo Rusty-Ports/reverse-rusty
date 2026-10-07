@@ -153,7 +153,8 @@ impl ClusterEngine {
     /// control-plane READ failure (the driver logs + retries next pass); per-position move failures
     /// land in the report, not as an `Err`.
     pub fn reconcile(&self, rf: usize, handle: &Handle) -> Result<ReconcileReport, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         self.reconcile_with_in(layout, rf, 1, handle)
     }
 
@@ -172,7 +173,8 @@ impl ClusterEngine {
         max_parallel_moves: usize,
         handle: &Handle,
     ) -> Result<ReconcileReport, ShardError> {
-        self.reconcile_with_in(&self.layout(), rf, max_parallel_moves, handle)
+        let stable = self.stable();
+        self.reconcile_with_in(&stable.layout, rf, max_parallel_moves, handle)
     }
 
     pub(in crate::cluster::coordinator) fn reconcile_with_in(

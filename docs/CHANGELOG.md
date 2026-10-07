@@ -9,19 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-10-07 — A cluster rebuild no longer needs the engine to itself (library)
+## 2026-10-07 — A search runs beside a cluster rebuild (library)
 
-- In the library, a vocabulary change and an in-process resize run beside reads and hold only
-  writes out ([ADR-209](decisions/adr-209-a-layout-change-holds-writes-out-not-reads.md)). A read
-  that overlaps a rebuild returns what the old layout returns or what the new one does, never a
-  mix. **The served coordinator does not benefit yet**: it still holds its own lock around a
-  rebuild, which the next change removes.
+- In the library, a search answers while a vocabulary change or an in-process resize rebuilds the
+  cluster ([ADR-209](decisions/adr-209-only-a-search-runs-beside-a-layout-change.md)). It returns
+  what the old layout returns or what the new one does, never a mix. Every other operation waits
+  for the rebuild, as before. **The served coordinator does not benefit yet**: it still holds its
+  own lock around a rebuild, which the next change removes.
 - Library: `ClusterEngine::resize`, `set_vocab`, `learn_and_apply`, `learn_and_apply_with`,
   `import_alias_synonyms`, `learn_aliases_and_apply`, `resize_to_recommended`,
-  `install_remote_resize` and `resize_remote` take `&self`. A write during a rebuild is refused
-  with "writes are paused while the cluster's layout is rebuilt"; retry it.
-- The files of a layout that a rebuild replaced are removed once no operation is still running
-  on that layout, at the rebuild's own checkpoint or the next one.
+  `install_remote_resize` and `resize_remote` take `&self`.
+- The files of a layout that a rebuild replaced are removed once no search is still running on
+  that layout, at the rebuild's own checkpoint or the next one.
 
 ## 2026-10-07 — The coordinator's serving state is one published layout
 

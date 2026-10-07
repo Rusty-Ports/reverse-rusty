@@ -134,10 +134,10 @@ impl ClusterEngine {
         replica_dir: &Path,
         max_passes: usize,
     ) -> Result<(), ShardError> {
+        let stable = self.stable();
         // A recovery seals the primary, which writes into its directory: it is maintenance,
         // and waits for a layout change like a checkpoint does.
-        let _maintenance = self.maintenance();
-        let layout = &*self.layout();
+        let layout = &*stable.layout;
         let Some(base) = self.data_dir.as_deref() else {
             return Err(ShardError::Config(
                 "add_replica requires a durable cluster (no on-disk segments to copy)".into(),
@@ -164,7 +164,8 @@ impl ClusterEngine {
     /// Any events buffered before this call are delivered immediately, mirroring the
     /// engine's `set_observer`.
     pub fn set_observer(&self, observer: ClusterObserver) {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let pending: Vec<EngineEvent> = {
             let mut p = self
                 .pending_events

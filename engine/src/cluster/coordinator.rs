@@ -359,9 +359,9 @@ pub struct ClusterEngine {
     /// incomplete, so an identical retry can overwrite precisely that commit
     /// point and no other CRC-valid manifest.
     pending_alias_import_predecessor: Mutex<Option<crate::storage::ClusterManifest>>,
-    /// Held by one layout change, checkpoint, flush or backup at a time. See
-    /// [`Self::maintenance`].
-    maintenance: Mutex<()>,
+    /// Held alone by a layout change for its whole run, and shared by every operation that is
+    /// not a search. See [`Self::stable`] and `layout::LayoutChange`.
+    layout_lock: RwLock<()>,
     /// Layouts that have been replaced and may still be held by a running operation. Their
     /// files are removed only once they are released.
     retired_layouts: Mutex<Vec<std::sync::Weak<layout::Layout>>>,

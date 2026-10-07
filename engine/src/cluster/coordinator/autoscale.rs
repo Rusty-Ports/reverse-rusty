@@ -21,7 +21,8 @@ impl ClusterEngine {
     /// nodes). Fail-closed: a control-plane or shard error propagates rather than yielding a
     /// partial/blind snapshot.
     pub fn collect_load(&self, config: &AutoscaleConfig) -> Result<LoadSnapshot, ShardError> {
-        self.collect_load_in(&self.layout(), config)
+        let stable = self.stable();
+        self.collect_load_in(&stable.layout, config)
     }
 
     pub(in crate::cluster::coordinator) fn collect_load_in(
@@ -62,7 +63,8 @@ impl ClusterEngine {
         &self,
         config: &AutoscaleConfig,
     ) -> Result<ResizeObservation, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         let snapshot = self.collect_load_in(layout, config)?;
         let max_selective_corpus = snapshot
             .shard_corpus
@@ -88,7 +90,8 @@ impl ClusterEngine {
     /// for the caller to log or act on. A disabled config yields an empty decision ⇒ a no-op
     /// tick, so a default-config caller is byte-identical to no autoscaler at all.
     pub fn tick(&self, config: &AutoscaleConfig) -> Result<AutoscaleDecision, ShardError> {
-        self.tick_in(&self.layout(), config)
+        let stable = self.stable();
+        self.tick_in(&stable.layout, config)
     }
 
     pub(in crate::cluster::coordinator) fn tick_in(
@@ -243,7 +246,8 @@ impl ClusterEngine {
         node: NodeDescriptor,
         config: &AutoscaleConfig,
     ) -> Result<AutoscaleDecision, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         self.register_node(node)?;
         self.tick_in(layout, config)
     }
@@ -255,7 +259,8 @@ impl ClusterEngine {
         id: NodeId,
         config: &AutoscaleConfig,
     ) -> Result<AutoscaleDecision, ShardError> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         self.deregister_node(id)?;
         self.tick_in(layout, config)
     }

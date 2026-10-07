@@ -63,7 +63,8 @@ impl ClusterEngine {
     /// advances a position's generation when it re-points it to a new owner; this is how a
     /// test/operator observes the live map.
     pub fn handoff_generations(&self) -> Vec<u64> {
-        let layout = &*self.layout();
+        let stable = self.stable();
+        let layout = &*stable.layout;
         layout.handoffs.iter().map(|h| h.generation()).collect()
     }
 

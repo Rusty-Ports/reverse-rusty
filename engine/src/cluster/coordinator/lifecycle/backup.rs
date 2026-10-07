@@ -29,6 +29,7 @@ impl ClusterEngine {
     /// `dest` — a 400), and [`ShardError::Log`] for a checkpoint / copy / validation
     /// failure (a 503).
     pub fn backup_to(&self, dest: &Path) -> Result<(), ShardError> {
+        let stable = self.stable();
         let Some(src) = self.data_dir.clone() else {
             return Err(ShardError::Config(
                 "cluster is in-memory (no data_dir): nothing to back up".into(),
@@ -37,9 +38,8 @@ impl ClusterEngine {
         // Exclude mutations, checkpoints and other backups before looking at `dest`: two
         // backups to one destination must not both find it absent, or the second would
         // checkpoint (epoch bump, log truncation) and only then learn it cannot succeed.
-        let _maintenance = self.maintenance();
         let _quiesced = self.quiesce_mutations();
-        let layout = &*self.layout();
+        let layout = &*stable.layout;
         // Reject every existing directory entry up front, including a dangling
         // symlink: checkpoint() has side effects (epoch bump, log truncation), so
         // a request that cannot succeed must not run it. `Path::exists` follows

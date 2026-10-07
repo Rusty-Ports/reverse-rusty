@@ -61,16 +61,16 @@ impl Layout {
     }
 }
 
-/// How long a layout change waits, once it has published, for the operations still running on
+/// How long a layout change waits, once it has published, for the searches still running on
 /// the layout it replaced. After that it leaves that layout's files for a later checkpoint.
 const RETIRED_LAYOUT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// One change of the layout in progress. Until it is dropped no other change, checkpoint,
-/// flush or backup runs, and every write is refused. Reads go on, on the layout that is
-/// published when they load.
+/// One change of the layout in progress. It holds the layout lock alone, so until it is
+/// dropped nothing runs on the engine but searches, which go on, each on the layout that was
+/// published when it loaded.
 pub(in crate::cluster::coordinator) struct LayoutChange<'a> {
     engine: &'a super::ClusterEngine,
-    _maintenance: std::sync::MutexGuard<'a, ()>,
+    _alone: std::sync::RwLockWriteGuard<'a, ()>,
 }
 
 impl LayoutChange<'_> {
@@ -83,11 +83,11 @@ impl LayoutChange<'_> {
     /// finish on it; it is released when the last of them returns.
     ///
     /// `with_it` runs just before the swap and is for what must change together with the
-    /// layout (the logical-id directory). Both, the repair queue and the release of the old
-    /// layout's point-in-time pins change on the exclusive side of the mutation barrier. A frozen read
-    /// view, a point-in-time open and an exhaustive read hold that side for as long as they
-    /// run, so each of them sees one layout, one directory and its own pins from its first
-    /// step to its last.
+    /// layout (the logical-id directory). The swap, the repair queue and the release of the
+    /// old layout's point-in-time pins happen on the exclusive side of the mutation barrier.
+    /// A frozen read view is a search, so it may be open while this change builds; it holds
+    /// that side of the barrier for as long as it lives, and so sees one layout from its
+    /// first step to its last.
     pub(in crate::cluster::coordinator) fn publish(
         &self,
         next: Layout,
@@ -98,8 +98,7 @@ impl LayoutChange<'_> {
         let next = self.engine.publish_layout(next);
         // Queued repairs (ADR-047) describe where the old layout's shards disagree, by their
         // positions. The new layout was rebuilt from the live corpus and has no such
-        // disagreement. Until this moment they must stay: an exhaustive read on the old
-        // layout refuses to certify a result while one is queued.
+        // disagreement.
         self.engine
             .pending_repair
             .lock()
@@ -110,12 +109,6 @@ impl LayoutChange<'_> {
         // never name a later point in time.
         self.engine.clear_pits();
         Ok(next)
-    }
-}
-
-impl Drop for LayoutChange<'_> {
-    fn drop(&mut self) {
-        self.engine.lower_write_fence();
     }
 }
 
@@ -157,29 +150,57 @@ impl Drop for FrozenShards {
     }
 }
 
-/// A mutation that holds the mutation barrier shared. Its layout stays the published one
-/// until this is dropped. See [`ClusterEngine::admit_mutation`](super::ClusterEngine).
+/// An operation that is not a search, running under the layout lock held shared: no layout
+/// change starts or finishes while this lives, so its layout is the published one throughout,
+/// and so is everything that changes with a layout (the logical-id directory, the repair
+/// queue, the control state, the files on disk).
+pub(in crate::cluster::coordinator) struct Stable<'a> {
+    pub(in crate::cluster::coordinator) layout: Arc<Layout>,
+    _held: std::sync::RwLockReadGuard<'a, ()>,
+}
+
+/// A mutation: [`Stable`], and the mutation barrier held shared.
 pub(in crate::cluster::coordinator) struct Admitted<'a> {
     pub(in crate::cluster::coordinator) layout: Arc<Layout>,
     _barrier: std::sync::RwLockReadGuard<'a, ()>,
+    _held: std::sync::RwLockReadGuard<'a, ()>,
 }
 
 impl super::ClusterEngine {
-    /// The layout to run one operation under. Load it once, at the operation's entry, and
-    /// hand it down: a rebuild may publish another at any moment, and an operation that
-    /// routed by one layout and matched in another would be wrong.
+    /// The layout for a **search**: an operation that only reads shard data, through this
+    /// one layout, and may therefore run while the layout is being changed. Load it once, at
+    /// the operation's entry, and hand it down: a change may publish another at any moment,
+    /// and a search that routed by one layout and matched in another would be wrong.
+    ///
+    /// Everything that is not a search uses [`Self::stable`] or [`Self::admit_mutation`]. The
+    /// rule test (`tests/layout_discipline.rs`) lists the files that may call this.
     pub(in crate::cluster::coordinator) fn layout(&self) -> Arc<Layout> {
         self.layout.load_full()
     }
 
-    /// Admit one mutation: take the mutation barrier shared, then load the layout.
-    ///
-    /// The order is what makes the layout safe to write to. A layout change first refuses new
-    /// writes and then takes the barrier exclusively once, so it waits for every mutation
-    /// admitted before it and publishes only after they have applied. A mutation that loaded
-    /// the layout before it held the barrier could find, by the time it applied, that the
-    /// layout had been replaced, and write to shards nothing reads any more.
+    /// Run an operation that is not a search: hold the layout lock shared and load the
+    /// layout under it. A layout change holds that lock alone, so the two never overlap, as
+    /// when a change needed the engine to itself. Take it once, at the operation's entry, and
+    /// before any other lock: a second shared hold under the first would wait behind a change
+    /// that is waiting for the first.
+    pub(in crate::cluster::coordinator) fn stable(&self) -> Stable<'_> {
+        let held = self
+            .layout_lock
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Stable {
+            layout: self.layout.load_full(),
+            _held: held,
+        }
+    }
+
+    /// Admit one mutation: the layout lock shared, then the mutation barrier shared, then the
+    /// layout. The mutation holds both until it has applied.
     pub(in crate::cluster::coordinator) fn admit_mutation(&self) -> Admitted<'_> {
+        let held = self
+            .layout_lock
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let barrier = self
             .pit_open_barrier
             .read()
@@ -189,24 +210,39 @@ impl super::ClusterEngine {
         Admitted {
             layout: self.layout.load_full(),
             _barrier: barrier,
+            _held: held,
         }
     }
 
-    /// Begin a change of the layout: one at a time, with every write held out.
+    /// Whether `layout` is the one published now.
+    pub(in crate::cluster::coordinator) fn is_published(&self, layout: &Layout) -> bool {
+        std::ptr::eq(Arc::as_ptr(&self.layout.load()), layout)
+    }
+
+    /// Begin a change of the layout. It waits for every operation that is not a search to
+    /// finish and keeps new ones out, so the corpus is still and the layout published now
+    /// stays published until this change replaces it. A change that fails before it publishes
+    /// leaves that layout serving.
     ///
-    /// It takes the maintenance lock, raises the write fence, and takes the mutation barrier
-    /// exclusively once, so every mutation admitted before the fence has applied. From here
-    /// the corpus is still, and the layout published now stays published until this change
-    /// replaces it. A change that fails before it publishes leaves that layout serving.
+    /// It refuses, without waiting, while a remote resize is copying the corpus: that copy
+    /// holds the layout lock shared for its whole run, and a change queued behind it would
+    /// hold every other operation back until the copy was done.
     pub(in crate::cluster::coordinator) fn begin_layout_change(
         &self,
     ) -> Result<LayoutChange<'_>, ShardError> {
-        let maintenance = self.maintenance();
-        self.raise_resize_write_fence()?;
-        Ok(LayoutChange {
+        self.ensure_resize_write_fence_open()?;
+        Ok(self.begin_cutover())
+    }
+
+    /// The layout lock alone, for the cutover of a remote resize, whose own fence is up.
+    pub(in crate::cluster::coordinator) fn begin_cutover(&self) -> LayoutChange<'_> {
+        LayoutChange {
+            _alone: self
+                .layout_lock
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             engine: self,
-            _maintenance: maintenance,
-        })
+        }
     }
 
     /// Swap in `next` and remember the layout it replaces until its last holder lets go.
@@ -220,8 +256,8 @@ impl super::ClusterEngine {
         next
     }
 
-    /// Whether every layout that was replaced has been released by the operations that held
-    /// it. Until then its files stay: an operation still running on it may open one.
+    /// Whether every layout that was replaced has been released by the searches that held
+    /// it. Until then its files stay: a search still running on it may open one.
     pub(in crate::cluster::coordinator) fn retired_layouts_released(&self) -> bool {
         let mut retired = self
             .retired_layouts
@@ -231,18 +267,13 @@ impl super::ClusterEngine {
         retired.is_empty()
     }
 
-    /// Give the operations still running on a replaced layout a moment to finish, so that the
+    /// Give the searches still running on a replaced layout a moment to finish, so that the
     /// checkpoint that follows can remove its files. The caller holds no handle on it.
     pub(in crate::cluster::coordinator) fn await_retired_layouts(&self) {
         let deadline = std::time::Instant::now() + RETIRED_LAYOUT_GRACE;
         while !self.retired_layouts_released() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-    }
-
-    /// Whether `layout` is the one published now.
-    pub(in crate::cluster::coordinator) fn is_published(&self, layout: &Layout) -> bool {
-        std::ptr::eq(Arc::as_ptr(&self.layout.load()), layout)
     }
 
     /// Publish a copy of the current layout with `edit` applied. For assembly and for the

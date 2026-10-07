@@ -1,5 +1,5 @@
-//! A layout change holds writes out, lets reads through, and leaves a replaced layout's
-//! files alone until nothing is running on it (ADR-209).
+//! A layout change has the engine to itself except for searches, and leaves a replaced
+//! layout's files alone until nothing is running on it (ADR-209).
 
 use super::*;
 
@@ -18,12 +18,13 @@ fn in_memory(shards: usize, count: u64) -> ClusterEngine {
     ClusterEngine::build(vocab(), &cfg, &corpus(count)).expect("cluster")
 }
 
-/// The order inside a mutation's admission is the whole of its safety: barrier, then layout.
-/// A mutation is stopped between the two steps while a resize runs. Taken in that order, the
-/// resize waits for it. Taken the other way round, the resize would finish first and the
-/// mutation would then write to shards nothing reads any more.
+/// A mutation takes the layout lock, then the mutation barrier, and only then loads the
+/// layout. It is stopped between the locks and the load while a resize starts. Taken in that
+/// order, the resize waits for it and the write is in the layout the resize builds. Loaded
+/// first, the mutation would hold nothing while it was stopped, the resize would finish, and
+/// the mutation would then write to shards that have been replaced.
 #[test]
-fn a_mutation_admitted_before_a_layout_change_is_not_lost_to_it() {
+fn a_layout_change_waits_for_a_mutation_that_has_been_admitted() {
     let cluster = in_memory(3, 200);
     let (paused, is_paused) = mpsc::channel();
     let (resume, resumed) = mpsc::channel::<()>();
@@ -55,85 +56,119 @@ fn a_mutation_admitted_before_a_layout_change_is_not_lost_to_it() {
         let matched = cluster
             .percolate_with_broad("zzlate zzarrival", true)
             .expect("read");
-        match written {
-            Ok(_) => assert_eq!(
-                matched,
-                vec![9_001],
-                "the write was acknowledged and no read finds it (the resize ran beside the \
-                 stopped mutation: {resized_beside_it})"
-            ),
-            // Refused at the fence the resize raised while it waited: the caller retries.
-            Err(error) => {
-                assert!(error.to_string().contains("writes are paused"), "{error}");
-                assert!(matched.is_empty());
-            }
-        }
         assert!(
             !resized_beside_it,
-            "the resize did not wait for a mutation that had been admitted"
+            "the resize did not wait for a mutation that had been admitted (the write: {written:?})"
+        );
+        written.expect("an admitted write is applied");
+        assert_eq!(
+            matched,
+            vec![9_001],
+            "the write was acknowledged and no read finds it"
         );
     });
     assert_eq!(cluster.num_shards(), 5);
 }
 
 #[test]
-fn a_layout_change_refuses_writes_and_lets_reads_through() {
+fn a_layout_change_holds_writes_back_and_lets_searches_through() {
     let cluster = in_memory(3, 200);
-    let change = cluster.begin_layout_change().expect("begin");
-    let refused = cluster.add_query(9_002, "zzheld zzout");
-    let upsert = cluster.upsert_query(1, "zzitem1 zzgroup1", 2);
-    let remove = cluster.remove_query(2);
-    let read = cluster.percolate_with_broad("zzitem5 zzgroup5", true);
-    let view = cluster
-        .consistent_read_view()
-        .percolate_filtered_with_stats("zzitem6 zzgroup6", &[], true)
-        .map(|(matched, _)| matched);
-    drop(change);
-    for (what, error) in [
-        ("add", refused.err().map(|e| e.to_string())),
-        ("upsert", upsert.err().map(|e| e.to_string())),
-        ("remove", remove.err().map(|e| e.to_string())),
-    ] {
-        let error = error.unwrap_or_else(|| panic!("{what} was accepted during a layout change"));
-        assert!(error.contains("writes are paused"), "{what}: {error}");
-    }
-    assert_eq!(read.expect("read"), vec![5]);
-    assert_eq!(view.expect("frozen view"), vec![6]);
-    // Nothing the refused writes asked for happened, and writes are back.
+    std::thread::scope(|scope| {
+        let change = cluster.begin_layout_change().expect("begin");
+        let add = scope.spawn(|| cluster.add_query(9_002, "zzheld zzback"));
+        let remove = scope.spawn(|| cluster.remove_query(2));
+        std::thread::sleep(Duration::from_millis(150));
+        let wrote_beside_it = add.is_finished() || remove.is_finished();
+        // Searches, of every kind, run on the layout that is published.
+        let read = cluster.percolate_with_broad("zzitem5 zzgroup5", true);
+        let view = cluster
+            .consistent_read_view()
+            .percolate_filtered_with_stats("zzitem6 zzgroup6", &[], true)
+            .map(|(matched, _)| matched);
+        let counted = cluster.num_queries();
+        let untouched = cluster.percolate_with_broad("zzitem2 zzgroup2", true);
+        // Released before anything can fail: both writes are waiting for it.
+        drop(change);
+        let added = add.join().expect("add thread");
+        let removed = remove.join().expect("remove thread");
+
+        assert!(!wrote_beside_it, "a write ran beside a layout change");
+        assert_eq!(read.expect("read"), vec![5]);
+        assert_eq!(view.expect("frozen view"), vec![6]);
+        assert!(counted.expect("count") > 0);
+        assert_eq!(
+            untouched.expect("read"),
+            vec![2],
+            "the remove had not run yet"
+        );
+        assert!(matches!(
+            added,
+            Ok(AddOutcome::Placed { .. } | AddOutcome::Replicated { .. })
+        ));
+        removed.expect("remove");
+    });
     assert_eq!(
         cluster
-            .percolate_with_broad("zzitem2 zzgroup2", true)
+            .percolate_with_broad("zzheld zzback", true)
             .expect("read"),
-        vec![2]
+        vec![9_002]
     );
-    assert!(matches!(
-        cluster.add_query(9_002, "zzheld zzout"),
-        Ok(AddOutcome::Placed { .. } | AddOutcome::Replicated { .. })
-    ));
+    assert!(cluster
+        .percolate_with_broad("zzitem2 zzgroup2", true)
+        .expect("read")
+        .is_empty());
 }
 
+/// A load snapshot is in this list because it reads the control state together with the
+/// layout, and a layout change updates the one after the other.
 #[test]
-fn a_checkpoint_and_a_second_layout_change_wait_for_the_one_in_progress() {
+fn everything_but_a_search_waits_for_a_layout_change() {
     let cluster = in_memory(3, 100);
     std::thread::scope(|scope| {
         let change = cluster.begin_layout_change().expect("begin");
         let checkpoint = scope.spawn(|| cluster.checkpoint());
         let resize = scope.spawn(|| cluster.resize(4));
+        let load = scope
+            .spawn(|| cluster.collect_load(&crate::cluster::autoscale::AutoscaleConfig::default()));
         std::thread::sleep(Duration::from_millis(150));
-        let (checkpointed_beside_it, resized_beside_it) =
-            (checkpoint.is_finished(), resize.is_finished());
-        // Released before anything can fail: both threads are waiting for it.
+        let ran_beside_it = [
+            ("a checkpoint", checkpoint.is_finished()),
+            ("a second layout change", resize.is_finished()),
+            ("a load snapshot", load.is_finished()),
+        ];
+        // Released before anything can fail: all three are waiting for it.
         drop(change);
         checkpoint
             .join()
             .expect("checkpoint thread")
             .expect("checkpoint");
         resize.join().expect("resize thread").expect("resize");
+        let snapshot = load.join().expect("load thread").expect("load snapshot");
+        for (what, ran) in ran_beside_it {
+            assert!(!ran, "{what} ran beside a layout change");
+        }
+        assert_eq!(snapshot.num_shards as usize, snapshot.shard_corpus.len());
+    });
+    assert_eq!(cluster.num_shards(), 4);
+}
+
+/// The other direction: an operation that is not a search holds the layout lock until it is
+/// done, so a layout change that arrives meanwhile waits for it.
+#[test]
+fn a_layout_change_waits_for_an_operation_in_flight() {
+    let cluster = in_memory(3, 100);
+    std::thread::scope(|scope| {
+        let in_flight = cluster.stable();
+        let resize = scope.spawn(|| cluster.resize(4));
+        std::thread::sleep(Duration::from_millis(150));
+        let changed_beside_it = resize.is_finished() || !cluster.is_published(&in_flight.layout);
+        // Released before anything can fail: the resize is waiting for it.
+        drop(in_flight);
+        resize.join().expect("resize thread").expect("resize");
         assert!(
-            !checkpointed_beside_it,
-            "a checkpoint ran beside a layout change"
+            !changed_beside_it,
+            "the layout was changed under an operation that was still running"
         );
-        assert!(!resized_beside_it, "two layout changes ran at once");
     });
     assert_eq!(cluster.num_shards(), 4);
 }
@@ -289,4 +324,25 @@ fn a_replica_recovery_waits_for_a_layout_change() {
             "a replica recovery ran beside a layout change"
         );
     });
+}
+
+/// A remote resize holds the layout lock shared for its whole copy. A layout change that
+/// queued for the lock behind it would hold every other operation back until the copy was
+/// done, so it is refused at once while that resize has writes fenced.
+#[test]
+fn a_layout_change_is_refused_at_once_while_a_remote_resize_is_copying() {
+    let cluster = in_memory(3, 50);
+    cluster.resize_write_fence.store(true, Ordering::Release);
+    let refused = cluster
+        .resize(4)
+        .expect_err("a resize during a remote resize");
+    let vocabulary = cluster
+        .import_alias_synonyms("package, pkg")
+        .expect_err("a vocabulary change during a remote resize");
+    cluster.resize_write_fence.store(false, Ordering::Release);
+    for error in [refused, vocabulary] {
+        assert!(error.to_string().contains("writes are paused"), "{error}");
+    }
+    assert_eq!(cluster.num_shards(), 3);
+    cluster.resize(4).expect("a resize once the fence is down");
 }
