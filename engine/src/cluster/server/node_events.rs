@@ -82,11 +82,14 @@ impl NodeEvents {
         }
     }
 
-    /// Durability failures by operation, in a stable order. A lost log is always listed, at
-    /// zero until it happens, so that an alert on its increase sees the first one.
+    /// Durability failures by operation, in a stable order. Every operation is listed, at
+    /// zero until it happens: a series that first appears at 1 shows no increase, so an alert
+    /// on the increase would miss the first failure of its kind.
     pub(super) fn durability_failures(&self) -> Vec<(&'static str, u64)> {
         let mut failures = self.lock().failures.clone();
-        failures.entry(DurabilityOp::LogLost.as_str()).or_default();
+        for op in DurabilityOp::ALL {
+            failures.entry(op.as_str()).or_default();
+        }
         failures.into_iter().collect()
     }
 }

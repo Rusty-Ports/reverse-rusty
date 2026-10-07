@@ -94,8 +94,12 @@ removed, opened without complaint and without the second write.
    accepted loss there would have been said to nobody. Every shard a node hosts is now wired
    to one node-level channel where its state is built (`ServerState::new`, the only way to
    build one; a source test keeps it so). The node counts durability failures by operation
-   in `reverse_rusty_shard_durability_failures_total{op}`, with `log_lost` listed at zero
-   from the start, and the binary prints each event on standard error.
+   in `reverse_rusty_shard_durability_failures_total{op}`, and the binary prints each event
+   on standard error.
+10. **Every durability operation has its series from the first scrape, at zero,** on a shard
+    node and on the server (`DurabilityOp::ALL`). A counter series that first appears at 1
+    shows no increase, so an alert on the increase missed the first failure of each kind;
+    that was true of the server's existing alert too.
 
 ## What changes for a deployment
 
@@ -121,6 +125,10 @@ removed, opened without complaint and without the second write.
   fire on the counter's **value**, because the loss happens at start-up, before the first
   scrape, and a rule on its increase would never see it; `RRShardDurabilityFailure` fires on
   an increase of any other shard-node event except `wal_torn_tail`.
+- `reverse_rusty_durability_failures_total` now shows every `op` at zero from the first
+  scrape, so the existing `RRDurabilityFailure` alert sees the first failure of each kind. It
+  still does not see a failure reported while the server starts
+  ([roadmap](../roadmap.md#durability-alerts-and-start-up)).
 
 ## Alternatives considered
 
@@ -205,8 +213,11 @@ removed, opened without complaint and without the second write.
 - `cluster/server/tests/node_events.rs`: a shard node started over a slot whose translog is
   gone is refused; with the setting it starts, counts one `log_lost` in its metrics before
   any sink exists, and hands the event to the sink once; the count is listed at zero on a
-  serving and on a pending node; no shard state is built outside the constructor that
-  wires it.
+  serving and on a pending node, as is every other operation; no shard state is built
+  outside the constructor that wires it.
+- `events.rs`: `DurabilityOp::ALL` lists every operation once (an exhaustive match keeps it
+  so). `bin/server/handlers/admin/metrics_tests.rs`: the server's first scrape has every
+  operation at zero.
 - `cluster/control_raft/log_store.rs`: a node with a vote, a committed index, a purge point
   or a snapshot and no log is refused, and no log is created; a node with no state starts.
 - `cluster/clog/tests`: `open` with `IfMissing::Refuse` refuses a missing file and creates

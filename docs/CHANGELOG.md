@@ -36,6 +36,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   each and counts them in `reverse_rusty_shard_durability_failures_total{op}` on
   `--metrics-addr`. That covers the new `log_lost` and the existing `wal_torn_tail` (a torn
   translog tail repaired at start-up).
+- **Every durability operation is listed at zero from the first scrape,** in the server's
+  `reverse_rusty_durability_failures_total{op}` and in the shard node's new counter. A series
+  that first appears at 1 shows no increase, so the `RRDurabilityFailure` alert used to miss
+  the first failure of each kind. New rules: `RRLogLost` and `RRShardLogLost` (on the value,
+  because that loss happens at start-up) and `RRShardDurabilityFailure`.
 - **A refused start touches nothing.** The coordinator checks its log before it attaches a
   shard, so a refusal leaves the shards' translogs as they were; and a translog reset replaces
   the file by a rename instead of removing it first.

@@ -85,16 +85,19 @@ fn a_shard_nodes_accepted_loss_reaches_its_sink_and_its_metrics() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A lost log is listed at zero before it ever happens, so that an alert on its increase
-/// sees the first one; and a node that is still pending has the family too.
+/// Every durability operation is listed at zero before it ever happens, on a serving node and
+/// on a pending one. A counter series that first appears at 1 shows no increase, so an alert
+/// on the increase would miss the first failure of its kind.
 #[test]
-fn the_lost_log_count_is_listed_before_anything_is_lost() {
+fn every_durability_operation_is_listed_before_anything_fails() {
     let n = norm();
     let d = Arc::new(frozen_dict(&["nodeeventneedle"], &n));
     let serving = ShardServer::new(Arc::clone(&n), d, EngineConfig::default());
-    assert_eq!(failures(&serving, "log_lost"), Some(0));
     let pending = ShardServer::pending(n, EngineConfig::default());
-    assert_eq!(failures(&pending, "log_lost"), Some(0));
+    for op in DurabilityOp::ALL {
+        assert_eq!(failures(&serving, op.as_str()), Some(0), "{}", op.as_str());
+        assert_eq!(failures(&pending, op.as_str()), Some(0), "{}", op.as_str());
+    }
 }
 
 /// A shard's state is built in one place, which wires the shard to the node's event channel.

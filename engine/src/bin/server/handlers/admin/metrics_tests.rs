@@ -284,6 +284,21 @@ fn cluster_gauges_remove_disappeared_shards_and_clamp_unsigned_values() {
     assert!(!second.contains("reverse_rusty_cluster_shard_queries{shard=\"2\"}"));
 }
 
+/// Every durability operation has its series from the first scrape, at zero. The alert on
+/// this counter is on its increase, and a series that first appears at 1 shows none.
+#[test]
+fn every_durability_operation_is_listed_before_anything_fails() {
+    let prom = PrometheusMetrics::new();
+    let body = render(&prom);
+    for op in reverse_rusty::events::DurabilityOp::ALL {
+        let series = format!(
+            "reverse_rusty_durability_failures_total{{op=\"{}\"}} 0",
+            op.as_str()
+        );
+        assert!(body.contains(&series), "missing: {series}");
+    }
+}
+
 fn assert_error(status: StatusCode, bytes: &Bytes, expected: StatusCode, kind: &str) {
     assert_eq!(status, expected);
     let body: serde_json::Value = serde_json::from_slice(bytes).expect("JSON error");

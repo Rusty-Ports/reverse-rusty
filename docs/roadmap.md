@@ -274,6 +274,23 @@ it created when it cannot finish.)
 serves exactly the corpus once; a directory with shard state and neither manifest nor mark is
 refused with an error that says what it may be.
 
+### Durability alerts and start-up
+
+**Problem.** `RRDurabilityFailure` fires on an increase of the durability counter. A failure
+that is reported while a process starts (a corrupt segment skipped at recovery, a source store
+that did not load, a log that could not be opened) is already in the counter at the first
+scrape, so the series begins above zero and never rises. After an outage longer than the alert
+window, or on a new scrape target, the alert does not fire. The lost-log rules avoid this by
+alerting on the value ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)); the others do
+not.
+
+**Direction.** Decide, per operation, whether a start-up report should page until it is
+acknowledged, and expose that as a gauge of its own (start-up durability faults since this
+process began) instead of overloading the counter. Health already reports some of these.
+
+**Completion.** Each durability operation that can be reported at start-up has an alert that
+fires for it without a pre-restart sample, with a test that renders the first scrape.
+
 ### A log has an identity
 
 **Problem.** A store refuses to open when its commit record says a log existed and the log is
