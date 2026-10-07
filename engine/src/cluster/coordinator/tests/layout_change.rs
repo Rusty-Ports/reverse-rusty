@@ -483,6 +483,81 @@ fn an_expired_deadline_still_takes_a_free_layout_lock() {
     );
 }
 
+/// A reader that takes no lock and combines the layout with the control state is told when a
+/// layout change overlapped it: `None` while one is running, and a second run when one came
+/// and went.
+#[test]
+fn a_lock_free_read_is_told_when_a_layout_change_overlapped_it() {
+    let cluster = in_memory(3, 50);
+    let pair = || {
+        (
+            cluster.num_shards(),
+            cluster.control_state().expect("control").num_shards as usize,
+        )
+    };
+    assert_eq!(cluster.read_between_layout_changes(pair), Some((3, 3)));
+
+    // One is running from before the read to after it.
+    let change = cluster.begin_layout_change().expect("begin");
+    let during = cluster.read_between_layout_changes(pair);
+    drop(change);
+    assert_eq!(during, None, "a read beside a running change was passed");
+
+    // One is running when the read starts and finishes inside it. It may have replaced half
+    // of what the read combines before the read began, so the read does not count even
+    // though nothing is running, and nothing has changed, by the time it ends.
+    let mut change = Some(cluster.begin_layout_change().expect("begin"));
+    let begun_under_one = cluster.read_between_layout_changes(|| {
+        drop(change.take());
+        pair()
+    });
+    assert_eq!(
+        begun_under_one, None,
+        "a read that began under a running change was passed"
+    );
+
+    // One comes and goes inside the read: the read is run again, on the new layout.
+    let mut runs = 0;
+    let across = cluster.read_between_layout_changes(|| {
+        runs += 1;
+        if runs == 1 {
+            let before = pair();
+            cluster.resize(4).expect("resize");
+            before
+        } else {
+            pair()
+        }
+    });
+    assert_eq!((across, runs), (Some((4, 4)), 2));
+
+    // One begins inside the read and is still running when the read ends.
+    let cluster = &cluster;
+    std::thread::scope(|scope| {
+        let (begun, has_begun) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let mut released = Some(released);
+        let overlapped = cluster.read_between_layout_changes(|| {
+            let seen = (cluster.num_shards(), 0);
+            let released = released.take().expect("the read runs once");
+            let begun = begun.clone();
+            scope.spawn(move || {
+                let change = cluster.begin_layout_change().expect("begin");
+                begun.send(()).expect("begun");
+                let _ = released.recv();
+                drop(change);
+            });
+            has_begun.recv().expect("the change began");
+            seen
+        });
+        // Released before anything can fail.
+        drop(release);
+        assert_eq!(
+            overlapped, None,
+            "a read that a change began under was passed"
+        );
+    });
+}
+
 /// An in-memory engine never runs the cleanup that forgets the layouts it has replaced.
 #[test]
 fn replaced_layouts_are_forgotten_once_released() {

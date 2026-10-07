@@ -174,7 +174,35 @@ async fn collect_once(state: &Arc<ClusterAppState>, deadline: Instant) -> Cluste
     }
 }
 
+/// The health of the cluster. The committed topology is compared with the serving shards,
+/// and a vocabulary change or a resize replaces the one after the other, so the comparison
+/// counts only when no such change overlapped it. While one runs, the cluster is reported as
+/// what it is: serving, and rebuilding.
 fn collect_cluster_health(cluster: &ClusterEngine) -> Result<ClusterHealth, ShardError> {
+    match cluster.read_between_layout_changes(|| compare_topology(cluster)) {
+        Some(health) => health,
+        None => rebuilding_health(cluster),
+    }
+}
+
+/// Yellow while a rebuild runs: searches answer from the layout it replaces, and writes wait.
+/// Every serving shard still has to answer the count.
+fn rebuilding_health(cluster: &ClusterEngine) -> Result<ClusterHealth, ShardError> {
+    let counts = cluster.shard_query_counts()?;
+    Ok(ClusterHealth {
+        status: HealthStatus::Yellow,
+        deadline_expired: false,
+        shards: counts.len(),
+        pending_repairs: cluster.pending_repairs(),
+        out_of_sync_replicas: cluster.out_of_sync_replicas(),
+        reason: Some(
+            "a vocabulary change or a resize is rebuilding the cluster; searches answer from \
+             the layout it replaces and writes wait until it finishes",
+        ),
+    })
+}
+
+fn compare_topology(cluster: &ClusterEngine) -> Result<ClusterHealth, ShardError> {
     let control = cluster.control_state()?;
     let counts = cluster.shard_query_counts()?;
     if control.num_shards as usize != counts.len() {

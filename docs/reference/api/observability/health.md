@@ -24,7 +24,7 @@ Standalone response:
 | Status | Meaning |
 |---|---|
 | `green` | Single-node durability is healthy, or every cluster position answers with no queued repair and every replica in sync |
-| `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync, or a replica is outside the in-sync set so reads cannot fail over to it (ADR-195) |
+| `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync, or a replica is outside the in-sync set so reads cannot fail over to it (ADR-195), or a vocabulary change or resize is rebuilding the cluster (searches answer, writes wait; ADR-210) |
 | `red` | Single-node WAL/persistence failure, or a required cluster shard/control/topology check failed |
 
 Cluster health uses a deliberately smaller native payload:
@@ -75,7 +75,10 @@ reasons. A coordinator request that times out cannot forcibly stop already-runni
 work; that work retains its single shared stats permit until its own transport bounds complete.
 A vocabulary change or a resize does not hold that permit, so in coordinator mode a probe answers
 while one rebuilds the cluster
-([ADR-210](../../../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)).
+([ADR-210](../../../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)). It answers
+`yellow` with a reason that says so, and does not compare the committed topology with the serving
+shards until the rebuild is done, because the rebuild replaces the one after the other.
+`wait_for_status=green` therefore waits for a rebuild to finish.
 
 Coordinator green requires a successful committed control-state read, a count from every logical
 serving position, matching committed/ring shard counts, and exactly one in-range committed

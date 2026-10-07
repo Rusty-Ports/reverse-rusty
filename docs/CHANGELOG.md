@@ -19,6 +19,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
   `/_settings`, `GET /_vocab`, `GET /_vocab/aliases` and `/_cluster/state`. Before, all of them
   waited for the whole rebuild; a health probe answered red at its deadline and a metrics scrape
   hung.
+- `/_health` answers `yellow` (HTTP 200) with a reason while a rebuild runs, and green again when
+  it is done, so `wait_for_status=green` waits for a rebuild to finish.
 - Writes still wait for the rebuild. A topology operation with a manager timeout still answers
   its "not started" timeout within that budget.
 - **Behaviour changes.** A vocabulary change can swap in between two titles of one source-free

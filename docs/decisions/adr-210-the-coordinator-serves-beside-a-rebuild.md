@@ -52,7 +52,18 @@ its rebuild methods take shared access. The server's lock and the slot were what
    waited for the guard would wait for the copy. `admit_rebuild` looks at the fence when the
    change arrives and again while it waits for the guard; the engine checks it once more when
    the change begins.
-6. **Nothing that runs in the search pool takes a lock that a rebuild holds or waits for.**
+6. **A read that combines the layout with the control state is told when a rebuild
+   overlapped it.** The lock used to hold such a read together. A rebuild replaces the layout
+   and then commits the control state, so a health probe that read the committed topology
+   before a resize's swap and the shard counts after it took the difference for a fault and
+   answered red. The engine has `read_between_layout_changes`: it runs a lock-free read and
+   returns it only if no layout change was running at any point while it ran. `/_health`
+   compares the topology under it, and answers yellow with a reason while a rebuild runs.
+   `/_cat/shards` reads again until its two halves agree. A cursor request asks the stale
+   gate a second time before it calls a fingerprint a mismatch, because a rebuild that swaps
+   in between the gate and the fingerprint leaves a fingerprint computed under a normalizer
+   the cursor was not minted under.
+7. **Nothing that runs in the search pool takes a lock that a rebuild holds or waits for.**
    A worker that waited behind a rebuild would hold up the workers that are waiting for it,
    which is the deadlock ADR-207 describes. The types no longer enforce this (there is no
    lock to hide). A stress test of real rebuilds against a two-worker pool does.
@@ -69,6 +80,8 @@ its rebuild methods take shared access. The server's lock and the slot were what
   vocabulary and the ones after it under the new. ADR-207 had made a batch wait out the
   change as a side effect of its gate; that is gone. A search that returns sources, and a
   `/v2/_mpercolate` batch, still see one layout throughout.
+- **`/_health` is yellow while a rebuild runs**, with a reason that says so, and HTTP 200.
+  `wait_for_status=green` waits for the rebuild to finish.
 - **Writes wait for a rebuild**, at write admission, as before.
 - **An operation with a time budget answers "not started" within it** during a rebuild, as
   before.
@@ -82,6 +95,9 @@ its rebuild methods take shared access. The server's lock and the slot were what
   time budget somewhere to give up. The topology guard and write admission already are that
   place, once a vocabulary change takes the topology guard as a resize does. A third lock
   would say the same thing.
+- **Report health green during a rebuild.** Searches are exact throughout, but writes are
+  waiting, and an automation that waits for green should not move on while a rebuild is half
+  done. Yellow is what the status means elsewhere: serving, with something owed.
 - **Let operations with a time budget wait inside the engine.** Simpler, and they would lose
   their "not started" answer: a rebalance sent during a rebuild would hold its thread and its
   permit until the rebuild finished.
@@ -99,6 +115,9 @@ its rebuild methods take shared access. The server's lock and the slot were what
 - ADR-191 runs brief reads of the cluster on blocking threads. Its reason is narrower now: a
   brief read no longer waits for a rebuild at a lock, but it can still wait for a remote
   shard, and one that is not a search waits inside the engine.
+- `read_between_layout_changes` treats a change that is waiting for the operations in flight
+  as running, so `/_health` is yellow from the moment a rebuild is asked for. Writes are
+  already waiting by then.
 - The engine has two hidden test seams (`set_rebuild_hook_for_test`,
   `set_resize_write_fence_for_test`). The server's tests use them to stop a real rebuild
   half-way and to stand in for a remote copy.
@@ -113,7 +132,8 @@ its rebuild methods take shared access. The server's lock and the slot were what
 - A real `PUT /_vocab`, stopped once it holds the engine alone: sixteen requests (every
   search route with and without sources, the document reads, and the administrative reads
   listed above) answer `200`, each within two seconds, while a resync with a 30-second budget
-  is waiting for the rebuild; a search answers under the old vocabulary; a write waits; a
+  is waiting for the rebuild; `/_health` is yellow and says a rebuild is running, and green
+  again afterwards; a search answers under the old vocabulary; a write waits; a
   rebalance with a 25 ms budget answers `408 rebalance_timeout`. When the rebuild goes on, it,
   the write and the resync succeed, a search answers under the new vocabulary, and the
   written query is matched.
@@ -132,7 +152,17 @@ search waiting for a pool worker stops nothing; both finish once a worker is fre
 tests of vocabulary, alias, resize and membership handlers that used to hold the cluster's
 write lock now stop a real rebuild, or hold the guard or the slot the handler waits for.
 
-Eight mutations were run and each fails a test: a search with sources that shares write
+`coordinator/tests/layout_change.rs`: a lock-free read is passed with no change about, is
+refused while one runs, is refused when one was running as it began even if that one has
+finished by the time it ends, is run again when one came and went inside it, and is refused
+when one began inside it. `cluster_compile.rs`: a cursor that a rebuild overtook between the
+stale gate and the fingerprint is reported stale (409), and a live cursor is judged by its
+fingerprint.
+
+Thirteen mutations were run and each fails a test: the three checks of
+`read_between_layout_changes` removed one at a time; a health probe that compares the topology
+whatever is running; a mismatched fingerprint not checked against the stale gate again; a
+search with sources that shares write
 admission again; a vocabulary change that does not take the topology guard; a vocabulary
 change, a resize, and a resync, on the slot for administrative reads; a pool worker that takes write admission
 for each title (the pool stops, as ADR-207 describes); a rebuild admitted without looking at

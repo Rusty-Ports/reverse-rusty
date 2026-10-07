@@ -189,7 +189,26 @@ fn validate_request(
     })
 }
 
+/// The rows of the table. Each joins a serving shard with its committed assignment, and a
+/// vocabulary change or a resize replaces the one after the other. A read that no such change
+/// overlapped stands, whatever it says. One that a change overlapped stands if its two halves
+/// agree; if they do not, it is read again, for as long as a swap can take.
 fn collect_rows(cluster: &ClusterEngine) -> Result<Vec<CatRow>, ShardError> {
+    const TRIES: usize = 200;
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+    for _ in 0..TRIES {
+        if let Some(rows) = cluster.read_between_layout_changes(|| join_rows(cluster)) {
+            return rows;
+        }
+        if let Ok(rows) = join_rows(cluster) {
+            return Ok(rows);
+        }
+        std::thread::sleep(PAUSE);
+    }
+    join_rows(cluster)
+}
+
+fn join_rows(cluster: &ClusterEngine) -> Result<Vec<CatRow>, ShardError> {
     let control = cluster.control_state()?;
     let counts = cluster.shard_query_counts()?;
     if control.num_shards as usize != counts.len() {

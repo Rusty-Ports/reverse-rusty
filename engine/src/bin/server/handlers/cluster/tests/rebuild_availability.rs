@@ -146,6 +146,18 @@ async fn budgeted_rebalance(state: &Arc<ClusterAppState>) -> Option<(StatusCode,
     ))
 }
 
+/// `/_health`: its HTTP status, its colour, and whether its reason says a rebuild is running.
+async fn health(state: &Arc<ClusterAppState>) -> (StatusCode, String, bool) {
+    let (status, body) = send(state, req_empty("GET", "/_health")).await;
+    (
+        status,
+        body["status"].as_str().unwrap_or_default().to_string(),
+        body["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("rebuilding the cluster")),
+    )
+}
+
 async fn wait_for(stopped: std::sync::mpsc::Receiver<()>) {
     tokio::task::spawn_blocking(move || stopped.recv_timeout(Duration::from_secs(10)))
         .await
@@ -175,6 +187,7 @@ async fn searches_and_reads_answer_while_a_vocabulary_change_is_half_done() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let failures = unanswered(&state).await;
     let resync_waited = !resync.is_finished();
+    let health_meanwhile = health(&state).await;
     let old_answer = matches(&state, "widget pkg").await;
     let write_state = Arc::clone(&state);
     let mut write = tokio::spawn(async move {
@@ -208,6 +221,17 @@ async fn searches_and_reads_answer_while_a_vocabulary_change_is_half_done() {
         .expect("resync task");
 
     assert!(failures.is_empty(), "{failures:#?}");
+    assert_eq!(
+        health_meanwhile,
+        (StatusCode::OK, "yellow".to_string(), true),
+        "health says the cluster serves and is rebuilding, and does not compare a topology \
+         that is being replaced"
+    );
+    assert_eq!(
+        health(&state).await,
+        (StatusCode::OK, "green".to_string(), false),
+        "health is green again once the rebuild is done"
+    );
     assert!(resync_waited, "a resync ran beside a vocabulary change");
     assert_eq!(resynced, StatusCode::OK, "{resync_body}");
     assert_eq!(

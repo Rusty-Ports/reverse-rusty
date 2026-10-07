@@ -368,6 +368,44 @@ impl super::ClusterEngine {
         self.edit_layout(|layout| layout.shards = Arc::new(wrap(shards)));
     }
 
+    /// Run `read` and return what it read, if no layout change was running at any point while
+    /// it ran. `None` if one is running, or is waiting for the operations in flight to
+    /// finish. `read` runs again if a change came and went meanwhile.
+    ///
+    /// This is for a reader that takes no lock and combines several things this engine
+    /// reports: the published layout, the control state, the repair queue. A layout change
+    /// replaces those one after the other, so a reader that overlaps one can see the new
+    /// shard count beside the old committed topology and take it for a fault. With `Some`,
+    /// everything `read` saw belongs together.
+    ///
+    /// `read` holds no lock. It may call a search or a lock-free accessor. It must not call
+    /// an operation that waits for a layout change.
+    pub fn read_between_layout_changes<T>(&self, mut read: impl FnMut() -> T) -> Option<T> {
+        loop {
+            // The layout first, then whether a change is running: a change that publishes
+            // after this load is seen below, as a different layout or as still running.
+            let before = self.layout.load_full();
+            if self.layout_change_is_running() {
+                return None;
+            }
+            let seen = read();
+            if self.layout_change_is_running() {
+                return None;
+            }
+            if self.is_published(&before) {
+                return Some(seen);
+            }
+        }
+    }
+
+    /// Whether a layout change holds the layout lock, or is waiting for it.
+    fn layout_change_is_running(&self) -> bool {
+        matches!(
+            self.layout_lock.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     /// Have every later rebuild call `hook` once it holds the layout lock alone and has frozen
     /// the shards it replaces, or stop doing so. A test seam: a test of the server stops a
     /// real rebuild half-way with it.
