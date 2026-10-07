@@ -44,8 +44,11 @@ fn a_cluster_writer_waits_at_the_gate_while_work_is_in_the_pool() {
             let writer_state = Arc::clone(&state);
             std::thread::spawn(move || {
                 let admission = writer_state.write_admission.write();
-                drop(writer_state.write_cluster(&admission));
+                let writer = writer_state.write_cluster(&admission);
+                // Said while the gate is still closed, so the order is the gate's and not
+                // the scheduler's.
                 let _ = wrote.send("the writer");
+                drop(writer);
             });
             // The writer shows up at the gate, or (without one) queued for the lock.
             wait_until(|| state.pool.try_enter().is_none() || state.cluster.try_read().is_none());
