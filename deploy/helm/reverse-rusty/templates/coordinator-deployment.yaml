@@ -151,7 +151,7 @@ spec:
           # Process-local probes (ADR-211): they answer for this process only, need no
           # credentials, and do not wait for a shard, the control plane or an admission slot.
           # /_health, which does all three, is for operators and alerts.
-          {{- with .Values.coordinator.probes }}
+          {{- with (include "reverse-rusty.coordinatorProbes" . | fromYaml) }}
           startupProbe:
             httpGet:
               path: {{ .liveness.path }}

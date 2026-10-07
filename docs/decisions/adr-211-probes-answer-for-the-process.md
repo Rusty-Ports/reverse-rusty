@@ -46,10 +46,16 @@ on:
    - a startup probe on the liveness route, whose budget covers assembly.
 4. **Every probe in the chart sets `timeoutSeconds`**, and the shards have a startup probe
    whose budget covers opening a durable store.
-5. **`deploy/check-probes.sh` renders the chart and fails** if the coordinator's liveness or
+5. **The templates carry the probe defaults as well as `values.yaml`.** The documented upgrade
+   is `helm upgrade --reuse-values`, which renders with the values a release was installed
+   with. A release from before these settings has no `probes` map, and a template that read
+   one would fail to render, or render a coordinator with no probes at all.
+6. **`deploy/check-probes.sh` renders the chart and fails** if the coordinator's liveness or
    startup probe points at `/_health`, if a probe has no timeout, if the coordinator or the
    shards have no startup probe, or if the coordinator's liveness or startup probe has no
-   termination grace of its own. It runs in the `helm chart` CI job.
+   termination grace of its own. It also renders the chart with the probe settings stripped
+   from its values, as a reused old release has them, and fails if that render differs. It
+   runs in the `helm chart` CI job.
 
 The two routes answer the same way today. The listener binds only once the engine or the
 cluster is assembled, and a graceful shutdown closes it before anything else, so a process
@@ -118,10 +124,13 @@ contracts: readiness may come to say more, and liveness must not.
 - Six mutations of the routes each fail a test: a probe that takes a health permit; either
   route needing credentials under `--auth-protect-reads`; a probe that answers every method;
   and either router missing a probe route (the smoke scripts fail).
-- `deploy/check-probes.sh` passes on the chart for four sets of values, and fails for each
-  of six planted regressions: liveness on `/_health`; a shard probe and a control probe
-  without a timeout; no coordinator startup probe; no shard startup probe; liveness without
-  its own termination grace.
+- `deploy/check-probes.sh` passes on the chart for four sets of values and for values with
+  no probe settings, and fails for each of ten planted regressions: liveness on `/_health`;
+  a shard probe and a control probe without a timeout; no coordinator startup probe; no
+  shard startup probe; liveness without its own termination grace; the coordinator, shard
+  or control template reading its probe settings straight from values (an upgrade with
+  reused values then renders no probes, or probes with no timeout); and a template default
+  that differs from `values.yaml`.
 - `deploy/k8s-smoke.sh` has a fault leg, run on a `kind` cluster: one shard is taken away for
   100 seconds, longer than a liveness probe's whole failure budget. Both probe routes go on
   answering, `/_health` reports 503, the coordinator's restart count does not change and it

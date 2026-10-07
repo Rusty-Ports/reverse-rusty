@@ -22,7 +22,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
   shard. Now the coordinator keeps running and serving; requests that need the missing shard
   fail loudly. `/_health` is unchanged and still reports the outage.
 - **Behaviour change for an existing deployment:** on upgrade the coordinator stays Ready with a
-  shard down. To keep the old behaviour set `coordinator.probes.readiness.path=/_health`.
+  shard down. To keep the old behaviour set `coordinator.probes.readiness.path=/_health`. An
+  upgrade with `--reuse-values` gets the new probes too: the templates carry their defaults.
 - Helm: every probe sets `timeoutSeconds`; the coordinator and the shards have startup probes
   (`coordinator.probes.startup`, `shard.probes.startup`); the coordinator's liveness and startup
   probes have their own termination grace. `deploy/check-probes.sh` checks all of this in CI, and

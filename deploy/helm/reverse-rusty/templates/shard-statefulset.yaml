@@ -117,24 +117,25 @@ spec:
           # ("ready") — a --pending shard is live-but-not-ready until AdoptDict (ADR-084).
           # The health port is served only after the durable store is open, so the startup
           # probe carries the budget for that (ADR-211) and liveness starts when it passes.
+          {{- $probes := include "reverse-rusty.shardProbes" . | fromYaml }}
           startupProbe:
             grpc:
               port: {{ .Values.ports.shardHealth }}
-            periodSeconds: {{ .Values.shard.probes.startup.periodSeconds }}
-            timeoutSeconds: {{ .Values.shard.probes.timeoutSeconds }}
-            failureThreshold: {{ .Values.shard.probes.startup.failureThreshold }}
+            periodSeconds: {{ $probes.startup.periodSeconds }}
+            timeoutSeconds: {{ $probes.timeoutSeconds }}
+            failureThreshold: {{ $probes.startup.failureThreshold }}
           livenessProbe:
             grpc:
               port: {{ .Values.ports.shardHealth }}
             periodSeconds: 10
-            timeoutSeconds: {{ .Values.shard.probes.timeoutSeconds }}
+            timeoutSeconds: {{ $probes.timeoutSeconds }}
             failureThreshold: 6
           readinessProbe:
             grpc:
               port: {{ .Values.ports.shardHealth }}
               service: ready
             periodSeconds: 10
-            timeoutSeconds: {{ .Values.shard.probes.timeoutSeconds }}
+            timeoutSeconds: {{ $probes.timeoutSeconds }}
             failureThreshold: 3
           volumeMounts:
             - name: data
