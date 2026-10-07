@@ -134,6 +134,9 @@ impl ClusterEngine {
         replica_dir: &Path,
         max_passes: usize,
     ) -> Result<(), ShardError> {
+        // A recovery seals the primary, which writes into its directory: it is maintenance,
+        // and waits for a layout change like a checkpoint does.
+        let _maintenance = self.maintenance();
         let layout = &*self.layout();
         let Some(base) = self.data_dir.as_deref() else {
             return Err(ShardError::Config(

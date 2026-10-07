@@ -83,8 +83,8 @@ impl LayoutChange<'_> {
     /// finish on it; it is released when the last of them returns.
     ///
     /// `with_it` runs just before the swap and is for what must change together with the
-    /// layout (the logical-id directory). Both, and the release of the old layout's
-    /// point-in-time pins, happen on the exclusive side of the mutation barrier. A frozen read
+    /// layout (the logical-id directory). Both, the repair queue and the release of the old
+    /// layout's point-in-time pins change on the exclusive side of the mutation barrier. A frozen read
     /// view, a point-in-time open and an exhaustive read hold that side for as long as they
     /// run, so each of them sees one layout, one directory and its own pins from its first
     /// step to its last.
@@ -96,6 +96,15 @@ impl LayoutChange<'_> {
         let _quiet = self.engine.quiesce_mutations();
         with_it()?;
         let next = self.engine.publish_layout(next);
+        // Queued repairs (ADR-047) describe where the old layout's shards disagree, by their
+        // positions. The new layout was rebuilt from the live corpus and has no such
+        // disagreement. Until this moment they must stay: an exhaustive read on the old
+        // layout refuses to certify a result while one is queued.
+        self.engine
+            .pending_repair
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         // ADR-113: the old shards' pins can only fail their generation gate now. Drop them
         // (which frees their slots) without resetting the id counter, so a stale cursor can
         // never name a later point in time.
@@ -107,6 +116,44 @@ impl LayoutChange<'_> {
 impl Drop for LayoutChange<'_> {
     fn drop(&mut self) {
         self.engine.lower_write_fence();
+    }
+}
+
+/// The shards a layout change is replacing, with their storage frozen (ADR-209). The new
+/// layout is built in their directories and shares their segment numbers, log and checkpoint
+/// sidecar, so from the moment it starts to be built nothing may write there through the old
+/// shards: not a write that slipped the fence, not a seal, not a replica recovery. A change
+/// that fails thaws them and they go on serving; one that publishes keeps them frozen for
+/// good, and they only finish the reads that are still running on them.
+pub(in crate::cluster::coordinator) struct FrozenShards {
+    replaced: Arc<Layout>,
+    thaw: bool,
+}
+
+impl FrozenShards {
+    pub(in crate::cluster::coordinator) fn freeze(replaced: Arc<Layout>) -> Self {
+        for shard in replaced.shards.iter() {
+            shard.set_storage_frozen(true);
+        }
+        Self {
+            replaced,
+            thaw: true,
+        }
+    }
+
+    /// The new layout is published: the replaced shards stay frozen.
+    pub(in crate::cluster::coordinator) fn keep(mut self) {
+        self.thaw = false;
+    }
+}
+
+impl Drop for FrozenShards {
+    fn drop(&mut self) {
+        if self.thaw {
+            for shard in self.replaced.shards.iter() {
+                shard.set_storage_frozen(false);
+            }
+        }
     }
 }
 

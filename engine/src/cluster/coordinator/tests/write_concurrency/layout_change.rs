@@ -110,3 +110,84 @@ fn a_layout_is_not_published_under_a_frozen_read_view() {
     assert_eq!(again.expect("second match under the view"), vec![40]);
     assert_eq!(cluster.num_shards(), 5);
 }
+
+fn exhaustive(cluster: &ClusterEngine, title: &str) -> Result<Vec<u64>, ShardError> {
+    let mut sink = RecordingExhaustiveSink::default();
+    cluster.try_percolate_filtered_all(
+        title,
+        &[],
+        crate::result::QueryScope::Standard,
+        None,
+        16,
+        None,
+        &mut sink,
+    )?;
+    let mut ids: Vec<u64> = sink
+        .chunks
+        .iter()
+        .flat_map(|chunk| chunk.matches.iter().map(|matched| matched.logical_id))
+        .collect();
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+/// A queued repair says the old layout's shards disagree about an id, and an exhaustive read
+/// refuses to certify a result while one is queued. A resize drops the queue, because the
+/// layout it builds has no such disagreement. It has to drop it when that layout is
+/// published and not before: until then exhaustive reads still run on the old shards.
+#[test]
+fn a_queued_repair_stays_until_the_new_layout_is_published() {
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        ..Default::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("cluster");
+    cluster.upsert_query(999, "zzredrive", 1).expect("seed");
+    let failing = Arc::new(AtomicBool::new(true));
+    let gate = Arc::new(FirstAppendGate::default());
+    let once = Arc::new(AtomicBool::new(true));
+    instrument(&mut cluster, {
+        let (failing, gate) = (Arc::clone(&failing), Arc::clone(&gate));
+        Arc::new(move |_position, call| match call {
+            WriteCall::Insert(999) | WriteCall::Delete(999) | WriteCall::Replace(999, _)
+                if failing.load(Ordering::SeqCst) =>
+            {
+                Err(ShardError::Remote("injected shard failure".into()))
+            }
+            WriteCall::Gather if once.swap(false, Ordering::SeqCst) => {
+                pause(&gate);
+                Ok(())
+            }
+            _ => Ok(()),
+        })
+    });
+    assert!(matches!(
+        cluster.upsert_query(999, "zzredrive", 2),
+        Err(ShardError::PartiallyApplied { .. })
+    ));
+    failing.store(false, Ordering::SeqCst);
+    assert_eq!(cluster.pending_repairs(), 1);
+
+    let (queued_while_building, read_while_building) = std::thread::scope(|scope| {
+        let resizer = scope.spawn(|| cluster.resize(6));
+        gate.wait_until_entered();
+        let queued = cluster.pending_repairs();
+        let read = exhaustive(&cluster, "zzredrive");
+        gate.release_first();
+        resizer.join().expect("resizer").expect("resize");
+        (queued, read)
+    });
+    assert_eq!(
+        queued_while_building, 1,
+        "the repair queue was emptied while the old layout was still serving"
+    );
+    assert!(
+        read_while_building.is_err(),
+        "an exhaustive read certified {read_while_building:?} while a repair was queued"
+    );
+    assert_eq!(cluster.pending_repairs(), 0);
+    assert_eq!(
+        exhaustive(&cluster, "zzredrive").expect("exhaustive read on the rebuilt layout"),
+        vec![999]
+    );
+}

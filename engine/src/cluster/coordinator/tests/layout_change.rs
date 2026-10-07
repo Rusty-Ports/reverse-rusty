@@ -199,3 +199,94 @@ fn the_files_of_a_replaced_layout_stay_until_nothing_runs_on_it() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The new layout is built in the old shards' directories and shares their segment numbers,
+/// log and checkpoint sidecar. So the shards a layout change replaces refuse to write there,
+/// whoever asks, and go on answering reads.
+#[test]
+fn a_replaced_shard_no_longer_writes_storage() {
+    let dir = scratch_dir("replaced_shard_frozen");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let cluster = ClusterEngine::build(vocab(), &cfg, &corpus(300)).expect("durable cluster");
+    cluster.checkpoint().expect("checkpoint");
+    let held = cluster.layout();
+    cluster.resize(3 + 2).expect("resize");
+    cluster.checkpoint().expect("checkpoint the new layout");
+    let before = segment_files(&dir);
+
+    let old = &held.shards[0];
+    let sealed = old.seal_for_checkpoint().map(|_| ());
+    let flushed = old.flush();
+    let deleted = old.delete_by_logical_id(1).map(|_| ());
+    let still_reads = old.live_sources().map(|rows| rows.len());
+    let after = segment_files(&dir);
+    drop(held);
+
+    for (what, outcome) in [("seal", sealed), ("flush", flushed), ("delete", deleted)] {
+        let error = outcome
+            .err()
+            .unwrap_or_else(|| panic!("a replaced shard accepted a {what}"))
+            .to_string();
+        assert!(
+            error.contains("replaced by a layout change"),
+            "{what}: {error}"
+        );
+    }
+    assert!(still_reads.expect("read on the replaced shard") > 0);
+    assert_eq!(before, after, "a replaced shard wrote a segment");
+    // What the new layout committed is what a restart opens.
+    drop(cluster);
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    assert_eq!(reopened.num_shards(), 5);
+    for id in [1u64, 150, 300] {
+        let title = format!("zzitem{id} zzgroup{}", id % 7);
+        assert_eq!(
+            reopened.percolate_with_broad(&title, true).expect("read"),
+            vec![id]
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A layout change that fails leaves the old layout serving, writes included.
+#[test]
+fn a_layout_change_that_does_not_publish_thaws_the_shards_it_froze() {
+    let cluster = in_memory(3, 50);
+    let frozen = layout::FrozenShards::freeze(cluster.layout());
+    let while_frozen = cluster.layout().shards[0].flush();
+    drop(frozen);
+    let thawed = cluster.layout().shards[0].flush();
+    let kept = layout::FrozenShards::freeze(cluster.layout());
+    kept.keep();
+    let after_keep = cluster.layout().shards[0].flush();
+    assert!(while_frozen.is_err(), "a frozen shard flushed");
+    thawed.expect("a thawed shard flushes");
+    assert!(after_keep.is_err(), "a replaced shard was thawed");
+}
+
+/// A replica recovery seals its primary, which writes into the primary's directory. It is
+/// maintenance, and waits for a layout change the way a checkpoint does.
+#[test]
+fn a_replica_recovery_waits_for_a_layout_change() {
+    let cluster = in_memory(3, 50);
+    let target = scratch_dir("replica_waits");
+    std::thread::scope(|scope| {
+        let change = cluster.begin_layout_change().expect("begin");
+        let recovery = scope.spawn(|| cluster.add_replica(0, &target, 4));
+        std::thread::sleep(Duration::from_millis(150));
+        let ran_beside_it = recovery.is_finished();
+        // Released before anything can fail: the recovery is waiting for it.
+        drop(change);
+        // An in-memory cluster has nothing to copy; that it answers at all is the point.
+        assert!(recovery.join().expect("recovery thread").is_err());
+        assert!(
+            !ran_beside_it,
+            "a replica recovery ran beside a layout change"
+        );
+    });
+}

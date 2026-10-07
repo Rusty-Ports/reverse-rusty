@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::cluster::coordinator::layout::{Layout, LayoutChange};
+use crate::cluster::coordinator::layout::{FrozenShards, Layout, LayoutChange};
 use crate::cluster::coordinator::{into_shard, replica_dir, shard_dir, ClusterEngine, Target};
 use crate::cluster::ring::HashRing;
 use crate::cluster::shard::{LocalShard, Shard, ShardError};
@@ -90,6 +90,9 @@ impl ClusterEngine {
         append_missing_features: bool,
     ) -> Result<(usize, Arc<Layout>), ShardError> {
         let current = change.current();
+        // Writes are already refused by the fence. From here the old shards' storage is
+        // frozen as well, at the shards themselves, whoever asks.
+        let frozen = FrozenShards::freeze(Arc::clone(&current));
         // Pass A — produce the (dict, extracted) the rebuild re-places. Two paths, keyed off
         // whether the NORMALIZER changed (an `Arc::ptr_eq` against the current one):
         //
@@ -445,6 +448,7 @@ impl ClusterEngine {
             },
             || self.replace_logical_ids(accepted_ids),
         )?;
+        frozen.keep();
         Ok((rebuilt, next))
     }
 }

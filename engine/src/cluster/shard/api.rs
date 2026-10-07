@@ -375,6 +375,13 @@ pub(crate) trait Shard: Send + Sync {
         Ok(count)
     }
 
+    /// Freeze or thaw this shard's storage (ADR-209). A frozen shard refuses every operation
+    /// that would write to its directory or its log; reads are unaffected. A layout change
+    /// freezes the shards it is replacing, because the new layout is built in the same
+    /// directories, and they stay frozen once it has published. Only an in-process shard has
+    /// storage a layout change shares, so the default does nothing.
+    fn set_storage_frozen(&self, _frozen: bool) {}
+
     /// Whether this shard is backed by an in-process [`Engine`](crate::segment::Engine), so its normalizer
     /// can be swapped in place by a vocabulary change. `false` for a
     /// `RemoteShard`/`HandoffShard`, whose normalizer lives in another process and

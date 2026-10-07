@@ -533,6 +533,18 @@ impl Shard for ReplicatedShard {
     }
 
     // ---- observability ----
+    fn set_storage_frozen(&self, frozen: bool) {
+        self.primary.set_storage_frozen(frozen);
+        let replicas = self
+            .replicas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for replica in replicas {
+            replica.shard.set_storage_frozen(frozen);
+        }
+    }
+
     fn set_event_sink(&self, sink: EventSink) {
         let pending: Vec<EngineEvent> = {
             let mut p = self

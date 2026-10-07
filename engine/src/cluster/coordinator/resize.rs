@@ -31,7 +31,7 @@
 //! them), and per-query tags carry through as stored `TagId`s exactly as
 //! [`set_vocab`](ClusterEngine::set_vocab) does (ADR-074).
 
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 use crate::cluster::autoscale::{AutoscaleConfig, LoadSnapshot};
 use crate::cluster::control::ClusterStateChange;
@@ -112,15 +112,9 @@ impl ClusterEngine {
 
         let new_ring = HashRing::new(new_num_shards, self.vnodes)?;
 
-        // Partial-apply repairs (ADR-047) index the OLD shard space; after a resize those
-        // indices are meaningless (and out of range on shrink). The rebuild below gathers the
-        // live corpus (every applied mutation folded in) and the durable backstop is the
-        // coordinator log, so drop the queue rather than carry stale shard indices. Empty on
-        // the in-process / RF=1 default path, so this is a no-op there.
-        self.pending_repair
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        // Queued partial-apply repairs (ADR-047) index the old shard space. They are dropped
+        // when the new layout is published, not before: until then reads still run on the
+        // old shards, and an exhaustive read must go on refusing while one is queued.
 
         // Rebuild under the new ring, reusing the current normalizer + vocab (None ⇒ preserve
         // before.vocab and re-resolve ITS equivalences onto the re-minted dict).

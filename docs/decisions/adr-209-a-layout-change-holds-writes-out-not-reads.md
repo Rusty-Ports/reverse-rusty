@@ -30,13 +30,23 @@ that is the next step.
    that arrive later are refused with a message that says to retry. It does not hold the
    barrier while it builds: a search that returns sources takes the same side of that barrier
    for its frozen view, and would wait for the whole rebuild.
-4. **A mutation takes the barrier before it loads the layout** (`admit_mutation`), and holds
-   it until it has applied. Loaded the other way round, a write could load the layout, lose
-   the processor while a rebuild ran from fence to publish, and then apply to shards nothing
-   reads any more. A checkpoint, a flush and a backup take the maintenance lock, then the
-   barrier, and load after both.
+4. **Whoever takes the mutation barrier loads the layout after it has it.** The barrier is
+   what ties the layout to the state that changes with it: the logical-id directory, the
+   repair queue, the point-in-time pins.
+   - A mutation takes the barrier shared before it loads (`admit_mutation`) and holds it
+     until it has applied. Loaded the other way round, a write could load the layout, lose
+     the processor while a rebuild ran from fence to publish, and then apply to shards
+     nothing reads any more.
+   - A checkpoint, a flush, a backup and a replica recovery take the maintenance lock, then
+     the barrier where they need it, and load after.
+   - An exhaustive read and a point-in-time open take the barrier exclusively and load under
+     it. An exhaustive read that loaded first could run on a replaced layout while checking
+     the new layout's repair queue, and certify a result the old shards do not support.
 5. **A layout is published on the exclusive side of the mutation barrier**, together with the
-   logical-id directory and the release of the old layout's point-in-time pins. A frozen read
+   logical-id directory, the repair queue and the release of the old layout's point-in-time
+   pins. The repair queue says where the old layout's shards disagree; it is dropped at the
+   swap and not before, because until then an exhaustive read on the old layout must go on
+   refusing while a repair is queued. A frozen read
    view, a point-in-time open and an exhaustive read hold that side for as long as they run,
    so each sees one layout, one directory and its own pins from its first step to its last.
    Writes need this too. A mutation checks the fence after it has parsed and placed its
@@ -54,8 +64,18 @@ that is the next step.
    directories of positions a shrink removed) runs only when none is held. A rebuild waits up
    to two seconds for that before its checkpoint; whatever is left is never selected and goes
    at the next checkpoint, which now also restores the shard-directory set.
-8. **The rule test covers the new shape.** A function that runs inside a layout change never
-   loads the layout from outside it, and a mutation's `admit_mutation` counts as its one load.
+8. **A shard that is being replaced refuses to write.** The new layout is built in the old
+   shards' directories and shares their segment numbers, log and checkpoint sidecar. From
+   the moment the build starts, the old shards' storage is frozen at the shards themselves:
+   a write, a flush, a seal or a recovery through one is refused with an error, whoever asks
+   and whatever lock they hold. A change that fails thaws them and they go on serving; one
+   that publishes leaves them frozen for good, and they only finish the reads still running
+   on them. The fence and the maintenance lock keep every known caller away; the freeze is
+   what holds if one is missed.
+9. **The rule test covers the new shape.** A function that runs inside a layout change never
+   loads the layout from outside it, a mutation's `admit_mutation` counts as its one load,
+   a function that takes the mutation barrier loads after it, and a helper that takes the
+   barrier with a layout it was handed checks that the layout is still the published one.
 
 ## What changes for a caller
 
@@ -92,6 +112,16 @@ that is the next step.
 - The write fence's messages no longer name a remote resize only.
 - `ClusterEngine` has no method that needs exclusive access except assembly.
 
+## What review found
+
+The first version met three failures of one kind, each something exclusive access used to
+keep away from a rebuild and the narrower protocol had not listed: a replica recovery, which
+seals its primary and so writes into a directory the new layout was being built in; the
+repair queue, which a resize emptied before the rebuild while exhaustive reads still ran on
+the unrepaired shards; and the exhaustive read, which loaded its layout before it took the
+barrier. They are fixed as a class and not one by one: items 4, 5 and 8 above, with the rule
+test extended so that the next path of this kind fails a test.
+
 ## Proven
 
 `tests/cluster_oracle/concurrent_rebuild.rs` (through the public API):
@@ -115,14 +145,25 @@ that is the next step.
 - a layout is not published while a frozen read view is open;
 - on a durable cluster, the segment files of a replaced layout exist for as long as a holder
   of that layout does and a read through it works; the next checkpoint after its release
-  removes them.
+  removes them;
+- a replaced shard refuses a seal, a flush and a delete, still answers reads, writes no
+  segment, and the cluster reopens on what the new layout committed; a layout change that
+  does not publish thaws the shards it froze;
+- a replica recovery waits for a layout change;
+- with a repair queued and a resize paused while it reads the corpus, the queue is still
+  there and an exhaustive read refuses; after the resize the queue is empty and the read
+  returns the id once.
 
-Eight mutations of the protocol were run against these tests, and each fails one: a mutation
-that loads the layout before it holds the barrier; a layout change that raises no fence; one
-that does not wait for writes in flight; a layout published outside the barrier; a replaced
-layout that is not remembered; cleanup that does not wait for replaced layouts; a checkpoint
-that does not take the maintenance lock; and a logical-id directory that is not replaced with
-the layout.
+Seventeen mutations of the protocol were run against these tests, and each fails one. The
+protocol: a mutation that loads the layout before it holds the barrier; a layout change that
+raises no fence; one that does not wait for writes in flight; a layout published outside the
+barrier; a replaced layout that is not remembered; cleanup that does not wait for replaced
+layouts; a checkpoint that does not take the maintenance lock; a logical-id directory that is
+not replaced with the layout. The review fixes: replaced shards that are not frozen; a failed
+change that does not thaw; a published change that thaws; a frozen shard that still writes; a
+replica recovery without the maintenance lock; a repair queue emptied when the change begins,
+or not emptied at publish; an exhaustive read, and a point-in-time open, that load before the
+barrier (both caught by the rule test).
 
 **See also:** ADR-177 (the mutation barrier and id locks), ADR-180 (the write fence),
 ADR-197 (checkpoint excludes mutations), ADR-207 (the gate this work retires), ADR-208 (the

@@ -9,7 +9,9 @@
 //!   (`change: &LayoutChange`), and never loads the layout itself;
 //! - an **operation** loads once, at its entry, and calls no other method that loads (a
 //!   mutation loads through `admit_mutation`, after it holds the mutation barrier);
-//! - **assembly** (the engine by value, before it is shared) may load whenever it likes.
+//! - **assembly** (the engine by value, before it is shared) may load whenever it likes;
+//! - whoever takes the **mutation barrier** loads after it has it, because the barrier is
+//!   what ties the layout to the state that changes with it.
 
 use std::path::{Path, PathBuf};
 
@@ -152,6 +154,33 @@ fn every_operation_loads_the_layout_once_and_helpers_never_do() {
         if function.signature.contains("change:&LayoutChange") && count > 0 {
             violations.push(format!(
                 "{place} runs inside a layout change and loads outside it"
+            ));
+        }
+        // The mutation barrier is what makes the layout and the state that changes with it
+        // (the logical-id directory, the repair queue, the point-in-time pins) one consistent
+        // pair, so whoever takes the barrier loads the layout after it has it.
+        let barrier = [
+            "pit_open_barrier",
+            "quiesce_mutations()",
+            "lock_exhaustive_view(",
+        ]
+        .iter()
+        .filter_map(|token| function.body.find(token))
+        .min();
+        if let (Some(barrier), Some(load)) = (barrier, function.body.find("self.layout()")) {
+            if load < barrier {
+                violations.push(format!(
+                    "{place} loads the layout before it takes the mutation barrier"
+                ));
+            }
+        }
+        if barrier.is_some()
+            && function.signature.contains("layout:&Layout")
+            && !function.body.contains("self.is_published(layout)")
+        {
+            violations.push(format!(
+                "{place} takes the mutation barrier with a layout loaded before it, and does \
+                 not check that the layout is still the published one"
             ));
         }
         if count == 0 || is_writer(function) {
