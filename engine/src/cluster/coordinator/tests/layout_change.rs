@@ -503,14 +503,16 @@ fn a_lock_free_read_is_told_when_a_layout_change_overlapped_it() {
     drop(change);
     assert_eq!(during, None, "a read beside a running change was passed");
 
-    // One is running when the read starts and finishes inside it. It may have replaced half
-    // of what the read combines before the read began, so the read does not count even
-    // though nothing is running, and nothing has changed, by the time it ends.
+    // One is running when the read would start. It may already have replaced half of what
+    // the read combines, so the read is refused before it begins. A helper that began it
+    // anyway would pass it here: the change ends inside the read, and by the time the read
+    // ends nothing is running and the layout is the one it started with.
     let mut change = Some(cluster.begin_layout_change().expect("begin"));
     let begun_under_one = cluster.read_between_layout_changes(|| {
         drop(change.take());
         pair()
     });
+    drop(change);
     assert_eq!(
         begun_under_one, None,
         "a read that began under a running change was passed"
