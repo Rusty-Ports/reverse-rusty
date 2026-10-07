@@ -224,11 +224,37 @@ pub(crate) struct FileClusterLog {
     fsync_each_write: bool,
 }
 
+/// What [`FileClusterLog::open`] does when no file is at the log's path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IfMissing {
+    /// Nothing says this log exists yet (a new store; a store an older release wrote its
+    /// commit record for before it created the log; an owner that was asked to accept the
+    /// loss): create it.
+    Create,
+    /// The owner's commit record was written after the log existed. A missing file is then
+    /// a lost log, and the writes acknowledged since that record went with it. Refuse.
+    Refuse,
+}
+
 impl FileClusterLog {
     /// Open or create the log at `path`. `floor_pos` (the manifest's snapshot cursor)
     /// seeds the position counter so it stays monotonic even after a checkpoint
     /// truncated the file.
-    pub(crate) fn open(path: &Path, fsync_each_write: bool, floor_pos: LogPos) -> io::Result<Self> {
+    ///
+    /// `if_missing` is the caller's answer to "does anything say this log exists?". Every
+    /// caller has to give one, because the wrong default loses data silently (ADR-213).
+    pub(crate) fn open(
+        path: &Path,
+        fsync_each_write: bool,
+        floor_pos: LogPos,
+        if_missing: IfMissing,
+    ) -> io::Result<Self> {
+        if if_missing == IfMissing::Refuse && !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} is missing", path.display()),
+            ));
+        }
         let (file, next_seq, repaired_tail_bytes) = if path.exists() {
             let scan = Self::read_entries(path)?;
             let max_seq = scan.records.iter().map(|(p, _)| p.0).max().unwrap_or(0);
@@ -254,6 +280,25 @@ impl FileClusterLog {
                 path: path.to_path_buf(),
                 next_seq,
                 repaired_tail_bytes,
+            }),
+            fsync_each_write,
+        })
+    }
+
+    /// Put an empty log at `path`, in place of whatever is there, and open it.
+    ///
+    /// The new log is written beside the path and renamed over it, so there is no moment at
+    /// which the path holds no log: a crash leaves the old log or the new one. Removing the
+    /// old file first would leave, for that moment, an owner whose commit record says a log
+    /// exists and no log, which a restart refuses (ADR-213).
+    pub(crate) fn replace_with_empty(path: &Path, fsync_each_write: bool) -> io::Result<Self> {
+        let file = publish_empty_log(path, &Self::header(CLOG_VERSION))?;
+        Ok(FileClusterLog {
+            state: Mutex::new(FileState {
+                file: LogAppender::new(file),
+                path: path.to_path_buf(),
+                next_seq: 1,
+                repaired_tail_bytes: 0,
             }),
             fsync_each_write,
         })

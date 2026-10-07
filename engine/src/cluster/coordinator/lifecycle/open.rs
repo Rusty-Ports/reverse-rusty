@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::cluster::clog::{ClusterMutation, FileClusterLog, LogPos};
+use crate::cluster::clog::{ClusterMutation, FileClusterLog, IfMissing, LogPos};
 use crate::cluster::control::{ClusterStateChange, InMemoryControlPlane};
 use crate::cluster::coordinator::layout::Layout;
 use crate::cluster::coordinator::{
@@ -394,20 +394,49 @@ impl ClusterEngine {
         }
 
         let log_path = data_dir.join(CLUSTER_LOG_FILE);
-        // `build` writes its manifest (epoch 0, position 0) and then creates the log, so that
-        // manifest is no evidence that the log was ever whole. A log shorter than its header is
-        // then one whose creation was interrupted (releases before ADR-212 created the file and
-        // then wrote the header), and it is finished here. Every later manifest is written by a
-        // checkpoint, which needs the log open and replaces it through a rename, and it bumps
-        // the epoch even when it records position 0 (a checkpoint before the first write). So
-        // under any manifest but the first, a short log has lost its content and `open`
-        // refuses it.
-        let is_the_manifest_build_wrote = manifest.epoch == 0 && manifest.snapshot_pos == 0;
-        if is_the_manifest_build_wrote {
+        // Does this manifest say the log exists? (ADR-212, ADR-213.)
+        //
+        // A manifest at epoch 1 or later was written with the log in place: by `build`, which
+        // creates the log first, or by a checkpoint, which needs the log open and replaces it
+        // only through a rename. Under it a log that is missing, or shorter than its header,
+        // has been lost with the writes acknowledged since that manifest, and the cluster is
+        // refused.
+        //
+        // Epoch 0 is the manifest that releases before ADR-213 wrote at build, before they
+        // created the log (and, before ADR-212, before the log had its header). Under it a
+        // missing or short log may be a build that was interrupted, so it is created or
+        // finished. A cluster from such a release that has taken writes and never
+        // checkpointed looks the same; its first checkpoint (a graceful stop makes one) ends
+        // that.
+        let written_with_its_log = manifest.written_with_its_log();
+        let accept_lost_log = config.is_some_and(|c| c.accept_lost_log);
+        let log_was_lost = written_with_its_log && !log_path.exists();
+        if log_was_lost && !accept_lost_log {
+            return Err(ShardError::Log(
+                crate::storage::framed_log::lost_log(
+                    &log_path,
+                    &format!(
+                        "the cluster manifest (epoch {}, log position {}) was written after it \
+                         existed",
+                        manifest.epoch, manifest.snapshot_pos
+                    ),
+                    "Restore the data directory from a backup, or start once with \
+                     `accept_lost_log` (`--accept-lost-log`) to continue from the last \
+                     checkpoint without those writes.",
+                )
+                .to_string(),
+            ));
+        }
+        if !written_with_its_log {
             FileClusterLog::finish_interrupted_creation(&log_path)
                 .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
         }
-        let log = FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos))
+        let if_missing = if written_with_its_log && !log_was_lost {
+            IfMissing::Refuse
+        } else {
+            IfMissing::Create
+        };
+        let log = FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos), if_missing)
             .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
 
         let durable = ClusterDurable {
@@ -482,6 +511,18 @@ impl ClusterEngine {
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
         // log tail strictly after snapshot_pos, through the SAME apply funnel as live
         // writes — those entries are not in the attached segments, so no double-apply.
+        if log_was_lost {
+            engine.emit(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::LogLost,
+                detail: "the cluster log was missing and `accept_lost_log` is set: started \
+                         with an empty one"
+                    .to_string(),
+                error: format!(
+                    "every write acknowledged after log position {} (manifest epoch {}) is lost",
+                    manifest.snapshot_pos, manifest.epoch
+                ),
+            });
+        }
         let replay = engine.log.replay(LogPos(manifest.snapshot_pos))?;
         if replay.skipped_bytes > 0 {
             engine.emit(EngineEvent::DurabilityFailure {

@@ -250,29 +250,37 @@ rank metadata, fully sorts already-sorted shard runs, and clones request groups 
 **Completion.** Preserve exact ordering, totals, ownership, and winner-source behavior while
 `rankbench` demonstrates lower allocation and coordinator CPU at fixed K.
 
-### A lost log is refused, not recreated
+### A log has an identity
 
-**Problem.** A reopen that finds no log file creates an empty one, also where something on disk
-says the log once existed: a coordinator whose manifest records a checkpoint, a restarting shard
-with its checkpoint file, a control node with a vote. Writes acknowledged after the last
-checkpoint were in that file. If it is deleted or lost, they are gone and nothing says so, and a
-control node comes back with an empty log beside its vote.
-[ADR-212](decisions/adr-212-a-log-is-created-whole.md) refuses a log that is too short in
-those places; a log that is missing is the same loss.
+**Problem.** A store refuses to open when its commit record says a log existed and the log is
+gone ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)). It accepts any well-formed log it
+finds: one from another store, or from an older backup, put in place of the lost one, replays
+as if it were the right one. And a cluster from an earlier release that has never completed a
+checkpoint still has an epoch-0 manifest, which cannot say whether its log ever existed.
 
-**Direction.** Refuse a missing log wherever its owner holds evidence that it existed, with an
-error that names the evidence. For the coordinator, create the log before the manifest in
-`build`, so that a manifest always means a log. Established systems make the commit record name the log it
-expects and check it at open: RocksDB can track its write-ahead logs in the manifest
-(`track_and_verify_wals_in_manifest`, added because a missing log was otherwise recovered
-from silently), Elasticsearch ties each Lucene commit to its translog by a UUID and refuses a
-shard whose translog is missing, and PostgreSQL refuses to start without the log segment its
-control file's checkpoint points at. Each keeps going only through an explicit tool that says
-data may be lost.
+**Direction.** Give each log a random identity in its header and record it in the commit
+record that goes with it (the manifest, the shard checkpoint file), as Elasticsearch ties a
+Lucene commit to its translog by UUID. Refuse a log whose identity is not the recorded one. It
+is a format change for three logs and three commit records, with the compatibility fences that
+go with them.
 
-**Completion.** Each of the three owners refuses a missing log when its other state says one
-existed, the error names what to do, and a test deletes the log of a store that holds
-acknowledged writes and sees the refusal.
+**Completion.** A store refuses a log that belongs to another store or another point in time,
+with a test for each owner, and the upgrade path for stores without identities is documented.
+
+### A log deleted under a running store
+
+**Problem.** A log file removed while its store is running goes unnoticed. The store keeps
+appending to the unlinked file and acknowledging the writes; they are gone at the next restart,
+which now refuses to start ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)) but cannot
+bring them back. A checkpoint in that state also fails to rewrite the log and reports the
+failure as benign.
+
+**Direction.** Check that the open log is still the file at its path (link count, or device and
+inode) when it is synced and at each checkpoint, mark durability unhealthy and refuse further
+writes when it is not, and treat a checkpoint that cannot read its log as a failure.
+
+**Completion.** A test deletes the log of a running store and sees the next write refused and
+health change, for the single-node engine, the coordinator and a shard node.
 
 ### Writes during a rebuild, and what a rebuild costs
 

@@ -165,21 +165,45 @@ pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<LogAppend
     }
 }
 
-/// Remove a raft log whose creation was interrupted, so that the node starts as the fresh
-/// node it is.
+/// Check a node's raft log against the rest of its raft state, before anything reads it.
 ///
-/// Releases before this one created the log file and then wrote its header. A crash, a power
-/// loss or a full disk between the two left a file shorter than its header, and every later
-/// start refused it ("header is truncated"). Such a file never held an entry.
+/// A node that has a vote, a committed index, a purge point or a snapshot once had a log:
+/// the log is created when the store is first opened, before any of those is written. If
+/// that log is now missing, or shorter than its header, the node has lost entries it may
+/// have acknowledged, and bringing it back with an empty log would break what Raft promises
+/// its peers (it could vote again in a term it voted in, or accept a shorter history). The
+/// library underneath does not detect this, so it is refused here (ADR-212, ADR-213). There
+/// is no override: the node's data directory is restored from a snapshot. (Replacing the
+/// node under a new identity is the textbook answer, and needs a control plane that can add
+/// a member.)
 ///
-/// It is removed only when the node has no other raft state. A node that has a vote, a
-/// committed index, a purge point or a snapshot once had a log; if that log is now shorter
-/// than its header it has lost entries the node may have acknowledged, and bringing the node
-/// back with an empty log would break what Raft promises its peers. That stays an error.
-pub(super) fn repair_interrupted_creation(paths: &RaftPaths) -> io::Result<()> {
+/// A node with none of that state is a fresh node. A log shorter than its header is then
+/// one whose creation was interrupted (releases before ADR-212 created the file and then
+/// wrote the header); it is removed, and the node starts as the fresh node it is. A missing
+/// log there is simply a node that has not started yet.
+pub(super) fn check_log_against_other_state(paths: &RaftPaths) -> io::Result<()> {
     let log = paths.log();
+    let other_state = [
+        paths.vote(),
+        paths.committed(),
+        paths.purged(),
+        paths.snapshot(),
+    ];
+    let other = other_state.iter().find(|path| path.exists());
     if !log.exists() {
-        return Ok(());
+        return match other {
+            None => Ok(()),
+            Some(found) => Err(crate::storage::framed_log::lost_log(
+                &log,
+                &format!(
+                    "this node has other raft state ({}), written after it existed",
+                    found.display()
+                ),
+                "It must not start with an empty log beside that state. Restore this node's \
+                 data directory from a snapshot; until then leave it down, and the other \
+                 control nodes keep their majority.",
+            )),
+        };
     }
     let headers = [
         LogFormat::Legacy.header_bytes(),
@@ -190,13 +214,7 @@ pub(super) fn repair_interrupted_creation(paths: &RaftPaths) -> io::Result<()> {
     if !header_was_interrupted(&log, &headers)? {
         return Ok(());
     }
-    let other_state = [
-        paths.vote(),
-        paths.committed(),
-        paths.purged(),
-        paths.snapshot(),
-    ];
-    if let Some(found) = other_state.iter().find(|path| path.exists()) {
+    if let Some(found) = other {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(

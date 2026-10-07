@@ -95,6 +95,11 @@ pub enum DurabilityOp {
     /// Reconstructing remote create-only admission failed. No mutation or match
     /// data was lost; explicit upserts remain available while creates fail closed.
     LogicalIdDirectory,
+    /// A log that the store's commit record says existed was not there at startup, and the
+    /// operator asked to start without it (`accept_lost_log`, ADR-213): the store opened
+    /// with an empty log in its place. Every write acknowledged since the last checkpoint
+    /// or flush is gone. Data at risk. Without that request the store refuses to open.
+    LogLost,
 }
 
 impl DurabilityOp {
@@ -120,6 +125,7 @@ impl DurabilityOp {
             DurabilityOp::ReplicaDesync => "replica_desync",
             DurabilityOp::ClusterPartialApply => "cluster_partial_apply",
             DurabilityOp::LogicalIdDirectory => "logical_id_directory",
+            DurabilityOp::LogLost => "log_lost",
         }
     }
 
@@ -137,7 +143,8 @@ impl DurabilityOp {
             | DurabilityOp::SegmentRecovery
             | DurabilityOp::ManifestWrite
             | DurabilityOp::IngestRollback
-            | DurabilityOp::ClusterPartialApply => true,
+            | DurabilityOp::ClusterPartialApply
+            | DurabilityOp::LogLost => true,
             DurabilityOp::WalCheckpoint
             | DurabilityOp::WalReset
             | DurabilityOp::SourceStoreWrite

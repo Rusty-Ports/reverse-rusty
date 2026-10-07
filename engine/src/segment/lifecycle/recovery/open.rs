@@ -179,8 +179,36 @@ impl Engine {
             }
         }
 
-        // Open WAL and replay
+        // Open WAL and replay.
+        //
+        // A data directory with a manifest once had a log: the log is opened before the
+        // first commit, and it is only ever replaced through a rename (ADR-198). So a log
+        // that is not there has been lost, with every write acknowledged since the last
+        // flush, and `Wal::open` would put an empty one in its place without a word.
+        // Refuse, unless the operator asked to start without it (ADR-213).
         let wal_path = dir.join("wal.log");
+        let log_was_lost = !wal_path.exists();
+        if log_was_lost {
+            if !config.accept_lost_log {
+                return Err(crate::storage::framed_log::lost_log(
+                    &wal_path,
+                    "the manifest beside it was written after it existed",
+                    "Restore the data directory from a backup, or start once with \
+                     `accept_lost_log` (`--accept-lost-log`) to continue from the last flush \
+                     without those writes.",
+                ));
+            }
+            pending_events.push(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::LogLost,
+                detail: "the write-ahead log was missing and `accept_lost_log` is set: \
+                         started with an empty one"
+                    .to_string(),
+                error: format!(
+                    "every write acknowledged after log sequence {} is lost",
+                    manifest.wal_seq_watermark
+                ),
+            });
+        }
         let mut wal_file = Wal::open(&wal_path, config.wal_sync_on_write)?;
         // ADR-066: a reset (header-only) WAL rescans to seq 1, but the manifest
         // keeps its watermark — pin the sequence past it so frames appended after

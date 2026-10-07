@@ -49,6 +49,7 @@ disk are `shardserver` flags:
 | `shardserver` flag | Default | Effect |
 |---|---|---|
 | `--wal-sync-on-write <true\|false>` | false | Fsync the shard translog on every write, so an acknowledged write survives a power loss and not only a process crash |
+| `--accept-lost-log` | off | Restart although the shard's translog is gone (ADR-213). A shard with a checkpoint file and no `translog.clog` is refused, because the writes it acknowledged since that checkpoint were in the translog. With this flag it starts from the checkpoint with an empty translog and reports a `log_lost` durability event. For one start. Recovering the shard into an empty data directory is the better way when a replica or the coordinator can supply it |
 | `--retain-source <true\|false>` | true | Keep query source text in memory, or on disk and read on demand (ADR-020) |
 | `--max-segments N` | 8 | Base segments before compaction triggers |
 | `--memtable-flush-threshold N` | 100000 | Memtable entries before an automatic flush |

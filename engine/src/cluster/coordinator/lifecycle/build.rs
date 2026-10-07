@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::cluster::clog::{FileClusterLog, LogPos};
+use crate::cluster::clog::{FileClusterLog, IfMissing, LogPos};
 use crate::cluster::control::InMemoryControlPlane;
 use crate::cluster::coordinator::{
     into_shard, placement_of, replica_dir, shard_dir, ClusterConfig, ClusterDurable, ClusterEngine,
@@ -290,8 +290,8 @@ impl ClusterEngine {
             }
         }
 
-        // Durability: commit the coordinator manifest (the atomic base = per-shard
-        // segment registry + dict + ring + epoch 0) and open an empty log, or fall back
+        // Durability: open an empty log and commit the coordinator manifest (the atomic
+        // base = per-shard segment registry + dict + ring + epoch 1), or fall back
         // to an in-memory log. Construction fails loud on a durable-setup error (fresh
         // construction — nothing to lose yet); a shard whose segment write fell back to
         // in-memory makes `segment_filenames` error, aborting the build rather than
@@ -366,8 +366,8 @@ impl ClusterEngine {
     }
 
     /// Commit the initial durable base for a freshly built cluster: collect each shard's
-    /// segment registry + next-seg-id, write the coordinator manifest (epoch 0,
-    /// snapshot_pos 0 — the atomic commit point), and open an empty log. The per-shard
+    /// segment registry + next-seg-id, create an empty log, and write the coordinator
+    /// manifest (epoch 1, snapshot_pos 0 — the atomic commit point). The per-shard
     /// `.seg` files were already written by pass-B ingest; this records which ones are
     /// committed. Returns the durability bundle for [`from_parts`].
     #[allow(clippy::too_many_arguments)]
@@ -405,7 +405,7 @@ impl ClusterEngine {
             next_seg_ids.push(p.next_seg_id()?);
         }
         let manifest = crate::storage::ClusterManifest {
-            epoch: 0,
+            epoch: crate::storage::ClusterManifest::FIRST_EPOCH_WITH_A_LOG,
             placement_generation: PlacementGeneration::INITIAL,
             snapshot_pos: 0,
             dict_fingerprint: dict.fingerprint(),
@@ -438,18 +438,23 @@ impl ClusterEngine {
             // ADR-184: the feature model the base was compiled under, checked on every reopen.
             feature_model_fingerprint: Some(norm.fingerprint()),
         };
-        crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
-            .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
+        // The log first, then the manifest (ADR-213). A manifest is what makes this directory
+        // a cluster, and a reopen under it refuses a log that is not there; so nothing may
+        // say the cluster exists before its log does. A crash between the two leaves a log
+        // and no manifest, which is no cluster, and the build runs again.
         let log = FileClusterLog::open(
             &dir.join(CLUSTER_LOG_FILE),
             config.wal_sync_on_write,
             LogPos(0),
+            IfMissing::Create,
         )
         .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
+        crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
+            .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
         Ok(ClusterDurable {
             log: Box::new(log),
             data_dir: Some(dir.to_path_buf()),
-            epoch: 0,
+            epoch: crate::storage::ClusterManifest::FIRST_EPOCH_WITH_A_LOG,
             placement_generation: PlacementGeneration::INITIAL,
             source_files: vec!["sources.dat".to_string(); ring.num_shards()],
             manifest: Some(manifest),

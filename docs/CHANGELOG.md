@@ -9,6 +9,30 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-07 — A store whose log is gone no longer starts without it
+
+- **A lost log is refused, not recreated** ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)).
+  A reopen that found no log file created an empty one, also where the store's own commit record
+  proved a log had existed: a single-node `manifest.bin`, a cluster manifest, a shard's checkpoint
+  file, a control node's vote. Every write acknowledged since the last flush or checkpoint was
+  dropped without an error, an event or a change in health, and a control node rejoined with an
+  empty log beside its vote. All four now refuse to start, name the file and what proves it
+  existed, and create nothing in its place.
+- **`--accept-lost-log`** (`server` and `shardserver`; `accept_lost_log` in the library): start
+  from the last flush or checkpoint with an empty log, and report a `log_lost` durability event
+  that says after which position writes were lost. For one start. It changes nothing when the log
+  is there and does not make a damaged log acceptable. A control node has no such flag: its data
+  directory is restored from a snapshot.
+- **`build` creates the cluster log before it writes the manifest,** and writes that manifest at
+  epoch 1. A manifest at epoch 1 or later therefore means its log existed; epoch 0 is what
+  earlier releases wrote before the log, and is still opened as before. A cluster built by this
+  release reports epoch 1 where it reported 0.
+- **A backup of a store whose log is gone is refused,** and a backup directory without its log
+  does not verify.
+- **Behaviour change:** a data directory whose log was deleted or lost does not start until it is
+  restored from a backup or started once with `--accept-lost-log`. Do not delete a log to get a
+  node started. No format change.
+
 ## 2026-10-07 — A node whose first start was interrupted starts again
 
 - **A log is created whole** ([ADR-212](decisions/adr-212-a-log-is-created-whole.md)). The

@@ -117,7 +117,11 @@ fn checkpoint_then_reopen_matches_oracle() {
 
     let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
         .expect("durable cluster builds");
-    assert_eq!(cluster.epoch(), 0);
+    assert_eq!(
+        cluster.epoch(),
+        1,
+        "`build` writes epoch 1, once its log exists (ADR-213)"
+    );
     apply_churn(&cluster, &added, &removed);
 
     let log_path = dir.join("cluster.log");
@@ -129,7 +133,7 @@ fn checkpoint_then_reopen_matches_oracle() {
         placement_generation,
         "checkpoint changes physical durability state, never logical placement"
     );
-    assert_eq!(cluster.epoch(), 1, "checkpoint bumps the epoch");
+    assert_eq!(cluster.epoch(), 2, "checkpoint bumps the epoch");
     let log_after = std::fs::metadata(&log_path).expect("log").len();
     assert!(
         log_after < log_before,
@@ -147,7 +151,7 @@ fn checkpoint_then_reopen_matches_oracle() {
     drop(cluster);
 
     let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
-    assert_eq!(reopened.epoch(), 1, "epoch persists across reopen");
+    assert_eq!(reopened.epoch(), 2, "epoch persists across reopen");
 
     let mut live = final_live(&queries, &added, &removed);
     live.push((post_id, post_dsl));

@@ -364,6 +364,19 @@ pub struct EngineConfig {
     /// Default: `false` (negation-only queries are loudly rejected)
     pub accept_class_d: bool,
 
+    /// Start although the log is gone (ADR-213).
+    ///
+    /// A store whose commit record says a log existed (a single-node data directory with a
+    /// manifest; a restarting shard with its checkpoint file) refuses to open when that log
+    /// is not there: the writes acknowledged since the last flush or checkpoint were in it.
+    /// With this set, the store opens with an empty log in their place and reports a
+    /// [`LogLost`](crate::events::DurabilityOp::LogLost) durability event. It changes
+    /// nothing when the log is present. Set it for one start, to accept a loss that has
+    /// already happened, and then remove it.
+    ///
+    /// Default: `false` (a lost log is refused)
+    pub accept_lost_log: bool,
+
     /// Translog peer-recovery retention-lease TTL, in seconds (ADR-048). A lease pins a
     /// recovery source's un-sealed translog tail so a concurrent seal can't trim it
     /// (ADR-040); a recovery renews its lease every catch-up pass (the heartbeat). If a
@@ -410,6 +423,7 @@ impl Default for EngineConfig {
             alias_feedback_max_pairs: 256,
             max_percolate_batch: 10_000,
             accept_class_d: false,
+            accept_lost_log: false,
             retention_lease_ttl_secs: 1800,
         }
     }

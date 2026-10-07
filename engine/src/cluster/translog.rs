@@ -33,7 +33,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use super::clog::{ClusterLog, FileClusterLog, LogPos, NullClusterLog};
+use super::clog::{ClusterLog, FileClusterLog, IfMissing, LogPos, NullClusterLog};
 use super::shard::ShardError;
 use crate::storage::crc32;
 
@@ -47,7 +47,7 @@ pub(crate) const TRANSLOG_FILE: &str = "translog.clog";
 /// `Box<dyn ClusterLog>`); the trait is identical so the file backend is shared.
 pub(crate) type ShardLog = dyn ClusterLog;
 
-/// Open a **fresh** per-shard translog under `dir` (removing any stale file first), starting
+/// Open a **fresh** per-shard translog under `dir` (replacing any stale file), starting
 /// at `LogPos(0)`. This is the construction-time / attach-time translog for the CORE recovery
 /// path: the durable base is the attached/loaded segments, and the translog accumulates only
 /// this shard instance's un-sealed writes. For the in-process durable cluster the coordinator
@@ -55,24 +55,22 @@ pub(crate) type ShardLog = dyn ClusterLog;
 /// stale on-disk tail from before a crash must NOT linger here (it would double-apply against
 /// the coordinator-log replay) — hence the reset. (Data-node self-restart-from-translog, which
 /// instead *keeps* and replays this file, is a separate open path — ADR-039 §6.)
+///
+/// The reset replaces the file by a rename; it does not remove it first. A recovery target
+/// resets its translog while its old checkpoint file is still in place, and a restart that
+/// finds a checkpoint file and no translog is refused (ADR-213). With a rename a crash leaves
+/// the old translog or the new one, and both restart.
 pub(crate) fn open_fresh(dir: &Path, fsync_each_write: bool) -> Result<Box<ShardLog>, ShardError> {
     // The durable ctor opens the translog before the engine creates the data dir, so ensure it
     // exists (idempotent; a real failure surfaces).
     std::fs::create_dir_all(dir)
         .map_err(|e| ShardError::Log(format!("creating shard dir {}: {e}", dir.display())))?;
     let path = dir.join(TRANSLOG_FILE);
-    // Reset: the segments are the durable base; the translog starts empty. A real removal
-    // failure surfaces (a lingering tail would corrupt recovery); a missing file is benign.
-    if let Err(e) = std::fs::remove_file(&path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(ShardError::Log(format!(
-                "resetting shard translog {}: {e}",
-                path.display()
-            )));
-        }
-    }
-    let log = FileClusterLog::open(&path, fsync_each_write, LogPos(0))
-        .map_err(|e| ShardError::Log(format!("opening shard translog {}: {e}", path.display())))?;
+    // Reset: the segments are the durable base; the translog starts empty. A failure surfaces
+    // (a lingering tail would corrupt recovery) and leaves the old file as it was.
+    let log = FileClusterLog::replace_with_empty(&path, fsync_each_write).map_err(|e| {
+        ShardError::Log(format!("resetting shard translog {}: {e}", path.display()))
+    })?;
     Ok(Box::new(log))
 }
 
@@ -88,19 +86,43 @@ pub(crate) fn null() -> Box<ShardLog> {
 /// data-node self-restart path: the on-disk tail is the authority, replayed over the attached
 /// segments. `floor` (the sidecar's local checkpoint) seeds the position counter so new appends
 /// stay monotonic across the restart.
+///
+/// The caller is a shard that found its checkpoint file, which is written after the translog
+/// exists. So a translog that is not there has been lost, with every write the shard
+/// acknowledged since that checkpoint, and this refuses (ADR-213). With `accept_lost_log` it
+/// creates an empty one instead and returns `true` beside it, for the caller to report.
 pub(crate) fn open_existing(
     dir: &Path,
     fsync_each_write: bool,
     floor: LogPos,
-) -> Result<Box<ShardLog>, ShardError> {
+    accept_lost_log: bool,
+) -> Result<(Box<ShardLog>, bool), ShardError> {
     let path = dir.join(TRANSLOG_FILE);
-    let log = FileClusterLog::open(&path, fsync_each_write, floor).map_err(|e| {
+    let lost = !path.exists();
+    if lost && !accept_lost_log {
+        return Err(ShardError::Log(
+            crate::storage::framed_log::lost_log(
+                &path,
+                "this shard's checkpoint file was written after it existed",
+                "Recover the shard into an empty data directory from a replica or from the \
+                 coordinator, or start once with `accept_lost_log` (`--accept-lost-log`) to \
+                 continue without those writes.",
+            )
+            .to_string(),
+        ));
+    }
+    let if_missing = if lost {
+        IfMissing::Create
+    } else {
+        IfMissing::Refuse
+    };
+    let log = FileClusterLog::open(&path, fsync_each_write, floor, if_missing).map_err(|e| {
         ShardError::Log(format!(
             "opening existing shard translog {}: {e}",
             path.display()
         ))
     })?;
-    Ok(Box::new(log))
+    Ok((Box::new(log), lost))
 }
 
 // ---- per-shard checkpoint sidecar (ADR-039 §6: data-node self-restart) ----
@@ -334,6 +356,36 @@ mod tests {
             u32::from_le_bytes(bytes[4..8].try_into().expect("version")),
             4
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reset replaces the translog; it never removes it first. A reset that cannot finish
+    /// leaves the old translog in place, so a shard whose checkpoint file says it has one
+    /// is never left without. Before ADR-213 the old file was removed and then a new one
+    /// created, and a crash in between left a restart that now would be refused.
+    #[test]
+    fn a_reset_that_fails_leaves_the_translog_in_place() {
+        let dir = scratch_dir("reset_blocked");
+        {
+            let log = open_fresh(&dir, true).expect("open");
+            log.append(&add(1, "a")).unwrap();
+        }
+        let path = dir.join(TRANSLOG_FILE);
+        let before = std::fs::read(&path).expect("the translog");
+        let blocker = crate::storage::framed_log::replacement_path(&path);
+        std::fs::create_dir_all(&blocker).expect("block the replacement");
+        let failed = open_fresh(&dir, true).is_err();
+        let after = std::fs::read(&path).ok();
+        std::fs::remove_dir_all(&blocker).expect("unblock");
+        assert!(failed, "the reset went ahead without its replacement");
+        assert_eq!(
+            after.as_deref(),
+            Some(before.as_slice()),
+            "a failed reset removed or changed the translog"
+        );
+        // With the way clear it resets.
+        let log = open_fresh(&dir, true).expect("reset");
+        assert!(log.replay(LogPos(0)).unwrap().entries.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

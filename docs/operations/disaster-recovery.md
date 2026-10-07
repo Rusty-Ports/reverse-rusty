@@ -65,6 +65,7 @@ your real RTO.
 | Shard **volume** lost (RF=1) | **§3.1 below** |
 | Control quorum majority lost | **§3.2 below** |
 | Everything lost (site/namespace deletion) | **§3.3 below** |
+| A node refuses to start: `… is missing, but …` (its log is gone) | **§3.4 below** |
 | Backup taking / verifying / restoring mechanics | [`backup-restore.md`](backup-restore.md) |
 
 ## 3. The flows this page owns
@@ -136,6 +137,36 @@ the [runbook §7 procedure](cluster-deployment.md) (a stateless coordinator's
 `POST /_checkpoint` seals primaries independently and `POST /_backup` returns 400; each node's volume
 is crash-consistent on its own). If you must restore from a non-quiesced set, treat the window
 between the oldest and newest snapshot as lost and replay it from upstream.
+
+### 3.4 A store refuses to start because its log is gone
+
+The start-up error reads `<file> is missing, but <what proves it existed>. The writes
+acknowledged since then were in it and are lost.` (ADR-213). The store still has everything up
+to its last flush or checkpoint. What it has lost is every write it acknowledged after that.
+Earlier releases started in this state without those writes and said nothing; this is the same
+loss, reported.
+
+First find out why the file is gone (someone removed it, a restore left it out, the volume lost
+it) and delete nothing else. **Never remove a log to get a node started.** Then, by role:
+
+| Role | File | Ways on |
+|---|---|---|
+| Single-node server | `wal.log` | Restore the data directory from a backup ([`backup-restore.md`](backup-restore.md)). Or start **once** with `--accept-lost-log`: it serves from its last flush. |
+| In-process cluster coordinator | `cluster.log` | The same; it serves from its last checkpoint. |
+| Shard node of a remote cluster | `translog.clog` | Treat it as a lost volume: §3.1 at RF=1, the replica-replacement row of [runbook §6](cluster-deployment.md) at RF≥2. Or start it **once** with `--accept-lost-log`: it serves from its last checkpoint, and replicas that still hold the lost writes are found unequal at the coordinator's next connect and kept out of the in-sync set (ADR-195). |
+| Control node | `raft-log.bin` | **No flag.** A node that has voted must not come back with an empty log. Restore the node's data directory from a snapshot (§3.2). Until then leave it down: the other control nodes keep their majority. Do not start it on a partly emptied directory. |
+
+After an accepted loss:
+
+1. The server logs the loss and `durability_failures_total{op="log_lost"}` counts it once. The
+   event names the position after which writes were lost.
+2. Replay the window since the last flush or checkpoint from the upstream system of record
+   (§3.1 step 3); upserts are idempotent per id.
+3. Remove `--accept-lost-log`. Left in place it would accept the next loss as well.
+4. Take a fresh backup, then **verify** (§4).
+
+A backup taken from a store in this state is refused, and a backup directory that lacks its log
+does not verify, so a restore cannot bring the problem back.
 
 ## 4. Post-recovery verification checklist
 

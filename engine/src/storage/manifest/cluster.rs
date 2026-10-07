@@ -112,6 +112,24 @@ pub struct ClusterManifest {
     pub feature_model_fingerprint: Option<u64>,
 }
 
+impl ClusterManifest {
+    /// The epoch `build` gives its manifest, which it writes once the cluster log exists
+    /// (ADR-213). Epoch 0 is what releases before that wrote, *before* they created the log.
+    /// A checkpoint has always needed the log open, and bumps the epoch.
+    pub const FIRST_EPOCH_WITH_A_LOG: u64 = 1;
+
+    /// Whether this manifest was written with the cluster log in place.
+    ///
+    /// If it was, a log that is missing under it, or shorter than its header, has been lost
+    /// with the writes acknowledged since this manifest, and must not be replaced with an
+    /// empty one. If it was not (an epoch-0 manifest from a release before ADR-213), the log
+    /// may never have existed: the build may have been interrupted before it got that far.
+    #[must_use]
+    pub fn written_with_its_log(&self) -> bool {
+        self.epoch >= Self::FIRST_EPOCH_WITH_A_LOG || self.snapshot_pos != 0
+    }
+}
+
 pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Result<()> {
     if manifest.segment_registry.len() != manifest.num_shards as usize
         || manifest.next_seg_ids.len() != manifest.num_shards as usize

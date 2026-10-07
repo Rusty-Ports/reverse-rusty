@@ -297,7 +297,12 @@ impl LocalShard {
         }
         let floor = LogPos(ckpt.local_checkpoint);
         let retention_lease_ttl = resolve_lease_ttl(&config);
-        let translog = translog::open_existing(&dir, config.wal_sync_on_write, floor)?;
+        let (translog, translog_was_lost) = translog::open_existing(
+            &dir,
+            config.wal_sync_on_write,
+            floor,
+            config.accept_lost_log,
+        )?;
         // A shard-local restart cannot safely rewrite an older compiler plan:
         // restoring a lost clause/member boundary can change both placement
         // and visibility mode. The strict attach therefore refuses every
@@ -330,6 +335,20 @@ impl LocalShard {
         // Replay the un-sealed tail (ops > P) into the engine ONLY — the ops are already on disk
         // in the translog, so re-appending would duplicate them. Position-filtered, so it never
         // double-applies an op already baked into the attached segments.
+        if translog_was_lost {
+            shard
+                .lock()
+                .queue_recovery_event(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::LogLost,
+                    detail: "the shard translog was missing and `accept_lost_log` is set: \
+                             started with an empty one"
+                        .into(),
+                    error: format!(
+                        "every write acknowledged after translog position {} is lost",
+                        floor.0
+                    ),
+                });
+        }
         let replay = shard.translog.replay(floor)?;
         if replay.skipped_bytes > 0 {
             shard

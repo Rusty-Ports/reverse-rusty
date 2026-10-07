@@ -89,7 +89,11 @@ pub(crate) fn parse(args: &[String]) -> Result<ShardServerArgs, String> {
         max_grpc_request_bytes: DEFAULT_MAX_GRPC_REQUEST_BYTES,
         max_concurrent_exhaustive_streams: DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
         max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
-        engine: EngineConfig::default(),
+        engine: EngineConfig {
+            // Presence flag, like `--pending`: start although the translog is gone (ADR-213).
+            accept_lost_log: args.iter().any(|a| a == "--accept-lost-log"),
+            ..EngineConfig::default()
+        },
     };
     let mut i = 0;
     while i < args.len() {
@@ -258,6 +262,21 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_lost_translog_is_accepted_only_when_asked() {
+        let default = parse(&args(&["0.0.0.0:50051", "--data-dir", "/data"])).expect("valid");
+        assert!(!default.engine.accept_lost_log);
+        let asked = parse(&args(&[
+            "0.0.0.0:50051",
+            "--data-dir",
+            "/data",
+            "--accept-lost-log",
+        ]))
+        .expect("valid");
+        assert!(asked.engine.accept_lost_log);
+        assert_eq!(asked.addr.as_deref(), Some("0.0.0.0:50051"));
     }
 
     #[test]

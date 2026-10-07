@@ -49,9 +49,20 @@ fn reopen_attaches_segments_with_no_log_or_snapshot() {
         "a raw-DSL cluster_snapshot_*.dat exists — 3b should have removed it"
     );
 
-    // Delete the log: the attached segments alone must answer the full corpus.
+    // Delete the log: the attached segments alone must answer the full corpus. A cluster
+    // whose log is gone is refused (ADR-213), so the reopen says it accepts the loss; nothing
+    // was in the log after the checkpoint, so nothing is lost here.
     std::fs::remove_file(dir.join("cluster.log")).expect("remove log");
-    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen with no log");
+    assert!(
+        ClusterEngine::open(dir.clone(), vocab(), None).is_err(),
+        "a cluster whose log is gone opened without being told to"
+    );
+    let without_its_log = ClusterConfig {
+        accept_lost_log: true,
+        ..durable_cfg(3, dir.clone(), false)
+    };
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&without_its_log))
+        .expect("reopen with no log");
     let brute = Brute::build(&queries);
     let mut lc = String::new();
     let mut feats: Vec<u32> = Vec::new();

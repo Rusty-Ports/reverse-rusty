@@ -22,13 +22,13 @@ fn reopen_repairs_partial_frames_and_preserves_later_acknowledged_appends() {
         let mut bytes = prefix.clone();
         bytes.extend_from_slice(&tail);
         std::fs::write(&path, bytes).unwrap();
-        let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
+        let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), prefix);
         assert_eq!(log.replay(LogPos(0)).unwrap().skipped_bytes, len);
         assert_eq!(log.replay(LogPos(0)).unwrap().skipped_bytes, 0);
         assert_eq!(log.append(&add(2, "beta")).unwrap(), LogPos(2));
         drop(log);
-        let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
+        let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).unwrap();
         let replay = log.replay(LogPos(0)).unwrap();
         assert_eq!(
             replay.entries,
@@ -87,12 +87,12 @@ fn complete_unknown_or_malformed_payloads_refuse_open_replay_and_checkpoint() {
     for (i, body) in cases.into_iter().enumerate() {
         let healthy = framed(&FileClusterLog::encode_body(1, &add(1, "alpha")));
         std::fs::write(&path, healthy).unwrap();
-        let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
+        let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).unwrap();
         let mut invalid = framed(&body);
         invalid.extend_from_slice(&[0xaa; 3]);
         std::fs::write(&path, &invalid).unwrap();
         assert_eq!(
-            FileClusterLog::open(&path, true, LogPos(0))
+            FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create)
                 .err()
                 .unwrap()
                 .kind(),
@@ -121,7 +121,7 @@ fn complete_crc_failure_and_damaged_length_before_later_records_refuse_repair() 
         }
         std::fs::write(&path, &bytes).unwrap();
         assert_eq!(
-            FileClusterLog::open(&path, true, LogPos(0))
+            FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create)
                 .err()
                 .unwrap()
                 .kind(),
@@ -153,10 +153,12 @@ fn a_log_whose_creation_was_interrupted_is_finished_as_an_empty_log() {
             .unwrap_or_else(|error| panic!("{held} header bytes: {error}"));
         assert_eq!(std::fs::read(&path).unwrap(), header, "{held} header bytes");
         {
-            let log = FileClusterLog::open(&path, true, LogPos(0)).expect("open");
+            let log =
+                FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).expect("open");
             log.append(&add(7, "alpha beta")).expect("append");
         }
-        let reopened = FileClusterLog::open(&path, true, LogPos(0)).expect("reopen");
+        let reopened =
+            FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).expect("reopen");
         let held_records = reopened.replay(LogPos(0)).expect("replay");
         assert_eq!(
             held_records.entries,
@@ -195,7 +197,7 @@ fn open_refuses_a_log_shorter_than_its_header() {
             let path = scratch_path(&format!("short_{}_{held}", floor.0));
             std::fs::write(&path, &header[..held]).unwrap();
             assert!(
-                FileClusterLog::open(&path, true, floor).is_err(),
+                FileClusterLog::open(&path, true, floor, IfMissing::Create).is_err(),
                 "{held} header bytes, floor {}: opened",
                 floor.0
             );
@@ -217,7 +219,7 @@ fn a_short_log_that_is_no_header_is_left_alone_and_refused() {
     std::fs::write(&path, b"XY").unwrap();
     FileClusterLog::finish_interrupted_creation(&path).expect("nothing to finish");
     assert_eq!(std::fs::read(&path).unwrap(), b"XY", "the file was changed");
-    assert!(FileClusterLog::open(&path, true, LogPos(0)).is_err());
+    assert!(FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).is_err());
     // A whole log, and no log at all, are not touched either.
     std::fs::write(&path, current_header()).unwrap();
     FileClusterLog::finish_interrupted_creation(&path).expect("a whole log");
@@ -235,7 +237,7 @@ fn a_creation_that_fails_leaves_no_file_at_the_path() {
     let blocker = crate::storage::framed_log::replacement_path(&path);
     let _ = std::fs::remove_dir_all(&blocker);
     std::fs::create_dir_all(&blocker).unwrap();
-    let failed = FileClusterLog::open(&path, true, LogPos(0)).is_err();
+    let failed = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).is_err();
     let left_behind = path.exists();
     std::fs::remove_dir_all(&blocker).unwrap();
     assert!(failed, "the log was created without its replacement");
@@ -244,7 +246,28 @@ fn a_creation_that_fails_leaves_no_file_at_the_path() {
         "a failed creation left a file at the log's path"
     );
     // With the way clear it is created whole.
-    FileClusterLog::open(&path, true, LogPos(0)).expect("create");
+    FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).expect("create");
     assert_eq!(std::fs::read(&path).unwrap(), current_header());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Every caller says what a missing file means (ADR-213). With `Refuse` nothing is created:
+/// the caller's commit record says the log existed, so an empty one in its place would hide
+/// the loss of everything that was in it. With `Create` a new log is made.
+#[test]
+fn a_missing_log_is_created_only_when_the_caller_says_so() {
+    let path = scratch_path("missing");
+    let _ = std::fs::remove_file(&path);
+    let refused = FileClusterLog::open(&path, true, LogPos(5), IfMissing::Refuse)
+        .err()
+        .expect("a missing log was created for a caller that said it existed");
+    assert_eq!(refused.kind(), std::io::ErrorKind::NotFound);
+    assert!(!path.exists(), "a refused open created a log");
+
+    let log = FileClusterLog::open(&path, true, LogPos(5), IfMissing::Create).expect("create");
+    assert_eq!(log.last_pos().expect("position"), LogPos(5));
+    drop(log);
+    // An existing log opens the same either way.
+    FileClusterLog::open(&path, true, LogPos(5), IfMissing::Refuse).expect("reopen");
     let _ = std::fs::remove_file(&path);
 }
