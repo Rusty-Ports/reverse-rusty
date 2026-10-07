@@ -3,13 +3,32 @@
 //! `timeout_ms` was a response deadline only — a timed-out match kept burning the
 //! rayon pool to completion. These tests measure an uncancelled slow match (`T_full`)
 //! over a deliberately broad-heavy corpus, then run the SAME match armed with a
-//! deadline a fraction of `T_full` and assert the wall clock actually stopped early
-//! (self-calibrating: every bound is relative to the measured `T_full`, so machine
-//! speed cannot flake it — only a cancellation that fails to cancel can).
+//! deadline a fraction of `T_full` and assert the wall clock actually stopped early.
+//!
+//! Two things keep the wall clock from failing for a reason other than a cancellation
+//! that does not cancel:
+//!
+//! - every bound is relative to the measured `T_full`, so machine speed does not matter;
+//! - both runs are timed on a thread pool of their own ([`own_pool`]), so nothing else in
+//!   this test binary can be queued in front of them.
 
 use crate::harness::*;
 use reverse_rusty::exact::TagPredicate;
 use std::time::Duration;
+
+/// A thread pool for one test's timed runs.
+///
+/// The matcher runs on the ambient rayon pool, and a rayon pool does not share its workers
+/// fairly between top-level jobs: workers finish the tasks of the job they are in before
+/// they take up a new one. On the global pool, which every test in this binary shares, a
+/// sibling test's build or batch can therefore be in front of the cancelled run, and the
+/// time that run waits for a worker is counted as time the cancellation took. With a
+/// 100 ms job in front of it, the cancelled run measured longer than the uncancelled one.
+fn own_pool() -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .build()
+        .expect("a thread pool for the timed runs")
+}
 
 /// Manual before/after evidence for cancellation *inside* one deliberately
 /// pathological segment. Half the rows share one canonical body (one enormous
@@ -96,10 +115,14 @@ fn armed_deadline_actually_stops_broad_batch_work() {
         ..BatchMatchOptions::default()
     };
 
+    let pool = own_pool();
+
     // 1) the uncancelled baseline
     let t0 = Instant::now();
-    let (full, _) = snap
-        .try_match_titles_batch_with_stats_filtered(&data.titles, opts, &pred, None)
+    let (full, _) = pool
+        .install(|| {
+            snap.try_match_titles_batch_with_stats_filtered(&data.titles, opts, &pred, None)
+        })
         .expect("unarmed never cancels");
     let t_full = t0.elapsed();
     eprintln!(
@@ -118,12 +141,14 @@ fn armed_deadline_actually_stops_broad_batch_work() {
     //    proven is "cancellation stops the work", not a precise latency.
     let budget = t_full / 20;
     let t1 = Instant::now();
-    let r = snap.try_match_titles_batch_with_stats_filtered(
-        &data.titles,
-        opts,
-        &pred,
-        Some(Instant::now() + budget),
-    );
+    let r = pool.install(|| {
+        snap.try_match_titles_batch_with_stats_filtered(
+            &data.titles,
+            opts,
+            &pred,
+            Some(Instant::now() + budget),
+        )
+    });
     let elapsed = t1.elapsed();
     assert!(r.is_err(), "an armed sub-runtime deadline must cancel");
     assert!(
@@ -153,9 +178,11 @@ fn armed_deadline_actually_stops_par_work() {
     let snap = eng.snapshot();
     let pred = TagPredicate::empty();
 
+    let pool = own_pool();
+
     let t0 = Instant::now();
-    let full = snap
-        .try_match_titles_par_filtered(&data.titles, true, &pred, None)
+    let full = pool
+        .install(|| snap.try_match_titles_par_filtered(&data.titles, true, &pred, None))
         .expect("unarmed never cancels");
     let t_full = t0.elapsed();
     eprintln!(
@@ -170,12 +197,14 @@ fn armed_deadline_actually_stops_par_work() {
     );
 
     let t1 = Instant::now();
-    let r = snap.try_match_titles_par_filtered(
-        &data.titles,
-        true,
-        &pred,
-        Some(Instant::now() + t_full / 20),
-    );
+    let r = pool.install(|| {
+        snap.try_match_titles_par_filtered(
+            &data.titles,
+            true,
+            &pred,
+            Some(Instant::now() + t_full / 20),
+        )
+    });
     let elapsed = t1.elapsed();
     assert!(r.is_err(), "an armed sub-runtime deadline must cancel");
     assert!(
