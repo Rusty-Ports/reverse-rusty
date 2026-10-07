@@ -260,7 +260,12 @@ need at their peak, has not been measured at scale.
 
 **Direction.** Measure a rebuild's time and peak memory per phase at scale, and publish the
 numbers with sizing guidance. If the write pause is too long for real corpora, carry the writes
-that arrive during a rebuild into the new layout, so that only the swap pauses them.
+that arrive during a rebuild into the new layout, so that only the swap pauses them. The
+established shape is the one online schema-change tools use (gh-ost, `CREATE INDEX
+CONCURRENTLY`): build beside from a snapshot, keep accepting writes and log them (the cluster
+log already orders them), replay the tail into the new layout, then pause writes only for the
+last of the tail and the swap. Give that pause a timeout that abandons the cut-over, so that a
+swap which cannot finish does not queue every writer behind it.
 
 **Completion.** A measured capture of rebuild time and peak memory per phase is published, and
 either writes are accepted during a rebuild without losing an acknowledged query, or the

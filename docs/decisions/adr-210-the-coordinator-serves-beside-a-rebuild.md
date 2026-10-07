@@ -20,6 +20,11 @@ corpus is large. In coordinator mode nothing answered while it ran, for two reas
    permit. With the lock gone they would still have queued behind the rebuild: a health probe
    answering red at its deadline, a metrics scrape hanging, for as long as the rebuild took.
 
+The shipped Helm chart points the coordinator's liveness probe at `/_health`, every ten
+seconds with a failure threshold of six and the kubelet's one-second timeout. So a rebuild
+longer than about a minute would have had the coordinator restarted in the middle of it.
+(Derived from the chart and the handler; not run on a kubelet.)
+
 Since ADR-209 the engine keeps a rebuild apart from everything but a search by itself, and
 its rebuild methods take shared access. The server's lock and the slot were what was left.
 
