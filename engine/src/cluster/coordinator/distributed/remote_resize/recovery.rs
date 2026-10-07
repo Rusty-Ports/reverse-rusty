@@ -9,27 +9,35 @@ use crate::cluster::remote::{claim_retirement, unretire_node};
 use crate::cluster::security::ClientSecurity;
 
 use super::{ClusterEngine, ShardError};
+use crate::cluster::coordinator::layout::Layout;
 
 impl ClusterEngine {
     /// Fail unless this coordinator serves exactly the committed layout: its shard count,
     /// placement generation, and every position's primary endpoint. An assignment-routed
     /// coordinator checks this before serving, because its topology was read before it connected.
     pub fn attest_committed_layout(&self) -> Result<(), ShardError> {
+        self.attest_committed_layout_in(&self.layout())
+    }
+
+    pub(in crate::cluster::coordinator) fn attest_committed_layout_in(
+        &self,
+        layout: &Layout,
+    ) -> Result<(), ShardError> {
         let state = self.control_state()?;
-        let generation = self.placement_generation().0;
-        if state.num_shards as usize != self.shards.len()
+        let generation = layout.generation.0;
+        if state.num_shards as usize != layout.shards.len()
             || state.placement_generation != generation
         {
             return Err(ShardError::ControlPlane(format!(
                 "this coordinator serves placement generation {generation} with {} shards, but \
                  the committed layout is generation {} with {} shards; restart it with \
                  --route-by-assignments to route to the committed layout",
-                self.shards.len(),
+                layout.shards.len(),
                 state.placement_generation,
                 state.num_shards
             )));
         }
-        for (position, shard) in self.shards.iter().enumerate() {
+        for (position, shard) in layout.shards.iter().enumerate() {
             let committed = state
                 .assignments
                 .iter()

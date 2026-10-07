@@ -26,6 +26,7 @@ use super::ranked::{
     ClusterRankedHit, TitlePart,
 };
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 /// One title's exact distributed result inside a batch.
 #[derive(Clone, Debug)]
@@ -67,17 +68,19 @@ impl ClusterEngine {
         program: &CompiledRankProgram,
         deadline: Option<Instant>,
     ) -> Result<ClusterBatchRankedMatch, ClusterRankedError> {
+        let layout = &*self.layout();
         // ADR-185: the whole batch is one read; a pass that overlapped a placement-moving
         // upsert is repeated, and one held back past its deadline fails with that deadline.
         self.move_fence
             .read_until(deadline, |_| {
-                self.top_k_batch_pass(titles, filter, options, program, deadline)
+                self.top_k_batch_pass(layout, titles, filter, options, program, deadline)
             })
             .unwrap_or(Err(ClusterRankedError::DeadlineExceeded))
     }
 
     fn top_k_batch_pass(
         &self,
+        layout: &Layout,
         titles: &[impl AsRef<str> + Sync],
         filter: &[(String, Vec<String>)],
         options: TopKOptions,
@@ -115,8 +118,8 @@ impl ClusterEngine {
 
         let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;
         let pred = self.compile_tag_predicate(filter);
-        let generation = self.placement_generation();
-        let num_shards = self.shards.len();
+        let generation = layout.generation;
+        let num_shards = layout.shards.len();
 
         // Route every title independently; group titles by shard so each shard
         // is called ONCE with its sub-batch + index-aligned contexts.
@@ -124,7 +127,7 @@ impl ClusterEngine {
         let mut routed_counts = Vec::with_capacity(titles.len());
         let mut per_shard_titles: Vec<Vec<usize>> = (0..num_shards).map(|_| Vec::new()).collect();
         for (index, title) in titles.iter().enumerate() {
-            let (targets, broad_eval_shard) = self.route(title.as_ref());
+            let (targets, broad_eval_shard) = Self::route(layout, title.as_ref());
             let context = crate::ownership::OwnershipContext::new(
                 generation,
                 num_shards as u32,
@@ -173,7 +176,7 @@ impl ClusterEngine {
                 && title_indices
                     .iter()
                     .any(|&index| contexts[index].broad_evaluator() == Some(*position as u32));
-            self.shards[*position]
+            layout.shards[*position]
                 .percolate_top_k_batch_owned(
                     &requests,
                     shard_broad,
@@ -280,9 +283,10 @@ impl ClusterEngine {
         max_source_bytes: usize,
         deadline: Option<Instant>,
     ) -> Result<Vec<Vec<String>>, ClusterRankedError> {
+        let layout = &*self.layout();
         check_deadline(deadline)?;
-        if self.placement_generation() != ranked.placement_generation
-            || self.shards.len() as u32 != ranked.num_shards
+        if layout.generation != ranked.placement_generation
+            || layout.shards.len() as u32 != ranked.num_shards
         {
             return Err(ClusterRankedError::InvalidShardReply {
                 position: 0,
@@ -293,7 +297,7 @@ impl ClusterEngine {
         // Distinct winners, first-observed owner (any owner serves an
         // identical source), grouped per shard.
         let mut owner_of: FastMap<u64, usize> = fast_map();
-        let mut groups: Vec<Vec<u64>> = (0..self.shards.len()).map(|_| Vec::new()).collect();
+        let mut groups: Vec<Vec<u64>> = (0..layout.shards.len()).map(|_| Vec::new()).collect();
         for title in &ranked.titles {
             for hit in &title.hits {
                 let position = hit.owner_position as usize;
@@ -326,7 +330,7 @@ impl ClusterEngine {
         let mut remaining = max_source_bytes;
         for (position, group_ids) in &active {
             for ids in group_ids.chunks(crate::result::MAX_TOP_K) {
-                let rows = match self.shards[*position].fetch_matches(ids, remaining, deadline) {
+                let rows = match layout.shards[*position].fetch_matches(ids, remaining, deadline) {
                     Err(ShardError::EnrichmentLimit { .. }) => {
                         return Err(ClusterRankedError::EnrichmentLimit {
                             limit: max_source_bytes,

@@ -258,9 +258,14 @@ for the whole rebuild and its checkpoint. A search holds the cluster lock for ea
 matches, which is also why the search pool needs a gate
 ([ADR-207](decisions/adr-207-cluster-writers-wait-outside-the-search-pool.md)).
 
-**Direction.** Serve from a published snapshot, as single-node mode does: split the cluster's
-serving layout (normalizer, dictionaries, ring, shards) from its coordination state, let a request
-pin one layout for its whole run, build the new layout beside the old one, and swap. First measure
+**Done so far.** The serving layout (normalizer, dictionary, vocabulary, ring, shards, placement
+generation) is one published value, and every operation loads it once
+([ADR-208](decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)). A rebuild still
+runs with the engine held exclusively, so nothing is served during it yet.
+
+**Direction.** Build the new layout beside the old one without holding the engine, exclude only
+writes while it is built, and publish it; then take the cluster lock and the search pool's gate off
+the search path in the server. First measure
 a rebuild's time and peak memory per phase at scale. Give the exclusive step a wait budget, so a
 change that cannot start soon gives up instead of holding searches behind it.
 

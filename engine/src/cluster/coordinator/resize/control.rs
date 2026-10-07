@@ -4,6 +4,7 @@ use crate::cluster::control::{ClusterState, ClusterStateChange};
 use crate::cluster::shard::ShardError;
 
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 impl ClusterEngine {
     /// Complete one exact post-swap resize transition before another rebuild
@@ -12,13 +13,16 @@ impl ClusterEngine {
     /// and a control generation exactly one behind the live shards. Anything
     /// else may be a different unfinished model/topology transition and must
     /// fail loud rather than be reinterpreted as resize state.
-    pub(super) fn finish_pending_resize_control_commit(&self) -> Result<(), ShardError> {
+    pub(super) fn finish_pending_resize_control_commit(
+        &self,
+        layout: &Layout,
+    ) -> Result<(), ShardError> {
         let control = self.control.cluster_state()?;
-        self.attest_resize_control_identity(&control)?;
+        self.attest_resize_control_identity(layout, &control)?;
 
-        let live_generation = self.placement_generation().0;
+        let live_generation = layout.generation.0;
         if control.placement_generation == live_generation {
-            return self.attest_resize_control_state(&control);
+            return self.attest_resize_control_state(layout, &control);
         }
 
         let prior_generation = live_generation.checked_sub(1).ok_or_else(|| {
@@ -26,7 +30,7 @@ impl ClusterEngine {
                 "resize control state cannot precede placement generation zero".into(),
             )
         })?;
-        let live_num_shards = self.live_num_shards_for_control()?;
+        let live_num_shards = Self::live_num_shards_for_control(layout)?;
         if control.placement_generation != prior_generation || control.num_shards == live_num_shards
         {
             return Err(ShardError::ControlPlane(format!(
@@ -41,16 +45,17 @@ impl ClusterEngine {
             num_shards: live_num_shards,
         })?;
         let repaired = self.control.cluster_state()?;
-        self.attest_resize_control_state(&repaired)
+        self.attest_resize_control_state(layout, &repaired)
     }
 
     pub(super) fn attest_resize_control_state(
         &self,
+        layout: &Layout,
         control: &ClusterState,
     ) -> Result<(), ShardError> {
-        self.attest_resize_control_identity(control)?;
-        let live_num_shards = self.live_num_shards_for_control()?;
-        let live_generation = self.placement_generation().0;
+        self.attest_resize_control_identity(layout, control)?;
+        let live_num_shards = Self::live_num_shards_for_control(layout)?;
+        let live_generation = layout.generation.0;
         if control.num_shards != live_num_shards || control.placement_generation != live_generation
         {
             return Err(ShardError::ControlPlane(format!(
@@ -62,23 +67,27 @@ impl ClusterEngine {
         Ok(())
     }
 
-    fn live_num_shards_for_control(&self) -> Result<u32, ShardError> {
-        u32::try_from(self.ring.num_shards()).map_err(|_| {
+    fn live_num_shards_for_control(layout: &Layout) -> Result<u32, ShardError> {
+        u32::try_from(layout.ring.num_shards()).map_err(|_| {
             ShardError::ControlPlane(
                 "serving shard count exceeds the control-plane representation".into(),
             )
         })
     }
 
-    fn attest_resize_control_identity(&self, control: &ClusterState) -> Result<(), ShardError> {
-        if control.vnodes != self.vnodes || control.dict_fingerprint != self.dict.fingerprint() {
+    fn attest_resize_control_identity(
+        &self,
+        layout: &Layout,
+        control: &ClusterState,
+    ) -> Result<(), ShardError> {
+        if control.vnodes != self.vnodes || control.dict_fingerprint != layout.dict.fingerprint() {
             return Err(ShardError::ControlPlane(format!(
                 "resize control identity diverged: control has {} vnodes/fingerprint {}, serving \
                  state has {} vnodes/fingerprint {}",
                 control.vnodes,
                 control.dict_fingerprint,
                 self.vnodes,
-                self.dict.fingerprint()
+                layout.dict.fingerprint()
             )));
         }
         if control.assignments.len() != control.num_shards as usize

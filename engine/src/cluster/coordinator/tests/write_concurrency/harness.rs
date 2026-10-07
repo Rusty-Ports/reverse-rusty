@@ -15,19 +15,21 @@ pub(super) enum WriteCall {
 pub(super) type WriteHook = Arc<dyn Fn(usize, WriteCall) -> Result<(), ShardError> + Send + Sync>;
 
 pub(super) fn instrument(cluster: &mut ClusterEngine, hook: WriteHook) {
-    let shard_count = cluster.shards.len();
-    cluster.shards = std::mem::take(&mut cluster.shards)
-        .into_iter()
-        .enumerate()
-        .zip(std::iter::repeat_n(hook, shard_count))
-        .map(|((position, inner), hook)| {
-            Box::new(ObservedShard {
-                inner,
-                position,
-                hook,
-            }) as Box<dyn Shard>
-        })
-        .collect();
+    let shard_count = cluster.layout().shards.len();
+    cluster.replace_shards(|shards| {
+        shards
+            .into_iter()
+            .enumerate()
+            .zip(std::iter::repeat_n(hook, shard_count))
+            .map(|((position, inner), hook)| {
+                Box::new(ObservedShard {
+                    inner,
+                    position,
+                    hook,
+                }) as Box<dyn Shard>
+            })
+            .collect()
+    });
 }
 
 pub(super) fn pause(gate: &FirstAppendGate) {

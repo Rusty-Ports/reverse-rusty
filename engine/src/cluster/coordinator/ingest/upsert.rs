@@ -27,6 +27,7 @@
 use super::{
     extract_readonly, planned, AddOutcome, ClusterEngine, ClusterMutation, ShardError, Target,
 };
+use crate::cluster::coordinator::layout::Layout;
 use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus, Shard};
 
 /// Per-shard results of one upsert fan-out.
@@ -114,8 +115,10 @@ impl ClusterEngine {
     /// directory. Partial failures ride the ADR-047 machinery with the `Upsert` itself as
     /// the queued repair mutation; re-driving it on one shard is an idempotent atomic replace
     /// (or a tombstone, where the new placement does not store the row).
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::cluster::coordinator) fn apply_upsert(
         &self,
+        layout: &Layout,
         id: u64,
         version: u32,
         dsl: &str,
@@ -133,20 +136,20 @@ impl ClusterEngine {
             ))
         })?;
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        let ex = extract_readonly(&ast, &layout.norm, &layout.dict, &mut lc);
         // Force accept=true: apply is reached ONLY for already-accepted writes (live upsert
         // classified + accepted before logging; replay sees only logged=accepted frames), so this
         // placement is configuration-independent — a knob flip on reopen neither drops nor
         // resurrects (codex review). The empty-class-D guard in `placement_of` still rejects a
         // never-stored empty query defensively.
         let (target, class) = planned(
-            &self.dict,
-            &self.ring,
+            &layout.dict,
+            &layout.ring,
             &ex,
             true,
             self.per_shard.hot_anchor_threshold,
         );
-        let expected = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        let expected = target.placement(layout.generation, layout.shards.len() as u32)?;
         if &expected != placement {
             return Err(crate::ownership::OwnershipError::PlacementDecisionMismatch.into());
         }
@@ -154,7 +157,7 @@ impl ClusterEngine {
             Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
             // The broad lane is replicated to every shard (ADR-080).
             Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => (
-                (0..self.shards.len()).collect(),
+                (0..layout.shards.len()).collect(),
                 AddOutcome::Replicated { class },
             ),
             Target::Selective(shards) => (
@@ -193,7 +196,7 @@ impl ClusterEngine {
             // No copy exists, so no reader can lose a version: place the new one. A shard
             // that nevertheless replaced a copy contradicts the directory.
             for &s in &placement_shards {
-                let status = fan.replace(&self.shards, s, &write, ReplaceMode::Unconditional);
+                let status = fan.replace(&layout.shards, s, &write, ReplaceMode::Unconditional);
                 if matches!(status, Some(ReplaceStatus::Replaced { .. })) {
                     cleanup = Cleanup::Move;
                 }
@@ -202,7 +205,7 @@ impl ClusterEngine {
             let mut declined: Vec<usize> = Vec::new();
             for &s in &placement_shards {
                 if let Some(ReplaceStatus::Absent | ReplaceStatus::PlacementMismatch) =
-                    fan.replace(&self.shards, s, &write, ReplaceMode::IfSamePlacement)
+                    fan.replace(&layout.shards, s, &write, ReplaceMode::IfSamePlacement)
                 {
                     declined.push(s);
                 }
@@ -217,7 +220,7 @@ impl ClusterEngine {
                 // changed nothing, so the whole rewrite still fits inside the fence.
                 moving = Some(self.move_fence.begin_move());
                 for &s in &declined {
-                    fan.replace(&self.shards, s, &write, ReplaceMode::Unconditional);
+                    fan.replace(&layout.shards, s, &write, ReplaceMode::Unconditional);
                 }
                 cleanup = Cleanup::Move;
             }
@@ -236,12 +239,12 @@ impl ClusterEngine {
             match cleanup {
                 Cleanup::None => {}
                 // Removing a stale extra copy can only take a duplicate away: no fence.
-                Cleanup::Strays => fan.sweep(&self.shards, &placement_shards, id),
+                Cleanup::Strays => fan.sweep(&layout.shards, &placement_shards, id),
                 Cleanup::Move => {
                     let _move = moving
                         .take()
                         .unwrap_or_else(|| self.move_fence.begin_move());
-                    fan.sweep(&self.shards, &placement_shards, id);
+                    fan.sweep(&layout.shards, &placement_shards, id);
                 }
             }
         }
@@ -251,7 +254,7 @@ impl ClusterEngine {
             let deferred: Vec<usize> = if installed || cleanup == Cleanup::None {
                 Vec::new()
             } else {
-                (0..self.shards.len())
+                (0..layout.shards.len())
                     .filter(|s| !placement_shards.contains(s))
                     .collect()
             };

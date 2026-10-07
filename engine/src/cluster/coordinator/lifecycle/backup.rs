@@ -29,6 +29,7 @@ impl ClusterEngine {
     /// `dest` — a 400), and [`ShardError::Log`] for a checkpoint / copy / validation
     /// failure (a 503).
     pub fn backup_to(&self, dest: &Path) -> Result<(), ShardError> {
+        let layout = &*self.layout();
         let Some(src) = self.data_dir.clone() else {
             return Err(ShardError::Config(
                 "cluster is in-memory (no data_dir): nothing to back up".into(),
@@ -59,7 +60,7 @@ impl ClusterEngine {
         }
         // Make the source dir a consistent on-disk snapshot (seal + atomic manifest
         // + log truncate + orphan GC). Fails loud if any shard fell back to memory.
-        self.checkpoint_quiesced()?;
+        self.checkpoint_quiesced(layout)?;
         // copy_cluster_dir stages + verifies + atomically commits. A precondition
         // error (NotDurable/DestExists) is a bad request (400); a copy/verify failure
         // is a durability problem (503).

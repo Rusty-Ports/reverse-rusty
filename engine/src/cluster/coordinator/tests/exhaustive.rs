@@ -66,8 +66,8 @@ fn exhaustive_refuses_after_partial_bulk_ingest_without_a_repair_record() {
     };
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
-    let norm = Arc::clone(&real.norm);
-    let dict = Arc::clone(&real.dict);
+    let norm = Arc::clone(&real.layout().norm);
+    let dict = Arc::clone(&real.layout().dict);
     let tag_dict = Arc::clone(&real.tag_dict);
     let ring = HashRing::new(cfg.num_shards, cfg.vnodes).expect("ring");
 
@@ -208,8 +208,11 @@ fn exhaustive_blocks_successful_replacement_until_the_stream_finishes() {
     let mut by_position = vec![None; cfg.num_shards];
     for index in 0..1_024 {
         let dsl = format!("zzexhaustivemove{index}");
-        let feature = cluster.dict.get_or_synthetic(&format!("term:{dsl}"));
-        let position = cluster.ring.lookup(feature);
+        let feature = cluster
+            .layout()
+            .dict
+            .get_or_synthetic(&format!("term:{dsl}"));
+        let position = cluster.layout().ring.lookup(feature);
         by_position[position].get_or_insert(dsl);
         if by_position.iter().filter(|value| value.is_some()).count() >= 2 {
             break;
@@ -411,8 +414,8 @@ fn exhaustive_refuses_pending_repair_overlap_until_resync() {
     };
     let seed = vec![(100u64, "1994 acme appliance".to_string())];
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
-    let norm = Arc::clone(&real.norm);
-    let dict = Arc::clone(&real.dict);
+    let norm = Arc::clone(&real.layout().norm);
+    let dict = Arc::clone(&real.layout().dict);
     let tag_dict = Arc::clone(&real.tag_dict);
     let ring = HashRing::new(cfg.num_shards, cfg.vnodes).expect("ring");
 

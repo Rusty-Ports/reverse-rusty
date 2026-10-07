@@ -3,6 +3,7 @@ use super::{
     extract_readonly, planned, AddOutcome, ClusterEngine, ClusterMutation, DurabilityOp,
     EngineEvent, Extracted, ShardError, Target,
 };
+use crate::cluster::coordinator::layout::Layout;
 
 impl ClusterEngine {
     /// Add one query incrementally (lands in the target shard's memtable). Uses a
@@ -20,7 +21,8 @@ impl ClusterEngine {
     /// empty query, or a parse error) is classified out BEFORE the log, so the log holds only
     /// accepted mutations and replay is configuration-independent (codex review).
     pub fn add_query(&self, id: u64, dsl: &str) -> Result<AddOutcome, ShardError> {
-        self.add_query_with_tags(id, dsl, &[])
+        let layout = &*self.layout();
+        self.add_query_with_tags_in(layout, id, dsl, &[])
     }
 
     /// [`add_query`](Self::add_query) carrying per-query metadata tags (ADR-049/055). The raw tags
@@ -34,7 +36,17 @@ impl ClusterEngine {
         dsl: &str,
         tags: &[(String, String)],
     ) -> Result<AddOutcome, ShardError> {
-        self.create_query_with_tags(id, dsl, 1, tags)
+        self.add_query_with_tags_in(&self.layout(), id, dsl, tags)
+    }
+
+    pub(in crate::cluster::coordinator) fn add_query_with_tags_in(
+        &self,
+        layout: &Layout,
+        id: u64,
+        dsl: &str,
+        tags: &[(String, String)],
+    ) -> Result<AddOutcome, ShardError> {
+        self.create_query_with_tags_in(layout, id, dsl, 1, tags)
     }
 
     /// Atomically create one query only when `id` is absent. This is the
@@ -47,6 +59,17 @@ impl ClusterEngine {
     /// matching the versioned REST upsert path.
     pub fn create_query_with_tags(
         &self,
+        id: u64,
+        dsl: &str,
+        version: u32,
+        tags: &[(String, String)],
+    ) -> Result<AddOutcome, ShardError> {
+        self.create_query_with_tags_in(&self.layout(), id, dsl, version, tags)
+    }
+
+    pub(in crate::cluster::coordinator) fn create_query_with_tags_in(
+        &self,
+        layout: &Layout,
         id: u64,
         dsl: &str,
         version: u32,
@@ -69,7 +92,7 @@ impl ClusterEngine {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _logical_guard = self.logical_write_guard(id);
-            if let Some(conflict) = self.create_conflict(id) {
+            if let Some(conflict) = self.create_conflict(layout, id) {
                 return Err(conflict);
             }
         }
@@ -92,18 +115,18 @@ impl ClusterEngine {
         // single-node "the WAL records only accepted mutations" (ADR-068); the apply/replay funnel
         // then forces accept=true, so replay reproduces the writer's decision regardless of config.
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        let ex = extract_readonly(&ast, &layout.norm, &layout.dict, &mut lc);
         // Reject a column-overflowing compiled query before the log too: it would
         // truncate the shards' u16 exact-store counts on apply (a false negative).
         if let Err(e) = Self::check_column_limit(&ex) {
             return Ok(AddOutcome::RejectedParse(e));
         }
-        let target = self.placement(&ex);
+        let target = self.placement(layout, &ex);
         if matches!(target, Target::Reject) {
             return Ok(AddOutcome::RejectedClassD);
         }
-        let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
-        self.ensure_serving_layout_committed()?;
+        let placement = target.placement(layout.generation, layout.shards.len() as u32)?;
+        self.ensure_serving_layout_committed(layout)?;
         // Global lock order is PIT/mutation barrier -> logical-ID lock. Resync
         // uses the same order; taking the ID lock first can deadlock behind a
         // queued exhaustive writer on writer-preferring RwLock implementations.
@@ -133,7 +156,7 @@ impl ClusterEngine {
                     .to_string(),
             ));
         }
-        if let Some(conflict) = self.create_conflict(id) {
+        if let Some(conflict) = self.create_conflict(layout, id) {
             return Err(conflict);
         }
         let inserted = self.insert_logical_id(id);
@@ -154,7 +177,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_add(id, version, dsl, tags, &placement)
+        self.apply_add(layout, id, version, dsl, tags, &placement)
     }
 
     /// Why a create-only write of `id` is refused, or `None` when the id is free. The caller
@@ -167,7 +190,7 @@ impl ClusterEngine {
     /// While a shard still refuses, the answer says that the EARLIER write is unconverged and
     /// that this create was neither applied nor queued, so nobody takes a later resync of the
     /// earlier write for this one.
-    fn create_conflict(&self, id: u64) -> Option<ShardError> {
+    fn create_conflict(&self, layout: &Layout, id: u64) -> Option<ShardError> {
         if !self.contains_logical_id(id) {
             return None;
         }
@@ -175,7 +198,7 @@ impl ClusterEngine {
         if let Err(fenced) = self.ensure_resize_write_fence_open() {
             return Some(fenced);
         }
-        if let Redrive::StillPending { pending, detail } = self.redrive_pending(id) {
+        if let Redrive::StillPending { pending, detail } = self.redrive_pending(layout, id) {
             return Some(ShardError::EarlierWriteUnconverged {
                 logical: id,
                 pending,
@@ -202,7 +225,8 @@ impl ClusterEngine {
         dsl: &str,
         version: u32,
     ) -> Result<(usize, AddOutcome), ShardError> {
-        self.upsert_query_with_tags(id, dsl, version, &[])
+        let layout = &*self.layout();
+        self.upsert_query_with_tags_in(layout, id, dsl, version, &[])
     }
 
     /// [`upsert_query`](Self::upsert_query) carrying per-query metadata tags for the NEW
@@ -212,6 +236,17 @@ impl ClusterEngine {
     /// N and reopens to N (matching single-node `try_upsert_live_with_tags`).
     pub fn upsert_query_with_tags(
         &self,
+        id: u64,
+        dsl: &str,
+        version: u32,
+        tags: &[(String, String)],
+    ) -> Result<(usize, AddOutcome), ShardError> {
+        self.upsert_query_with_tags_in(&self.layout(), id, dsl, version, tags)
+    }
+
+    pub(in crate::cluster::coordinator) fn upsert_query_with_tags_in(
+        &self,
+        layout: &Layout,
         id: u64,
         dsl: &str,
         version: u32,
@@ -235,19 +270,19 @@ impl ClusterEngine {
         // tombstone pass. Same config-independent-replay discipline as add (codex review): the
         // log holds only accepted mutations, and apply/replay forces accept=true.
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        let ex = extract_readonly(&ast, &layout.norm, &layout.dict, &mut lc);
         // Reject a column-overflowing compiled query before the log (and before any
         // tombstone): it would truncate the shards' u16 exact-store counts on apply.
         // A failed replace never deletes, so the prior version stays live (0 replaced).
         if let Err(e) = Self::check_column_limit(&ex) {
             return Ok((0, AddOutcome::RejectedParse(e)));
         }
-        let target = self.placement(&ex);
+        let target = self.placement(layout, &ex);
         if matches!(target, Target::Reject) {
             return Ok((0, AddOutcome::RejectedClassD));
         }
-        let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
-        self.ensure_serving_layout_committed()?;
+        let placement = target.placement(layout.generation, layout.shards.len() as u32)?;
+        self.ensure_serving_layout_committed(layout)?;
         // Keep the same barrier -> logical-ID order as add/remove/resync.
         // The barrier spans the log append and the whole shard fan-out.
         let _pit_barrier = self
@@ -278,7 +313,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_upsert(id, version, dsl, tags, &placement, fresh_id)
+        self.apply_upsert(layout, id, version, dsl, tags, &placement, fresh_id)
     }
 
     /// Remove a query by logical id. Fans the (idempotent) delete out to every
@@ -286,6 +321,7 @@ impl ClusterEngine {
     /// or any-of query may live on several shards; a re-add may have moved it).
     /// WAL-first, like [`Self::add_query`].
     pub fn remove_query(&self, id: u64) -> Result<usize, ShardError> {
+        let layout = &*self.layout();
         // Canonical barrier -> logical-ID order; see add/upsert. Keeping
         // this guard through append + fan-out excludes torn exhaustive/PIT views.
         let _pit_barrier = self
@@ -303,7 +339,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        let removed = self.apply_remove(id);
+        let removed = self.apply_remove(layout, id);
         // A partially-applied remove keeps the id reserved: allowing a fresh Add
         // before repair could coexist with an old row on the failed shard. Upsert
         // remains available because it re-drives delete+insert on every shard.
@@ -325,6 +361,7 @@ impl ClusterEngine {
     #[allow(clippy::too_many_arguments)]
     fn insert_on_shards(
         &self,
+        layout: &Layout,
         shards: &[usize],
         ex: &Extracted,
         id: u64,
@@ -338,7 +375,7 @@ impl ClusterEngine {
         let mut failed = Vec::new();
         let mut first_err: Option<ShardError> = None;
         for &s in shards {
-            match self.shards[s]
+            match layout.shards[s]
                 .insert_extracted_with_placement(ex, id, version, dsl, tags, placement)
             {
                 Ok(_) => applied.push(s),
@@ -372,6 +409,7 @@ impl ClusterEngine {
     /// byte-identical.
     pub(super) fn apply_add(
         &self,
+        layout: &Layout,
         id: u64,
         version: u32,
         dsl: &str,
@@ -390,19 +428,19 @@ impl ClusterEngine {
             ))
         })?;
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        let ex = extract_readonly(&ast, &layout.norm, &layout.dict, &mut lc);
         // Force accept=true (same only-accepted-writes invariant as apply_upsert): apply/replay
         // reproduces the writer's decision regardless of the current knob, so a knob flip on
         // reopen cannot drop or resurrect a class-D write (codex review). Rejected writes never
         // reach the log (classified out in add_query), so the Reject arm is defensive.
         let (target, class) = planned(
-            &self.dict,
-            &self.ring,
+            &layout.dict,
+            &layout.ring,
             &ex,
             true,
             self.per_shard.hot_anchor_threshold,
         );
-        let expected = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        let expected = target.placement(layout.generation, layout.shards.len() as u32)?;
         if &expected != placement {
             return Err(crate::ownership::OwnershipError::PlacementDecisionMismatch.into());
         }
@@ -415,8 +453,9 @@ impl ClusterEngine {
             // is queued for repair rather than a silent partial. In-process inserts are infallible
             // ⇒ the outcome is byte-identical save that the entry now lands on every shard.
             Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
-                let all: Vec<usize> = (0..self.shards.len()).collect();
+                let all: Vec<usize> = (0..layout.shards.len()).collect();
                 self.insert_on_shards(
+                    layout,
                     &all,
                     &ex,
                     id,
@@ -428,6 +467,7 @@ impl ClusterEngine {
                 )?
             }
             Target::Selective(shards) => self.insert_on_shards(
+                layout,
                 &shards,
                 &ex,
                 id,
@@ -450,7 +490,7 @@ impl ClusterEngine {
     /// Apply a REMOVE to the shards — the state-machine `apply` for removes. The shard
     /// memtable/segment liveness is the authority; there is no separate coordinator live
     /// set to keep in sync (the durable base is the per-shard segments — ADR-032).
-    pub(super) fn apply_remove(&self, id: u64) -> Result<usize, ShardError> {
+    pub(super) fn apply_remove(&self, layout: &Layout, id: u64) -> Result<usize, ShardError> {
         // Remove fans the idempotent delete out to EVERY shard. Try them all (don't bail on the
         // first error) and collect failures, so a partial remove is repairable rather than a
         // silent half-delete (ADR-047). In-process deletes are infallible ⇒ `failed` stays empty
@@ -458,7 +498,7 @@ impl ClusterEngine {
         let mut removed = 0usize;
         let mut failed = Vec::new();
         let mut first_err: Option<ShardError> = None;
-        for (s, shard) in self.shards.iter().enumerate() {
+        for (s, shard) in layout.shards.iter().enumerate() {
             match shard.delete_by_logical_id(id) {
                 Ok(n) => removed += n,
                 Err(e) => {
@@ -468,7 +508,7 @@ impl ClusterEngine {
             }
         }
         if !failed.is_empty() {
-            let applied: Vec<usize> = (0..self.shards.len())
+            let applied: Vec<usize> = (0..layout.shards.len())
                 .filter(|s| !failed.contains(s))
                 .collect();
             return Err(self.note_partial(

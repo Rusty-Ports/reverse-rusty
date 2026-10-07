@@ -36,6 +36,7 @@ use crate::cluster::shard::ShardError;
 
 use super::reassign::{plan_waves, rebalance_group_targets, ReassignOutcome};
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 /// One [`ClusterEngine::reconcile`] pass's outcome (ADR-092/175). Every position is independent and
 /// individually consistent (each move has replicated intent, conditional commit, and deterministic
@@ -152,7 +153,8 @@ impl ClusterEngine {
     /// control-plane READ failure (the driver logs + retries next pass); per-position move failures
     /// land in the report, not as an `Err`.
     pub fn reconcile(&self, rf: usize, handle: &Handle) -> Result<ReconcileReport, ShardError> {
-        self.reconcile_with(rf, 1, handle)
+        let layout = &*self.layout();
+        self.reconcile_with_in(layout, rf, 1, handle)
     }
 
     /// [`reconcile`](Self::reconcile) with wave parallelism (ADR-095): the diverged positions are
@@ -170,6 +172,16 @@ impl ClusterEngine {
         max_parallel_moves: usize,
         handle: &Handle,
     ) -> Result<ReconcileReport, ShardError> {
+        self.reconcile_with_in(&self.layout(), rf, max_parallel_moves, handle)
+    }
+
+    pub(in crate::cluster::coordinator) fn reconcile_with_in(
+        &self,
+        layout: &Layout,
+        rf: usize,
+        max_parallel_moves: usize,
+        handle: &Handle,
+    ) -> Result<ReconcileReport, ShardError> {
         let state = self.control_state()?;
         // Positions whose GROUP diverges from the HRW-desired placement (a data move), position
         // order, partitioned into conflict-free waves (singletons in target order at the default
@@ -180,7 +192,7 @@ impl ClusterEngine {
 
         let mut report = ReconcileReport::default();
         for wave in &waves {
-            for (pos, outcome) in self.execute_move_wave(&state, &targets, wave, handle) {
+            for (pos, outcome) in self.execute_move_wave(layout, &state, &targets, wave, handle) {
                 match outcome {
                     Ok(ReassignOutcome::Moved { .. } | ReassignOutcome::Reconciled { .. }) => {
                         report.reconciled.push(pos);

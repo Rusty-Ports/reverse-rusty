@@ -344,7 +344,7 @@ impl ClusterEngine {
         // (codex review). `accepted_ids` stays the loud duplicate check.
         drop(accepted_ids);
         let mut ingested_ids = Vec::new();
-        for shard in &engine.shards {
+        for shard in engine.layout().shards.iter() {
             ingested_ids.extend(shard.live_logical_ids()?);
         }
         ingested_ids.sort_unstable();
@@ -354,7 +354,7 @@ impl ClusterEngine {
         // merged-under by the learn paths, and re-persisted at every checkpoint.
         // (The durable manifest above already carries it.)
         if let Some(v) = vocab {
-            engine.vocab = Some(Arc::new(v));
+            engine.edit_layout(|layout| layout.vocab = Some(Arc::new(v)));
         }
         // Latch tags_present (ADR-055, `/_stats` introspection). For a build with interned corpus
         // tags `tag_dict` is also non-empty, but this also covers a build whose only tags would be

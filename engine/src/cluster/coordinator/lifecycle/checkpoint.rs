@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
+use crate::cluster::coordinator::layout::Layout;
 use crate::cluster::coordinator::{ClusterEngine, CLUSTER_MANIFEST_FILE};
 use crate::cluster::shard::ShardError;
 use crate::events::{DurabilityOp, EngineEvent};
@@ -33,8 +34,9 @@ impl ClusterEngine {
     /// set of writes. PIT opens, exhaustive delivery, `flush` and other checkpoints wait too;
     /// ordinary reads do not. Lock order: this barrier, then a logical-id lock, then a shard.
     pub fn checkpoint(&self) -> Result<(), ShardError> {
+        let layout = &*self.layout();
         let _quiesced = self.quiesce_mutations();
-        self.checkpoint_quiesced()
+        self.checkpoint_quiesced(layout)
     }
 
     /// Take the exclusive side of the mutation barrier: wait for every write that has been
@@ -52,10 +54,13 @@ impl ClusterEngine {
     /// the bulk logical-id guard (a bulk load, which is itself the only writer); have
     /// `&mut self`; or own an engine that has not been shared yet. Taking the barrier here
     /// would deadlock the first two.
-    pub(in crate::cluster::coordinator) fn checkpoint_quiesced(&self) -> Result<(), ShardError> {
+    pub(in crate::cluster::coordinator) fn checkpoint_quiesced(
+        &self,
+        layout: &Layout,
+    ) -> Result<(), ShardError> {
         let Some(dir) = self.data_dir.clone() else {
             if self.is_remote() {
-                for shard in &self.shards {
+                for shard in layout.shards.iter() {
                     shard.seal_for_checkpoint()?;
                 }
             }
@@ -69,16 +74,16 @@ impl ClusterEngine {
 
         // 1. Seal each shard: memtable → base segment, then bake base-segment tombstones
         //    onto disk. After this every shard's on-disk segments reflect live state ≤ up_to.
-        for s in &self.shards {
+        for s in layout.shards.iter() {
             s.seal_for_checkpoint()?;
         }
 
         // 2. Collect the per-shard segment registry + next-seg-ids. An error here (e.g. a
         //    segment write fell back to in-memory) aborts BEFORE the commit, leaving the
         //    old manifest authoritative — nothing is lost.
-        let mut segment_registry = Vec::with_capacity(self.shards.len());
-        let mut next_seg_ids = Vec::with_capacity(self.shards.len());
-        for s in &self.shards {
+        let mut segment_registry = Vec::with_capacity(layout.shards.len());
+        let mut next_seg_ids = Vec::with_capacity(layout.shards.len());
+        for s in layout.shards.iter() {
             segment_registry.push(s.segment_filenames()?);
             next_seg_ids.push(s.next_seg_id()?);
         }
@@ -88,9 +93,9 @@ impl ClusterEngine {
         //    verified to reopen as the serving normalizer (ADR-184); a vocabulary that
         //    cannot be recorded fails the checkpoint loudly rather than writing a
         //    manifest the next open would refuse or mis-serve.
-        let vocab_data = match &self.vocab {
+        let vocab_data = match &layout.vocab {
             Some(v) => v
-                .recordable_json(&self.norm, &self.dict)
+                .recordable_json(&layout.norm, &layout.dict)
                 .map_err(|e| ShardError::Log(format!("recording cluster vocab: {e}")))?
                 .into_bytes(),
             None => Vec::new(),
@@ -98,26 +103,26 @@ impl ClusterEngine {
         let manifest = crate::storage::ClusterManifest {
             epoch: new_epoch,
             snapshot_pos: up_to.0,
-            dict_fingerprint: self.dict.fingerprint(),
-            num_shards: self.ring.num_shards() as u32,
+            dict_fingerprint: layout.dict.fingerprint(),
+            num_shards: layout.ring.num_shards() as u32,
             vnodes: self.vnodes,
             include_broad: self.include_broad,
             // ADR-080 replicate-to-all layout marker (always set by this binary — broad on every
             // shard). Writes v5: the two-way fence (a pre-ADR-080 binary refuses it on open; this
             // binary refuses a pre-ADR-080 v<5 cluster on open, whose broad is on shard 0 only).
             broad_replicate_all: true,
-            placement_generation: self.placement_generation(),
+            placement_generation: layout.generation,
             segment_registry: segment_registry.clone(),
             next_seg_ids,
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
-            source_files: self.source_files.clone(),
-            dict_data: crate::storage::serialize_dict(&self.dict),
+            source_files: layout.source_files.clone(),
+            dict_data: crate::storage::serialize_dict(&layout.dict),
             vocab_data,
             // The frozen per-query tag space (ADR-049/055) — re-persisted so the filter resolves to
             // the same `TagId`s on the next reopen. Empty + finalized for an untagged cluster.
             tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
             // ADR-184: the feature model of the committed base and log tail, checked on reopen.
-            feature_model_fingerprint: Some(self.norm.fingerprint()),
+            feature_model_fingerprint: Some(layout.norm.fingerprint()),
         };
         // An alias import retains the exact manifest it is attempting before
         // publication. `write_cluster_manifest` can report an error after the
@@ -148,7 +153,7 @@ impl ClusterEngine {
             });
         }
         self.gc_orphan_segments(&dir, &segment_registry);
-        self.gc_superseded_source_sidecars(&dir, self.shards.len(), self.placement_generation().0);
+        self.gc_superseded_source_sidecars(&dir, layout.shards.len(), layout.generation.0);
         self.compact_logical_ids();
         Ok(())
     }
@@ -179,12 +184,13 @@ impl ClusterEngine {
     /// available. In-memory clusters have no commit point to protect.
     pub(in crate::cluster::coordinator) fn ensure_serving_layout_committed(
         &self,
+        layout: &Layout,
     ) -> Result<(), ShardError> {
         if self.data_dir.is_none() {
             return Ok(());
         }
         let committed = self.committed_placement_generation.load(Ordering::Acquire);
-        let serving = self.placement_generation().0;
+        let serving = layout.generation.0;
         if committed == serving {
             return Ok(());
         }

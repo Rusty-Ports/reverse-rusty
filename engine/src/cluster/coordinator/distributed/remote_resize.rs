@@ -35,8 +35,10 @@ mod plan;
 mod recovery;
 mod retire;
 
+use crate::cluster::coordinator::layout::Layout;
 use plan::{expected_endpoints, member_endpoint, resize_intent};
 pub use recovery::{recover_durable_resize, ResizeRecovery};
+use std::sync::Arc;
 
 /// One remote resize request.
 #[derive(Clone, Debug)]
@@ -107,9 +109,9 @@ impl ClusterEngine {
         &mut self,
         request: &RemoteResizeRequest,
     ) -> Result<RemoteResizeReport, ShardError> {
-        let prepared = self.prepare_remote_resize(request)?;
+        let prepared = self.prepare_remote_resize_in(&self.layout(), request)?;
         let retired = self.install_remote_resize(prepared)?;
-        self.finish_remote_resize(retired)
+        self.finish_remote_resize_in(&self.layout(), retired)
     }
 
     /// Build, prove, and commit the new layout while the old one keeps serving reads. Writes are
@@ -118,7 +120,15 @@ impl ClusterEngine {
         &self,
         request: &RemoteResizeRequest,
     ) -> Result<PreparedRemoteResize, ShardError> {
-        self.prepare_remote_resize_then(request, || {})
+        self.prepare_remote_resize_in(&self.layout(), request)
+    }
+
+    pub(in crate::cluster::coordinator) fn prepare_remote_resize_in(
+        &self,
+        layout: &Layout,
+        request: &RemoteResizeRequest,
+    ) -> Result<PreparedRemoteResize, ShardError> {
+        self.prepare_remote_resize_then_in(layout, request, || {})
     }
 
     /// [`Self::prepare_remote_resize`], running `on_fenced` once the write fence is raised and
@@ -132,27 +142,39 @@ impl ClusterEngine {
         request: &RemoteResizeRequest,
         on_fenced: impl FnOnce(),
     ) -> Result<PreparedRemoteResize, ShardError> {
+        self.prepare_remote_resize_then_in(&self.layout(), request, on_fenced)
+    }
+
+    pub(in crate::cluster::coordinator) fn prepare_remote_resize_then_in(
+        &self,
+        layout: &Layout,
+        request: &RemoteResizeRequest,
+        on_fenced: impl FnOnce(),
+    ) -> Result<PreparedRemoteResize, ShardError> {
         let handle = self.handle.clone().ok_or_else(|| {
             ShardError::Config("remote resize requires a gRPC-connected cluster".into())
         })?;
-        self.validate_remote_resize_request(request)?;
+        self.validate_remote_resize_request(layout, request)?;
         self.raise_resize_write_fence()?;
         on_fenced();
         let progress = ResizeProgress::default();
-        self.begin_and_build(&handle, request, &progress)
-            .map_err(|failure| self.fail_resize(&handle, request.operation_id, failure, &progress))
+        self.begin_and_build(layout, &handle, request, &progress)
+            .map_err(|failure| {
+                self.fail_resize(layout, &handle, request.operation_id, failure, &progress)
+            })
     }
 
     /// Record `Begin`, then build, prove, retire, and commit.
     fn begin_and_build(
         &self,
+        layout: &Layout,
         handle: &tokio::runtime::Handle,
         request: &RemoteResizeRequest,
         progress: &ResizeProgress,
     ) -> Result<PreparedRemoteResize, ShardError> {
         self.register_resize_targets(&request.targets)?;
         let state = self.control_state()?;
-        let state = self.finish_prior_resize(state, request.operation_id)?;
+        let state = self.finish_prior_resize(layout, state, request.operation_id)?;
         let intent = resize_intent(&state, request)?;
         let expected_endpoints = expected_endpoints(&state)?;
         let target_endpoints: Vec<String> = intent
@@ -171,7 +193,7 @@ impl ClusterEngine {
         // every handoff and move over these endpoints out until the resize ends: an uncommitted
         // route change (a raw handoff or a map-only reassignment) is refused rather than leaving
         // a live node unretired.
-        self.attest_committed_layout().map_err(|error| {
+        self.attest_committed_layout_in(layout).map_err(|error| {
             ShardError::ControlPlane(format!(
                 "remote resize requires serving routing to match the committed layout: {error}"
             ))
@@ -179,7 +201,7 @@ impl ClusterEngine {
 
         // A durable layout may only move onto durable targets; a volatile one (tests, caches) may
         // move onto either.
-        let source_durable = self.layout_is_durable(handle, &expected_endpoints)?;
+        let source_durable = self.layout_is_durable(layout, handle, &expected_endpoints)?;
 
         match self.propose_resize(ResizeCommand::Begin(intent.clone()))? {
             MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => {}
@@ -196,6 +218,7 @@ impl ClusterEngine {
             loaded,
             retired_slots,
         } = self.build_and_commit(
+            layout,
             handle,
             request,
             &intent,
@@ -240,13 +263,19 @@ impl ClusterEngine {
         // coordinator attached to populated shards without either. A failure leaves the retired
         // old nodes refusing every request, so nothing answers from the superseded layout.
         self.replace_logical_ids(logical_ids)?;
-        self.ring = staged.ring;
-        self.shards = staged.shards;
-        self.handoffs = staged.handoffs;
-        self.source_files = staged.source_files;
+        let staged_layout = staged.layout();
+        let current = self.layout();
+        self.layout.store(Arc::new(Layout {
+            norm: Arc::clone(&current.norm),
+            dict: Arc::clone(&current.dict),
+            vocab: current.vocab.clone(),
+            ring: staged_layout.ring.clone(),
+            shards: Arc::clone(&staged_layout.shards),
+            source_files: staged_layout.source_files.clone(),
+            handoffs: staged_layout.handoffs.clone(),
+            generation,
+        }));
         self.transport_metrics = staged.transport_metrics;
-        self.placement_generation
-            .store(generation.0, Ordering::Release);
         self.pending_repair
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -270,6 +299,16 @@ impl ClusterEngine {
         &self,
         retired: RetiredRemoteLayout,
     ) -> Result<RemoteResizeReport, ShardError> {
+        self.finish_remote_resize_in(&self.layout(), retired)
+    }
+
+    // The shape of the public method it serves.
+    #[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
+    pub(in crate::cluster::coordinator) fn finish_remote_resize_in(
+        &self,
+        layout: &Layout,
+        retired: RetiredRemoteLayout,
+    ) -> Result<RemoteResizeReport, ShardError> {
         let RetiredRemoteLayout {
             operation_id,
             old_num_shards,
@@ -283,8 +322,8 @@ impl ClusterEngine {
         );
         Ok(RemoteResizeReport {
             old_num_shards,
-            num_shards: self.ring.num_shards(),
-            placement_generation: self.placement_generation().0,
+            num_shards: layout.ring.num_shards(),
+            placement_generation: layout.generation.0,
             exported,
             loaded,
             retired_slots,
@@ -297,6 +336,7 @@ impl ClusterEngine {
     /// exactly the one it committed (its old nodes were retired before it committed).
     fn finish_prior_resize(
         &self,
+        layout: &Layout,
         state: ClusterState,
         operation_id: u64,
     ) -> Result<ClusterState, ShardError> {
@@ -316,8 +356,8 @@ impl ClusterEngine {
             && state.num_shards == prior.desired.num_shards
             && state.placement_generation == prior.desired.placement_generation
             && state.assignments == prior.desired.assignments
-            && self.ring.num_shards() == prior.desired.num_shards as usize
-            && self.placement_generation().0 == prior.desired.placement_generation;
+            && layout.ring.num_shards() == prior.desired.num_shards as usize
+            && layout.generation.0 == prior.desired.placement_generation;
         if !serving_committed {
             return Err(ShardError::ControlPlane(format!(
                 "another remote resize ({}) is still in progress; wait for it or restart the \
@@ -333,6 +373,7 @@ impl ClusterEngine {
 
     fn validate_remote_resize_request(
         &self,
+        layout: &Layout,
         request: &RemoteResizeRequest,
     ) -> Result<(), ShardError> {
         if request.operation_id == 0 {
@@ -355,7 +396,7 @@ impl ClusterEngine {
                 "remote resize supports replication factor 1; rebalance replicas afterwards".into(),
             ));
         }
-        if self.handoffs.len() != self.shards.len() || self.data_dir.is_some() {
+        if layout.handoffs.len() != layout.shards.len() || self.data_dir.is_some() {
             return Err(ShardError::Config(
                 "remote resize requires a remote, assignment-routed cluster".into(),
             ));
@@ -465,6 +506,7 @@ impl ClusterEngine {
     /// layout.
     fn fail_resize(
         &self,
+        layout: &Layout,
         handle: &tokio::runtime::Handle,
         operation_id: u64,
         failure: ShardError,
@@ -478,8 +520,8 @@ impl ClusterEngine {
             );
             aborted
                 && self.control_state().is_ok_and(|state| {
-                    state.num_shards as usize == self.ring.num_shards()
-                        && state.placement_generation == self.placement_generation().0
+                    state.num_shards as usize == layout.ring.num_shards()
+                        && state.placement_generation == layout.generation.0
                         && state.moves.resize.is_none()
                 })
         };

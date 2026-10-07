@@ -41,6 +41,7 @@ use crate::cluster::remote::RemoteShard;
 use crate::cluster::shard::ShardError;
 
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 /// One slot the sweep classified — where it lives and how big it was when listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +150,7 @@ impl ClusterEngine {
     /// report and the sweep continues. An in-process / genesis cluster (no addr'd data nodes)
     /// returns the clean empty report.
     pub fn gc_orphan_slots(&self, handle: &Handle) -> Result<GcReport, ShardError> {
+        let layout = &*self.layout();
         let state = self.control_state()?;
         let mut report = GcReport::default();
         let mut data_nodes = Vec::new();
@@ -179,9 +181,9 @@ impl ClusterEngine {
         let state = self.control_state()?;
 
         // The live-routing keep-set: each position's endpoints as routing currently reaches them.
-        let live_eps: Vec<Vec<String>> = self.shards.iter().map(|s| s.live_endpoints()).collect();
+        let live_eps: Vec<Vec<String>> = layout.shards.iter().map(|s| s.live_endpoints()).collect();
 
-        let expected = self.dict.fingerprint();
+        let expected = layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         for (node, addr) in data_nodes {
             // A node-level client (slot binding irrelevant for the LISTING; drops connect their
@@ -258,7 +260,7 @@ impl ClusterEngine {
                     SlotClass::Committed => {} // simply not an orphan; unreported
                     SlotClass::Unassigned => report.skipped_unassigned.push(slot),
                     SlotClass::LiveRouted => report.kept_live_routed.push(slot),
-                    SlotClass::Orphan => match self.drop_orphan(&addr, s, handle) {
+                    SlotClass::Orphan => match self.drop_orphan(layout, &addr, s, handle) {
                         Ok(DropOrphanOutcome::Absent) => {}
                         Ok(DropOrphanOutcome::Dropped { dir_removed }) => {
                             report.dropped.push(slot.clone());
@@ -280,6 +282,7 @@ impl ClusterEngine {
     /// (the server re-checks it under its slot-map write lock — the CAS).
     fn drop_orphan(
         &self,
+        layout: &Layout,
         addr: &str,
         listing: &crate::cluster::proto::ShardListing,
         handle: &Handle,
@@ -287,7 +290,7 @@ impl ClusterEngine {
         let client = RemoteShard::connect_for_coordinator_with_security(
             addr,
             handle.clone(),
-            self.dict.fingerprint(),
+            layout.dict.fingerprint(),
             self.tag_dict.fingerprint(),
             listing.shard_id,
             self.coordinator_id,

@@ -60,9 +60,9 @@ pub(crate) async fn cluster_get_vocab(
         let _permit = permit;
         let vocab = {
             let cluster = worker_state.cluster.read();
-            cluster.vocab().cloned()
+            cluster.vocab()
         };
-        serialize_vocab(vocab.as_ref())
+        serialize_vocab(vocab.as_deref())
     });
     finish_vocab_worker(&state.prom, worker.await)
 }

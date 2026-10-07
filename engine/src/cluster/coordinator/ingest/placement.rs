@@ -1,13 +1,14 @@
 use super::{placement_of, ClusterEngine, Extracted, ParseError, ParseErrorKind, Target};
+use crate::cluster::coordinator::layout::Layout;
 
 impl ClusterEngine {
     /// The placement decision for one compiled query — see the module-level table.
     /// Delegates to the free [`placement_of`] so `build` can bucket the corpus before
     /// the cluster value exists.
-    pub(super) fn placement(&self, ex: &Extracted) -> Target {
+    pub(super) fn placement(&self, layout: &Layout, ex: &Extracted) -> Target {
         placement_of(
-            &self.dict,
-            &self.ring,
+            &layout.dict,
+            &layout.ring,
             ex,
             self.per_shard.accept_class_d,
             self.per_shard.hot_anchor_threshold,

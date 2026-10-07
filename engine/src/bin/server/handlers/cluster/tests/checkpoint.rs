@@ -21,7 +21,7 @@ async fn checkpoint_reports_remote_primary_seals_and_fails_without_acknowledgeme
         &seed(),
     )
     .expect("frozen dict");
-    let dict = Arc::new(template.dict().clone());
+    let dict = Arc::new(reverse_rusty::dict::Dict::clone(&template.dict()));
     let mut tags = reverse_rusty::tagdict::TagDict::new();
     tags.mark_finalized();
     let tags = Arc::new(tags);

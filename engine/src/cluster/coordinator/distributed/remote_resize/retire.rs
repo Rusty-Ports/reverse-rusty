@@ -13,6 +13,7 @@ use crate::cluster::control::normalized_move_endpoint;
 use crate::cluster::remote::RetiredSlot;
 
 use super::{ClusterEngine, ResizeProgress, ShardError};
+use crate::cluster::coordinator::layout::Layout;
 
 /// A content fingerprint: `(fp_lo, fp_hi, live_count)`.
 pub(super) type Fingerprint = (u64, u64, u64);
@@ -22,6 +23,7 @@ impl ClusterEngine {
     /// write fence has drained and before the export.
     pub(super) fn source_fingerprints(
         &self,
+        layout: &Layout,
         handle: &tokio::runtime::Handle,
         expected: &[String],
     ) -> Result<Vec<Fingerprint>, ShardError> {
@@ -29,7 +31,7 @@ impl ClusterEngine {
             .iter()
             .enumerate()
             .map(|(position, endpoint)| {
-                self.slot_client(handle, endpoint, position)?
+                self.slot_client(layout, handle, endpoint, position)?
                     .content_fingerprint()
             })
             .collect()
@@ -39,8 +41,10 @@ impl ClusterEngine {
     /// checking that no position changed since `before` was taken. Records each node in `progress`
     /// before asking it, so a lost reply is still unretired on failure. Returns the number of
     /// retired slots.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn retire_old_layout(
         &self,
+        layout: &Layout,
         handle: &tokio::runtime::Handle,
         operation_id: u64,
         successor_generation: u64,
@@ -55,7 +59,7 @@ impl ClusterEngine {
                 .borrow_mut()
                 .push(expected[positions[0]].clone());
             let slots = self
-                .slot_client(handle, &expected[positions[0]], positions[0])?
+                .slot_client(layout, handle, &expected[positions[0]], positions[0])?
                 .retire(operation_id, successor_generation)?;
             check_unchanged(&endpoint, &positions, before, &slots)?;
             retired_slots += slots.len();

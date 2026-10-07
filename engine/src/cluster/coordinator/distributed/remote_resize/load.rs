@@ -12,6 +12,7 @@ use crate::cluster::shard::Shard;
 use crate::segment::PlacedQuery;
 
 use super::{ClusterConfig, ClusterEngine, RemoteResizeRequest, ResizeProgress, ShardError};
+use crate::cluster::coordinator::layout::Layout;
 
 /// Queries buffered before each staged-layout placement pass.
 const EXPORT_BATCH: usize = 4096;
@@ -36,8 +37,10 @@ pub(super) struct Layouts<'a> {
 impl ClusterEngine {
     /// Build the staged layout on the empty targets, stream the live corpus into it, prove each
     /// position, retire the old layout's nodes, record `Ready`, and commit.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_and_commit(
         &self,
+        layout: &Layout,
         handle: &tokio::runtime::Handle,
         request: &RemoteResizeRequest,
         intent: &ResizeIntent,
@@ -61,8 +64,8 @@ impl ClusterEngine {
             ..ClusterConfig::default()
         };
         let staged = Self::connect_remote_with_security_mode(
-            Arc::clone(&self.norm),
-            Arc::clone(&self.dict),
+            Arc::clone(&layout.norm),
+            Arc::clone(&layout.dict),
             Arc::clone(&self.tag_dict),
             &config,
             target_endpoints,
@@ -78,12 +81,12 @@ impl ClusterEngine {
         let targets: Vec<RemoteShard> = target_endpoints
             .iter()
             .enumerate()
-            .map(|(position, endpoint)| self.slot_client(handle, endpoint, position))
+            .map(|(position, endpoint)| self.slot_client(layout, handle, endpoint, position))
             .collect::<Result<_, _>>()?;
         // Writes are fenced and drained, so these are the fingerprints the export must reproduce;
         // retirement re-checks them to prove nothing landed on a source in between.
-        let before = self.source_fingerprints(handle, layouts.expected)?;
-        let (logical_ids, loaded) = self.load_staged_layout(&staged, &targets)?;
+        let before = self.source_fingerprints(layout, handle, layouts.expected)?;
+        let (logical_ids, loaded) = Self::load_staged_layout(layout, &staged, &targets)?;
 
         let mut evidence = Vec::with_capacity(targets.len());
         for (position, target) in targets.iter().enumerate() {
@@ -112,6 +115,7 @@ impl ClusterEngine {
         // cancellation, or lost reply, or any other) can answer from it afterwards. Reads fail loud
         // from here until installation.
         let retired_slots = self.retire_old_layout(
+            layout,
             handle,
             request.operation_id,
             intent.desired.placement_generation,
@@ -138,13 +142,13 @@ impl ClusterEngine {
     /// store once. Returns the sorted distinct logical ids exported and each position's loaded row
     /// count.
     fn load_staged_layout(
-        &self,
+        layout: &Layout,
         staged: &ClusterEngine,
         targets: &[RemoteShard],
     ) -> Result<(Vec<u64>, Vec<u64>), ShardError> {
         // Each source position's export may take up to its own export bound; the streams stay
         // open across all of them, plus one more bound to finish.
-        let rounds = u32::try_from(self.shards.len())
+        let rounds = u32::try_from(layout.shards.len())
             .unwrap_or(u32::MAX)
             .saturating_add(1);
         let deadline = Instant::now()
@@ -159,13 +163,14 @@ impl ClusterEngine {
             let mut emit = |position: usize, chunk: &[PlacedQuery]| -> Result<(), ShardError> {
                 loads[position].send(chunk)
             };
+            let staged_layout = staged.layout();
             let mut batch = Vec::with_capacity(EXPORT_BATCH);
             let mut load_error: Option<ShardError> = None;
-            let exported = self.export_live_corpus(&mut |query| {
+            let exported = Self::export_live_corpus_in(layout, &mut |query| {
                 logical_ids.push(query.logical_id);
                 batch.push((query.logical_id, query.version, query.dsl, query.tags));
                 if batch.len() >= EXPORT_BATCH {
-                    let placed = staged.place_resize_batch(&batch, &mut emit);
+                    let placed = staged.place_resize_batch(&staged_layout, &batch, &mut emit);
                     batch.clear();
                     if let Err(error) = placed {
                         load_error = Some(error);
@@ -178,7 +183,7 @@ impl ClusterEngine {
                 return Err(error);
             }
             let exported = exported?;
-            staged.place_resize_batch(&batch, &mut emit)?;
+            staged.place_resize_batch(&staged_layout, &batch, &mut emit)?;
             exported
         };
         let mut loaded = Vec::with_capacity(loads.len());
@@ -229,11 +234,15 @@ impl ClusterEngine {
     /// Whether any slot of the current layout persists to disk.
     pub(super) fn layout_is_durable(
         &self,
+        layout: &Layout,
         handle: &tokio::runtime::Handle,
         endpoints: &[String],
     ) -> Result<bool, ShardError> {
         for (position, endpoint) in endpoints.iter().enumerate() {
-            if self.slot_client(handle, endpoint, position)?.is_durable()? {
+            if self
+                .slot_client(layout, handle, endpoint, position)?
+                .is_durable()?
+            {
                 return Ok(true);
             }
         }
@@ -243,6 +252,7 @@ impl ClusterEngine {
     /// A direct client for one slot, stamped with this coordinator's identity.
     pub(super) fn slot_client(
         &self,
+        layout: &Layout,
         handle: &tokio::runtime::Handle,
         endpoint: &str,
         position: usize,
@@ -250,7 +260,7 @@ impl ClusterEngine {
         RemoteShard::connect_for_coordinator_with_security(
             endpoint,
             handle.clone(),
-            self.dict.fingerprint(),
+            layout.dict.fingerprint(),
             self.tag_dict.fingerprint(),
             position as u32,
             self.coordinator_id,

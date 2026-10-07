@@ -153,7 +153,7 @@ fn connect(
     RemoteShard::connect_for_coordinator_with_security(
         endpoint,
         handle.clone(),
-        engine.dict.fingerprint(),
+        engine.layout().dict.fingerprint(),
         engine.tag_dict.fingerprint(),
         position,
         engine.coordinator_id,
@@ -221,8 +221,8 @@ fn connect_and_adopt_source(
     RemoteShard::connect_and_adopt_for_coordinator_with_security(
         endpoint,
         handle.clone(),
-        crate::storage::serialize_dict(&engine.dict),
-        engine.dict.fingerprint(),
+        crate::storage::serialize_dict(&engine.layout().dict),
+        engine.layout().dict.fingerprint(),
         crate::storage::serialize_tagdict(&engine.tag_dict),
         engine.tag_dict.fingerprint(),
         move_intent.position,

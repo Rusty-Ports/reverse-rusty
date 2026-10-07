@@ -18,6 +18,8 @@ use crate::result::TopKOptions;
 
 use super::ranked::{ClusterRankedError, ClusterRankedMatch};
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
+use std::sync::Arc;
 
 /// Placement identity a PIT's per-shard pins were taken under.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,14 +55,14 @@ impl ClusterEngine {
     /// fingerprints against it (under a valid PIT the current normalizer IS
     /// the pinned one: any vocab change bumps the placement generation, which
     /// stales the PIT first).
-    pub fn normalizer(&self) -> &crate::normalize::Normalizer {
-        &self.norm
+    pub fn normalizer(&self) -> Arc<crate::normalize::Normalizer> {
+        Arc::clone(&self.layout().norm)
     }
 
     /// The shared frozen dict — the fingerprint's feature-id space (same
     /// pinned-≡-current argument as [`Self::normalizer`]).
-    pub fn dict(&self) -> &crate::dict::Dict {
-        &self.dict
+    pub fn dict(&self) -> Arc<crate::dict::Dict> {
+        Arc::clone(&self.layout().dict)
     }
 
     /// Open an index-wide PIT: reap expired entries (releasing their shard
@@ -73,7 +75,8 @@ impl ClusterEngine {
         cfg: &PitConfig,
         now: Instant,
     ) -> Result<PitId, ClusterPitError> {
-        self.reap_pits(now);
+        let layout = &*self.layout();
+        self.reap_pits(layout, now);
         // ADR-113 mutation barrier (WRITE side): every live mutation entry
         // point holds the read side from before its coordinator-log append
         // through the complete shard fan-out, so the pin fan below observes
@@ -87,16 +90,16 @@ impl ClusterEngine {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let meta = ClusterPitMeta {
-            generation: self.placement_generation(),
-            num_shards: self.shards.len() as u32,
+            generation: layout.generation,
+            num_shards: layout.shards.len() as u32,
         };
         let pit = self
             .lock_pits()
             .open(meta, keep_alive, cfg, now)
             .map_err(ClusterPitError::Admission)?;
-        for (position, shard) in self.shards.iter().enumerate() {
+        for (position, shard) in layout.shards.iter().enumerate() {
             if let Err(error) = shard.open_pit(pit.0) {
-                for pinned in &self.shards[..position] {
+                for pinned in &layout.shards[..position] {
                     pinned.close_pit(pit.0).ok();
                 }
                 self.lock_pits().close(pit);
@@ -112,10 +115,11 @@ impl ClusterEngine {
     /// `false` = already gone (expired/closed/rebuilt) — the caller's goal
     /// state either way.
     pub fn close_pit(&self, pit: PitId, now: Instant) -> bool {
-        self.reap_pits(now);
+        let layout = &*self.layout();
+        self.reap_pits(layout, now);
         let existed = self.lock_pits().close(pit).is_some();
         if existed {
-            for shard in &self.shards {
+            for shard in layout.shards.iter() {
                 shard.close_pit(pit.0).ok();
             }
         }
@@ -132,14 +136,21 @@ impl ClusterEngine {
     /// any fingerprint comparison against the (possibly rebuilt) normalizer
     /// could mis-classify it as a client mismatch. The kernel re-gates.
     pub fn check_pit(&self, pit: PitId, now: Instant) -> Result<(), ClusterRankedError> {
-        self.reap_pits(now);
+        self.check_pit_in(&self.layout(), pit, now)
+    }
+
+    pub(in crate::cluster::coordinator) fn check_pit_in(
+        &self,
+        layout: &Layout,
+        pit: PitId,
+        now: Instant,
+    ) -> Result<(), ClusterRankedError> {
+        self.reap_pits(layout, now);
         let meta = match self.lock_pits().touch(pit, now) {
             Some(meta) => *meta,
             None => return Err(ClusterRankedError::StalePit),
         };
-        if meta.generation != self.placement_generation()
-            || meta.num_shards != self.shards.len() as u32
-        {
+        if meta.generation != layout.generation || meta.num_shards != layout.shards.len() as u32 {
             self.lock_pits().close(pit);
             return Err(ClusterRankedError::StalePit);
         }
@@ -160,8 +171,17 @@ impl ClusterEngine {
         deadline: Option<Instant>,
         now: Instant,
     ) -> Result<ClusterRankedMatch, ClusterRankedError> {
-        self.check_pit(pit, now)?;
-        self.top_k_core(Some(pit.0), title, filter, options, program, deadline)
+        let layout = &*self.layout();
+        self.check_pit_in(layout, pit, now)?;
+        self.top_k_core(
+            layout,
+            Some(pit.0),
+            title,
+            filter,
+            options,
+            program,
+            deadline,
+        )
     }
 
     pub(super) fn lock_pits(
@@ -173,10 +193,10 @@ impl ClusterEngine {
     /// Reap expired registry entries and release their shard pins. Lazy — run
     /// at every PIT-API touch (the RetentionLeases pattern, no background
     /// thread); the shard fan happens after the registry lock is dropped.
-    fn reap_pits(&self, now: Instant) {
+    fn reap_pits(&self, layout: &Layout, now: Instant) {
         let reaped = self.lock_pits().reap_expired(now);
         for (pit, _) in reaped {
-            for shard in &self.shards {
+            for shard in layout.shards.iter() {
                 shard.close_pit(pit.0).ok();
             }
         }

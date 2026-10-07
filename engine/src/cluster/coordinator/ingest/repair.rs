@@ -2,6 +2,7 @@ use super::{
     ClusterEngine, ClusterMutation, DurabilityOp, EngineEvent, PendingRepair, ResyncReport,
     ShardError,
 };
+use crate::cluster::coordinator::layout::Layout;
 
 impl ClusterEngine {
     /// Record a partial multi-shard apply (ADR-047): queue the failed shards for repair (keyed by
@@ -86,6 +87,10 @@ impl ClusterEngine {
     /// stays queued. A no-op (empty report) on the in-process / RF=1 path, which never queues
     /// anything.
     pub fn resync(&self) -> ResyncReport {
+        self.resync_in(&self.layout())
+    }
+
+    pub(in crate::cluster::coordinator) fn resync_in(&self, layout: &Layout) -> ResyncReport {
         // Exhaustive cross-shard reads take the exclusive side of the same
         // barrier. A repair re-drive mutates shard visibility just like a live
         // add/upsert/remove and must not slip between sequential shard reads.
@@ -110,7 +115,7 @@ impl ClusterEngine {
             // as live writers. A cleared entry needs no repair; a replacement
             // entry carries the newer failed mutation and its current targets.
             let _logical_guard = self.logical_write_guard(logical);
-            match self.redrive_pending(logical) {
+            match self.redrive_pending(layout, logical) {
                 Redrive::NothingQueued => {}
                 Redrive::Converged => repaired += 1,
                 Redrive::StillPending { .. } => still_pending += 1,
@@ -125,7 +130,7 @@ impl ClusterEngine {
     /// Re-drive the repair queued for `logical`, if there is one, against the shards it still
     /// has to reach. The caller holds the mutation barrier and `logical`'s ID lock, as every
     /// live write of that id does, so no newer write can supersede the entry mid-repair.
-    pub(super) fn redrive_pending(&self, logical: u64) -> Redrive {
+    pub(super) fn redrive_pending(&self, layout: &Layout, logical: u64) -> Redrive {
         let repair = self
             .pending_repair
             .lock()
@@ -155,9 +160,9 @@ impl ClusterEngine {
             }
             for &s in targets {
                 if let Err(e) = crate::cluster::shard::apply_mutation(
-                    self.shards[s].as_ref(),
-                    &self.norm,
-                    &self.dict,
+                    layout.shards[s].as_ref(),
+                    &layout.norm,
+                    &layout.dict,
                     &redrive,
                     Some(s as u32),
                 ) {
@@ -227,6 +232,7 @@ impl ClusterEngine {
     /// Replay one recovered mutation through the same `apply` funnel as live writes.
     pub(in crate::cluster::coordinator) fn replay_apply(
         &self,
+        layout: &Layout,
         m: ClusterMutation,
     ) -> Result<(), ShardError> {
         match m {
@@ -240,10 +246,10 @@ impl ClusterEngine {
                 if !self.insert_logical_id(logical) {
                     return Err(ShardError::DuplicateLogicalId(logical));
                 }
-                self.apply_add(logical, version, &dsl, &tags, &placement)?;
+                self.apply_add(layout, logical, version, &dsl, &tags, &placement)?;
             }
             ClusterMutation::Remove { logical } => {
-                self.apply_remove(logical)?;
+                self.apply_remove(layout, logical)?;
                 self.remove_logical_id(logical);
             }
             ClusterMutation::Upsert {
@@ -254,7 +260,7 @@ impl ClusterEngine {
                 placement,
             } => {
                 let fresh = self.insert_logical_id(logical);
-                self.apply_upsert(logical, version, &dsl, &tags, &placement, fresh)?;
+                self.apply_upsert(layout, logical, version, &dsl, &tags, &placement, fresh)?;
             }
         }
         Ok(())
@@ -264,8 +270,9 @@ impl ClusterEngine {
     /// checkpoints while it runs (ADR-197): a flush that wrote a segment between a
     /// checkpoint's registry snapshot and its orphan sweep would have that file deleted.
     pub fn flush(&self) -> Result<(), ShardError> {
+        let layout = &*self.layout();
         let _quiesced = self.quiesce_mutations();
-        for s in &self.shards {
+        for s in layout.shards.iter() {
             s.flush()?;
         }
         self.compact_logical_ids();

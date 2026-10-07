@@ -105,7 +105,8 @@ fn a_cluster_keeps_every_match_across_a_multiword_alias() {
         // vocabulary answers.
         let mut all = queries.clone();
         all.extend(live.iter().map(|&(id, dsl)| (id, dsl.to_string())));
-        let installed = cluster.vocab().expect("vocab installed").clone();
+        let installed =
+            reverse_rusty::vocab::Vocab::clone(&cluster.vocab().expect("vocab installed"));
         let mut single = Engine::with_vocab(installed, EngineConfig::default()).expect("engine");
         single.build_from_queries(&all);
         let mut s = MatchScratch::new();
@@ -194,7 +195,8 @@ fn a_cluster_keeps_every_match_across_a_chain_of_imports() {
             "K={num_shards}: the title carries the form"
         );
 
-        let installed = cluster.vocab().expect("vocab installed").clone();
+        let installed =
+            reverse_rusty::vocab::Vocab::clone(&cluster.vocab().expect("vocab installed"));
         let mut single = Engine::with_vocab(installed, EngineConfig::default()).expect("engine");
         single.build_from_queries(&queries);
         let mut s = MatchScratch::new();

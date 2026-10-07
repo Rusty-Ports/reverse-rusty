@@ -10,7 +10,7 @@ impl ClusterEngine {
     /// both produced by [`wrap_handoff`]). The in-process/default path never calls this, so its
     /// `handoffs` stays empty and the cluster is byte-identical to pre-6a.
     pub(super) fn with_handoffs(mut self, handoffs: Vec<Arc<HandoffShard>>) -> Self {
-        self.handoffs = handoffs;
+        self.edit_layout(|layout| layout.handoffs = handoffs);
         self
     }
 
@@ -63,7 +63,8 @@ impl ClusterEngine {
     /// advances a position's generation when it re-points it to a new owner; this is how a
     /// test/operator observes the live map.
     pub fn handoff_generations(&self) -> Vec<u64> {
-        self.handoffs.iter().map(|h| h.generation()).collect()
+        let layout = &*self.layout();
+        layout.handoffs.iter().map(|h| h.generation()).collect()
     }
 
     /// Assemble a cluster whose K shards are REMOTE (gRPC) — one per `endpoints[i]`,

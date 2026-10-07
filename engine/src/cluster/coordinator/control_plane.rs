@@ -134,20 +134,21 @@ impl ClusterEngine {
         replica_dir: &Path,
         max_passes: usize,
     ) -> Result<(), ShardError> {
+        let layout = &*self.layout();
         let Some(base) = self.data_dir.as_deref() else {
             return Err(ShardError::Config(
                 "add_replica requires a durable cluster (no on-disk segments to copy)".into(),
             ));
         };
-        let shard = self.shards.get(position).ok_or_else(|| {
+        let shard = layout.shards.get(position).ok_or_else(|| {
             ShardError::Config(format!(
                 "add_replica: shard position {position} out of range"
             ))
         })?;
         let primary_dir = shard_dir(base, position);
         shard.add_recovered_replica(
-            &self.norm,
-            &self.dict,
+            &layout.norm,
+            &layout.dict,
             &self.tag_dict,
             EngineConfig::default(),
             &primary_dir,
@@ -160,6 +161,7 @@ impl ClusterEngine {
     /// Any events buffered before this call are delivered immediately, mirroring the
     /// engine's `set_observer`.
     pub fn set_observer(&self, observer: ClusterObserver) {
+        let layout = &*self.layout();
         let pending: Vec<EngineEvent> = {
             let mut p = self
                 .pending_events
@@ -173,7 +175,7 @@ impl ClusterEngine {
         // Fan the observer into each shard as an event sink, so a `ReplicatedShard` surfaces its
         // degraded-redundancy (`ReplicaDesync`) events through the same observer (ADR-035). A
         // plain shard's default `set_event_sink` is a no-op.
-        for shard in &self.shards {
+        for shard in layout.shards.iter() {
             shard.set_event_sink(Arc::clone(&observer));
         }
         *self

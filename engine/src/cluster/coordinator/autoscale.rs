@@ -11,6 +11,7 @@ use crate::cluster::shard::ShardError;
 use crate::events::{DurabilityOp, EngineEvent};
 
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 impl ClusterEngine {
     /// Collect the deterministic policy input: membership + the shard→node map from the
@@ -20,15 +21,23 @@ impl ClusterEngine {
     /// nodes). Fail-closed: a control-plane or shard error propagates rather than yielding a
     /// partial/blind snapshot.
     pub fn collect_load(&self, config: &AutoscaleConfig) -> Result<LoadSnapshot, ShardError> {
+        self.collect_load_in(&self.layout(), config)
+    }
+
+    pub(in crate::cluster::coordinator) fn collect_load_in(
+        &self,
+        layout: &Layout,
+        config: &AutoscaleConfig,
+    ) -> Result<LoadSnapshot, ShardError> {
         let state = self.control_state()?;
-        let shard_corpus = self.shard_query_counts()?;
+        let shard_corpus = layout.shard_query_counts()?;
         // A replicated row is on every shard, so that part of a shard's corpus is the same size
         // everywhere and does not shrink when shards are added: it must not drive split pressure.
         // That is the broad lane (classes C and D, ADR-080) and the replicated always-visible
         // rows: top-64 pairs, phrase proxies, and class-C plans a rebuild kept in default reads
         // (ADR-203). Each shard counts its own; the per-shard size is the total / num_shards.
         let mut replicated = 0u64;
-        for shard in &self.shards {
+        for shard in layout.shards.iter() {
             replicated += shard.replicated_rows()?;
         }
         let num_shards = u64::from(state.num_shards).max(1);
@@ -53,7 +62,8 @@ impl ClusterEngine {
         &self,
         config: &AutoscaleConfig,
     ) -> Result<ResizeObservation, ShardError> {
-        let snapshot = self.collect_load(config)?;
+        let layout = &*self.layout();
+        let snapshot = self.collect_load_in(layout, config)?;
         let max_selective_corpus = snapshot
             .shard_corpus
             .iter()
@@ -61,8 +71,8 @@ impl ClusterEngine {
             .max()
             .unwrap_or(0);
         Ok(ResizeObservation {
-            num_shards: self.num_shards(),
-            placement_generation: self.placement_generation().0,
+            num_shards: layout.num_shards(),
+            placement_generation: layout.generation.0,
             recommended: crate::cluster::recommended_shard_count(&snapshot, config),
             max_selective_corpus,
         })
@@ -78,6 +88,14 @@ impl ClusterEngine {
     /// for the caller to log or act on. A disabled config yields an empty decision ⇒ a no-op
     /// tick, so a default-config caller is byte-identical to no autoscaler at all.
     pub fn tick(&self, config: &AutoscaleConfig) -> Result<AutoscaleDecision, ShardError> {
+        self.tick_in(&self.layout(), config)
+    }
+
+    pub(in crate::cluster::coordinator) fn tick_in(
+        &self,
+        layout: &Layout,
+        config: &AutoscaleConfig,
+    ) -> Result<AutoscaleDecision, ShardError> {
         let problems = config.validate();
         if !problems.is_empty() {
             return Err(ShardError::Config(format!(
@@ -88,8 +106,8 @@ impl ClusterEngine {
         // Opportunistically converge any partial-apply divergence (ADR-047) each cycle — a cheap
         // no-op when nothing is queued (the default path). Repairing before snapshotting load
         // keeps the autoscaler's view consistent with the converged cluster.
-        let _ = self.resync();
-        let snapshot = self.collect_load(config)?;
+        let _ = self.resync_in(layout);
+        let snapshot = self.collect_load_in(layout, config)?;
         let decision = evaluate(&snapshot, config);
         // Execute the executable subset. A `Rebalance` reconciles placement (idempotent — a no-op
         // when already balanced).
@@ -107,7 +125,7 @@ impl ClusterEngine {
                     // next tick or the reconcile loop, never failing the enclosing `tick` (mirroring
                     // `drive_autoscaled_handoff`). The `handle.is_some()` gate keeps the in-process /
                     // lean path byte-identical: only a gRPC-built cluster carries a runtime handle.
-                    match self.rebalance_and_move(*rf, &handle) {
+                    match self.rebalance_and_move_in(layout, *rf, &handle) {
                         Ok(report) => {
                             if let Some((pos, reason)) = report.failed {
                                 self.emit(EngineEvent::DurabilityFailure {
@@ -152,7 +170,7 @@ impl ClusterEngine {
             if !rebalanced {
                 for action in &decision.actions {
                     if let ScalingAction::Handoff { position, from, to } = action {
-                        self.drive_autoscaled_handoff(&snapshot, *position, *from, *to);
+                        self.drive_autoscaled_handoff(layout, &snapshot, *position, *from, *to);
                     }
                 }
             }
@@ -175,6 +193,7 @@ impl ClusterEngine {
     #[cfg(feature = "distributed")]
     pub(in crate::cluster::coordinator) fn drive_autoscaled_handoff(
         &self,
+        layout: &Layout,
         snapshot: &LoadSnapshot,
         position: u32,
         from: NodeId,
@@ -203,7 +222,7 @@ impl ClusterEngine {
         // membership, records the transition, proves recovery under a source fence, conditionally
         // commits, and only then swaps live routing. A missing endpoint or failed proof surfaces as
         // an Err we report as a skip; a preserved intent makes retry/startup resolution deterministic.
-        if let Err(e) = self.reassign_and_move(position as usize, to, &handle) {
+        if let Err(e) = self.reassign_and_move_in(layout, position as usize, to, &handle) {
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::ReplicaDesync,
                 detail: format!(
@@ -224,8 +243,9 @@ impl ClusterEngine {
         node: NodeDescriptor,
         config: &AutoscaleConfig,
     ) -> Result<AutoscaleDecision, ShardError> {
+        let layout = &*self.layout();
         self.register_node(node)?;
-        self.tick(config)
+        self.tick_in(layout, config)
     }
 
     /// Event-driven entry: a node left — deregister it, then run a [`Self::tick`] (which
@@ -235,7 +255,8 @@ impl ClusterEngine {
         id: NodeId,
         config: &AutoscaleConfig,
     ) -> Result<AutoscaleDecision, ShardError> {
+        let layout = &*self.layout();
         self.deregister_node(id)?;
-        self.tick(config)
+        self.tick_in(layout, config)
     }
 }
