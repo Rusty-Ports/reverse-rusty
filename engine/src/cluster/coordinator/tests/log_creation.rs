@@ -357,3 +357,29 @@ fn a_refused_open_leaves_the_shard_translogs_as_they_were() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// `build` ends with a checkpoint, and a checkpoint rewrites the log. If that rewrite cannot
+/// be made, the build still returns a cluster that takes writes: the checkpoint's manifest is
+/// committed, and the log is left as it was. (A checkpoint that disabled the log's append
+/// handle before it had a replacement returned a cluster on which every write failed.)
+#[test]
+fn a_built_cluster_takes_writes_when_its_first_checkpoint_could_not_rewrite_the_log() {
+    let (dir, cfg) = durable("first_checkpoint_blocked");
+    let blocker = dir.join(CLUSTER_LOG_FILE).with_extension("clog.tmp");
+    std::fs::create_dir_all(&blocker).expect("block the checkpoint's replacement log");
+    let built =
+        ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())]).expect("the build");
+    let wrote = built.add_query(2, "mechanical keyboard");
+    std::fs::remove_dir_all(&blocker).expect("unblock");
+    wrote.expect("a write to the built cluster");
+    assert_eq!(
+        epoch_on_disk(&dir),
+        1,
+        "the checkpoint's manifest is committed"
+    );
+    drop(built);
+    let reopened = open(&dir, &cfg, "reopen");
+    assert_eq!(matched(&reopened, "a mechanical keyboard"), vec![2]);
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}

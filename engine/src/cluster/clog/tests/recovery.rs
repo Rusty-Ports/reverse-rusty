@@ -271,3 +271,42 @@ fn a_missing_log_is_created_only_when_the_caller_says_so() {
     FileClusterLog::open(&path, true, LogPos(5), IfMissing::Refuse).expect("reopen");
     let _ = std::fs::remove_file(&path);
 }
+
+/// A checkpoint builds the log's replacement before it touches the log. One that cannot
+/// build it fails and leaves the log as it was, still taking writes. Before, the append
+/// handle was disabled first, so every later write was refused ("log append disabled") until
+/// a restart, although nothing had happened to the log.
+#[test]
+fn a_checkpoint_that_cannot_build_its_replacement_leaves_the_log_taking_writes() {
+    let path = scratch_path("checkpoint_blocked");
+    let _ = std::fs::remove_file(&path);
+    let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).expect("open");
+    log.append(&add(1, "alpha")).expect("append");
+    let blocker = path.with_extension("clog.tmp");
+    let _ = std::fs::remove_dir_all(&blocker);
+    std::fs::create_dir_all(&blocker).expect("block the replacement");
+    let failed = ClusterLog::checkpoint(&log, LogPos(1)).is_err();
+    let appended = log.append(&add(2, "beta"));
+    std::fs::remove_dir_all(&blocker).expect("unblock");
+    assert!(failed, "the checkpoint went ahead without its replacement");
+    assert_eq!(
+        appended.expect("the log still takes writes"),
+        LogPos(2),
+        "a failed checkpoint disabled the log"
+    );
+    let held = log.replay(LogPos(0)).expect("replay");
+    assert_eq!(
+        held.entries,
+        vec![(LogPos(1), add(1, "alpha")), (LogPos(2), add(2, "beta"))],
+        "the log is as it was, plus the new write"
+    );
+    // With the way clear the checkpoint goes through and keeps what is after its position.
+    ClusterLog::checkpoint(&log, LogPos(1)).expect("checkpoint");
+    assert_eq!(
+        log.replay(LogPos(0)).expect("replay").entries,
+        vec![(LogPos(2), add(2, "beta"))]
+    );
+    log.append(&add(3, "gamma"))
+        .expect("append after the checkpoint");
+    let _ = std::fs::remove_file(&path);
+}

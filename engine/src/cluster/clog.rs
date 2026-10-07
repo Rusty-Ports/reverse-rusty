@@ -509,10 +509,11 @@ impl ClusterLog for FileClusterLog {
             .filter(|(p, _)| *p > up_to)
             .collect();
 
-        st.file.disable();
-
-        let rewrite = (|| -> io::Result<()> {
-            let tmp = st.path.with_extension("clog.tmp");
+        // Build the replacement first. Until the rename the log and its handle are untouched,
+        // so a checkpoint that cannot build its replacement leaves the log as it was, still
+        // taking writes. (The write-ahead log's reset has the same rule, ADR-198.)
+        let tmp = st.path.with_extension("clog.tmp");
+        let replacement = (|| -> io::Result<()> {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&CLOG_MAGIC)?;
             f.write_all(&CLOG_VERSION.to_le_bytes())?;
@@ -520,15 +521,22 @@ impl ClusterLog for FileClusterLog {
                 let body = Self::encode_body(pos.0, m);
                 write_frame(&mut f, &body)?;
             }
-            f.sync_all()?;
-            drop(f);
+            f.sync_all()
+        })();
+        replacement.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
+
+        // From the rename on, the old handle addresses a file that is no longer the log. It
+        // is disabled first: if anything after this fails, appends are refused until a reopen
+        // instead of being acknowledged into a file no restart will read.
+        st.file.disable();
+        let publish = (|| -> io::Result<()> {
             std::fs::rename(&tmp, &st.path)?;
             if let Some(parent) = st.path.parent() {
                 std::fs::File::open(parent)?.sync_all()?;
             }
             Ok(())
         })();
-        rewrite.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
+        publish.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
 
         // Re-open the appending handle on the rewritten file.
         st.file = LogAppender::new(

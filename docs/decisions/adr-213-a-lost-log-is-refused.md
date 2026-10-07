@@ -69,6 +69,13 @@ write.
 7. **A backup of a store whose log is gone is refused,** and so is verifying one. Such a
    backup would restore to a store that refuses to open, and the running store is
    acknowledging writes into a file no restart will read.
+8. **A checkpoint builds the log's replacement before it touches the log.** The cluster
+   log's checkpoint disabled its append handle and then wrote the replacement, so a
+   checkpoint that could not write it left a log that refused every later write until a
+   restart, and reported the failure as harmless. The handle is now disabled at the rename
+   and not before, which is the rule ADR-198 gave the write-ahead log. It matters here
+   because `build` and an epoch-0 reopen now end with a checkpoint: without this they could
+   return a cluster that takes no writes.
 
 ## What changes for a deployment
 
@@ -158,7 +165,8 @@ write.
   that open, and refuses a lost log from then on; a log cut short under a manifest at epoch
   1 or 2 is refused; a build that cannot create its log fails with an epoch-0 manifest, and
   the next start finishes it and holds the same rows as a build that was never disturbed; a
-  refused open, for a log that is gone and for one cut short, leaves every shard's translog
+  build whose final checkpoint cannot rewrite the log still returns a cluster that takes
+  writes; a refused open, for a log that is gone and for one cut short, leaves every shard's translog
   byte for byte as it was.
 - `cluster/shard/tests/recovery.rs`: the same for a restarting shard and its translog.
 - `cluster/translog.rs`: a translog reset that cannot finish leaves the old translog as it
@@ -166,7 +174,8 @@ write.
 - `cluster/control_raft/log_store.rs`: a node with a vote, a committed index, a purge point
   or a snapshot and no log is refused, and no log is created; a node with no state starts.
 - `cluster/clog/tests`: `open` with `IfMissing::Refuse` refuses a missing file and creates
-  nothing; with `IfMissing::Create` it creates one.
+  nothing; with `IfMissing::Create` it creates one. A checkpoint that cannot build its
+  replacement fails, and the log still takes writes and holds what it held.
 - `storage/backup/tests.rs`: a store without its log is not backed up, with a refusal that
   names the source's own log, and a backup directory without its log does not verify; a
   cluster at epoch 0 is copied as before.
