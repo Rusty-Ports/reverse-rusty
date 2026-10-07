@@ -46,7 +46,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use super::shard::ShardError;
-use crate::storage::framed_log::{repair_tail, scan_records, write_frame, FrameScan, LogAppender};
+use crate::storage::framed_log::{
+    header_was_interrupted, publish_empty_log, repair_tail, scan_records, write_frame, FrameScan,
+    LogAppender,
+};
 
 mod codec;
 
@@ -239,10 +242,10 @@ impl FileClusterLog {
             let next_seq = floor_pos.0.checked_add(1).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "cluster log position exhausted")
             })?;
-            let mut file = std::fs::File::create(path)?;
-            file.write_all(&CLOG_MAGIC)?;
-            file.write_all(&CLOG_VERSION.to_le_bytes())?;
-            file.sync_all()?;
+            // Written beside the path and renamed in, so a crash or a full disk leaves no
+            // file or a whole one, and the directory entry is durable before the first
+            // append is acknowledged.
+            let file = publish_empty_log(path, &Self::header(CLOG_VERSION))?;
             (file, next_seq, 0)
         };
         Ok(FileClusterLog {
@@ -254,6 +257,41 @@ impl FileClusterLog {
             }),
             fsync_each_write,
         })
+    }
+
+    /// The eight bytes that open a log of format `version`.
+    fn header(version: u32) -> [u8; CLOG_HEADER_SIZE] {
+        let mut header = [0u8; CLOG_HEADER_SIZE];
+        header[..CLOG_MAGIC.len()].copy_from_slice(&CLOG_MAGIC);
+        header[CLOG_MAGIC.len()..].copy_from_slice(&version.to_le_bytes());
+        header
+    }
+
+    /// Replace a log whose creation was interrupted with the empty log it was going to be.
+    ///
+    /// Releases before this one created the file and then wrote its header. A crash, a power
+    /// loss or a full disk between the two left a file shorter than its header, and every
+    /// later start refused it ("clog too small"). Such a file never held a record, because
+    /// the header is written and synced before the first append.
+    ///
+    /// [`open`](Self::open) does not do this itself, and still refuses a short file. Whether
+    /// a short log is an interrupted creation or a log that has lost its content cannot be
+    /// read from the file; it is known to the owner, who calls this only when nothing it
+    /// holds says the log was ever whole. A short file that is not the start of a supported
+    /// header is left as it is, for `open` to refuse.
+    pub(crate) fn finish_interrupted_creation(path: &Path) -> io::Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let supported: Vec<[u8; CLOG_HEADER_SIZE]> = (1..=CLOG_VERSION).map(Self::header).collect();
+        let supported: Vec<&[u8]> = supported
+            .iter()
+            .map(<[u8; CLOG_HEADER_SIZE]>::as_slice)
+            .collect();
+        if header_was_interrupted(path, &supported)? {
+            drop(publish_empty_log(path, &Self::header(CLOG_VERSION))?);
+        }
+        Ok(())
     }
 
     /// Lock the file state, recovering a poisoned guard rather than panicking (a prior

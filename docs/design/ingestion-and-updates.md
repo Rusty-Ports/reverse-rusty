@@ -104,6 +104,14 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   later frame refuses repair. A failed write, flush, or sync disables further appends on that handle
   until recovery. Fallible open propagates initialization failures even before the first manifest.
   Exact repaired-byte diagnostics survive startup and are delivered when an observer attaches.
+- **A log is created whole** ([ADR-198](../decisions/adr-198-wal-is-replaced-not-truncated.md),
+  [ADR-212](../decisions/adr-212-a-log-is-created-whole.md)). The WAL, the coordinator log, the
+  shard translog and the Raft log are each created, and the WAL is reset, by writing a complete
+  header-only file beside the path, syncing it, renaming it into place and syncing the directory.
+  A crash or a full disk leaves no file or a whole one. A file shorter than its header is
+  refused, except where an older release could have left it and nothing on disk says the log
+  ever held a record: the WAL (the manifest covers what it held), a coordinator log with no
+  checkpoint behind it, and a Raft log on a node with no other Raft state.
 - **Segments are immutable** (Lucene/LSM): the write path is append-only; complexity is pushed to
   the merge, which is the right place for it.
 - **Updates/deletes are tombstones**, not in-place edits: update = compile new version into the

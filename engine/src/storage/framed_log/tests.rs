@@ -155,3 +155,62 @@ fn a_sync_failure_disables_later_appends_even_when_the_frame_is_complete() {
     let scan = scan_records(&bytes, 0, |b| Ok(b.to_vec())).expect("complete ambiguous frame");
     assert_eq!(scan.records.len(), 1);
 }
+
+fn scratch_file(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "reverse_rusty_framed_{name}_{}.log",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(replacement_path(&path));
+    path
+}
+
+/// A log is created whole: the header is there when the file is, and nothing is left beside
+/// it. A replacement that an earlier, interrupted creation left behind is written over.
+#[test]
+fn an_empty_log_is_published_whole() {
+    let path = scratch_file("publish");
+    std::fs::write(replacement_path(&path), b"left by an interrupted creation").unwrap();
+    let header = *b"TEST\x01\x00\x00\x00";
+    let mut file = publish_empty_log(&path, &header).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), header);
+    assert!(!replacement_path(&path).exists());
+    // The handle appends after the header.
+    file.write_all(b"x").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap().len(), header.len() + 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A file is an interrupted creation when it is shorter than a header and is the start of
+/// one. Anything else short is damage, and a whole header is a log.
+#[test]
+fn an_interrupted_header_is_a_strict_prefix_of_a_supported_one() {
+    let path = scratch_file("prefix");
+    let old = *b"TEST\x01\x00\x00\x00";
+    let new = *b"TEST\x02\x00\x00\x00";
+    let supported: [&[u8]; 2] = [&old, &new];
+    for held in 0..old.len() {
+        std::fs::write(&path, &new[..held]).unwrap();
+        assert!(
+            header_was_interrupted(&path, &supported).unwrap(),
+            "{held} bytes of a header"
+        );
+    }
+    std::fs::write(&path, new).unwrap();
+    assert!(
+        !header_was_interrupted(&path, &supported).unwrap(),
+        "a whole header"
+    );
+    std::fs::write(&path, b"TEST\x09").unwrap();
+    assert!(
+        !header_was_interrupted(&path, &supported).unwrap(),
+        "the start of a header no supported format has"
+    );
+    std::fs::write(&path, b"XY").unwrap();
+    assert!(
+        !header_was_interrupted(&path, &supported).unwrap(),
+        "other bytes"
+    );
+    let _ = std::fs::remove_file(&path);
+}

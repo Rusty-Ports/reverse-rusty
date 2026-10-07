@@ -70,6 +70,7 @@ impl LogStore {
         let cf: fn(std::io::Error) -> ControlError =
             |e| ControlError::Backend(format!("raft store open: {e}"));
         let paths = control_store::RaftPaths::new(dir.to_path_buf());
+        control_store::repair_interrupted_creation(&paths).map_err(cf)?;
         let (entries, log_format): (Vec<Entry<TypeConfig>>, _) =
             control_store::read_records(&paths.log()).map_err(cf)?;
         let mut log = BTreeMap::new();
@@ -284,6 +285,83 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 mod tests {
     use super::*;
     use crate::storage::framed_log::write_frame;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rr_raft_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A control node whose first start was interrupted between creating its log and writing
+    /// the header (a crash, or a full disk) starts as the fresh node it is, and starts again
+    /// after that. Before, every later start answered "header is truncated".
+    #[test]
+    fn a_node_whose_log_creation_was_interrupted_starts() {
+        for held in [&b""[..], b"R", b"RRL5", b"RRL5\x05\x00"] {
+            let dir = scratch("interrupted_creation");
+            let log = dir.join("raft-log.bin");
+            std::fs::write(&log, held).unwrap();
+            if let Err(error) = LogStore::open(&dir, true) {
+                panic!("{} header bytes: {error:?}", held.len());
+            }
+            assert_eq!(
+                std::fs::read(&log).unwrap().len(),
+                8,
+                "the log has a whole header"
+            );
+            assert!(LogStore::open(&dir, true).is_ok(), "a second start");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A node that has other raft state once had a log. If that log is now shorter than its
+    /// header it has lost entries the node may have acknowledged, and the node does not come
+    /// back with an empty one.
+    #[test]
+    fn a_node_with_other_raft_state_is_not_given_an_empty_log() {
+        for other in [
+            "raft-vote.json",
+            "raft-committed.json",
+            "raft-snapshot.json",
+        ] {
+            let dir = scratch("lost_log");
+            std::fs::write(dir.join("raft-log.bin"), b"RR").unwrap();
+            std::fs::write(dir.join(other), b"{}").unwrap();
+            let refused = LogStore::open(&dir, true).err();
+            assert!(
+                refused.is_some_and(|error| format!("{error:?}").contains("other raft state")),
+                "a node with {other} was given an empty log"
+            );
+            assert_eq!(std::fs::read(dir.join("raft-log.bin")).unwrap(), b"RR");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A new log is written beside its path and renamed in, so a creation that fails
+    /// part-way leaves nothing at the path. Here the replacement cannot be written at all.
+    #[test]
+    fn a_log_creation_that_fails_leaves_no_file_at_the_path() {
+        let dir = scratch("blocked_creation");
+        let log = dir.join("raft-log.bin");
+        std::fs::create_dir_all(crate::storage::framed_log::replacement_path(&log)).unwrap();
+        assert!(LogStore::open(&dir, true).is_err());
+        assert!(
+            !log.exists(),
+            "a failed creation left a file at the log's path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A short log that is not the start of a header is damage, on any node.
+    #[test]
+    fn a_short_log_that_is_no_header_is_refused() {
+        let dir = scratch("short_other");
+        std::fs::write(dir.join("raft-log.bin"), b"XY").unwrap();
+        assert!(LogStore::open(&dir, true).is_err());
+        assert_eq!(std::fs::read(dir.join("raft-log.bin")).unwrap(), b"XY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn incompatible_entry_refuses_reopen_before_repairing_any_bytes() {

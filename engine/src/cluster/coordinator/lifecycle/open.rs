@@ -393,12 +393,19 @@ impl ClusterEngine {
             }
         }
 
-        let log = FileClusterLog::open(
-            &data_dir.join(CLUSTER_LOG_FILE),
-            fsync,
-            LogPos(manifest.snapshot_pos),
-        )
-        .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
+        let log_path = data_dir.join(CLUSTER_LOG_FILE);
+        // `build` writes the manifest and then creates the log, so a manifest that records no
+        // checkpoint is no evidence that the log was ever whole. A log shorter than its header
+        // is then one whose creation was interrupted (releases before ADR-212 created the file
+        // and then wrote the header), and it is finished here. After a checkpoint the log has
+        // been whole and is only ever replaced through a rename, so a short one has lost its
+        // content and `open` refuses it.
+        if manifest.snapshot_pos == 0 {
+            FileClusterLog::finish_interrupted_creation(&log_path)
+                .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
+        }
+        let log = FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos))
+            .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
 
         let durable = ClusterDurable {
             log: Box::new(log),

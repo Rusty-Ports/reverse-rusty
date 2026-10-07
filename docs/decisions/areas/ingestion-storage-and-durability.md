@@ -32,6 +32,7 @@ Write paths, segments, WAL and source persistence, compaction, recovery, and dur
 | [198](../adr-198-wal-is-replaced-not-truncated.md) | The WAL is replaced, not truncated | Resets and creates the write-ahead log by renaming a complete empty log into place, and opens a log whose header an older truncate left incomplete as empty, so a crash during a reset can no longer leave a node that refuses to start. | Accepted |
 | [190](../adr-190-no-commit-around-in-memory-segments.md) | No commit around in-memory segments | Writes a segment a failed flush or rebuild left in memory to disk before any manifest commit, or refuses the commit, so a later flush cannot retire WAL frames of rows no manifest lists. | Accepted |
 | [200](../adr-200-keep-an-exact-source-sidecar.md) | Keep an exact source sidecar | Gives the source store a content version so a commit that changed no document selects the sidecar it has, instead of writing the corpus again; reports each full write as an event and metrics. | Accepted |
+| [212](../adr-212-a-log-is-created-whole.md) | A log is created whole | Creates the cluster log, the shard translog and the raft log by renaming a complete header-only file into place, and lets the owner of a log that an older release left shorter than its header finish it only when nothing on disk says the log was ever whole. | Accepted |
 
 ---
 

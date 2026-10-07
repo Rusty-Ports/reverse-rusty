@@ -9,6 +9,25 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-07 — A node whose first start was interrupted starts again
+
+- **A log is created whole** ([ADR-212](decisions/adr-212-a-log-is-created-whole.md)). The
+  coordinator's `cluster.log`, a shard's `translog.clog` and a control node's `raft-log.bin` were
+  created by making the file and then writing its header. A crash, a power loss or a full disk
+  between the two left a file shorter than its header, and every later start refused it
+  (`raft log: header is truncated`, `clog too small`) until someone deleted the file by hand.
+  They are now written beside their path and renamed into place, with the directory synced, as
+  the write-ahead log already was (ADR-198).
+- **A node that an earlier release left that way starts after the upgrade,** with nothing to
+  delete: a control node that has no other raft state, and a coordinator whose manifest records
+  no checkpoint. Neither can have held an acknowledged record.
+- **A short log that may have held records is still refused,** and left as it was found: a
+  control node with a vote, a committed index, a purge point or a snapshot; a coordinator after a
+  checkpoint; a restarting shard. A short file that is not the start of a supported header is
+  refused everywhere.
+- No format change. Found by starting a three-node control plane on a full disk: none of the
+  three started again once there was space.
+
 ## 2026-10-07 — A shard outage no longer restarts the coordinator on Kubernetes
 
 - **Two probe routes, `/_health/live` and `/_health/ready`**, in both modes
