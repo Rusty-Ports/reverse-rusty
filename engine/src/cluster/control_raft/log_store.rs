@@ -356,10 +356,9 @@ mod tests {
                 .err()
                 .map(|error| format!("{error:?}"));
             assert!(
-                refused
-                    .as_ref()
-                    .is_some_and(|reason| reason.contains("is missing")
-                        && reason.contains("from a snapshot")),
+                refused.as_ref().is_some_and(
+                    |reason| reason.contains("is missing") && reason.contains("Leave it down")
+                ),
                 "a node with {other} and no log: {refused:?}"
             );
             assert!(

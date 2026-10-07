@@ -21,8 +21,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **`--accept-lost-log`** (`server` and `shardserver`; `accept_lost_log` in the library): start
   from the last flush or checkpoint with an empty log, and report a `log_lost` durability event
   that says what was lost. For one start; both binaries say at every start that it is set. It changes nothing when the log
-  is there and does not make a damaged log acceptable. A control node has no such flag: its data
-  directory is restored from a snapshot.
+  is there and does not make a damaged log acceptable. A control node has no such flag and no
+  repair of its own: it stays down while the others keep their majority, and the control plane
+  is recovered as a whole.
 - **`build` ends with a checkpoint,** which writes the manifest that says the cluster log exists
   (epoch 1). The manifest `build` writes first, before it creates the log, stays at epoch 0, and
   a reopen that finds epoch 0 (a build that stopped part-way, or a cluster from an earlier

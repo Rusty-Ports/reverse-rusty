@@ -119,7 +119,8 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   checkpoint that writes epoch 1), a shard's checkpoint file, a control node's vote. A store that finds that record and no log does not open, because an empty log in
   its place would drop every write acknowledged since the record without a word.
   `accept_lost_log` starts it once from that record and reports a `log_lost` durability event.
-  A control node has no override: its data directory is restored from a snapshot.
+  A control node has no override and is not repaired alone: it stays down, and the control
+  plane is recovered as a whole.
 - **Segments are immutable** (Lucene/LSM): the write path is append-only; complexity is pushed to
   the merge, which is the right place for it.
 - **Updates/deletes are tombstones**, not in-place edits: update = compile new version into the

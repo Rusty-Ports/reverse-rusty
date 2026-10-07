@@ -154,19 +154,21 @@ it) and delete nothing else. **Never remove a log to get a node started.** Then,
 | Single-node server | `wal.log` | Restore the data directory from a backup ([`backup-restore.md`](backup-restore.md)). Or start **once** with `--accept-lost-log`: it serves from its last flush. |
 | In-process cluster coordinator | `cluster.log` | The same; it serves from its last checkpoint. |
 | Shard node of a remote cluster | `translog.clog` | Treat it as a lost volume: §3.1 at RF=1, the replica-replacement row of [runbook §6](cluster-deployment.md) at RF≥2. Or start it **once** with `--accept-lost-log`: it serves from its last checkpoint, and replicas that still hold the lost writes are found unequal at the coordinator's next connect and kept out of the in-sync set (ADR-195). |
-| Control node | `raft-log.bin` | **No flag.** A node that has voted must not come back with an empty log. Restore the node's data directory from a snapshot (§3.2). Until then leave it down: the other control nodes keep their majority. Do not start it on a partly emptied directory. |
+| Control node | `raft-log.bin` | **No flag, and no repair of this node alone.** A node that has voted must not come back with an empty log, and an older copy of its directory rolls its vote and log back just the same. Leave it down: the other control nodes keep their majority. To return to full strength, recover the control plane as a whole (§3.2). |
 
 After an accepted loss:
 
-1. The server logs the loss and `durability_failures_total{op="log_lost"}` counts it once. A
-   shard node prints a `DURABILITY log_lost: …` line on standard error and counts it in
-   `reverse_rusty_shard_durability_failures_total{op="log_lost"}`. For a cluster or a shard
+1. The server logs the loss and `reverse_rusty_durability_failures_total{op="log_lost"}` is 1
+   from its first scrape (`RRLogLost`). A shard node prints a `DURABILITY log_lost: …` line on
+   standard error and shows it in `reverse_rusty_shard_durability_failures_total{op="log_lost"}`
+   (`RRShardLogLost`). Both alerts stay up until the restart in step 3. For a cluster or a shard
    the event names the log position after which writes were lost. For a single-node server it
    says that every unflushed write is lost and that these can be older than the manifest's
    log watermark, so replay from before the last flush, not from that number.
 2. Replay the window since the last flush or checkpoint from the upstream system of record
    (§3.1 step 3); upserts are idempotent per id.
-3. Remove `--accept-lost-log`. Left in place it would accept the next loss as well.
+3. Remove `--accept-lost-log` and restart. Left in place it would accept the next loss as
+   well; the restart without it also clears the alert.
 4. Take a fresh backup, then **verify** (§4).
 
 A backup taken from a store in this state is refused, and a backup directory that lacks its log

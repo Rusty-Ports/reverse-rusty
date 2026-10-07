@@ -173,9 +173,10 @@ pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<LogAppend
 /// have acknowledged, and bringing it back with an empty log would break what Raft promises
 /// its peers (it could vote again in a term it voted in, or accept a shorter history). The
 /// library underneath does not detect this, so it is refused here (ADR-212, ADR-213). There
-/// is no override: the node's data directory is restored from a snapshot. (Replacing the
-/// node under a new identity is the textbook answer, and needs a control plane that can add
-/// a member.)
+/// is no override, and no safe repair of this node alone: an older copy of its directory
+/// would roll its vote and its log back just the same. The node stays down, the others keep
+/// their majority, and the control plane is recovered as a whole. (Replacing the node under
+/// a new identity is the textbook answer, and needs a control plane that can add a member.)
 ///
 /// A node with none of that state is a fresh node. A log shorter than its header is then
 /// one whose creation was interrupted (releases before ADR-212 created the file and then
@@ -199,9 +200,9 @@ pub(super) fn check_log_against_other_state(paths: &RaftPaths) -> io::Result<()>
                     "this node has other raft state ({}), written after it existed",
                     found.display()
                 ),
-                "It must not start with an empty log beside that state. Restore this node's \
-                 data directory from a snapshot; until then leave it down, and the other \
-                 control nodes keep their majority.",
+                "It must not start with an empty log beside that state, and it must not be \
+                 given an older copy of its directory either. Leave it down: the other \
+                 control nodes keep their majority. Recover the control plane as a whole.",
             )),
         };
     }

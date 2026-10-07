@@ -68,11 +68,14 @@ removed, opened without complaint and without the second write.
    position to replay from.) The flag changes nothing when the log is there, and it does not
    make a damaged log acceptable: a log shorter than its header is still refused (ADR-212).
    It is meant for one start, and both binaries say at every start that it is set.
-5. **A control node has no such flag.** A node that has lost its log must not rejoin with
-   an empty one beside its vote. Its data directory is restored from a snapshot; until then
-   it stays down, and the other control nodes keep their majority. Replacing one control node
-   with an empty one is the textbook answer, and it needs a control plane that can add a
-   member, which this one cannot yet do.
+5. **A control node has no such flag, and no repair of its own.** A node that has lost its
+   log must not rejoin with an empty one beside its vote, and an older copy of its directory
+   is no better: it rolls the vote and the log back, and a node that has forgotten an entry
+   it acknowledged can help elect a leader that lacks it. The node stays down, the other
+   control nodes keep their majority, and full strength comes back through the recovery of
+   the control plane as a whole (operations: disaster recovery, control-plane loss).
+   Replacing one node under a new identity is the textbook answer, and it needs a control
+   plane that can add a member, which this one cannot yet do.
 6. **`FileClusterLog::open` takes the caller's answer.** Its new argument, `IfMissing`, is
    `Create` or `Refuse`, and every caller has to pass one. The default that lost data cannot
    be reached by leaving something out.
@@ -99,8 +102,8 @@ removed, opened without complaint and without the second write.
 - **A store whose log is missing no longer starts.** It did, without the writes that were in
   the log. Restore from a backup, or pass `--accept-lost-log` for one start to go on without
   them. For a shard node, recovering it into an empty data directory from a replica or the
-  coordinator is the better way. A control node takes no flag: restore its data directory
-  from a snapshot.
+  coordinator is the better way. A control node takes no flag and is not repaired alone:
+  leave it down and recover the control plane as a whole.
 - **Do not delete a log to get a node started.** It was never safe; now it also does not
   work.
 - A cluster built by this release is at epoch 1 when `build` returns (it was 0), and its
@@ -109,12 +112,15 @@ removed, opened without complaint and without the second write.
   `ClusterEngine::epoch` and in the shutdown log line; nothing reads it as a count.
 - No format change. An older release reads an epoch-1 manifest as it reads any other.
 - `GET /_settings` shows `accept_lost_log`. It is a startup setting.
-- `durability_failures_total` has a new `op` value, `log_lost`. The existing zero-tolerance
-  alert covers it.
-- A shard node has a new counter, `reverse_rusty_shard_durability_failures_total{op}`, and
-  prints a `DURABILITY <op>: …` line on standard error for each event its shards report.
-  That includes the repair of a torn translog tail at start-up (`wal_torn_tail`), which was
-  reported to nobody before. Alert on an increase of any `op` other than `wal_torn_tail`.
+- `reverse_rusty_durability_failures_total` has a new `op` value, `log_lost`, and a shard
+  node has a new counter, `reverse_rusty_shard_durability_failures_total{op}`, with a
+  `DURABILITY <op>: …` line on standard error for each event its shards report (including
+  `wal_torn_tail`, the repair of a torn translog tail at start-up, which was reported to
+  nobody before).
+- Three alert rules ship in `deploy/prometheus-alerts.yml`: `RRLogLost` and `RRShardLogLost`
+  fire on the counter's **value**, because the loss happens at start-up, before the first
+  scrape, and a rule on its increase would never see it; `RRShardDurabilityFailure` fires on
+  an increase of any other shard-node event except `wal_torn_tail`.
 
 ## Alternatives considered
 
