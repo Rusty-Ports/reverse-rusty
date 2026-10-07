@@ -246,3 +246,62 @@ fn a_recommended_resize_is_decided_on_the_layout_it_replaces() {
     );
     assert_eq!(recommended.expect("recommended resize"), None);
 }
+
+/// The observer is the embedder's code. The events buffered for it, by the coordinator and by
+/// the shards, reach it after `set_observer` has released the layout lock: a callback that
+/// called back into the engine under the lock would wait behind a layout change that waits
+/// for `set_observer`.
+#[test]
+fn buffered_events_reach_the_observer_with_the_layout_lock_released() {
+    let cfg = ClusterConfig {
+        num_shards: 2,
+        include_broad: true,
+        ..Default::default()
+    };
+    let seeded: Vec<(u64, String)> = (1..=20u64)
+        .map(|id| (id, format!("zzitem{id} zzgroup{}", id % 7)))
+        .collect();
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seeded).expect("cluster");
+    // Shard 1 has an event buffered for whoever installs its sink.
+    instrument(
+        &mut cluster,
+        Arc::new(|position, call| match (position, call) {
+            (1, WriteCall::InstallSink) => Err(ShardError::Config("shard".into())),
+            _ => Ok(()),
+        }),
+    );
+    // And the coordinator has one of its own.
+    cluster.emit(EngineEvent::DurabilityFailure {
+        op: DurabilityOp::ReplicaDesync,
+        detail: "buffered by the coordinator".into(),
+        error: "coordinator".into(),
+    });
+
+    let cluster = Arc::new(cluster);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let engine = Arc::downgrade(&cluster);
+    cluster.set_observer(Arc::new(move |event: &EngineEvent| {
+        let engine = engine.upgrade().expect("engine");
+        // What a queued layout change asks for. It does not wait, so a callback that runs
+        // under the lock reports it and returns.
+        let lock_free = engine.layout_lock.try_write().is_ok();
+        let EngineEvent::DurabilityFailure { detail, .. } = event else {
+            return;
+        };
+        record
+            .lock()
+            .expect("seen")
+            .push((detail.clone(), lock_free));
+    }));
+    let mut seen = seen.lock().expect("seen").clone();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("buffered by a shard".to_string(), true),
+            ("buffered by the coordinator".to_string(), true),
+        ],
+        "each buffered event reaches the observer once, with the layout lock free"
+    );
+}

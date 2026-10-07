@@ -97,12 +97,8 @@ fn a_replica_without_a_proof_is_reported_once_the_observer_is_installed() {
             ),
         ],
     );
-    let seen: Arc<Mutex<Vec<EngineEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&seen);
-    rs.set_event_sink(Arc::new(move |event: &EngineEvent| {
-        sink.lock().expect("events").push(event.clone());
-    }));
-    let seen = seen.lock().expect("events");
+    // Buffered until a sink is installed, and handed back to whoever installs it.
+    let seen = rs.set_event_sink(Arc::new(|_event: &EngineEvent| {}));
     assert_eq!(seen.len(), 1, "one replica started without a proof");
     let EngineEvent::DurabilityFailure { op, detail, error } = &seen[0] else {
         panic!("unexpected event {:?}", seen[0]);
@@ -135,9 +131,10 @@ fn writes_are_not_fanned_to_a_replica_without_a_proof() {
     );
     let seen: Arc<Mutex<Vec<EngineEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
-    rs.set_event_sink(Arc::new(move |event: &EngineEvent| {
+    let buffered = rs.set_event_sink(Arc::new(move |event: &EngineEvent| {
         sink.lock().expect("events").push(event.clone());
     }));
+    seen.lock().expect("events").extend(buffered);
     seed(&rs, queries);
     assert_eq!(rs.num_queries().expect("count"), 2, "the primary took them");
     assert_eq!(

@@ -21,6 +21,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   `install_remote_resize` and `resize_remote` take `&self`.
 - The files of a layout that a rebuild replaced are removed once no search is still running on
   that layout, at the rebuild's own checkpoint or the next one.
+- Library: an observer must not call back into the engine from inside an event. It runs on the
+  thread that raised the event, under that operation's locks, and a read other than a search
+  (`collect_load`, for one) now waits for a rebuild there. The events buffered before
+  `ClusterEngine::set_observer` are delivered after it has released its locks.
 
 ## 2026-10-07 — The coordinator's serving state is one published layout
 

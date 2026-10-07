@@ -64,6 +64,12 @@ takes its own lock around a rebuild; removing that is the next step.
    taking the lock for a copy and raising its fence (a small admission lock covers both), so
    a copy cannot start between a change's check and its request. The cutover of the remote
    resize is itself a layout change.
+9. **`set_observer` does not call the observer under the layout lock.** The observer is the
+   embedder's code. Installing it on the shards needs the lock; delivering what was buffered
+   for it does not. A shard now hands its buffered events back when a sink is installed, and
+   `set_observer` delivers them, with the coordinator's own, after it has released the lock.
+   A callback that called back into the engine under the lock would wait behind a queued
+   layout change, which would be waiting for `set_observer`.
 
 ## What changes for a caller
 
@@ -71,6 +77,11 @@ takes its own lock around a rebuild; removing that is the next step.
   returns what the layout it loaded returns: the old result or the new one, never a mix.
   Every other operation waits for the rebuild, where the borrow checker used to make the
   overlap impossible.
+- **Library, observers:** an event raised inside an operation reaches the observer on that
+  operation's thread, while the operation holds its locks, the layout lock among them. The
+  observer must not call back into the engine; it hands the event to another thread if it
+  needs to act on it. This was already true of an observer that called a write. It is now
+  true of one that calls a read other than a search, such as `collect_load`.
 - **Server:** nothing yet. It still holds its cluster lock and the search pool's gate around
   a rebuild (ADR-207), so searches still wait.
 
@@ -140,9 +151,11 @@ hooks that stop a write or a rebuild half-way:
   refused;
 - an exhaustive read gives up at its deadline while a layout change holds it back, and an
   operation whose deadline has already passed still takes a free lock;
-- an in-memory engine forgets the layouts it has replaced once they are released.
+- an in-memory engine forgets the layouts it has replaced once they are released;
+- the events buffered for an observer, by the coordinator and by a shard, reach it once each
+  with the layout lock free.
 
-Nineteen mutations of the design were run against these tests and each fails one: a mutation
+Twenty-two mutations of the design were run against these tests and each fails one: a mutation
 that loads the layout before it holds its locks; an operation that does not keep the layout
 lock; a load snapshot, and an exhaustive read, taken without it (both also fail the rule
 test); a layout published outside the barrier; a replaced layout that is not remembered, and
@@ -151,8 +164,10 @@ directory that is not replaced with the layout; a repair queue that is not empti
 swap; replaced shards that are not frozen, a failed change that does not thaw, a published
 change that thaws, and a frozen shard that still writes; a recommended resize measured before
 its layout change; a layout change that queues behind a remote resize, and one that checks
-for it without the admission; an exhaustive read that ignores its deadline at the lock; and a
-deadline that is checked before the lock is tried.
+for it without the admission; an exhaustive read that ignores its deadline at the lock; a
+deadline that is checked before the lock is tried; and an observer called under the layout
+lock by `set_observer`, for the coordinator's buffered events or a shard's, or a shard's
+buffered events dropped.
 One survived at first and showed that nothing tested a change waiting for an operation in
 flight that is not a write; that test is in.
 

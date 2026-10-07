@@ -573,14 +573,11 @@ impl Shard for LocalShard {
             .store(frozen, std::sync::atomic::Ordering::Release);
     }
 
-    fn set_event_sink(&self, sink: EventSink) {
+    fn set_event_sink(&self, sink: EventSink) -> Vec<crate::events::EngineEvent> {
         *self
             .event_sink
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&sink));
-        let pending = self.lock().take_recovery_events();
-        for event in &pending {
-            sink(event);
-        }
+            .unwrap_or_else(PoisonError::into_inner) = Some(sink);
+        self.lock().take_recovery_events()
     }
 }

@@ -597,7 +597,14 @@ pub(crate) trait Shard: Send + Sync {
     /// [`ReplicatedShard`](super::replica::ReplicatedShard) replica falling out of its
     /// in-sync set. Default: a no-op (a plain [`LocalShard`]/`RemoteShard` emits nothing
     /// here). The coordinator fans its observer in via `ClusterEngine::set_observer`.
-    fn set_event_sink(&self, _sink: EventSink) {}
+    ///
+    /// Returns the events the shard had buffered while it had no sink. The shard does not
+    /// deliver them itself: the sink is the embedder's code, and the caller installs sinks
+    /// under locks it must not hold while that code runs.
+    #[must_use = "the shard's buffered events are the caller's to deliver"]
+    fn set_event_sink(&self, _sink: EventSink) -> Vec<crate::events::EngineEvent> {
+        Vec::new()
+    }
 
     /// How many of this position's replicas reads may not fail over to (ADR-195). 0 for a
     /// position without replicas.

@@ -87,7 +87,7 @@ pub(crate) struct ReplicatedShard {
     /// to drain the last residual + insert the new replica atomically. Reads are lock-free.
     write_lock: Mutex<()>,
     /// Where degraded-redundancy events go once the coordinator installs its observer; until
-    /// then they buffer in `pending_events` and flush on [`Self::set_event_sink`].
+    /// then they buffer in `pending_events`, which [`Self::set_event_sink`] hands back.
     event_sink: Mutex<Option<EventSink>>,
     pending_events: Mutex<Vec<EngineEvent>>,
 }
@@ -166,7 +166,7 @@ impl ReplicatedShard {
     }
 
     /// Surface a degraded-redundancy event: deliver to the sink if installed, else buffer it
-    /// for delivery when the coordinator calls [`Self::set_event_sink`].
+    /// for the coordinator to deliver when it calls [`Self::set_event_sink`].
     fn emit(&self, ev: EngineEvent) {
         let sink = self
             .event_sink

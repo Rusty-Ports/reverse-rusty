@@ -12,6 +12,9 @@ pub(super) enum WriteCall {
     Seal,
     /// A rebuild is about to read this shard's live corpus.
     Gather,
+    /// An event sink is being installed. A hook that answers with an error gives the shard
+    /// one buffered event to hand back, carrying that error.
+    InstallSink,
 }
 
 pub(super) type WriteHook = Arc<dyn Fn(usize, WriteCall) -> Result<(), ShardError> + Send + Sync>;
@@ -199,6 +202,18 @@ impl Shard for ObservedShard {
 
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
         self.inner.segment_filenames()
+    }
+
+    fn set_event_sink(&self, sink: crate::cluster::shard::EventSink) -> Vec<EngineEvent> {
+        let mut buffered = self.inner.set_event_sink(sink);
+        if let Err(error) = (self.hook)(self.position, WriteCall::InstallSink) {
+            buffered.push(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::ReplicaDesync,
+                detail: "buffered by a shard".into(),
+                error: error.to_string(),
+            });
+        }
+        buffered
     }
 
     // What a rebuild asks of the shards it replaces.

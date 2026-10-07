@@ -161,31 +161,44 @@ impl ClusterEngine {
     }
 
     /// Register an observer for durability events (recovery torn-tail, append failures).
-    /// Any events buffered before this call are delivered immediately, mirroring the
+    /// Any events buffered before this call are delivered before it returns, mirroring the
     /// engine's `set_observer`.
+    ///
+    /// The observer is called on the thread that raised the event, inside the operation that
+    /// raised it, so it runs while the engine holds that operation's locks. It must be quick
+    /// and must not call back into the engine: hand the event to another thread to act on it.
+    /// The buffered events are the exception. This call delivers them itself, after it has
+    /// released everything it held.
     pub fn set_observer(&self, observer: ClusterObserver) {
+        let deliver = Arc::clone(&observer);
+        let buffered = self.install_observer(observer);
+        for event in &buffered {
+            deliver(event);
+        }
+    }
+
+    /// Install `observer` here and on every shard of the published layout, and return what
+    /// was buffered for it. The observer is the embedder's code, so it is not called here,
+    /// under the layout lock.
+    fn install_observer(&self, observer: ClusterObserver) -> Vec<EngineEvent> {
         let stable = self.stable();
-        let layout = &*stable.layout;
-        let pending: Vec<EngineEvent> = {
-            let mut p = self
+        let mut buffered = std::mem::take(
+            &mut *self
                 .pending_events
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::take(&mut *p)
-        };
-        for ev in &pending {
-            observer(ev);
-        }
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         // Fan the observer into each shard as an event sink, so a `ReplicatedShard` surfaces its
         // degraded-redundancy (`ReplicaDesync`) events through the same observer (ADR-035). A
         // plain shard's default `set_event_sink` is a no-op.
-        for shard in layout.shards.iter() {
-            shard.set_event_sink(Arc::clone(&observer));
+        for shard in stable.layout.shards.iter() {
+            buffered.extend(shard.set_event_sink(Arc::clone(&observer)));
         }
         *self
             .observer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+        buffered
     }
 
     /// Emit a durability event: deliver to the observer if set, else buffer it for

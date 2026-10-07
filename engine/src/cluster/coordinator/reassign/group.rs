@@ -654,7 +654,9 @@ impl ClusterEngine {
                     .unwrap_or_else(PoisonError::into_inner)
                     .as_ref()
                 {
-                    backing.set_event_sink(Arc::clone(obs));
+                    for event in backing.set_event_sink(Arc::clone(obs)) {
+                        obs(&event);
+                    }
                 }
                 handoff.swap_backing(backing, new_gen);
                 Ok(new_gen)

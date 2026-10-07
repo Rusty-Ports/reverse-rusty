@@ -167,8 +167,10 @@ pub enum CompactionTrigger {
 
 /// Lifecycle events emitted by the engine. Register an observer via
 /// [`Engine::set_observer`](crate::segment::Engine::set_observer) to receive
-/// these. All events are emitted synchronously on the calling thread; the
-/// observer callback should be fast (buffer or increment counters, don't do I/O).
+/// these. All events are emitted synchronously on the calling thread, inside the
+/// operation that raised them and under its locks. The observer callback should be
+/// fast (buffer or increment counters, don't do I/O) and must not call back into the
+/// engine: hand the event to another thread to act on it.
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     /// The memtable was sealed into an immutable base segment.
