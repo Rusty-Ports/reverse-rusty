@@ -371,8 +371,9 @@ async fn disconnected_consumer_fails_without_a_completion() {
 
 #[test]
 fn cancellation_interrupts_cluster_write_barrier_wait() {
-    let lock = parking_lot::Mutex::new(());
-    let held = lock.lock();
+    // A write in flight shares admission; the job needs it alone and waits.
+    let lock = parking_lot::RwLock::new(());
+    let held = lock.read();
     let mut sink = CancelWhileWaiting { checks: 0 };
     let started = Instant::now();
     // The deadline is far beyond the bound asserted below: a wait that ignored the

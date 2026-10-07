@@ -285,6 +285,14 @@ counts both holders and waiters, retiring an entry only after its final caller l
 with active mutation concurrency, not corpus size or historical churn
 ([ADR-177](../decisions/adr-177-per-id-cluster-write-locks.md)).
 
+The served coordinator admits writes together: a `PUT`, a `DELETE` and a bulk batch share one
+admission lock, up to 32 at a time, as does a search that returns sources. An operation that
+needs the corpus still (flush, checkpoint, backup, a vocabulary change, resync, resize, an
+exhaustive job) takes it alone
+([ADR-206](../decisions/adr-206-coordinator-writes-share-admission.md)). One write still visits
+its shards one after another, and a remote position that does not answer costs each write that
+touches it the write deadline.
+
 The lock order is PIT/exhaustive mutation barrier, then bulk-load barrier, then ID lock. Individual
 mutations hold the bulk barrier's shared side; initial bulk ingest holds its exclusive side across
 the empty check, directory installation, and all shard writes. Bulk never acquires individual ID

@@ -1,7 +1,7 @@
 //! The dedicated runtime every cluster RPC runs on.
 //!
 //! Request handlers and administrative workers wait on the coordinator's synchronous locks
-//! (`write_serial`, the cluster `RwLock`), and some of them do so on the HTTP runtime's worker
+//! (`write_admission`, the cluster `RwLock`), and some of them do so on the HTTP runtime's worker
 //! threads. If the RPCs a lock holder is waiting on were also driven by those workers (their
 //! connections' I/O and timers), enough blocked handlers would stall the runtime and the holder
 //! would never finish: a deadlock that needs no bug beyond ordinary concurrent writes. Cluster

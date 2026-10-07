@@ -71,7 +71,7 @@ async fn checkpoint_reports_remote_primary_seals_and_fails_without_acknowledgeme
     let _ = std::fs::remove_dir_all(root);
 }
 
-fn durable_state(tag: &str) -> (Arc<ClusterAppState>, std::path::PathBuf) {
+pub(super) fn durable_state(tag: &str) -> (Arc<ClusterAppState>, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "rr-cluster-checkpoint-api-{tag}-{}",
         uuid::Uuid::new_v4()
@@ -227,7 +227,8 @@ async fn checkpoint_waits_off_runtime_and_detached_work_keeps_shared_admission()
     let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
     let holder = std::thread::spawn(move || {
-        let _writer = held_state.write_serial.lock();
+        // A write in flight: it shares admission, and the checkpoint needs it alone.
+        let _writer = held_state.write_admission.read();
         locked_tx.send(()).expect("announce writer lock");
         release_rx.recv().expect("release writer lock");
     });

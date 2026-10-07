@@ -124,6 +124,11 @@ ordered coordinator-log upsert/create path. An item that not every shard took is
 status 503, error type `partial_write`, no `_version`, and not stored on every shard (ADR-194).
 Send it again as an `index` action, or use `POST /_cluster/resync` on the same coordinator.
 
+In coordinator mode, batches sent at the same time run at the same time and interleave their
+items (ADR-206). Each item is applied whole, and writes to one ID are applied in the order the
+coordinator logged them, so an ID that two concurrent batches both write ends on whichever was
+logged last. Send one batch after the other when their order matters.
+
 `update`, `delete`, automatic IDs, arbitrary indices, routing, pipelines, scripts, aliases,
 sequence-number/primary-term controls, ES/OpenSearch version controls, and shard-wait controls are
 not implemented. Supplying them fails rather than silently approximating their semantics. Use

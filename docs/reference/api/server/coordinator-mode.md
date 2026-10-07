@@ -152,8 +152,9 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   exact coordinator merge, honest thresholded totals, current-source fetch for final winners, and
   coordinator-compiled explanations. It defaults `include_source=true`, supports remote shards, and
   fails the whole response on timeout, stale placement, missing source, fetch/protocol failure, or
-  enrichment overflow; partial results are unsupported. Source/explanation requests fence direct
-  mutations through match and fetch, while source-free reads stay concurrent. ES/OS aliases
+  enrichment overflow; partial results are unsupported. Source/explanation requests fence
+  mutations through match and fetch and run one at a time, while source-free reads stay concurrent
+  (ADR-206). ES/OS aliases
   `_source`, numeric `track_total_hits`, and time-value `timeout` are strict body/query controls
   (ADR-127). Strict typed `rank_fields.priority` remains signed and available after tag-dict freeze.
 - **Compatibility `include_source` defaults to `false`** (`_source` costs a per-hit source probe);

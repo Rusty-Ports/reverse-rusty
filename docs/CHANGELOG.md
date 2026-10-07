@@ -9,6 +9,23 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-06 — Coordinator writes run beside each other
+
+- **In coordinator mode, writes no longer run one at a time**
+  ([ADR-206](decisions/adr-206-coordinator-writes-share-admission.md)). The server held one
+  mutex across every `PUT`, `DELETE` and bulk batch, so a write to one ID waited for a slow
+  write to another, for up to the write deadline when a remote shard did not answer. Writes now
+  share admission, up to 32 at a time. Writes to one ID are still applied in the order the
+  coordinator logged them.
+- **Behaviour change:** two bulk batches sent at the same time interleave their items, where the
+  second used to wait for the first. Send them one after the other when their order matters.
+- **A search that returns sources (the default on `/v2/_search` and `/v2/_mpercolate`) no
+  longer waits for a whole bulk batch to finish.** It shares admission with writes. It still
+  waits for the writes in flight and runs one at a time.
+- Flush, checkpoint, backup, a vocabulary change, resync, resize and an exhaustive job still
+  hold every write, and every search that returns sources, out while they run.
+- Not changed: one write still visits its shards one after another.
+
 ## 2026-10-06 — A write reports the class its query was stored under
 
 - `PUT /_doc/{id}` and each `_bulk` item now answer with `class` (`"a"`, `"b"`, `"c"`, `"d"` or

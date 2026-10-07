@@ -48,7 +48,7 @@ fn state_from_cluster_with_rebalance_topology(
     Arc::new(ClusterAppState {
         cluster: RwLock::new(cluster),
         topology_guard: RwLock::new(()),
-        write_serial: Mutex::new(()),
+        write_admission: RwLock::new(()),
         write_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_QUEUED_CLUSTER_WRITES,
         )),
@@ -452,9 +452,11 @@ mod reconcile;
 mod request_limit;
 mod resize;
 mod resync;
+mod search_pool;
 mod settings_read;
 mod settings_write;
 mod state_read;
 mod v2;
 mod vocab;
 mod write_admission;
+mod write_concurrency;

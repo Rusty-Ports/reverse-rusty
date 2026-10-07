@@ -313,11 +313,11 @@ fn resize_worker(
         return not_started();
     };
     let writes = if no_wait {
-        state.write_serial.try_lock()
+        state.write_admission.try_write()
     } else {
         deadline
             .checked_duration_since(Instant::now())
-            .and_then(|budget| state.write_serial.try_lock_for(budget))
+            .and_then(|budget| state.write_admission.try_write_for(budget))
     };
     let Some(writes) = writes else {
         return not_started();

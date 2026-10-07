@@ -65,8 +65,10 @@ cluster source is `502`). Matching, ranking, source, and explanation use one exa
 generation. A concurrent replacement can therefore make old enrichment unavailable, but can never
 splice the replacement's source onto the older match. In coordinator mode, a request that asks for
 sources takes the core mutation-frozen read view through matching and source cloning. Direct
-`ClusterEngine` writes and REST writes both wait for that short view; source-free searches keep the
-unfenced concurrent-read path.
+`ClusterEngine` writes and REST writes both wait for that short view, and such searches run one at a
+time; source-free searches keep the unfenced concurrent-read path. The search shares write
+admission with writes, so it does not wait for a whole bulk batch; it does wait for an operation
+that holds admission alone, such as a checkpoint, a resize or an exhaustive job (ADR-206).
 
 > **An explicit `timeout` or `timeout_ms` is also a compute budget (ADR-099/123).** On expiry the
 > request returns `408` as always, and — when the request set either timeout

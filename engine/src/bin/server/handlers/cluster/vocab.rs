@@ -69,10 +69,10 @@ pub(crate) async fn cluster_get_vocab(
 }
 
 /// Take the exclusive cluster lock for a vocabulary rebuild. Call it while holding
-/// `write_serial`. A remote resize (ADR-180) releases `write_serial` once its write fence is up but
+/// `write_admission` exclusively. A remote resize (ADR-180) releases it once its write fence is up but
 /// keeps shared access for its whole copy; waiting for exclusive access then would stall every
 /// read behind this request, so a raised fence refuses the rebuild instead. The resize raises the
-/// fence only while it holds `write_serial`, so the check cannot race it.
+/// fence only while it holds `write_admission` exclusively, so the check cannot race it.
 fn lock_for_rebuild(
     state: &ClusterAppState,
 ) -> Result<RwLockWriteGuard<'_, ClusterEngine>, ShardError> {
@@ -96,7 +96,7 @@ pub(crate) async fn cluster_put_vocab(
     let work_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let _w = work_state.write_serial.lock();
+        let _w = work_state.write_admission.write();
         lock_for_rebuild(&work_state).and_then(|mut cluster| cluster.set_vocab(vocab))
     });
     match worker.await {
@@ -149,7 +149,7 @@ pub(crate) async fn cluster_learn_and_apply_vocab(
     let work_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let _w = work_state.write_serial.lock();
+        let _w = work_state.write_admission.write();
         lock_for_rebuild(&work_state).and_then(|mut cluster| cluster.learn_and_apply_with(&config))
     });
     let response = match worker.await {
@@ -215,7 +215,7 @@ pub(crate) async fn cluster_import_aliases(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let (synonyms, rules) = payload.validate()?;
-        let _w = work_state.write_serial.lock();
+        let _w = work_state.write_admission.write();
         let report = lock_for_rebuild(&work_state)
             .and_then(|mut cluster| cluster.import_alias_synonyms(&synonyms));
         Ok::<_, String>((rules, report))
@@ -263,7 +263,7 @@ pub(crate) async fn cluster_learn_aliases(
     let work_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let _w = work_state.write_serial.lock();
+        let _w = work_state.write_admission.write();
         lock_for_rebuild(&work_state)
             .and_then(|mut cluster| cluster.learn_aliases_and_apply(min_count))
     });

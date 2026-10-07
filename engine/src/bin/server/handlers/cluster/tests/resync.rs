@@ -211,7 +211,8 @@ async fn manager_timeout_bounds_admission_and_exclusive_writer_waits() {
     let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
     let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
     let writer_holder = std::thread::spawn(move || {
-        let _writes = writer_state.write_serial.lock();
+        // A write in flight: it shares admission, and the resync needs it alone.
+        let _writes = writer_state.write_admission.read();
         locked_sender.send(()).expect("signal writer lock");
         release_receiver.recv().expect("release writer lock");
     });

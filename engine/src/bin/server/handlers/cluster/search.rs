@@ -641,8 +641,8 @@ async fn percolate_blocking(
                 )));
             }
 
-            let run_pool = |stable_view: Option<&ClusterReadView<'_>>| {
-                state_inner.pool.install(|| {
+            let run = |stable_view: Option<&ClusterReadView<'_>>| {
+                {
                     use rayon::prelude::*;
                     let deadline = requested_deadline.filter(|_| cooperative_cancel);
                     // Without source enrichment the read guard is taken PER TITLE: the
@@ -735,20 +735,18 @@ async fn percolate_blocking(
                             .inc();
                     }
                     run
-                })
+                }
             };
 
             if source_fetch.is_some() {
-                // Source waiters must not occupy the shared Rayon pool. Acquire
-                // both the HTTP write funnel and the core mutation-frozen view on
-                // this blocking thread before entering the pool. The core fence
-                // also covers direct `ClusterEngine` mutations.
-                let _write_guard = state_inner.write_serial.lock();
-                let cluster = state_inner.cluster.read();
-                let stable_view = cluster.consistent_read_view();
-                run_pool(Some(&stable_view))
+                // A request that returns sources runs under the mutation-frozen view,
+                // taken on this blocking thread before the work enters the search pool.
+                // The view excludes every mutation, served or direct. The request shares
+                // write admission with writes, so it does not wait for a whole bulk batch
+                // (ADR-206).
+                state_inner.run_with_stable_view(|stable_view| run(Some(stable_view)))
             } else {
-                run_pool(None)
+                state_inner.pool.install(|| run(None))
             }
         })
         .await

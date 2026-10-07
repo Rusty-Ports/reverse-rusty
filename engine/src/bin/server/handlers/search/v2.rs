@@ -696,15 +696,12 @@ async fn cluster_v2_search_inner(
             deadline,
         };
         let result = if mutation_fenced {
-            // Do not occupy a shared Rayon worker while waiting for the
-            // request/write and direct-mutation fences. Once acquired, match,
-            // winner fetch, and explanation stay inside one coherent view.
-            let _write_guard = cluster_state.write_serial.lock();
-            let cluster = cluster_state.cluster.read();
-            let stable_view = cluster.consistent_read_view();
-            cluster_state.pool.install(|| {
+            // Match, winner fetch and explanation run inside one mutation-frozen view,
+            // taken on this blocking thread before the work enters the search pool. The
+            // request shares write admission with writes (ADR-206).
+            cluster_state.run_with_stable_view(|stable_view| {
                 delivery::cluster_delivery(
-                    &stable_view,
+                    stable_view,
                     mint.as_ref().map(|mint| mint.pit),
                     &program,
                     &filter,
@@ -729,8 +726,8 @@ async fn cluster_v2_search_inner(
             result
         })
     };
-    // Fenced requests enter Rayon only after acquiring their mutation view;
-    // source-free requests retain the driver's ordinary pool installation.
+    // Fenced requests wait for their view on the driver's blocking thread and enter the
+    // search pool themselves; source-free requests are installed in it by the driver.
     delivery::drive(
         state,
         started,

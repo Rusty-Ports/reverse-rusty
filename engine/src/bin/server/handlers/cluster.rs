@@ -7,8 +7,8 @@
 //!
 //! Concurrency (see [`crate::state::ClusterAppState`]): percolates and ordinary
 //! writes take the cluster READ lock (`ClusterEngine` reads are `&self` lock-free;
-//! writes are `&self`, log-ordered); writes additionally hold `write_serial` so
-//! batches don't interleave. Descriptor mutation takes the exclusive side of
+//! writes are `&self`, log-ordered); writes additionally share `write_admission`,
+//! which whole-cluster operations take exclusively. Descriptor mutation takes the exclusive side of
 //! `topology_guard`, movement takes its shared side, and `&mut self` blue/green
 //! vocabulary/resize operations take the cluster WRITE lock.
 //!
@@ -51,7 +51,7 @@ pub(crate) async fn admit_cluster_write(
 }
 
 /// Run a cluster mutation on a blocking thread, never on an async worker. It waits on
-/// `write_serial` and the cluster lock and then makes remote write RPCs; a worker parked on those
+/// `write_admission` and the cluster lock and then makes remote write RPCs; a worker parked on those
 /// waits would starve every other request. The RPCs themselves run on the dedicated cluster
 /// runtime (see `cluster_mode::rpc_runtime`), so the lock holder always progresses.
 pub(crate) async fn run_cluster_write<T: Send + 'static>(
@@ -62,7 +62,7 @@ pub(crate) async fn run_cluster_write<T: Send + 'static>(
     let state = std::sync::Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let _writes = state.write_serial.lock();
+        let _writes = state.write_admission.read();
         let cluster = state.cluster.read();
         work(&cluster)
     })
