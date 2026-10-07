@@ -33,9 +33,26 @@ pub(super) fn open_cluster_log(
     let refused = |e: std::io::Error| ShardError::Log(format!("opening cluster log: {e}"));
     let log_path = data_dir.join(CLUSTER_LOG_FILE);
     let fsync = config.is_some_and(|c| c.wal_sync_on_write);
-    let if_missing = if manifest.written_with_its_log() {
-        if !log_path.exists() {
-            return Err(refused(crate::storage::framed_log::lost_log(
+    if !manifest.written_with_its_log() {
+        FileClusterLog::finish_interrupted_creation(&log_path).map_err(refused)?;
+        return FileClusterLog::open(
+            &log_path,
+            fsync,
+            LogPos(manifest.snapshot_pos),
+            IfMissing::Create,
+        )
+        .map_err(refused);
+    }
+    // The one check is in `open`: told to refuse, it creates nothing. A log that is not
+    // there is reported with what this owner knows about it.
+    match FileClusterLog::open(
+        &log_path,
+        fsync,
+        LogPos(manifest.snapshot_pos),
+        IfMissing::Refuse,
+    ) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(refused(crate::storage::framed_log::lost_log(
                 &log_path,
                 &format!(
                     "the cluster manifest (epoch {}, log position {}) was written after it \
@@ -44,15 +61,10 @@ pub(super) fn open_cluster_log(
                 ),
                 "Restore the data directory from a backup. The shards' translogs have not \
                  been touched.",
-            )));
+            )))
         }
-        IfMissing::Refuse
-    } else {
-        FileClusterLog::finish_interrupted_creation(&log_path).map_err(refused)?;
-        IfMissing::Create
-    };
-    FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos), if_missing)
-        .map_err(refused)
+        opened => opened.map_err(refused),
+    }
 }
 
 impl ClusterEngine {

@@ -96,8 +96,11 @@ pub(crate) fn open_existing(
     floor: LogPos,
 ) -> Result<Box<ShardLog>, ShardError> {
     let path = dir.join(TRANSLOG_FILE);
-    if !path.exists() {
-        return Err(ShardError::Log(
+    // The one check is in `open`: told to refuse, it creates nothing. A translog that is
+    // not there is reported with what this owner knows about it.
+    match FileClusterLog::open(&path, fsync_each_write, floor, IfMissing::Refuse) {
+        Ok(log) => Ok(Box::new(log)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ShardError::Log(
             crate::storage::framed_log::lost_log(
                 &path,
                 "this shard's checkpoint file was written after it existed",
@@ -105,16 +108,12 @@ pub(crate) fn open_existing(
                  coordinator, or restore its volume from a snapshot.",
             )
             .to_string(),
-        ));
+        )),
+        Err(e) => Err(ShardError::Log(format!(
+            "opening existing shard translog {}: {e}",
+            path.display()
+        ))),
     }
-    let log =
-        FileClusterLog::open(&path, fsync_each_write, floor, IfMissing::Refuse).map_err(|e| {
-            ShardError::Log(format!(
-                "opening existing shard translog {}: {e}",
-                path.display()
-            ))
-        })?;
-    Ok(Box::new(log))
 }
 
 // ---- per-shard checkpoint sidecar (ADR-039 §6: data-node self-restart) ----
