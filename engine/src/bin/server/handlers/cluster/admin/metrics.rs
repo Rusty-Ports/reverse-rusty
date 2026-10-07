@@ -36,8 +36,8 @@ pub(crate) async fn cluster_metrics(
 
     let worker_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
-        let cluster = worker_state.cluster.read();
-        let snapshot = collect_cluster_metrics(&cluster);
+        let cluster = &worker_state.cluster;
+        let snapshot = collect_cluster_metrics(cluster);
         (permit, snapshot)
     });
     match worker.await {

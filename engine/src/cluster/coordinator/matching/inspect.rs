@@ -25,12 +25,7 @@ impl ClusterEngine {
     /// Redundancy is reduced by that many copies until they are recovered. 0 without replicas.
     #[must_use]
     pub fn out_of_sync_replicas(&self) -> usize {
-        let layout = &*self.layout();
-        layout
-            .shards
-            .iter()
-            .map(|shard| shard.out_of_sync_replicas())
-            .sum()
+        self.layout().out_of_sync_replicas()
     }
 
     /// A point-in-time snapshot of the cluster gRPC transport metrics (ADR-085): per-RPC
@@ -58,15 +53,7 @@ impl ClusterEngine {
     /// 4 — ADR-105). Used by the oracle to assert each placement branch is
     /// actually exercised.
     pub fn class_counts(&self) -> Result<[u64; 5], ShardError> {
-        let layout = &*self.layout();
-        let mut total = [0u64; 5];
-        for s in layout.shards.iter() {
-            let c = s.class_counts()?;
-            for i in 0..5 {
-                total[i] += c[i];
-            }
-        }
-        Ok(total)
+        self.layout().class_counts()
     }
 
     /// [`Self::percolate_filtered_with_broad`] also returning the merged [`MatchStats`]

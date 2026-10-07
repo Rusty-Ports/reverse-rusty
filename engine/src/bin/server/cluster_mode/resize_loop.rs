@@ -125,15 +125,15 @@ enum OperationResult {
     NeedsCommit,
 }
 
-/// Collect one observation off the async runtime: the cluster read lock can wait behind an
-/// exclusive rebuild.
+/// Collect one observation off the async runtime: it calls every shard, and inside the engine
+/// it waits for a rebuild that is running.
 async fn observe(
     state: &Arc<ClusterAppState>,
     autoscale: &AutoscaleConfig,
 ) -> Option<ResizeObservation> {
     let st = Arc::clone(state);
     let cfg = autoscale.clone();
-    match tokio::task::spawn_blocking(move || st.cluster.read().resize_observation(&cfg)).await {
+    match tokio::task::spawn_blocking(move || st.cluster.resize_observation(&cfg)).await {
         Ok(Ok(observation)) => Some(observation),
         Ok(Err(error)) => {
             warn!(error = %error, "governed resize: load observation failed; retrying next interval");

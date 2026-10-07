@@ -45,7 +45,7 @@ fn hold_topology(state: &Arc<ClusterAppState>) -> impl FnOnce() {
 }
 
 fn generation(state: &Arc<ClusterAppState>) -> u64 {
-    state.cluster.read().placement_generation().0
+    state.cluster.placement_generation().0
 }
 
 #[tokio::test]
@@ -126,7 +126,7 @@ async fn an_operation_id_replays_its_recorded_success_without_rebuilding() {
         StatusCode::CONFLICT,
         "operation_id_conflict",
     );
-    assert_eq!(state.cluster.read().num_shards(), 4);
+    assert_eq!(state.cluster.num_shards(), 4);
 }
 
 #[tokio::test]
@@ -141,7 +141,7 @@ async fn a_stale_retry_cannot_undo_a_later_resize() {
     let (status, replay) = post_json(&state, r#"{"num_shards":4,"operation_id":"to-4"}"#).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(replay["replayed"], true);
-    assert_eq!(state.cluster.read().num_shards(), 2);
+    assert_eq!(state.cluster.num_shards(), 2);
 
     let (status, list) = get_json(&state, "/_cluster/resize").await;
     assert_eq!(status, StatusCode::OK, "{list}");
@@ -175,7 +175,7 @@ async fn a_placement_generation_precondition_guards_the_start() {
         StatusCode::CONFLICT,
         "placement_generation_mismatch",
     );
-    assert_eq!(state.cluster.read().num_shards(), 3, "nothing started");
+    assert_eq!(state.cluster.num_shards(), 3, "nothing started");
     assert_eq!(generation(&state), current);
     let (_, record) = get_json(&state, "/_cluster/resize/guarded").await;
     assert_eq!(record["state"], "failed");
@@ -194,13 +194,13 @@ async fn a_placement_generation_precondition_guards_the_start() {
             .is_some_and(|id| id.starts_with("resize-")),
         "a generated id is returned: {body}"
     );
-    assert_eq!(state.cluster.read().num_shards(), 4);
+    assert_eq!(state.cluster.num_shards(), 4);
 }
 
 #[tokio::test]
 async fn a_failed_operation_re_executes_under_the_same_id() {
     let base = test_state(&seed());
-    let initial = base.cluster.read().control_state().expect("state");
+    let initial = base.cluster.control_state().expect("state");
     drop(base);
     let state = state_with_control(Box::new(retry::FailResizeProposals {
         inner: InMemoryControlPlane::new(initial),
@@ -234,7 +234,7 @@ async fn a_failed_operation_re_executes_under_the_same_id() {
     let (_, record) = get_json(&state, "/_cluster/resize/heal").await;
     assert_eq!(record["state"], "succeeded", "{record}");
     assert!(record.get("error").is_none(), "{record}");
-    assert_eq!(state.cluster.read().num_shards(), 4);
+    assert_eq!(state.cluster.num_shards(), 4);
 }
 
 #[tokio::test]
@@ -307,13 +307,13 @@ async fn a_request_that_never_starts_is_recorded_not_started() {
     release();
     let record = state.resize_operations.get("blocked").expect("record");
     assert_eq!(record.state, crate::resize_ops::ResizeState::NotStarted);
-    assert_eq!(state.cluster.read().num_shards(), 3);
+    assert_eq!(state.cluster.num_shards(), 3);
 }
 
 #[tokio::test]
 async fn a_conditional_operation_heals_its_own_uncommitted_swap() {
     let base = test_state(&seed());
-    let initial = base.cluster.read().control_state().expect("state");
+    let initial = base.cluster.control_state().expect("state");
     drop(base);
     let state = state_with_control(Box::new(retry::FailResizeProposals {
         inner: InMemoryControlPlane::new(initial),
@@ -343,7 +343,7 @@ async fn a_conditional_operation_heals_its_own_uncommitted_swap() {
     assert_eq!(status, StatusCode::OK, "{healed}");
     assert_eq!(healed["num_shards"], 4);
     assert_eq!(healed["placement_generation"], before + 1);
-    let control = state.cluster.read().control_state().expect("state");
+    let control = state.cluster.control_state().expect("state");
     assert_eq!(control.num_shards, 4);
     assert_eq!(control.placement_generation, before + 1);
     let (_, record) = get_json(&state, "/_cluster/resize/cas-heal").await;
@@ -370,7 +370,7 @@ async fn a_conditional_operation_heals_its_own_uncommitted_swap() {
 #[tokio::test]
 async fn a_failure_names_the_generated_operation_so_it_can_heal() {
     let base = test_state(&seed());
-    let initial = base.cluster.read().control_state().expect("state");
+    let initial = base.cluster.control_state().expect("state");
     drop(base);
     let state = state_with_control(Box::new(retry::FailResizeProposals {
         inner: InMemoryControlPlane::new(initial),
@@ -397,15 +397,7 @@ async fn a_failure_names_the_generated_operation_so_it_can_heal() {
     .await;
     assert_eq!(status, StatusCode::OK, "{healed}");
     assert_eq!(healed["operation_id"], id.as_str());
-    assert_eq!(
-        state
-            .cluster
-            .read()
-            .control_state()
-            .expect("state")
-            .num_shards,
-        4
-    );
+    assert_eq!(state.cluster.control_state().expect("state").num_shards, 4);
 }
 
 #[tokio::test]
@@ -431,7 +423,7 @@ async fn targets_are_validated_against_the_topology() {
         let (status, _, bytes) = send_raw(&state, resize_request("/_cluster/resize", body)).await;
         assert_error(status, &bytes, StatusCode::BAD_REQUEST, "validation_error");
     }
-    assert_eq!(state.cluster.read().num_shards(), 3);
+    assert_eq!(state.cluster.num_shards(), 3);
 }
 
 #[cfg(feature = "distributed")]
@@ -453,22 +445,14 @@ async fn a_remote_resize_frees_health_admission_but_stays_joinable_by_shutdown()
         include_broad: true,
         ..ClusterConfig::default()
     });
-    // Hold the exclusive cluster lock on a dedicated thread so the remote worker parks after it
-    // has taken the topology and write guards.
-    let holder_state = Arc::clone(&state);
-    let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
-    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel::<()>(1);
-    let holder = std::thread::spawn(move || {
-        let _cluster = holder_state.cluster.write();
-        locked_sender.send(()).expect("signal cluster lock");
-        release_receiver.recv().expect("release cluster lock");
-    });
-    locked_receiver.recv().expect("cluster locked");
+    // A rebuild stopped half-way holds the engine alone, so the remote worker parks inside
+    // the engine after it has taken the topology and write guards.
+    let other_rebuild = pause_a_rebuild(&state);
     let request_state = Arc::clone(&state);
     let request = tokio::spawn(async move {
         post_json(
             &request_state,
-            r#"{"num_shards":4,"operation_id":"remote-health","targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
+            r#"{"num_shards":5,"operation_id":"remote-health","targets":[{"id":11,"endpoint":"http://127.0.0.1:1"}]}"#,
         )
         .await
     });
@@ -480,12 +464,12 @@ async fn a_remote_resize_frees_health_admission_but_stays_joinable_by_shutdown()
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    // A remote copy keeps reads serving, so it must return the single administrative permit
-    // that `/_health` also waits for; otherwise probes time out for the whole copy.
-    while state.stats_permits.available_permits() == 0 {
+    // A remote copy can take a long time, so it must return the administrative-change slot;
+    // otherwise a vocabulary change or a membership change queues for the whole copy.
+    while state.admin_change_permits.available_permits() == 0 {
         assert!(
             std::time::Instant::now() < deadline,
-            "the remote resize kept the permit health probes need"
+            "the remote resize kept the administrative-change slot"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -496,8 +480,7 @@ async fn a_remote_resize_frees_health_admission_but_stays_joinable_by_shutdown()
         0,
         "shutdown must be able to wait for the running copy"
     );
-    release_sender.send(()).expect("release");
-    holder.join().expect("holder");
+    other_rebuild.finish().expect("the other rebuild");
     let (status, failed) = request.await.expect("request task");
     assert_eq!(status, StatusCode::BAD_REQUEST, "{failed}");
     assert_eq!(state.remote_resize_permits.available_permits(), 1);
@@ -532,7 +515,6 @@ async fn a_resolve_only_remote_resize_requires_targets() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(state
         .cluster
-        .read()
         .control_state()
         .expect("state")
         .nodes
@@ -551,7 +533,7 @@ async fn a_resolve_only_remote_resize_requires_targets() {
     let (_, record) = get_json(&state, "/_cluster/resize/remote-1").await;
     assert_eq!(record["state"], "failed", "{record}");
     assert_eq!(record["targets"][0]["id"], 11);
-    assert_eq!(state.cluster.read().num_shards(), 3);
+    assert_eq!(state.cluster.num_shards(), 3);
 
     let static_state = state_from_cluster_with_rebalance_topology(
         ClusterEngine::build(

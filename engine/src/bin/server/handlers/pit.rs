@@ -481,9 +481,9 @@ fn join_failure() -> (StatusCode, Json<ApiError>) {
 }
 
 /// Coordinator-mode open: pins EVERY position's current snapshot under one id
-/// (index-wide, ES-style). The cluster lock is taken inside `spawn_blocking` —
-/// a concurrent vocab/resize rebuild holds the write lock for a long time, and
-/// an async-path read would park an executor thread behind it.
+/// (index-wide, ES-style). It runs inside `spawn_blocking`: the engine makes it
+/// wait for a vocabulary or resize rebuild that is running, which can take a long
+/// time, and on the async path that wait would park an executor thread.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_open_pit_route(
     State(state): State<Arc<ClusterAppState>>,
@@ -497,7 +497,7 @@ pub(crate) async fn cluster_open_pit_route(
     let keep_alive = resolve_open_pit(body, params).map_err(validation)?;
     let worker = Arc::clone(&state);
     let opened = tokio::task::spawn_blocking(move || {
-        let cluster = worker.cluster.read();
+        let cluster = &worker.cluster;
         let opened = cluster.open_pit(keep_alive, &worker.pit_config, Instant::now());
         let creation_time = creation_time_millis();
         worker.prom.open_pits.set(cluster.open_pit_count() as i64);
@@ -527,7 +527,7 @@ pub(crate) async fn cluster_close_pit_route(
     let targets = resolve_close_targets(&state.pit_tokens, body, state.pit_config.max_open)?;
     let worker = Arc::clone(&state);
     let outcomes = tokio::task::spawn_blocking(move || {
-        let cluster = worker.cluster.read();
+        let cluster = &worker.cluster;
         let shards = cluster.num_shards();
         let now = Instant::now();
         let outcomes = targets

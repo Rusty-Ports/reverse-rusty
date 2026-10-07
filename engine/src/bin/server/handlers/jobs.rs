@@ -401,7 +401,7 @@ async fn cluster_create_job_inner(
                 // Freeze coordinator writes and placement for the complete
                 // shard sequence, yielding one coherent execution view.
                 let _writes = lock_cluster_writes(&state_for_job.write_admission, sink, deadline)?;
-                let cluster = state_for_job.cluster.read();
+                let cluster = &state_for_job.cluster;
                 cluster
                     .try_percolate_filtered_all(
                         &title,

@@ -44,7 +44,7 @@ impl ControlPlane for FailResizeProposals {
 #[tokio::test]
 async fn retry_repairs_a_post_swap_control_failure_before_acknowledging() {
     let base = test_state(&seed());
-    let initial = base.cluster.read().control_state().expect("state");
+    let initial = base.cluster.control_state().expect("state");
     drop(base);
     let state = state_with_control(Box::new(FailResizeProposals {
         inner: InMemoryControlPlane::new(initial),
@@ -66,15 +66,10 @@ async fn retry_repairs_a_post_swap_control_failure_before_acknowledging() {
         !String::from_utf8_lossy(&bytes).contains("secret control-plane"),
         "backend detail must remain server-side: {bytes:?}"
     );
-    assert_eq!(
-        state.cluster.read().num_shards(),
-        4,
-        "the live swap occurred"
-    );
+    assert_eq!(state.cluster.num_shards(), 4, "the live swap occurred");
     assert_eq!(
         state
             .cluster
-            .read()
             .control_state()
             .expect("stale state")
             .num_shards,
@@ -93,7 +88,7 @@ async fn retry_repairs_a_post_swap_control_failure_before_acknowledging() {
     assert_eq!(body["old_num_shards"], 4, "{body}");
     assert_eq!(body["num_shards"], 4, "{body}");
     assert_eq!(body["rebuilt"], 0, "{body}");
-    let cluster = state.cluster.read();
+    let cluster = &state.cluster;
     let control = cluster.control_state().expect("repaired state");
     assert_eq!(control.num_shards, 4);
     assert_eq!(
@@ -106,7 +101,7 @@ async fn retry_repairs_a_post_swap_control_failure_before_acknowledging() {
 #[tokio::test]
 async fn different_target_retry_repairs_before_advancing_generation() {
     let base = test_state(&seed());
-    let initial = base.cluster.read().control_state().expect("state");
+    let initial = base.cluster.control_state().expect("state");
     let initial_generation = initial.placement_generation;
     drop(base);
     let state = state_with_control(Box::new(FailResizeProposals {
@@ -120,7 +115,7 @@ async fn different_target_retry_repairs_before_advancing_generation() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(state.cluster.read().num_shards(), 4, "first live swap");
+    assert_eq!(state.cluster.num_shards(), 4, "first live swap");
 
     let (status, _) = send(
         &state,
@@ -129,14 +124,13 @@ async fn different_target_retry_repairs_before_advancing_generation() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        state.cluster.read().num_shards(),
+        state.cluster.num_shards(),
         4,
         "a failed predecessor repair must block the next rebuild"
     );
     assert_eq!(
         state
             .cluster
-            .read()
             .control_state()
             .expect("still-stale control")
             .placement_generation,
@@ -149,7 +143,7 @@ async fn different_target_retry_repairs_before_advancing_generation() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let cluster = state.cluster.read();
+    let cluster = &state.cluster;
     let control = cluster.control_state().expect("terminal control");
     assert_eq!(cluster.num_shards(), 5);
     assert_eq!(control.num_shards, 5);

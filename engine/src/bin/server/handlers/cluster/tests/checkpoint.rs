@@ -114,7 +114,7 @@ async fn checkpoint_reports_whether_it_created_durable_shard_state() {
         .contains("no data directory"));
 
     let (durable, root) = durable_state("success");
-    let epoch_before = durable.cluster.read().epoch();
+    let epoch_before = durable.cluster.epoch();
     let (status, headers, bytes) = send_raw(&durable, req_empty("POST", "/_checkpoint")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -222,7 +222,7 @@ async fn checkpoint_transport_is_strict_bounded_and_uncacheable() {
 async fn checkpoint_waits_off_runtime_and_detached_work_keeps_shared_admission() {
     let (state, root) = durable_state("detached");
     let backup_dest = root.join("backup-that-must-not-run");
-    let epoch_before = state.cluster.read().epoch();
+    let epoch_before = state.cluster.epoch();
     let held_state = Arc::clone(&state);
     let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
@@ -270,7 +270,7 @@ async fn checkpoint_waits_off_runtime_and_detached_work_keeps_shared_admission()
 
     tokio::time::timeout(Duration::from_secs(2), async {
         while state.durability_permits.available_permits() != 1
-            || state.cluster.read().epoch() == epoch_before
+            || state.cluster.epoch() == epoch_before
             || state
                 .prom
                 .http_requests_total
@@ -310,10 +310,9 @@ async fn checkpoint_fails_loud_when_a_shard_cannot_persist() {
     let (state, root) = durable_state("persistence-failure");
     state
         .cluster
-        .read()
         .add_query(99, "checkpoint failure sentinel")
         .expect("WAL-backed live add");
-    let epoch_before = state.cluster.read().epoch();
+    let epoch_before = state.cluster.epoch();
     let mut original = Vec::new();
     for shard in 0..3 {
         let segments = root.join("data").join(format!("shard_{shard:03}/segments"));
@@ -341,7 +340,7 @@ async fn checkpoint_fails_loud_when_a_shard_cannot_persist() {
         "durability_unavailable",
     );
     assert_eq!(
-        state.cluster.read().epoch(),
+        state.cluster.epoch(),
         epoch_before,
         "a failed manifest commit must not advance the checkpoint generation"
     );

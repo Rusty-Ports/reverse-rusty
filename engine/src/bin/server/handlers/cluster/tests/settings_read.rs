@@ -1,7 +1,6 @@
 use super::*;
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{header, StatusCode};
@@ -100,46 +99,22 @@ async fn shared_transport_rejects_invalid_cluster_reads_before_locking() {
     assert_eq!(body["error"]["type"], "method_not_allowed", "{body}");
 }
 
+/// The settings are the engine's configuration, which no rebuild replaces, so the read answers
+/// while a rebuild holds the engine. It still needs administrative admission.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn cluster_lock_wait_is_off_runtime_and_keeps_admission() {
+async fn settings_read_answers_while_a_rebuild_runs_and_needs_admission() {
     let state = test_state(&seed());
-    let lock_state = Arc::clone(&state);
-    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-    let blocker = std::thread::spawn(move || {
-        let _guard = lock_state.cluster.write();
-        locked_tx.send(()).expect("announce held lock");
-        std::thread::sleep(Duration::from_millis(500));
-    });
-    locked_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("cluster write lock held");
-
-    let request_state = Arc::clone(&state);
-    let request =
-        tokio::spawn(async move { send_raw(&request_state, req_empty("GET", "/_settings")).await });
-    let started = Instant::now();
-    tokio::task::yield_now().await;
-    tokio::time::sleep(Duration::from_millis(25)).await;
-    assert!(
-        started.elapsed() < Duration::from_millis(300),
-        "cluster-lock contention escaped spawn_blocking and stalled the async runtime"
-    );
-    assert!(
-        !request.is_finished(),
-        "request should still be waiting for the deliberately held cluster lock"
-    );
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(25),
-            Arc::clone(&state.stats_permits).acquire_owned()
-        )
-        .await
-        .is_err(),
-        "the blocking worker must retain administrative admission while waiting"
-    );
-
-    blocker.join().expect("lock holder");
-    assert_eq!(request.await.expect("request task").0, StatusCode::OK);
+    let rebuild = pause_a_rebuild(&state);
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        send_raw(&state, req_empty("GET", "/_settings")),
+    )
+    .await;
+    // Released before anything can fail.
+    let rebuilt = rebuild.finish();
+    let (status, _, _) = answer.expect("the settings read waited for the rebuild");
+    rebuilt.expect("rebuild");
+    assert_eq!(status, StatusCode::OK);
 
     state.stats_permits.close();
     let (status, headers, bytes) = send_raw(&state, req_empty("GET", "/_settings")).await;

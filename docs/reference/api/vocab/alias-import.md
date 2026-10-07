@@ -85,8 +85,9 @@ remain non-empty after trimming, and must be unique after trimming. Unsupported 
 with `Allow: POST`. Every route-reached response has `Cache-Control: no-store` and fixed
 `vocab_aliases_import` telemetry.
 
-Admission, engine/coordinator lock waits, parsing apply, and any rebuild run in the shared one-slot
-administrative blocking worker. Closed admission returns `503 aliases_unavailable`; worker failure
+Admission, engine/coordinator lock waits, parsing apply, and any rebuild run in a one-slot
+blocking worker: the administrative slot in standalone mode, and in coordinator mode the slot for
+administrative changes, which administrative reads do not share. Closed admission returns `503 aliases_unavailable`; worker failure
 returns the same type with 500. In standalone durable mode, unhealthy persistence is refused before
 mutation. A successful mutation must rebuild every live source and leave no stale segment. If the
 coherent live rebuild completes but its durable commit fails, it is published for read consistency

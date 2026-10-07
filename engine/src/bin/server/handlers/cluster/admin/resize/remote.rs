@@ -1,8 +1,7 @@
 //! Remote blue/green resize worker (ADR-180): prepare (which retires the old nodes before it
-//! commits) under the shared cluster lock so reads keep serving the old layout during the copy,
-//! install under a brief exclusive lock, then finish. The REST write serializer is released as
-//! soon as the engine's write fence is up, so writers are refused by the fence instead of blocking
-//! runtime workers for the whole copy.
+//! commits) while reads keep serving the old layout during the copy, install in a brief layout
+//! change, then finish. Write admission is released as soon as the engine's write fence is up,
+//! so writers are refused by the fence instead of blocking runtime workers for the whole copy.
 
 use std::time::Instant;
 
@@ -42,19 +41,7 @@ pub(super) fn remote_resize_worker(
     if_generation: Option<u64>,
     targets: Vec<NodeDescriptor>,
 ) -> ClusterResizeWorkerOutcome {
-    let cluster = if no_wait {
-        state.cluster.try_read()
-    } else {
-        deadline
-            .checked_duration_since(Instant::now())
-            .and_then(|budget| state.cluster.try_read_for(budget))
-    };
-    let Some(cluster) = cluster else {
-        record
-            .ops
-            .mark_not_started(&record.id, not_started_failure());
-        return ClusterResizeWorkerOutcome::NotStarted;
-    };
+    let cluster = &state.cluster;
     if !begin_cluster_resize(gate, deadline, no_wait) {
         record
             .ops
@@ -82,24 +69,19 @@ pub(super) fn remote_resize_worker(
         num_shards,
         targets,
     };
-    // Reads continue on the old layout while the new one is built and committed. Holding the
-    // write serializer until the fence is up keeps a vocabulary rebuild from queueing for the
-    // exclusive lock behind this copy, which would stall every read; vocabulary handlers check
-    // the fence before asking for that lock.
+    // Reads continue on the old layout while the new one is built and committed. Write
+    // admission is released once the fence is up: a write that arrives during the copy is
+    // refused by the fence, and a vocabulary change is refused where it is admitted
+    // (`ClusterAppState::admit_rebuild`) and again by the engine.
     let prepared = cluster.prepare_remote_resize_then(&request, move || drop(writes));
-    drop(cluster);
     let result = prepared.and_then(|prepared| {
         // The new layout is committed; the swap itself is brief and cannot be skipped. Like
-        // every taker of the cluster's write lock it holds write admission alone (ADR-206)
-        // and closes the search pool's gate (ADR-207). Admission was released when the write
-        // fence went up; a write that arrives now is refused by the fence and gives its
-        // share straight back.
+        // every layout change it holds write admission alone (ADR-206). Admission was
+        // released when the write fence went up; a write that arrives now is refused by the
+        // fence and gives its share straight back.
         let admission = state.write_admission.write();
-        let retired = state
-            .write_cluster(&admission)
-            .install_remote_resize(prepared)?;
+        let retired = cluster.install_remote_resize(prepared)?;
         drop(admission);
-        let cluster = state.cluster.read();
         let report = cluster.finish_remote_resize(retired)?;
         let version = cluster.control_state()?.epoch;
         Ok(ClusterResizeSuccess {

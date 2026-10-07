@@ -1,6 +1,6 @@
 //! `GET /_cluster/resize` and `GET /_cluster/resize/{operation_id}` (ADR-179): read-only
-//! views of the bounded operation registry and the latest autoscaler observation. They never
-//! take the cluster lock, so they stay responsive while a rebuild holds the exclusive guards.
+//! views of the bounded operation registry and the latest autoscaler observation. They read
+//! neither the cluster nor the guards a rebuild holds, so they stay responsive while one runs.
 
 use axum::{
     extract::Request,

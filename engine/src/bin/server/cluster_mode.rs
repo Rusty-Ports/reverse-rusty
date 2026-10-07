@@ -356,7 +356,7 @@ pub(crate) async fn run(
     });
 
     let state = Arc::new(ClusterAppState {
-        cluster: crate::state::ClusterLock::new(cluster),
+        cluster,
         topology_guard: RwLock::new(()),
         write_admission: RwLock::new(()),
         write_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
@@ -382,6 +382,9 @@ pub(crate) async fn run(
             crate::state::MAX_CONCURRENT_CLUSTER_REASSIGNS,
         )),
         remote_resize_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        admin_change_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_ADMIN_CHANGES,
+        )),
         rebalance_topology: if in_process {
             ClusterRebalanceTopology::InProcess
         } else if resolve_only {
@@ -403,7 +406,9 @@ pub(crate) async fn run(
         stats_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_STATS,
         )),
-        pool: crate::state::SearchPool::new(pool),
+        pool,
+        #[cfg(test)]
+        read_pause: parking_lot::Mutex::new(None),
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
         ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),
@@ -514,7 +519,7 @@ pub(crate) async fn run(
     // flush only (checkpoint is a no-op there anyway).
     {
         let _w = state.write_admission.write();
-        let cluster = state.cluster.read();
+        let cluster = &state.cluster;
         if let Err(e) = cluster.flush() {
             error!(error = %e, "shutdown flush failed");
         }
@@ -525,7 +530,7 @@ pub(crate) async fn run(
             }
         }
         // The repair queue is this process's memory (ADR-194): say what stops with it.
-        shutdown::log_unconverged_writes(&cluster);
+        shutdown::log_unconverged_writes(cluster);
     }
     info!("shutdown complete");
 }

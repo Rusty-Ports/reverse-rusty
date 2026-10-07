@@ -185,7 +185,7 @@ async fn resync_transport_is_strict_and_bounded() {
 #[tokio::test]
 async fn manager_timeout_bounds_admission_and_exclusive_writer_waits() {
     let state = test_state(&seed());
-    let held = Arc::clone(&state.stats_permits)
+    let held = Arc::clone(&state.admin_change_permits)
         .acquire_owned()
         .await
         .expect("hold admin admission");
@@ -239,7 +239,7 @@ async fn manager_timeout_bounds_admission_and_exclusive_writer_waits() {
     writer_holder.join().expect("writer holder");
 
     let closed = test_state(&seed());
-    closed.stats_permits.close();
+    closed.admin_change_permits.close();
     let (status, _, bytes) = send_raw(&closed, req_empty("POST", "/_cluster/resync")).await;
     assert_error(
         status,

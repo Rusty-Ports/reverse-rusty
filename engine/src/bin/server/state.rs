@@ -3,13 +3,12 @@
 //! [`AppState`] holds the single-node snapshot-based concurrency primitives: a
 //! `Mutex<Engine>` for serialized writes and an `ArcSwap<EngineSnapshot>` for
 //! lock-free reads. [`ClusterAppState`] is the coordinator-mode analogue (ADR-070):
-//! an `RwLock<ClusterEngine>` whose READ side serves both percolates and ordinary
-//! writes (cluster reads are `&self` lock-free; writes are `&self` and the cluster
-//! orders them itself, by its log and a lock per logical id), while the WRITE side is
-//! taken only by the `&mut self` blue/green vocabulary/resize paths. Ordinary writes
-//! share `write_admission`; an operation that needs every write out of the way takes
-//! it exclusively (ADR-206). Descriptor mutations and
-//! topology movement coordinate separately through `topology_guard`.
+//! it holds the `ClusterEngine` with no lock of its own (ADR-210). Every engine method
+//! takes `&self`; the engine keeps a vocabulary change or a resize apart from everything
+//! but a search, and a search runs beside one. Ordinary writes share `write_admission`; an
+//! operation that needs every write out of the way takes it exclusively (ADR-206).
+//! Descriptor mutations and topology movement coordinate through `topology_guard`, and a
+//! rebuild holds both alone (see `state/cluster_access.rs`).
 //! [`RequestCtx`] is the seam that lets one auth / request-id middleware serve both
 //! backends. [`request_id_middleware`] stamps an `x-request-id` header and tracks
 //! the in-flight-request gauge via the RAII [`InFlightGuard`].
@@ -29,8 +28,6 @@ use crate::auth::AuthConfig;
 use crate::metrics::PrometheusMetrics;
 
 mod cluster_access;
-
-pub(crate) use cluster_access::{ClusterLock, ClusterWrite, SearchPool};
 
 /// Static winner-enrichment budget shared by local and coordinator v2 search.
 pub(crate) const DEFAULT_MAX_RANKED_ENRICHMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -68,9 +65,9 @@ pub(crate) const MAX_QUEUED_CLUSTER_WRITES: usize = 32;
 /// one at a time behind the engine mutex, so this bounds how many blocking threads queued writes
 /// can hold, including writes whose clients have disconnected.
 pub(crate) const MAX_QUEUED_WRITES: usize = 32;
-/// Brief cluster-lock reads (GET/HEAD `_doc`, `GET /`, the v2 and job compile steps) admitted
-/// onto blocking threads at once. They wait only while a vocabulary rebuild or resize holds or
-/// is queued for the exclusive cluster lock; this bounds the threads parked behind one.
+/// Brief reads of the cluster (GET/HEAD `_doc`, `GET /`, the v2 and job compile steps) admitted
+/// onto blocking threads at once. One can wait for a slow shard; this bounds the threads parked
+/// behind it.
 pub(crate) const MAX_QUEUED_CLUSTER_READS: usize = 64;
 /// The health route stays open even when read auth is enabled. Bound all of
 /// its requests independently before their bodies are buffered.
@@ -80,6 +77,10 @@ pub(crate) const MAX_CONCURRENT_HEALTH_REQUESTS: usize = 8;
 /// replacements also use it so large JSON snapshots and O(corpus) work cannot
 /// fan out.
 pub(crate) const MAX_CONCURRENT_STATS: usize = 1;
+/// One administrative change to the cluster is admitted at a time: a vocabulary change, an
+/// in-process resize, a node registration or deregistration, a resync. The rest wait as
+/// futures, not as blocking threads parked on the guards those operations take.
+pub(crate) const MAX_CONCURRENT_ADMIN_CHANGES: usize = 1;
 
 pub(crate) struct AppState {
     pub(crate) engine: Mutex<Engine>,
@@ -262,17 +263,17 @@ pub(crate) enum ClusterRebalanceTopology {
 
 /// Coordinator-mode state (ADR-070): the cluster analogue of [`AppState`].
 pub(crate) struct ClusterAppState {
-    /// Read lock for percolates AND ordinary writes (both `&self`); write lock only
-    /// for the `&mut self` vocabulary rebuilds and resizes, and only through
-    /// [`ClusterAppState::write_cluster`] (ADR-207). A read that returns ids only never
-    /// waits for a write. A read that also returns sources or an explanation takes the
-    /// cluster's mutation-frozen view, so it waits for the writes in flight and runs
-    /// alone (`ClusterEngine::consistent_read_view`).
-    pub(crate) cluster: ClusterLock,
+    /// The cluster, with no lock around it (ADR-210). A read that returns ids only never
+    /// waits for a write or for a rebuild. A read that also returns sources or an
+    /// explanation takes the cluster's mutation-frozen view, so it waits for the writes in
+    /// flight and for a rebuild's swap, and runs alone
+    /// (`ClusterEngine::consistent_read_view`).
+    pub(crate) cluster: reverse_rusty::cluster::ClusterEngine,
     /// Excludes descriptor mutation from in-flight topology movement. Movement
     /// operations take a shared guard (so their own conflict-aware concurrency
-    /// remains available); registration, deregistration, and resize take the
-    /// exclusive side. Separate from `write_admission`, so ingestion keeps flowing.
+    /// remains available); registration, deregistration, a resize and a vocabulary
+    /// change take the exclusive side. Separate from `write_admission`, so ingestion
+    /// keeps flowing under a movement.
     pub(crate) topology_guard: RwLock<()>,
     /// Admission for anything that changes the corpus (ADR-206).
     ///
@@ -282,18 +283,17 @@ pub(crate) struct ClusterAppState {
     /// - **Exclusive:** an operation that needs every write finished and none started:
     ///   flush, checkpoint, backup, a vocabulary change, resync, resize, an exhaustive job,
     ///   and shutdown.
-    /// - **Shared, too:** a search that returns sources or an explanation. It is kept apart
-    ///   from writes by the cluster's mutation-frozen view, not by this lock; it shares
-    ///   admission so that nothing can queue for the cluster's write lock while it holds
-    ///   the read lock (see `pool`). A read that returns ids only takes nothing.
     ///
-    /// Take it before the `cluster` lock, never after.
+    /// A search takes no admission. One that returns sources or an explanation is kept
+    /// apart from writes by the cluster's mutation-frozen view, not by this lock.
+    ///
+    /// Take it after `topology_guard`, never before.
     pub(crate) write_admission: RwLock<()>,
     /// Admission for cluster writes run on blocking threads (ADR-183). A permit is taken before
     /// the worker starts and held until it finishes, so a disconnected client can never leave more
     /// than [`MAX_QUEUED_CLUSTER_WRITES`] detached writers holding blocking threads.
     pub(crate) write_permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Admission for brief cluster-lock reads that run on blocking threads (ADR-191).
+    /// Admission for brief reads of the cluster that run on blocking threads (ADR-191).
     pub(crate) read_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Explicit-flush admission, separate from the general write serializer for
     /// the same `wait_if_ongoing` reason as [`AppState::flush_serial`].
@@ -320,23 +320,32 @@ pub(crate) struct ClusterAppState {
     /// worker owns admission through its terminal durable outcome, including
     /// after an HTTP disconnect, and shutdown joins it before cleanup.
     pub(crate) reassign_permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// One running remote resize (ADR-180). The worker takes it before returning the corpus
-    /// administration slot that health probes share, and holds it through its terminal result,
-    /// so shutdown joins the copy and cutover before cleanup.
+    /// One running remote resize (ADR-180). The worker takes it before returning its
+    /// administrative-change slot, and holds it through its terminal result, so shutdown joins the
+    /// copy and cutover before cleanup.
     pub(crate) remote_resize_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Admission for administrative changes: a vocabulary change, an in-process resize, a
+    /// node registration or deregistration, a resync. Each of them is a rebuild or waits for
+    /// one at `topology_guard` or `write_admission`. Separate from `stats_permits`, so that
+    /// health, metrics and the other administrative reads are never queued behind a rebuild,
+    /// or behind a change that is waiting for one (ADR-210).
+    pub(crate) admin_change_permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// Whether rebalance may commit an advisory map, move from the committed
     /// map, or must refuse because live routing has another authority.
     pub(crate) rebalance_topology: ClusterRebalanceTopology,
     /// Coordinator analogue of [`AppState::health_permits`].
     pub(crate) health_permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Coordinator analogue of [`AppState::stats_permits`], including bounded
-    /// vocabulary reads, learning, and blue/green replacements.
+    /// Coordinator analogue of [`AppState::stats_permits`]: stats, health probes, bounded
+    /// vocabulary reads and read-only learning. A rebuild does not hold it
+    /// (see `admin_change_permits`).
     pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// The search pool, behind its gate (ADR-207). Work enters it only through
-    /// [`SearchPool::enter`], so a request holds the gate for as long as its work is in the
-    /// pool, and whatever takes the cluster's write lock closes the gate first. Its workers
-    /// take `cluster.read()` for each title they match and never find a writer queued.
-    pub(crate) pool: SearchPool,
+    /// The search pool: a thread budget for match work. Nothing that runs in it takes a
+    /// lock that a rebuild holds or waits for (see `state/cluster_access.rs`).
+    pub(crate) pool: rayon::ThreadPool,
+    /// Called by a brief read on its blocking thread before it runs. A test parks reads
+    /// there to see what their admission does meanwhile.
+    #[cfg(test)]
+    pub(crate) read_pause: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
     /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,
     /// and the permit is moved INTO the closure — released when the blocking work

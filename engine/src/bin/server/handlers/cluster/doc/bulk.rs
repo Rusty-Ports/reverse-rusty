@@ -71,7 +71,7 @@ fn cluster_bulk_inner(state: &Arc<ClusterAppState>, items: Vec<ParsedBulkItem>) 
     // it runs. Two batches that run at once interleave their items; each item is applied
     // whole, and the cluster orders writes to one id by its log (ADR-177).
     let _write = state.write_admission.read();
-    let cluster = state.cluster.read();
+    let cluster = &state.cluster;
     for item in items {
         let source = match item.source {
             Ok(source) => source,
@@ -143,7 +143,6 @@ fn cluster_bulk_inner(state: &Arc<ClusterAppState>, items: Vec<ParsedBulkItem>) 
         }
         responses.push(response);
     }
-    drop(cluster);
 
     let errors = responses.iter_mut().any(|item| {
         let inner = item_inner_mut(item);

@@ -74,7 +74,7 @@ async fn map_only_rebalance_reports_the_attested_version_and_changed_count() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{registered}");
-    let before = state.cluster.read().control_state().expect("state");
+    let before = state.cluster.control_state().expect("state");
 
     let (status, headers, bytes) = send_raw(
         &state,
@@ -97,7 +97,7 @@ async fn map_only_rebalance_reports_the_attested_version_and_changed_count() {
     assert_eq!(body["failed"], serde_json::Value::Null, "{body}");
     assert_eq!(body["not_attempted"], serde_json::json!([]), "{body}");
 
-    let after = state.cluster.read().control_state().expect("state");
+    let after = state.cluster.control_state().expect("state");
     let reassigned = body["reassigned"].as_u64().expect("reassigned");
     assert!(
         reassigned > 0,
@@ -140,7 +140,7 @@ async fn static_remote_routing_is_rejected_before_planning() {
         cluster,
         crate::state::ClusterRebalanceTopology::StaticRemote,
     );
-    let before = state.cluster.read().control_state().expect("state");
+    let before = state.cluster.control_state().expect("state");
 
     let (status, _, bytes) = send_raw(
         &state,
@@ -158,7 +158,7 @@ async fn static_remote_routing_is_rejected_before_planning() {
         "{bytes:?}"
     );
     assert_eq!(
-        state.cluster.read().control_state().expect("state"),
+        state.cluster.control_state().expect("state"),
         before,
         "static routing must fail before planning or control mutation"
     );
@@ -415,7 +415,7 @@ async fn body_ready_after_the_absolute_deadline_is_rejected() {
 #[tokio::test]
 async fn admission_and_topology_deadlines_do_not_start_a_rebalance() {
     let state = test_state(&seed());
-    let before = state.cluster.read().control_state().expect("state");
+    let before = state.cluster.control_state().expect("state");
     let held = Arc::clone(&state.rebalance_permits)
         .acquire_owned()
         .await
@@ -473,7 +473,7 @@ async fn admission_and_topology_deadlines_do_not_start_a_rebalance() {
     release_sender.send(()).expect("release topology holder");
     topology_holder.join().expect("topology holder");
     assert_eq!(
-        state.cluster.read().control_state().expect("state"),
+        state.cluster.control_state().expect("state"),
         before,
         "admission and topology timeouts must not mutate state"
     );
@@ -576,7 +576,7 @@ impl ControlPlane for BlockingProposalControlPlane {
 
 fn changed_initial_state() -> ClusterState {
     let base = test_state(&seed());
-    let mut state = base.cluster.read().control_state().expect("state");
+    let mut state = base.cluster.control_state().expect("state");
     state.nodes.push(NodeDescriptor {
         id: NodeId(7),
         addr: Some("http://127.0.0.1:50057".into()),
@@ -643,13 +643,7 @@ async fn manager_timeout_only_bounds_start_and_disconnect_retains_admission() {
     .await
     .expect("detached worker released admission after completion");
     assert_ne!(
-        state
-            .cluster
-            .read()
-            .control_state()
-            .expect("state")
-            .assignments[0]
-            .primary,
+        state.cluster.control_state().expect("state").assignments[0].primary,
         NodeId(u64::MAX),
         "the detached, already-started rebalance must complete"
     );

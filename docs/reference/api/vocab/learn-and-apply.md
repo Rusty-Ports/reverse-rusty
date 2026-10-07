@@ -68,7 +68,9 @@ The transport is bodyless and bounded:
 - Body extraction has a 64 KiB ceiling and a 250 ms deadline even though only an empty body is
   valid. Every route-reached response has `Cache-Control: no-store`; unsupported methods are 405
   with `Allow: POST`.
-- The request waits asynchronously for the shared one-at-a-time administrative-work slot. Corpus
+- The request waits asynchronously for a one-at-a-time slot: the administrative-work slot in
+  standalone mode, and in coordinator mode the slot for administrative changes, which
+  administrative reads do not share. Corpus
   gathering, learning, lock acquisition, recompilation, persistence, and snapshot publication run
   on one blocking worker that owns the permit. There is no execution timeout after admission: a
   disconnect does not cancel a partially completed feature-model change.

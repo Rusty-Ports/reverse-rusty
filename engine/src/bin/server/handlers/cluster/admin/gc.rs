@@ -260,21 +260,12 @@ pub(crate) async fn cluster_gc(
         let Some(_topology) = topology else {
             return ClusterGcWorkerOutcome::NotStarted;
         };
-        let cluster = if no_wait {
-            worker_state.cluster.try_read()
-        } else {
-            deadline
-                .checked_duration_since(Instant::now())
-                .and_then(|budget| worker_state.cluster.try_read_for(budget))
-        };
-        let Some(cluster) = cluster else {
-            return ClusterGcWorkerOutcome::NotStarted;
-        };
+        let cluster = &worker_state.cluster;
         if !begin_cluster_gc(&worker_gate, deadline, no_wait) {
             return ClusterGcWorkerOutcome::NotStarted;
         }
         let _ = started_sender.send(());
-        ClusterGcWorkerOutcome::Finished(execute_cluster_gc(&cluster, &handle))
+        ClusterGcWorkerOutcome::Finished(execute_cluster_gc(cluster, &handle))
     }) {
         Ok(completion) => completion,
         Err(source) => {

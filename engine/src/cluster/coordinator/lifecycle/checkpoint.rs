@@ -212,8 +212,8 @@ impl ClusterEngine {
     /// (ADR-180). Callers check this while holding the PIT/mutation barrier, which the resize
     /// takes exclusively after raising the fence, so every accepted write lands before the export
     /// snapshot and every later write is refused rather than silently omitted. A server also
-    /// checks it before asking for exclusive access for a vocabulary rebuild: the resize holds
-    /// shared access for its whole copy, so waiting for exclusive access would stall reads.
+    /// checks it before it admits a vocabulary rebuild: the resize holds the server's topology
+    /// guard for its whole copy, and the rebuild should be refused, not parked behind it.
     pub fn ensure_resize_write_fence_open(&self) -> Result<(), ShardError> {
         if self.resize_write_fence.load(Ordering::Acquire) {
             return Err(ShardError::ControlPlane(
@@ -223,6 +223,13 @@ impl ClusterEngine {
             ));
         }
         Ok(())
+    }
+
+    /// Raise or lower the write fence of a remote resize, without a resize. A test seam: a
+    /// test of the server shows what it answers while a remote copy is running.
+    #[doc(hidden)]
+    pub fn set_resize_write_fence_for_test(&self, raised: bool) {
+        self.resize_write_fence.store(raised, Ordering::Release);
     }
 
     /// Best-effort GC of segment files no longer in the committed registry (superseded by

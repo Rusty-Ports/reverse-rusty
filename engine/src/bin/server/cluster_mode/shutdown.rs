@@ -6,16 +6,16 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::error;
 
 use crate::state::{
-    ClusterAppState, MAX_CONCURRENT_CLUSTER_HANDOFFS, MAX_CONCURRENT_CLUSTER_REASSIGNS,
-    MAX_CONCURRENT_CLUSTER_REBALANCES, MAX_CONCURRENT_CLUSTER_RECONCILES, MAX_CONCURRENT_STATS,
-    MAX_QUEUED_CLUSTER_WRITES,
+    ClusterAppState, MAX_CONCURRENT_ADMIN_CHANGES, MAX_CONCURRENT_CLUSTER_HANDOFFS,
+    MAX_CONCURRENT_CLUSTER_REASSIGNS, MAX_CONCURRENT_CLUSTER_REBALANCES,
+    MAX_CONCURRENT_CLUSTER_RECONCILES, MAX_CONCURRENT_STATS, MAX_QUEUED_CLUSTER_WRITES,
 };
 
 /// Acquire and retain every admission boundary for work that may outlive its HTTP request,
 /// before durability cleanup.
 ///
-/// Rebalance, reconcile/GC, raw handoff, move-and-commit reassignment, corpus-administration, and
-/// remote resize workers own their permit for their complete synchronous workflow, and every
+/// Rebalance, reconcile/GC, raw handoff, move-and-commit reassignment, corpus-administration,
+/// administrative-change and remote resize workers own their permit for their complete synchronous workflow, and every
 /// cluster write owns a write permit until it finishes (ADR-183), including after an HTTP
 /// disconnect. Taking each boundary's full capacity therefore joins every detached worker before
 /// the shutdown flush and checkpoint, and retaining the permits stops a late draining request from
@@ -23,10 +23,11 @@ use crate::state::{
 /// `write_admission`; quiescing only that lock would let the shutdown checkpoint win it first and the
 /// work land after cleanup.
 pub(crate) async fn quiesce_detached_work(state: &ClusterAppState) -> Vec<OwnedSemaphorePermit> {
-    // A remote resize returns its corpus-administration slot for health probes once it holds the
-    // topology guard, and releases `write_admission` once its write fence is up; its own permit
-    // covers the copy and cutover through their terminal result.
-    let boundaries: [(&str, &Arc<Semaphore>, usize); 7] = [
+    // A vocabulary change, an in-process resize, a membership change and a resync own the
+    // administrative-change slot for their whole run. A remote resize returns it once it holds the topology guard, and
+    // releases `write_admission` once its write fence is up; its own permit covers the copy and
+    // cutover through their terminal result.
+    let boundaries: [(&str, &Arc<Semaphore>, usize); 8] = [
         (
             "rebalance",
             &state.rebalance_permits,
@@ -51,6 +52,11 @@ pub(crate) async fn quiesce_detached_work(state: &ClusterAppState) -> Vec<OwnedS
             "corpus-administration",
             &state.stats_permits,
             MAX_CONCURRENT_STATS,
+        ),
+        (
+            "administrative change",
+            &state.admin_change_permits,
+            MAX_CONCURRENT_ADMIN_CHANGES,
         ),
         ("remote resize", &state.remote_resize_permits, 1),
         (

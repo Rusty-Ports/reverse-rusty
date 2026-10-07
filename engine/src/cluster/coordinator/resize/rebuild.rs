@@ -90,9 +90,10 @@ impl ClusterEngine {
         append_missing_features: bool,
     ) -> Result<(usize, Arc<Layout>), ShardError> {
         let current = change.current();
-        // Writes are already refused by the fence. From here the old shards' storage is
+        // Every write is waiting at the layout lock. From here the old shards' storage is
         // frozen as well, at the shards themselves, whoever asks.
         let frozen = FrozenShards::freeze(Arc::clone(&current));
+        self.pause_rebuild();
         // Pass A — produce the (dict, extracted) the rebuild re-places. Two paths, keyed off
         // whether the NORMALIZER changed (an `Arc::ptr_eq` against the current one):
         //

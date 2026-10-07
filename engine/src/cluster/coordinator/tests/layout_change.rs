@@ -483,6 +483,63 @@ fn an_expired_deadline_still_takes_a_free_layout_lock() {
     );
 }
 
+/// Two accessors called one after the other can straddle a swap. A pinned layout stays what
+/// it was when it was pinned, so everything read through it belongs together.
+#[test]
+fn a_pinned_layout_stays_what_it_was_across_a_swap() {
+    let cluster = in_memory(3, 100);
+    let pinned = cluster.published();
+    let generation = pinned.placement_generation();
+    let dict = pinned.dict().fingerprint();
+    cluster.resize(5).expect("resize");
+
+    // The engine answers from the new layout; the pin from the one it was taken on.
+    assert_eq!(cluster.num_shards(), 5);
+    assert_eq!(cluster.shard_query_counts().expect("counts").len(), 5);
+    assert_eq!(pinned.num_shards(), 3);
+    assert_eq!(pinned.shard_query_counts().expect("counts").len(), 3);
+    assert_eq!(
+        pinned.num_queries().expect("total"),
+        pinned
+            .shard_query_counts()
+            .expect("counts")
+            .iter()
+            .sum::<usize>()
+    );
+    assert_eq!(pinned.placement_generation(), generation);
+    assert_ne!(cluster.placement_generation(), generation);
+    assert_eq!(pinned.dict().fingerprint(), dict);
+    assert_eq!(pinned.out_of_sync_replicas(), 0);
+    assert_eq!(pinned.class_counts().expect("classes").len(), 5);
+
+    // A new pin is of the new layout.
+    let again = cluster.published();
+    assert_eq!(again.num_shards(), 5);
+    assert_eq!(again.placement_generation(), cluster.placement_generation());
+}
+
+/// A reader that compares the layout with the control state can ask whether a rebuild is in
+/// the middle of replacing them.
+#[test]
+fn a_layout_change_in_progress_can_be_seen_without_waiting_for_it() {
+    let cluster = in_memory(3, 50);
+    assert!(!cluster.layout_change_in_progress());
+    let change = cluster.begin_layout_change().expect("begin");
+    let during = cluster.layout_change_in_progress();
+    drop(change);
+    assert!(during, "a running layout change was not seen");
+    assert!(!cluster.layout_change_in_progress());
+
+    // An operation in flight is not a layout change.
+    let in_flight = cluster.stable();
+    let beside_an_operation = cluster.layout_change_in_progress();
+    drop(in_flight);
+    assert!(
+        !beside_an_operation,
+        "an operation in flight was taken for one"
+    );
+}
+
 /// An in-memory engine never runs the cleanup that forgets the layouts it has replaced.
 #[test]
 fn replaced_layouts_are_forgotten_once_released() {

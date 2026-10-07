@@ -2,8 +2,8 @@
 //!
 //! One brief read of the cluster engine: compile the rank program, pre-check the PIT and
 //! compute the request fingerprint. It runs on a blocking thread under read admission
-//! (ADR-191), because the cluster lock is not available while a vocabulary rebuild or a
-//! resize holds or waits for it, and a request waiting for it must not park an async worker.
+//! (ADR-191): the PIT check can call a remote shard, and a request waiting for that must not
+//! park an async worker.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use reverse_rusty::{CompiledRankProgram, PitId, QueryScope, RankProgramSpec, Top
 use super::delivery::{failure_response, DeliveryFailure};
 use super::{page, rank_program_error, record_outcome, ApiError, ClusterAppState, Reject};
 
-/// Run a compile step inside the request's deadline. The step waits for read admission, a
-/// blocking thread and the cluster lock, and all of that counts against the request's
+/// Run a compile step inside the request's deadline. The step waits for read admission and
+/// a blocking thread, and all of that counts against the request's
 /// timeout, as the wait for a search permit does (ADR-099). `None` when the deadline passed
 /// first; the admitted worker still finishes and frees its permit on its own.
 ///
@@ -65,7 +65,42 @@ pub(super) struct CompileRequest {
     pub(super) scope: QueryScope,
 }
 
-/// Compile under the cluster lock. The stale gate runs BEFORE the fingerprint so a rebuilt
+/// Check a cursor's point in time and compute the request's fingerprint, in that order.
+///
+/// The stale gate runs first, so that a rebuilt normalizer cannot make a dead cursor look
+/// like a client's mistake. The caller computes the fingerprint from a layout it pinned
+/// before the gate, so a rebuild cannot come between the two. The gate is still asked again
+/// before a request is blamed for a fingerprint that does not match: a cursor that has gone
+/// stale is never reported as a mismatch, whatever the fingerprint was computed from.
+pub(super) fn cursor_fingerprint(
+    cluster: &reverse_rusty::cluster::ClusterEngine,
+    pit: PitId,
+    expected: Option<[u8; 32]>,
+    fingerprint: impl FnOnce() -> [u8; 32],
+) -> Result<[u8; 32], (&'static str, Reject)> {
+    let stale_gate = || {
+        cluster.check_pit(pit, Instant::now()).map_err(|error| {
+            let (status, kind, outcome) = error.v2_http_class();
+            (
+                outcome,
+                ApiError::response(
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                    kind,
+                    error.to_string(),
+                ),
+            )
+        })
+    };
+    stale_gate()?;
+    let fingerprint = fingerprint();
+    if expected.is_some_and(|expected| expected != fingerprint) {
+        stale_gate()?;
+        return Err(("cursor_mismatch", crate::pit::cursor_mismatch_response()));
+    }
+    Ok(fingerprint)
+}
+
+/// Compile against the cluster. The stale gate runs BEFORE the fingerprint so a rebuilt
 /// normalizer cannot mis-classify a dead cursor as a client mismatch; the kernel re-gates
 /// inside its own blocking closure, so the gap between here and there stays fail-closed.
 ///
@@ -93,28 +128,21 @@ pub(super) async fn compile(
         let Some(pit) = pit else {
             return Ok((program, None));
         };
-        if let Err(error) = cluster.check_pit(pit, Instant::now()) {
-            let (status, kind, outcome) = error.v2_http_class();
-            return Err((
-                outcome,
-                ApiError::response(
-                    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                    kind,
-                    error.to_string(),
-                ),
-            ));
-        }
-        let fingerprint = crate::pit::request_fingerprint(
-            &cluster.normalizer(),
-            &cluster.dict(),
-            &title,
-            scope,
-            &rank,
-            &filter,
-        );
-        if expected_fingerprint.is_some_and(|expected| expected != fingerprint) {
-            return Err(("cursor_mismatch", crate::pit::cursor_mismatch_response()));
-        }
+        // Pinned before the stale gate. If the gate passes, the point in time is alive on
+        // the layout published then, which is this one or a later one; and a later one
+        // would have made it stale. So a cursor that passes is fingerprinted under the
+        // normalizer and dictionary it was minted under, both from one layout.
+        let layout = cluster.published();
+        let fingerprint = cursor_fingerprint(cluster, pit, expected_fingerprint, || {
+            crate::pit::request_fingerprint(
+                &layout.normalizer(),
+                &layout.dict(),
+                &title,
+                scope,
+                &rank,
+                &filter,
+            )
+        })?;
         Ok((program, Some(page::MintCtx { pit, fingerprint })))
     })
     .await;
@@ -132,5 +160,72 @@ pub(super) async fn compile(
                 format!("ranked search could not read the cluster: {error}"),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
+    use reverse_rusty::{Normalizer, PitConfig};
+
+    fn cluster() -> ClusterEngine {
+        let config = ClusterConfig {
+            num_shards: 3,
+            include_broad: true,
+            ..Default::default()
+        };
+        let queries: Vec<(u64, String)> = (1..=20u64)
+            .map(|id| (id, format!("zzitem{id} zzgroup{}", id % 5)))
+            .collect();
+        ClusterEngine::build(
+            Normalizer::default_vocab().expect("vocab"),
+            &config,
+            &queries,
+        )
+        .expect("cluster")
+    }
+
+    /// A rebuild that swaps its layout in between the stale gate and the fingerprint leaves a
+    /// fingerprint that does not match. The cursor is stale; the request is not at fault.
+    #[test]
+    fn a_cursor_that_a_rebuild_overtook_is_stale_not_mismatched() {
+        let cluster = cluster();
+        let pit = cluster
+            .open_pit(None, &PitConfig::default(), Instant::now())
+            .expect("open");
+        let minted_under_the_old_layout = [1u8; 32];
+        let (outcome, (status, _)) =
+            cursor_fingerprint(&cluster, pit, Some(minted_under_the_old_layout), || {
+                // The swap lands here: after the gate passed, before the fingerprint.
+                cluster.resize(4).expect("resize");
+                [2u8; 32]
+            })
+            .expect_err("the cursor is dead");
+        assert_ne!(outcome, "cursor_mismatch");
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    /// With no rebuild, a fingerprint that does not match is the request's doing, and one that
+    /// matches is returned.
+    #[test]
+    fn a_live_cursor_is_judged_by_its_fingerprint() {
+        let cluster = cluster();
+        let pit = cluster
+            .open_pit(None, &PitConfig::default(), Instant::now())
+            .expect("open");
+        let (outcome, (status, _)) =
+            cursor_fingerprint(&cluster, pit, Some([1u8; 32]), || [2u8; 32])
+                .expect_err("another request's cursor");
+        assert_eq!(outcome, "cursor_mismatch");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            cursor_fingerprint(&cluster, pit, Some([3u8; 32]), || [3u8; 32]).ok(),
+            Some([3u8; 32])
+        );
+        assert_eq!(
+            cursor_fingerprint(&cluster, pit, None, || [4u8; 32]).ok(),
+            Some([4u8; 32])
+        );
     }
 }

@@ -161,7 +161,7 @@ pub(crate) async fn run_resize(state: &Arc<ClusterAppState>, run: ResizeRun) -> 
         return ResizeRunOutcome::NotStarted;
     };
     let permit = if no_wait {
-        match Arc::clone(&state.stats_permits).try_acquire_owned() {
+        match Arc::clone(&state.admin_change_permits).try_acquire_owned() {
             Ok(permit) => permit,
             Err(TryAcquireError::NoPermits) => return ResizeRunOutcome::NotStarted,
             Err(TryAcquireError::Closed) => {
@@ -174,7 +174,7 @@ pub(crate) async fn run_resize(state: &Arc<ClusterAppState>, run: ResizeRun) -> 
         };
         match tokio::time::timeout(
             admission_budget,
-            Arc::clone(&state.stats_permits).acquire_owned(),
+            Arc::clone(&state.admin_change_permits).acquire_owned(),
         )
         .await
         {
@@ -324,11 +324,12 @@ fn resize_worker(
     };
     #[cfg(feature = "distributed")]
     if !targets.is_empty() {
-        // A remote copy keeps the old layout serving reads for its whole duration, so it must
-        // not hold the single administrative slot that health probes also need. The exclusive
-        // topology guard, held from here to the end, keeps every other resize out instead, and
-        // the remote resize permit (taken first, so shutdown never sees a gap) lets shutdown
-        // join the copy.
+        // A remote copy can take a long time, so it returns the administrative-change slot: a
+        // vocabulary change or a membership change that arrives meanwhile is then answered
+        // (refused by the write fence, or timed out at the topology guard) and does not queue
+        // for the whole copy. The exclusive topology guard, held from here to the end, keeps
+        // every other resize out instead, and the remote resize permit (taken first, so
+        // shutdown never sees a gap) lets shutdown join the copy.
         let Ok(running) = Arc::clone(&state.remote_resize_permits).try_acquire_owned() else {
             return not_started();
         };
@@ -350,10 +351,11 @@ fn resize_worker(
     #[cfg(not(feature = "distributed"))]
     drop(targets);
     let _permit = permit;
-    let cluster = state.try_write_cluster_until(&writes, (!no_wait).then_some(deadline));
-    let Some(cluster) = cluster else {
-        return not_started();
-    };
+    // The topology guard and write admission are held alone from here to the end, so no
+    // other layout change, no movement and no write runs beside this resize. A search does
+    // (ADR-210).
+    let _writes = writes;
+    let cluster = &state.cluster;
     if !begin_cluster_resize(gate, deadline, no_wait) {
         return not_started();
     }

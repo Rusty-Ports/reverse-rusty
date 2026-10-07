@@ -3,8 +3,8 @@
 //! rebuild) — its one built-in refusal (non-local shards; ADR-046/076) surfaces
 //! as a 400 carrying the engine's message, never weakened. A tagged cluster is
 //! NOT refused (tags carry through by stored `TagId`, ADR-074), and a multi-word
-//! alias activates (P(T)-aware routing, ADR-076). These are the only handlers
-//! that take the cluster WRITE lock.
+//! alias activates (P(T)-aware routing, ADR-076). With resize, these are the
+//! handlers that rebuild the cluster (`ClusterAppState::admit_rebuild`, ADR-210).
 
 use std::sync::Arc;
 
@@ -12,7 +12,6 @@ use axum::{extract::State, response::Response};
 use serde::Serialize;
 use tracing::{info, instrument};
 
-use reverse_rusty::cluster::ShardError;
 use reverse_rusty::config::EngineConfig;
 
 use crate::handlers::alias::{
@@ -43,9 +42,9 @@ use crate::state::ClusterAppState;
 
 use super::{not_in_cluster_mode, shard_error_response};
 
-/// GET/HEAD /_vocab — clone the installed vocabulary under the cluster read
-/// guard, then release the guard before serializing it. The whole operation runs
-/// in the shared bounded blocking slot rather than on an async request worker.
+/// GET/HEAD /_vocab — take the installed vocabulary (a shared handle to the published
+/// layout's) and serialize it. The whole operation runs in the shared bounded blocking
+/// slot rather than on an async request worker.
 pub(crate) async fn cluster_get_vocab(
     State(state): State<Arc<ClusterAppState>>,
     transport: VocabReadTransport,
@@ -59,25 +58,12 @@ pub(crate) async fn cluster_get_vocab(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let vocab = {
-            let cluster = worker_state.cluster.read();
+            let cluster = &worker_state.cluster;
             cluster.vocab()
         };
         serialize_vocab(vocab.as_deref())
     });
     finish_vocab_worker(&state.prom, worker.await)
-}
-
-/// Take the exclusive cluster lock for a vocabulary rebuild. Call it while holding
-/// `write_admission` exclusively. A remote resize (ADR-180) releases it once its write fence is up but
-/// keeps shared access for its whole copy; waiting for exclusive access then would stall every
-/// read behind this request, so a raised fence refuses the rebuild instead. The resize raises the
-/// fence only while it holds `write_admission` exclusively, so the check cannot race it.
-fn lock_for_rebuild<'a>(
-    state: &'a ClusterAppState,
-    admission: &'a parking_lot::RwLockWriteGuard<'a, ()>,
-) -> Result<crate::state::ClusterWrite<'a>, ShardError> {
-    state.cluster.read().ensure_resize_write_fence_open()?;
-    Ok(state.write_cluster(admission))
 }
 
 /// PUT /_vocab — replace the cluster vocabulary (ADR-046 mechanism 2): re-mint the
@@ -89,15 +75,16 @@ pub(crate) async fn cluster_put_vocab(
     transport: VocabWriteTransport,
 ) -> Response {
     let (_duration, started, vocab) = transport.into_parts();
-    let permit = match acquire_vocab_write_permit(&state.stats_permits, &state.prom).await {
+    let permit = match acquire_vocab_write_permit(&state.admin_change_permits, &state.prom).await {
         Ok(permit) => permit,
         Err(response) => return response,
     };
     let work_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let admission = work_state.write_admission.write();
-        lock_for_rebuild(&work_state, &admission).and_then(|cluster| cluster.set_vocab(vocab))
+        work_state
+            .admit_rebuild()
+            .and_then(|_alone| work_state.cluster.set_vocab(vocab))
     });
     match worker.await {
         Ok(rebuilt) => {
@@ -142,16 +129,17 @@ pub(crate) async fn cluster_learn_and_apply_vocab(
     transport: VocabLearnApplyTransport,
 ) -> Response {
     let (_duration, started, config) = transport.into_parts();
-    let permit = match acquire_vocab_learn_apply_permit(&state.stats_permits, &state.prom).await {
-        Ok(permit) => permit,
-        Err(response) => return response,
-    };
+    let permit =
+        match acquire_vocab_learn_apply_permit(&state.admin_change_permits, &state.prom).await {
+            Ok(permit) => permit,
+            Err(response) => return response,
+        };
     let work_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let admission = work_state.write_admission.write();
-        lock_for_rebuild(&work_state, &admission)
-            .and_then(|cluster| cluster.learn_and_apply_with(&config))
+        work_state
+            .admit_rebuild()
+            .and_then(|_alone| work_state.cluster.learn_and_apply_with(&config))
     });
     let response = match worker.await {
         Ok(Ok(recompiled)) => {
@@ -189,7 +177,7 @@ pub(crate) async fn cluster_get_aliases(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let aliases = {
-            let cluster = worker_state.cluster.read();
+            let cluster = &worker_state.cluster;
             cluster
                 .vocab()
                 .map(|vocab| vocab.aliases().clone())
@@ -208,7 +196,7 @@ pub(crate) async fn cluster_import_aliases(
     transport: AliasImportTransport,
 ) -> Response {
     let (_duration, started, payload) = transport.into_parts();
-    let permit = match acquire_alias_import_permit(&state.stats_permits, &state.prom).await {
+    let permit = match acquire_alias_import_permit(&state.admin_change_permits, &state.prom).await {
         Ok(permit) => permit,
         Err(response) => return response,
     };
@@ -216,9 +204,9 @@ pub(crate) async fn cluster_import_aliases(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let (synonyms, rules) = payload.validate()?;
-        let admission = work_state.write_admission.write();
-        let report = lock_for_rebuild(&work_state, &admission)
-            .and_then(|cluster| cluster.import_alias_synonyms(&synonyms));
+        let report = work_state
+            .admit_rebuild()
+            .and_then(|_alone| work_state.cluster.import_alias_synonyms(&synonyms));
         Ok::<_, String>((rules, report))
     });
     let response = match worker.await {
@@ -257,16 +245,17 @@ pub(crate) async fn cluster_learn_aliases(
     transport: AliasLearnApplyTransport,
 ) -> Response {
     let (_duration, started, min_count) = transport.into_parts();
-    let permit = match acquire_alias_learn_apply_permit(&state.stats_permits, &state.prom).await {
-        Ok(permit) => permit,
-        Err(response) => return response,
-    };
+    let permit =
+        match acquire_alias_learn_apply_permit(&state.admin_change_permits, &state.prom).await {
+            Ok(permit) => permit,
+            Err(response) => return response,
+        };
     let work_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let admission = work_state.write_admission.write();
-        lock_for_rebuild(&work_state, &admission)
-            .and_then(|cluster| cluster.learn_aliases_and_apply(min_count))
+        work_state
+            .admit_rebuild()
+            .and_then(|_alone| work_state.cluster.learn_aliases_and_apply(min_count))
     });
     let response = match worker.await {
         Ok(Ok(report)) => {
@@ -311,9 +300,9 @@ struct ClusterSettingsResponse {
     defaults: Option<EngineConfig>,
 }
 
-/// GET/HEAD /_settings — clone the cluster + per-shard configuration under the
-/// cluster read guard, then release it before bounded serialization. Admission,
-/// the lock wait, and serialization all stay off the async request worker.
+/// GET/HEAD /_settings — clone the cluster + per-shard configuration, then
+/// serialize it within a bound. Admission and serialization stay off the async
+/// request worker.
 pub(crate) async fn cluster_get_settings(
     State(state): State<Arc<ClusterAppState>>,
     transport: SettingsReadTransport,
@@ -327,7 +316,7 @@ pub(crate) async fn cluster_get_settings(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let response = {
-            let cluster = worker_state.cluster.read();
+            let cluster = &worker_state.cluster;
             ClusterSettingsResponse {
                 mode: "cluster",
                 shards: cluster.num_shards(),
@@ -373,7 +362,8 @@ pub(crate) async fn cluster_put_settings(
 /// POST /_vocab/aliases/discover — distributional discovery in cluster mode is a **dry run over
 /// an explicit corpus only** (ADR-102): the coordinator has no single-engine corpus to analyze
 /// in place (gathering every shard's sources is a cross-shard op with no seam yet), so the
-/// request must carry `queries`. The computation is pure — no cluster lock, nothing recorded.
+/// request must carry `queries`. The computation is pure — nothing read from the cluster,
+/// nothing recorded.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_discover_aliases(
     State(state): State<Arc<ClusterAppState>>,

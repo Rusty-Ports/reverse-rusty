@@ -1,7 +1,7 @@
 use super::*;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -112,7 +112,7 @@ async fn learn_and_apply_is_mode_consistent_bounded_and_off_runtime() {
     ];
     let state = test_state(&queries);
 
-    let held = Arc::clone(&state.stats_permits)
+    let held = Arc::clone(&state.admin_change_permits)
         .acquire_owned()
         .await
         .expect("admin permit");
@@ -146,7 +146,7 @@ async fn learn_and_apply_is_mode_consistent_bounded_and_off_runtime() {
     assert!(body["took_ms"].is_number(), "{body}");
 
     {
-        let cluster = state.cluster.read();
+        let cluster = &state.cluster;
         assert!(cluster.vocab().is_some_and(|vocab| {
             vocab.synonyms().is_empty()
                 && vocab
@@ -254,7 +254,6 @@ async fn alias_registry_read_has_the_same_paged_contract_in_coordinator_mode() {
     assert_eq!(
         state
             .cluster
-            .write()
             .set_vocab(alias_fixture_vocab())
             .expect("install alias fixture"),
         3
@@ -345,7 +344,6 @@ async fn coordinator_alias_read_waits_asynchronously_for_shared_admission() {
     let state = test_state(&alias_seed());
     state
         .cluster
-        .write()
         .set_vocab(alias_fixture_vocab())
         .expect("install alias fixture");
     let held = Arc::clone(&state.stats_permits)
@@ -373,44 +371,26 @@ async fn coordinator_alias_read_waits_asynchronously_for_shared_admission() {
     assert!(bytes.is_empty());
 }
 
+/// The alias registry is read from the published layout, so the read answers while a rebuild
+/// holds the engine: it does not wait for the rebuild to finish.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn coordinator_alias_read_does_not_wait_on_the_cluster_lock_on_async_runtime() {
+async fn coordinator_alias_read_answers_while_a_rebuild_runs() {
     let state = test_state(&alias_seed());
     state
         .cluster
-        .write()
         .set_vocab(alias_fixture_vocab())
         .expect("install alias fixture");
 
-    let lock_state = Arc::clone(&state);
-    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-    let blocker = std::thread::spawn(move || {
-        let _guard = lock_state.cluster.write();
-        locked_tx.send(()).expect("announce held lock");
-        std::thread::sleep(Duration::from_millis(500));
-    });
-    locked_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("cluster write lock held");
-
-    let request_state = Arc::clone(&state);
-    let request = tokio::spawn(async move {
-        send_raw(&request_state, req_empty("GET", "/_vocab/aliases?size=0")).await
-    });
-    let started = Instant::now();
-    tokio::task::yield_now().await;
-    tokio::time::sleep(Duration::from_millis(25)).await;
-    assert!(
-        started.elapsed() < Duration::from_millis(300),
-        "cluster-lock contention escaped spawn_blocking and stalled the async runtime"
-    );
-    assert!(
-        !request.is_finished(),
-        "request should still be waiting for the deliberately held cluster lock"
-    );
-
-    blocker.join().expect("lock holder");
-    let (status, _, bytes) = request.await.expect("request task");
+    let rebuild = pause_a_rebuild(&state);
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        send_raw(&state, req_empty("GET", "/_vocab/aliases?size=0")),
+    )
+    .await;
+    // Released before anything can fail.
+    let rebuilt = rebuild.finish();
+    let (status, _, bytes) = answer.expect("the alias read waited for the rebuild");
+    rebuilt.expect("rebuild");
     assert_eq!(status, StatusCode::OK);
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON aliases");
     assert_eq!(body["count"], 3, "{body}");
@@ -567,7 +547,7 @@ async fn vocabulary_write_is_strict_bounded_and_shares_async_admission() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
     assert_eq!(body["error"]["type"], "validation_error", "{body}");
 
-    let held = Arc::clone(&state.stats_permits)
+    let held = Arc::clone(&state.admin_change_permits)
         .acquire_owned()
         .await
         .expect("admin permit");

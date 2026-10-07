@@ -32,7 +32,7 @@ const VOCAB_WRITE_ENDPOINT: &str = "vocab_put";
 ///
 /// The timer begins before method, query, content-type, body, and JSON checks.
 /// The decoded document is held only until bounded administrative admission is
-/// acquired; no engine or cluster lock is held while the request body arrives.
+/// acquired; no engine lock or cluster guard is held while the request body arrives.
 pub(crate) struct VocabWriteTransport {
     duration: HistogramTimer,
     started: Instant,

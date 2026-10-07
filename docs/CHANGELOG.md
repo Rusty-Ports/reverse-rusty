@@ -9,6 +9,34 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-07 — A coordinator serves searches and health during a vocabulary change or resize
+
+- **A coordinator answers searches and reads while a vocabulary change or an in-process resize
+  rebuilds the cluster**
+  ([ADR-210](decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)). Until the rebuild
+  swaps its new layout in, they answer from the old one. This covers every search route with and
+  without sources, `GET`/`HEAD /_doc/{id}`, `/`, `/_health`, `/_metrics`, `/_stats`, `/_cat/shards`,
+  `/_settings`, `GET /_vocab`, `GET /_vocab/aliases` and `/_cluster/state`. Before, all of them
+  waited for the whole rebuild; a health probe answered red at its deadline and a metrics scrape
+  hung.
+- `/_health` in coordinator mode has a new field, `rebuild_in_progress`. A rebuild does not change
+  the health colour.
+- Library: `ClusterEngine::published()` pins the published layout for a reader that reports
+  several things about it together, and `layout_change_in_progress()` says whether a rebuild is
+  running.
+- Writes still wait for the rebuild. A topology operation with a manager timeout still answers
+  its "not started" timeout within that budget.
+- **Behaviour changes.** A vocabulary change can swap in between two titles of one source-free
+  `/_search` batch; each title is matched whole under one vocabulary. (A search that returns
+  sources and a `/v2/_mpercolate` batch see one vocabulary throughout.) A stats scan, a
+  vocabulary read or read-only learning can now run beside a rebuild, where one shared admission
+  slot used to keep them apart: allow memory for both. Administrative changes (vocabulary and
+  alias changes, an in-process resize, node registration and deregistration, a resync) are
+  admitted one at a time on a slot of their own.
+- The server's lock around the cluster engine and the search pool's gate
+  ([ADR-207](decisions/adr-207-cluster-writers-wait-outside-the-search-pool.md), now superseded)
+  are removed.
+
 ## 2026-10-07 — A search runs beside a cluster rebuild (library)
 
 - In the library, a search answers while a vocabulary change or an in-process resize rebuilds the

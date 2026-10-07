@@ -191,16 +191,20 @@ pub(crate) async fn cluster_stats(
     let worker_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let cluster = worker_state.cluster.read();
+        let cluster = &worker_state.cluster;
+        // The counts below are reported together, so they are read from one pinned layout:
+        // a resize that swapped in between two of them would put eight shard counts beside
+        // a shard total of nine.
+        let layout = cluster.published();
         // One count pass is enough: the aggregate is the sum of the returned
         // per-position rows. The old path called every shard twice.
-        let per_shard = cluster.shard_query_counts()?;
+        let per_shard = layout.shard_query_counts()?;
+        let cc = layout.class_counts()?;
+        let shards = layout.num_shards();
         let total = per_shard
             .iter()
             .copied()
             .fold(0usize, usize::saturating_add);
-        let cc = cluster.class_counts()?;
-        let shards = cluster.num_shards();
         Ok::<_, reverse_rusty::cluster::ShardError>(ClusterStatsResponse {
             took: 0,
             took_ms: 0.0,
@@ -225,7 +229,7 @@ pub(crate) async fn cluster_stats(
             },
             epoch: cluster.epoch(),
             pending_repairs: cluster.pending_repairs(),
-            out_of_sync_replicas: cluster.out_of_sync_replicas(),
+            out_of_sync_replicas: layout.out_of_sync_replicas(),
             has_tagged_queries: cluster.has_tagged_queries(),
         })
     });
@@ -288,7 +292,7 @@ pub(crate) async fn cluster_flush_route(
                 let _permit = permit;
                 let _flush = acquire_flush(&worker_state.flush_serial, params, &worker_state.prom)?;
                 let _w = worker_state.write_admission.write();
-                let cluster = worker_state.cluster.read();
+                let cluster = &worker_state.cluster;
                 Ok::<_, Box<Response>>((cluster.num_shards(), cluster.flush()))
             })
             .await
@@ -338,7 +342,7 @@ pub(crate) async fn cluster_flush_route(
 /// pointing a fresh coordinator at the copy via `--data-dir`. Replicas are rebuilt on
 /// open, so they are not copied.
 ///
-/// Holds the writer-serialization mutex + the cluster READ lock across the checkpoint
+/// Holds write admission alone across the checkpoint
 /// AND the copy (mirroring `cluster_checkpoint`), so no concurrent mutation or shard
 /// compaction runs during the snapshot; reads keep flowing off the shard snapshots.
 /// An in-memory cluster (no `--data-dir`) is a 400.
@@ -377,7 +381,7 @@ pub(crate) async fn cluster_backup(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _writer = work_state.write_admission.write();
-        let cluster = work_state.cluster.read();
+        let cluster = &work_state.cluster;
         cluster.backup_to(&dest).map(|()| cluster.epoch())
     });
     let prom = state.prom.clone();

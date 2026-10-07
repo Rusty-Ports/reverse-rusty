@@ -29,6 +29,75 @@ fn test_state(queries: &[(u64, String)]) -> Arc<ClusterAppState> {
     state_from_cluster(cluster)
 }
 
+/// Make the next rebuild of `state`'s cluster stop once it holds the engine's layout lock
+/// alone and has frozen the shards it replaces: what a vocabulary change or a resize holds
+/// for its whole run. The receiver reports that it has stopped; using the sender, or
+/// dropping it, lets the rebuild go on. Later rebuilds run straight through.
+fn stop_the_next_rebuild(
+    state: &ClusterAppState,
+) -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (stopped_sender, stopped) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel::<()>(1);
+    let released = std::sync::Mutex::new(released);
+    state
+        .cluster
+        .set_rebuild_hook_for_test(Some(Arc::new(move || {
+            let _ = stopped_sender.try_send(());
+            let _ = released.lock().expect("release").recv();
+        })));
+    (stopped, release)
+}
+
+/// A real rebuild of the cluster, stopped half-way (see [`stop_the_next_rebuild`]). It goes on
+/// when this is finished or dropped, so a failed assertion cannot leave anything parked
+/// behind it.
+struct PausedRebuild {
+    release: Option<std::sync::mpsc::SyncSender<()>>,
+    rebuild: Option<std::thread::JoinHandle<Result<usize, ShardError>>>,
+}
+
+impl PausedRebuild {
+    /// Let the rebuild finish and return what it returned.
+    fn finish(mut self) -> Result<usize, ShardError> {
+        drop(self.release.take());
+        self.rebuild
+            .take()
+            .expect("rebuild thread")
+            .join()
+            .expect("rebuild thread")
+    }
+}
+
+impl Drop for PausedRebuild {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(rebuild) = self.rebuild.take() {
+            let _ = rebuild.join();
+        }
+    }
+}
+
+/// Resize the cluster by one shard on a helper thread, straight at the engine, and stop the
+/// rebuild half-way.
+fn pause_a_rebuild(state: &Arc<ClusterAppState>) -> PausedRebuild {
+    let (stopped, release) = stop_the_next_rebuild(state);
+    let rebuild_state = Arc::clone(state);
+    let rebuild = std::thread::spawn(move || {
+        let shards = rebuild_state.cluster.num_shards();
+        rebuild_state.cluster.resize(shards + 1)
+    });
+    stopped
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the rebuild reached its stopping point");
+    PausedRebuild {
+        release: Some(release),
+        rebuild: Some(rebuild),
+    }
+}
+
 fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
     state_from_cluster_with_rebalance_topology(
         cluster,
@@ -46,7 +115,7 @@ fn state_from_cluster_with_rebalance_topology(
         .expect("pool");
     let prom = PrometheusMetrics::new();
     Arc::new(ClusterAppState {
-        cluster: crate::state::ClusterLock::new(cluster),
+        cluster,
         topology_guard: RwLock::new(()),
         write_admission: RwLock::new(()),
         write_permits: Arc::new(tokio::sync::Semaphore::new(
@@ -72,6 +141,9 @@ fn state_from_cluster_with_rebalance_topology(
             crate::state::MAX_CONCURRENT_CLUSTER_REASSIGNS,
         )),
         remote_resize_permits: Arc::new(tokio::sync::Semaphore::new(1)),
+        admin_change_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_ADMIN_CHANGES,
+        )),
         rebalance_topology,
         health_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_HEALTH_REQUESTS,
@@ -79,7 +151,8 @@ fn state_from_cluster_with_rebalance_topology(
         stats_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_STATS,
         )),
-        pool: crate::state::SearchPool::new(pool),
+        pool,
+        read_pause: Mutex::new(None),
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
         exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
@@ -443,12 +516,13 @@ mod jobs;
 mod metrics;
 mod node_deregister;
 mod node_register;
+mod one_layout;
 mod pit;
-mod pool_gate;
 mod ranked;
 mod read_admission;
 mod reassign;
 mod rebalance;
+mod rebuild_availability;
 mod reconcile;
 mod request_limit;
 mod resize;

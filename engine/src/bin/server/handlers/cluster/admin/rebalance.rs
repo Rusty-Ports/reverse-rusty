@@ -273,22 +273,13 @@ pub(crate) async fn cluster_rebalance(
         let Some(_topology) = topology else {
             return ClusterRebalanceWorkerOutcome::NotStarted;
         };
-        let cluster = if no_wait {
-            worker_state.cluster.try_read()
-        } else {
-            deadline
-                .checked_duration_since(Instant::now())
-                .and_then(|budget| worker_state.cluster.try_read_for(budget))
-        };
-        let Some(cluster) = cluster else {
-            return ClusterRebalanceWorkerOutcome::NotStarted;
-        };
+        let cluster = &worker_state.cluster;
         if !begin_cluster_rebalance(&worker_gate, deadline, no_wait) {
             return ClusterRebalanceWorkerOutcome::NotStarted;
         }
         let _ = started_sender.send(());
         let result = execute_cluster_rebalance(
-            &cluster,
+            cluster,
             mode,
             #[cfg(feature = "distributed")]
             &handle,

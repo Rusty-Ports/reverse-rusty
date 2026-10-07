@@ -36,7 +36,8 @@ Cluster health uses a deliberately smaller native payload:
   "timed_out": false,
   "shards": 8,
   "pending_repairs": 0,
-  "out_of_sync_replicas": 0
+  "out_of_sync_replicas": 0,
+  "rebuild_in_progress": false
 }
 ```
 
@@ -73,6 +74,14 @@ out. The coordinator rechecks the wall clock after each blocking result rather t
 the async timeout race. Explicit status waits and dependency-probe deadlines have distinct stable
 reasons. A coordinator request that times out cannot forcibly stop already-running blocking/network
 work; that work retains its single shared stats permit until its own transport bounds complete.
+A vocabulary change or a resize does not hold that permit, so in coordinator mode a probe answers
+while one rebuilds the cluster
+([ADR-210](../../../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)). A rebuild
+does not change the colour, because searches answer exactly throughout. The cluster payload
+reports it in `rebuild_in_progress`, which is `true` while a vocabulary change or a resize is
+rebuilding the cluster or is about to; writes wait until it is `false` again. While it is `true`,
+a difference between the committed topology and the serving shards is not treated as a failure,
+because the rebuild replaces the one and then the other.
 
 Coordinator green requires a successful committed control-state read, a count from every logical
 serving position, matching committed/ring shard counts, and exactly one in-range committed

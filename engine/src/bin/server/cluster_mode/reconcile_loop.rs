@@ -58,7 +58,7 @@ pub(crate) fn spawn_reconcile_loop(
             tokio::time::sleep(min_interval).await;
 
             let epoch = {
-                let cluster = state.cluster.read();
+                let cluster = &state.cluster;
                 match cluster.control_version() {
                     Ok(v) => v.0,
                     Err(e) => {
@@ -83,8 +83,8 @@ pub(crate) fn spawn_reconcile_loop(
             };
 
             // Run the pass OFF the async worker: `execute_handoff` does `block_on` internally, which
-            // must not nest on a runtime worker thread. Holds the cluster READ guard for the pass
-            // (excludes a concurrent vocab rebuild / resize `&mut self`, exactly like the manual
+            // must not nest on a runtime worker thread. Holds the topology guard shared for the
+            // pass (a vocabulary rebuild or a resize takes it alone, exactly like the manual
             // `/_cluster/reassign` handler); each move's own fence + the engine reassign guard provide
             // the rest of the concurrency safety.
             let handle = crate::cluster_mode::cluster_rpc_handle();
@@ -93,7 +93,7 @@ pub(crate) fn spawn_reconcile_loop(
             let result = tokio::task::spawn_blocking(move || {
                 let _admission = worker_admission;
                 let _topology = st.topology_guard.read();
-                let cluster = st.cluster.read();
+                let cluster = &st.cluster;
                 cluster.reconcile_with(rf, max_parallel_moves, &handle)
             })
             .await;
@@ -125,7 +125,7 @@ pub(crate) fn spawn_reconcile_loop(
                         match tokio::task::spawn_blocking(move || {
                             let _admission = worker_admission;
                             let _topology = st.topology_guard.read();
-                            let cluster = st.cluster.read();
+                            let cluster = &st.cluster;
                             cluster.gc_orphan_slots(&handle)
                         })
                         .await

@@ -18,7 +18,7 @@ fn alias_learning_seed() -> Vec<(u64, String)> {
 async fn has_standalone_parity_strict_transport_and_off_runtime_locking() {
     let state = test_state(&alias_learning_seed());
 
-    let held = Arc::clone(&state.stats_permits)
+    let held = Arc::clone(&state.admin_change_permits)
         .acquire_owned()
         .await
         .expect("admin permit");
@@ -54,7 +54,7 @@ async fn has_standalone_parity_strict_transport_and_off_runtime_locking() {
     assert_eq!(body["summary"]["active"], 1, "{body}");
 
     {
-        let cluster = state.cluster.read();
+        let cluster = &state.cluster;
         assert!(cluster
             .percolate("vertex adapters")
             .expect("percolate")
@@ -69,17 +69,8 @@ async fn has_standalone_parity_strict_transport_and_off_runtime_locking() {
         );
     }
 
-    let lock_state = Arc::clone(&state);
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let lock_thread = std::thread::spawn(move || {
-        let _cluster = lock_state.cluster.write();
-        held_tx.send(()).expect("held signal");
-        release_rx.recv().expect("release signal");
-    });
-    held_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("cluster lock held");
+    // Another rebuild is running: this one waits for it inside the engine.
+    let other_rebuild = pause_a_rebuild(&state);
     let request_state = Arc::clone(&state);
     let mut request = tokio::spawn(async move {
         send_raw(
@@ -92,7 +83,7 @@ async fn has_standalone_parity_strict_transport_and_off_runtime_locking() {
         tokio::time::timeout(Duration::from_millis(50), &mut request)
             .await
             .is_err(),
-        "the blocking worker should wait on the cluster write lock"
+        "the blocking worker should wait for the rebuild that is running"
     );
     tokio::time::timeout(
         Duration::from_millis(100),
@@ -100,9 +91,9 @@ async fn has_standalone_parity_strict_transport_and_off_runtime_locking() {
     )
     .await
     .expect("Tokio worker remained responsive");
-    release_tx.send(()).expect("release cluster");
-    lock_thread.join().expect("lock thread");
+    let rebuilt = other_rebuild.finish();
     assert_eq!(request.await.expect("request task").0, StatusCode::OK);
+    rebuilt.expect("the other rebuild");
 
     for path in [
         "/_vocab/aliases/learn_and_apply?min_count=0",
