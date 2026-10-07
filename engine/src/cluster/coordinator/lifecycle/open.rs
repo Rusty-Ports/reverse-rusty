@@ -318,6 +318,56 @@ impl ClusterEngine {
         let per_shard = config.map(|c| c.per_shard.clone()).unwrap_or_default();
         let fsync = config.is_some_and(|c| c.wal_sync_on_write);
 
+        // The log is opened, or refused, BEFORE any shard is attached. Attaching a shard resets
+        // its translog and reseeds its replicas. When the cluster log is gone, those shard
+        // translogs are the only place the writes since the last checkpoint still exist, so an
+        // open that is going to refuse must not have touched them (ADR-213).
+        let log_path = data_dir.join(CLUSTER_LOG_FILE);
+        // Does this manifest say the log exists? (ADR-212, ADR-213.)
+        //
+        // A manifest at epoch 1 or later was written with the log in place: by `build`, which
+        // creates the log first, or by a checkpoint, which needs the log open and replaces it
+        // only through a rename. Under it a log that is missing, or shorter than its header,
+        // has been lost with the writes acknowledged since that manifest, and the cluster is
+        // refused.
+        //
+        // Epoch 0 is the manifest that releases before ADR-213 wrote at build, before they
+        // created the log (and, before ADR-212, before the log had its header). Under it a
+        // missing or short log may be a build that was interrupted, so it is created or
+        // finished. A cluster from such a release that has taken writes and never
+        // checkpointed looks the same; its first checkpoint (a graceful stop makes one) ends
+        // that.
+        let written_with_its_log = manifest.written_with_its_log();
+        let accept_lost_log = config.is_some_and(|c| c.accept_lost_log);
+        let log_was_lost = written_with_its_log && !log_path.exists();
+        if log_was_lost && !accept_lost_log {
+            return Err(ShardError::Log(
+                crate::storage::framed_log::lost_log(
+                    &log_path,
+                    &format!(
+                        "the cluster manifest (epoch {}, log position {}) was written after it \
+                         existed",
+                        manifest.epoch, manifest.snapshot_pos
+                    ),
+                    "Restore the data directory from a backup, or start once with \
+                     `accept_lost_log` (`--accept-lost-log`) to continue from the last \
+                     checkpoint without those writes.",
+                )
+                .to_string(),
+            ));
+        }
+        if !written_with_its_log {
+            FileClusterLog::finish_interrupted_creation(&log_path)
+                .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
+        }
+        let if_missing = if written_with_its_log && !log_was_lost {
+            IfMissing::Refuse
+        } else {
+            IfMissing::Create
+        };
+        let log = FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos), if_missing)
+            .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
+
         // Attach each shard's committed compiled segments (mmap) against the shared dict —
         // NOT re-ingest. Fails loud on a missing / CRC-corrupt segment (a skipped segment
         // is a silent shard-sized false negative).
@@ -392,52 +442,6 @@ impl ClusterEngine {
                 ));
             }
         }
-
-        let log_path = data_dir.join(CLUSTER_LOG_FILE);
-        // Does this manifest say the log exists? (ADR-212, ADR-213.)
-        //
-        // A manifest at epoch 1 or later was written with the log in place: by `build`, which
-        // creates the log first, or by a checkpoint, which needs the log open and replaces it
-        // only through a rename. Under it a log that is missing, or shorter than its header,
-        // has been lost with the writes acknowledged since that manifest, and the cluster is
-        // refused.
-        //
-        // Epoch 0 is the manifest that releases before ADR-213 wrote at build, before they
-        // created the log (and, before ADR-212, before the log had its header). Under it a
-        // missing or short log may be a build that was interrupted, so it is created or
-        // finished. A cluster from such a release that has taken writes and never
-        // checkpointed looks the same; its first checkpoint (a graceful stop makes one) ends
-        // that.
-        let written_with_its_log = manifest.written_with_its_log();
-        let accept_lost_log = config.is_some_and(|c| c.accept_lost_log);
-        let log_was_lost = written_with_its_log && !log_path.exists();
-        if log_was_lost && !accept_lost_log {
-            return Err(ShardError::Log(
-                crate::storage::framed_log::lost_log(
-                    &log_path,
-                    &format!(
-                        "the cluster manifest (epoch {}, log position {}) was written after it \
-                         existed",
-                        manifest.epoch, manifest.snapshot_pos
-                    ),
-                    "Restore the data directory from a backup, or start once with \
-                     `accept_lost_log` (`--accept-lost-log`) to continue from the last \
-                     checkpoint without those writes.",
-                )
-                .to_string(),
-            ));
-        }
-        if !written_with_its_log {
-            FileClusterLog::finish_interrupted_creation(&log_path)
-                .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
-        }
-        let if_missing = if written_with_its_log && !log_was_lost {
-            IfMissing::Refuse
-        } else {
-            IfMissing::Create
-        };
-        let log = FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos), if_missing)
-            .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
 
         let durable = ClusterDurable {
             log: Box::new(log),

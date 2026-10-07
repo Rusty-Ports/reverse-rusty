@@ -56,6 +56,7 @@ pub const DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION: Duration = Duration::from_mins
 
 mod durable;
 mod metrics_source;
+mod node_events;
 mod service;
 
 use durable::{read_adopted_space, restore_durable_slots, sweep_dropped_trash};
@@ -73,6 +74,25 @@ struct ServerState {
     /// node-scope [`AdoptedSpace`] — every slot on the node shares the one deserialized dict/tag pair.
     tag_dict: Arc<TagDict>,
     shard: LocalShard,
+}
+
+impl ServerState {
+    /// The state of one hosted shard. The shard is wired to the node's event channel here,
+    /// and this is the only way to build one, so no slot can hold a shard whose durability
+    /// events go nowhere (ADR-213).
+    fn new(
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        shard: LocalShard,
+        events: &Arc<node_events::NodeEvents>,
+    ) -> Self {
+        events.wire(&shard);
+        ServerState {
+            dict,
+            tag_dict,
+            shard,
+        }
+    }
 }
 
 /// One hosted shard on a multi-shard node (ADR-093): its swappable engine state + its OWN fence
@@ -246,6 +266,8 @@ pub struct ShardServer {
     /// (ADR-189). A slot created for one is born awaiting recovery. Persisted under `data_dir`
     /// before a drop takes effect.
     dropped: std::sync::Mutex<dropped::DroppedRecord>,
+    /// Where every shard this node hosts reports its durability events (ADR-213).
+    events: Arc<node_events::NodeEvents>,
 }
 
 mod bulk_load;

@@ -20,7 +20,19 @@ impl ShardServer {
     pub fn metrics_source(&self) -> ShardMetricsSource {
         ShardMetricsSource {
             shards: Arc::clone(&self.shards),
+            events: Arc::clone(&self.events),
         }
+    }
+
+    /// Have the shards this node hosts report their durability events to `sink`: what they
+    /// queued while they were opened, and everything after, for every slot the node holds
+    /// now or creates later (ADR-213). The node's binary logs them here. Like every event
+    /// observer, `sink` must be quick and must not call back into the node.
+    pub fn set_event_sink(
+        &self,
+        sink: impl Fn(&crate::events::EngineEvent) + Send + Sync + 'static,
+    ) {
+        self.events.install(Arc::new(sink));
     }
 
     /// The slot hosting `shard_id` on this node, or `not_found` (ADR-093). Clones the slot `Arc` out

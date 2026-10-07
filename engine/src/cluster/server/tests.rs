@@ -147,6 +147,7 @@ mod gc;
 mod limits;
 mod live_sources;
 mod logical_ids;
+mod node_events;
 mod retire;
 mod seal;
 mod stage_ingest;

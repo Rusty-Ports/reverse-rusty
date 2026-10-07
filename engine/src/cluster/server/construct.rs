@@ -23,11 +23,10 @@ impl ShardServer {
             config.clone(),
         );
         let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
-        let shards = single_slot(ShardSlot::loaded(ServerState {
-            dict,
-            tag_dict,
-            shard,
-        }));
+        let events = Arc::default();
+        let shards = single_slot(ShardSlot::loaded(ServerState::new(
+            dict, tag_dict, shard, &events,
+        )));
         ShardServer {
             norm,
             config,
@@ -48,6 +47,7 @@ impl ShardServer {
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(None)),
             dropped: std::sync::Mutex::default(),
+            events,
         }
     }
 
@@ -76,6 +76,7 @@ impl ShardServer {
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(None)),
             dropped: std::sync::Mutex::default(),
+            events: Arc::default(),
         }
     }
 
@@ -134,7 +135,8 @@ impl ShardServer {
             placement_generation,
             num_shards,
         })));
-        let slots = restore_durable_slots(&data_dir, &norm, &dict, &tag_dict, &config)?;
+        let events = Arc::default();
+        let slots = restore_durable_slots(&data_dir, &norm, &dict, &tag_dict, &config, &events)?;
         for (&position, slot) in &slots {
             if let Some(state) = slot.state.load_full() {
                 state
@@ -168,6 +170,7 @@ impl ShardServer {
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
             dropped,
+            events,
         })
     }
 
@@ -197,6 +200,7 @@ impl ShardServer {
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
             dropped: std::sync::Mutex::default(),
+            events: Arc::default(),
         }
     }
 
@@ -222,11 +226,8 @@ impl ShardServer {
             sc,
         )?;
         let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
-        let slot = ShardSlot::loaded(ServerState {
-            dict,
-            tag_dict,
-            shard,
-        });
+        let events = Arc::default();
+        let slot = ShardSlot::loaded(ServerState::new(dict, tag_dict, shard, &events));
         // The pre-built node remembers its drops too (ADR-189): reopening a directory whose
         // slot 0 was dropped must not serve a fresh empty slot 0.
         let dropped = match node_dict.load_full() {
@@ -254,6 +255,7 @@ impl ShardServer {
             max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
             retired: Arc::new(ArcSwapOption::from(retired)),
             dropped,
+            events,
         })
     }
 }

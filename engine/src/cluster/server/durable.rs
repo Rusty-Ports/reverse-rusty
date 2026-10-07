@@ -226,6 +226,7 @@ pub(super) fn restore_durable_slots(
     dict: &Arc<Dict>,
     tag_dict: &Arc<TagDict>,
     config: &EngineConfig,
+    events: &Arc<super::node_events::NodeEvents>,
 ) -> Result<HashMap<u32, Arc<ShardSlot>>, ShardError> {
     let mut slots = HashMap::new();
     let entries = match std::fs::read_dir(data_dir) {
@@ -254,11 +255,12 @@ pub(super) fn restore_durable_slots(
             LocalShard::new_durable(Arc::clone(norm), Arc::clone(dict), Arc::clone(tag_dict), sc)?;
         slots.insert(
             shard_id,
-            ShardSlot::loaded(ServerState {
-                dict: Arc::clone(dict),
-                tag_dict: Arc::clone(tag_dict),
+            ShardSlot::loaded(ServerState::new(
+                Arc::clone(dict),
+                Arc::clone(tag_dict),
                 shard,
-            }),
+                events,
+            )),
         );
     }
     Ok(slots)

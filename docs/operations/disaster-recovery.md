@@ -158,8 +158,12 @@ it) and delete nothing else. **Never remove a log to get a node started.** Then,
 
 After an accepted loss:
 
-1. The server logs the loss and `durability_failures_total{op="log_lost"}` counts it once. The
-   event names the position after which writes were lost.
+1. The server logs the loss and `durability_failures_total{op="log_lost"}` counts it once. A
+   shard node prints a `DURABILITY log_lost: …` line on standard error and counts it in
+   `reverse_rusty_shard_durability_failures_total{op="log_lost"}`. For a cluster or a shard
+   the event names the log position after which writes were lost. For a single-node server it
+   says that every unflushed write is lost and that these can be older than the manifest's
+   log watermark, so replay from before the last flush, not from that number.
 2. Replay the window since the last flush or checkpoint from the upstream system of record
    (§3.1 step 3); upserts are idempotent per id.
 3. Remove `--accept-lost-log`. Left in place it would accept the next loss as well.

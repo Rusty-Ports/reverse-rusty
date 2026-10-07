@@ -93,7 +93,10 @@ space/health immediately; do not take a backup onto the same failing disk; once 
 with a sentinel write and take a fresh backup. `op="log_lost"` means a store was started with
 `--accept-lost-log` after its log went missing (ADR-213): the writes since its last flush or
 checkpoint are gone, so replay them from upstream and remove the flag
-([disaster recovery §3.4](disaster-recovery.md)). The `op="replica_desync"` series is different: a
+([disaster recovery §3.4](disaster-recovery.md)). A shard node counts its own in
+`reverse_rusty_shard_durability_failures_total{op}` on its metrics port: alert on an increase
+of any `op` except `wal_torn_tail`, which is the routine repair of a torn translog tail after
+a crash. The `op="replica_desync"` series is different: a
 replica left the in-sync set (a replicated write to it failed, or it was not proven equal to its
 primary when the coordinator connected, ADR-195). No write was lost, but that position has less
 redundancy until the replica is recovered ([runbook §6](cluster-deployment.md), *Replica

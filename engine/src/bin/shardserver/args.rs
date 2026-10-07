@@ -249,8 +249,15 @@ pub(crate) fn engine_banner(engine: &EngineConfig, durable: bool) -> String {
         (true, true) => "fsync on every write (survives power loss)",
         (true, false) => "fsync at flush checkpoints (survives a process crash)",
     };
+    // Said at every start while the flag is set, so that one left in place is seen (ADR-213).
+    let lost_log = if engine.accept_lost_log {
+        "; --accept-lost-log IS SET: a shard whose translog is gone starts from its checkpoint \
+         without the writes that were in it. Remove the flag after this start"
+    } else {
+        ""
+    };
     format!(
-        "translog {fsync}; retain-source {}; max-segments {}; memtable-flush-threshold {}",
+        "translog {fsync}; retain-source {}; max-segments {}; memtable-flush-threshold {}{lost_log}",
         engine.retain_source, engine.max_segments, engine.memtable_flush_threshold
     )
 }
@@ -277,6 +284,9 @@ mod tests {
         .expect("valid");
         assert!(asked.engine.accept_lost_log);
         assert_eq!(asked.addr.as_deref(), Some("0.0.0.0:50051"));
+        // The banner says so at every start while the flag is set, and not otherwise.
+        assert!(engine_banner(&asked.engine, true).contains("--accept-lost-log IS SET"));
+        assert!(!engine_banner(&default.engine, true).contains("accept-lost-log"));
     }
 
     #[test]

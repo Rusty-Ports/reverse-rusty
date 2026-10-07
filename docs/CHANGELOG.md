@@ -20,7 +20,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
   existed, and create nothing in its place.
 - **`--accept-lost-log`** (`server` and `shardserver`; `accept_lost_log` in the library): start
   from the last flush or checkpoint with an empty log, and report a `log_lost` durability event
-  that says after which position writes were lost. For one start. It changes nothing when the log
+  that says what was lost. For one start; both binaries say at every start that it is set. It changes nothing when the log
   is there and does not make a damaged log acceptable. A control node has no such flag: its data
   directory is restored from a snapshot.
 - **`build` creates the cluster log before it writes the manifest,** and writes that manifest at
@@ -29,6 +29,14 @@ reverse chronological and describe outcomes, not the current architecture or fut
   release reports epoch 1 where it reported 0.
 - **A backup of a store whose log is gone is refused,** and a backup directory without its log
   does not verify.
+- **A shard node reports durability events.** It gave its shards no event sink, so nothing they
+  reported reached a log or a metric. `shardserver` now prints a `DURABILITY <op>: …` line for
+  each and counts them in `reverse_rusty_shard_durability_failures_total{op}` on
+  `--metrics-addr`. That covers the new `log_lost` and the existing `wal_torn_tail` (a torn
+  translog tail repaired at start-up).
+- **A refused start touches nothing.** The coordinator checks its log before it attaches a
+  shard, so a refusal leaves the shards' translogs as they were; and a translog reset replaces
+  the file by a rename instead of removing it first.
 - **Behaviour change:** a data directory whose log was deleted or lost does not start until it is
   restored from a backup or started once with `--accept-lost-log`. Do not delete a log to get a
   node started. No format change.

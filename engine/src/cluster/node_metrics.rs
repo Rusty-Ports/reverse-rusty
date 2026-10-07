@@ -506,6 +506,25 @@ pub(crate) fn render_shard_pending() -> String {
     e.into_string()
 }
 
+/// Append a shard node's durability-failure counter (ADR-213): one series per operation its
+/// shards reported, whatever slot reported it. The node's log has the detail of each.
+pub(crate) fn push_durability_failures(out: &mut String, failures: &[(&'static str, u64)]) {
+    const NAME: &str = "reverse_rusty_shard_durability_failures_total";
+    let mut e = Exposition {
+        out: std::mem::take(out),
+    };
+    e.header_typed(
+        NAME,
+        "Durability events reported by this node's shards, by operation. An increase means \
+         data was at risk or lost; the node's log says which.",
+        "counter",
+    );
+    for (op, count) in failures {
+        e.sample(NAME, &[("op", op)], count);
+    }
+    *out = e.into_string();
+}
+
 // ---- control rendering -------------------------------------------------------------------------
 
 /// A snapshot of the Raft fields a control node exposes — primitives only, so [`render_control`] is

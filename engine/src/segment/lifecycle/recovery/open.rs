@@ -183,9 +183,15 @@ impl Engine {
         //
         // A data directory with a manifest once had a log: the log is opened before the
         // first commit, and it is only ever replaced through a rename (ADR-198). So a log
-        // that is not there has been lost, with every write acknowledged since the last
-        // flush, and `Wal::open` would put an empty one in its place without a word.
-        // Refuse, unless the operator asked to start without it (ADR-213).
+        // that is not there has been lost, with every acknowledged write that had not been
+        // flushed to a segment, and `Wal::open` would put an empty one in its place without
+        // a word. Refuse, unless the operator asked to start without it (ADR-213).
+        //
+        // Those writes are not "everything after the manifest's log watermark": a bulk
+        // ingest or a compaction commits a manifest, and advances the watermark, without
+        // flushing the memtable (ADR-066, ADR-067), so an unflushed write can be older than
+        // the watermark. Nothing on disk says where they begin, and the report does not
+        // pretend to.
         let wal_path = dir.join("wal.log");
         let log_was_lost = !wal_path.exists();
         if log_was_lost {
@@ -194,8 +200,8 @@ impl Engine {
                     &wal_path,
                     "the manifest beside it was written after it existed",
                     "Restore the data directory from a backup, or start once with \
-                     `accept_lost_log` (`--accept-lost-log`) to continue from the last flush \
-                     without those writes.",
+                     `accept_lost_log` (`--accept-lost-log`) to continue with what the \
+                     segments hold.",
                 ));
             }
             pending_events.push(crate::events::EngineEvent::DurabilityFailure {
@@ -204,7 +210,9 @@ impl Engine {
                          started with an empty one"
                     .to_string(),
                 error: format!(
-                    "every write acknowledged after log sequence {} is lost",
+                    "every acknowledged write that had not been flushed to a segment is \
+                     lost; they can be older than the manifest's log watermark ({}), so \
+                     replay from before the last flush",
                     manifest.wal_seq_watermark
                 ),
             });

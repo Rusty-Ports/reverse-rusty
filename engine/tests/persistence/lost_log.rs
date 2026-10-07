@@ -109,3 +109,58 @@ fn an_engine_with_no_manifest_and_no_log_starts() {
     assert!(lost_log_events(&mut engine).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What is lost is every acknowledged write that had not been flushed to a segment, and that
+/// is not "everything after the manifest's log watermark". A bulk ingest commits a manifest,
+/// and advances the watermark, without flushing the memtable, so a write from before that
+/// commit can still be only in the log. The report says so instead of naming a sequence
+/// number an operator would replay from, and miss the write.
+#[test]
+fn the_report_does_not_name_the_watermark_as_the_place_to_replay_from() {
+    let dir = test_dir("lost_log_below_watermark");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&[(1, "wireless mouse".into())]);
+        // Acknowledged, in the log and the memtable.
+        engine.insert_live("mechanical keyboard", 2, 1);
+        // Commits a manifest whose watermark covers that write, and does not flush it.
+        engine.bulk_ingest(&[(3, "usb hub".into())]);
+        assert!(engine.persistence_healthy(), "precondition: both commits");
+    }
+    let manifest =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert!(
+        manifest.wal_seq_watermark >= 1,
+        "precondition: the watermark covers the live write"
+    );
+    std::fs::remove_file(dir.join("wal.log")).expect("lose the log");
+
+    let accepting = EngineConfig {
+        accept_lost_log: true,
+        ..config
+    };
+    let mut engine = Engine::open(make_norm(), accepting).expect("the loss was accepted");
+    assert!(match_ids(&engine, "1986 vertex wireless mouse new").contains(&1));
+    assert!(match_ids(&engine, "2021 acme usb hub new").contains(&3));
+    assert!(
+        !match_ids(&engine, "2003 acme mechanical keyboard new").contains(&2),
+        "precondition: the write below the watermark is the one that is lost"
+    );
+    let lost = lost_log_events(&mut engine);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(
+        lost[0].contains("not been flushed") && lost[0].contains("older than"),
+        "the report names a boundary it cannot know: {}",
+        lost[0]
+    );
+    assert!(
+        !lost[0].contains("after log sequence"),
+        "the report offers the watermark as the boundary: {}",
+        lost[0]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

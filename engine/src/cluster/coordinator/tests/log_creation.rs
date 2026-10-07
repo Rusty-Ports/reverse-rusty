@@ -278,3 +278,57 @@ fn a_build_that_cannot_create_its_log_leaves_no_manifest() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn shard_translogs(dir: &std::path::Path, shards: usize) -> Vec<Vec<u8>> {
+    (0..shards)
+        .map(|shard| {
+            std::fs::read(shard_dir(dir, shard).join(crate::cluster::translog::TRANSLOG_FILE))
+                .expect("a shard translog")
+        })
+        .collect()
+}
+
+/// An open that refuses has touched nothing. Attaching a shard resets its translog, and when
+/// the cluster log is gone or cut short those translogs are the only place the writes since
+/// the last checkpoint still exist. The log is therefore checked before any shard is
+/// attached. (Checked after, the refused open left every translog an empty header.)
+#[test]
+fn a_refused_open_leaves_the_shard_translogs_as_they_were() {
+    for damage in ["gone", "cut short"] {
+        let (dir, cfg) = durable(&format!("refused_touches_nothing_{}", damage.len()));
+        let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
+            .expect("durable cluster");
+        // Selective rows, added after the build, so that they land in shard translogs.
+        for (id, dsl) in [
+            (2u64, "mechanical keyboard"),
+            (3, "usb hub"),
+            (4, "laptop stand"),
+        ] {
+            cluster.add_query(id, dsl).expect("write");
+        }
+        drop(cluster);
+        let before = shard_translogs(&dir, cfg.num_shards);
+        assert!(
+            before.iter().any(|translog| translog.len() > 8),
+            "precondition: some shard translog holds a write"
+        );
+
+        let log = dir.join(CLUSTER_LOG_FILE);
+        if damage == "gone" {
+            std::fs::remove_file(&log).expect("lose the log");
+        } else {
+            let header = std::fs::read(&log).expect("read log");
+            std::fs::write(&log, &header[..4]).expect("shorten the log");
+        }
+        assert!(
+            ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).is_err(),
+            "{damage}: the cluster opened"
+        );
+        assert_eq!(
+            shard_translogs(&dir, cfg.num_shards),
+            before,
+            "{damage}: a refused open reset a shard translog"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

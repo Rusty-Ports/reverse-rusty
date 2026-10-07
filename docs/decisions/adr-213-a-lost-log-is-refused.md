@@ -49,15 +49,22 @@ removed, opened without complaint and without the second write.
      written with its log in place, and epoch 0 means a manifest that a release before this
      one wrote before it created the log. `ClusterManifest::written_with_its_log` is that
      test, and the reopen and the backup both ask it.
-3. **A store whose commit record says the log exists refuses to open without it.** Nothing is
-   created in the log's place. The error names the file, says what proves it existed, says
-   that the writes acknowledged since then are lost, and says what to do.
+3. **A store whose commit record says the log exists refuses to open without it,** and a
+   refusal touches nothing. No log is created in the lost one's place, and the coordinator
+   checks its log before it attaches a single shard: attaching resets a shard's translog,
+   and when the cluster log is gone those translogs are the only place its writes still
+   exist. The error names the file, says what proves it existed, says that the acknowledged
+   writes that were only in it are lost, and says what to do.
 4. **One explicit way to go on: `accept_lost_log`** (`--accept-lost-log` on `server` and
    `shardserver`). With it, the store opens from its last flush or checkpoint with an empty
-   log and reports a `log_lost` durability event that names the position after which writes
-   were lost. It changes nothing when the log is there, and it does not make a damaged log
-   acceptable: a log shorter than its header is still refused (ADR-212). It is meant for one
-   start.
+   log and reports a `log_lost` durability event that says what was lost: for a cluster and
+   for a shard, every write after the checkpoint's log position; for a single node, every
+   acknowledged write that had not been flushed to a segment. (A single-node manifest's log
+   watermark is not that boundary: a bulk ingest or a compaction advances it without flushing
+   the memtable, so an unflushed write can be older. The report says so and names no
+   position to replay from.) The flag changes nothing when the log is there, and it does not
+   make a damaged log acceptable: a log shorter than its header is still refused (ADR-212).
+   It is meant for one start, and both binaries say at every start that it is set.
 5. **A control node has no such flag.** A node that has lost its log must not rejoin with
    an empty one beside its vote. Its data directory is restored from a snapshot; until then
    it stays down, and the other control nodes keep their majority. Replacing one control node
@@ -76,6 +83,13 @@ removed, opened without complaint and without the second write.
    decision 3 refuses, and a node that could not restart by itself. The reset now writes the
    new translog beside the old one and renames it over it: a crash leaves the old translog
    or the new one, and both restart.
+9. **A shard node reports what its shards report.** A shard node gave none of its shards an
+   event sink, so nothing they said about durability reached a log or a metric, and an
+   accepted loss there would have been said to nobody. Every shard a node hosts is now wired
+   to one node-level channel where its state is built (`ServerState::new`, the only way to
+   build one; a source test keeps it so). The node counts durability failures by operation
+   in `reverse_rusty_shard_durability_failures_total{op}`, with `log_lost` listed at zero
+   from the start, and the binary prints each event on standard error.
 
 ## What changes for a deployment
 
@@ -93,6 +107,10 @@ removed, opened without complaint and without the second write.
 - `GET /_settings` shows `accept_lost_log`. It is a startup setting.
 - `durability_failures_total` has a new `op` value, `log_lost`. The existing zero-tolerance
   alert covers it.
+- A shard node has a new counter, `reverse_rusty_shard_durability_failures_total{op}`, and
+  prints a `DURABILITY <op>: …` line on standard error for each event its shards report.
+  That includes the repair of a torn translog tail at start-up (`wal_torn_tail`), which was
+  reported to nobody before. Alert on an increase of any `op` other than `wal_torn_tail`.
 
 ## Alternatives considered
 
@@ -134,6 +152,9 @@ removed, opened without complaint and without the second write.
   - `accept_lost_log` left set would accept a later loss too. It reports each time, and the
     startup banner should not be the only place an operator sees it; the event and the
     metric are.
+- A refused coordinator leaves its shards' translogs as they were, so the lost writes of an
+  in-process cluster can still be read from them by hand. Nothing does that automatically,
+  and `accept_lost_log` discards them: the shards are attached and their translogs reset.
 - After an accepted loss on a shard node, replicas of that shard that had the lost writes
   hold more than their primary. The coordinator finds them unequal when it connects and
   keeps them out of the in-sync set (ADR-195); recovering them from the primary discards
@@ -157,6 +178,16 @@ removed, opened without complaint and without the second write.
 - `cluster/shard/tests/recovery.rs`: the same for a restarting shard and its translog.
 - `cluster/translog.rs`: a translog reset that cannot finish leaves the old translog as it
   was; before, the old file was already gone.
+- `cluster/coordinator/tests/log_creation.rs`: a refused open, for a log that is gone and
+  for one cut short, leaves every shard's translog byte for byte as it was.
+- `tests/persistence/lost_log.rs`: after a bulk ingest that advanced the manifest's watermark
+  past a write that was still only in the log, the accepted loss loses that write, and the
+  report names no sequence number to replay from.
+- `cluster/server/tests/node_events.rs`: a shard node started over a slot whose translog is
+  gone is refused; with the setting it starts, counts one `log_lost` in its metrics before
+  any sink exists, and hands the event to the sink once; the count is listed at zero on a
+  serving and on a pending node; no shard state is built outside the constructor that
+  wires it.
 - `cluster/control_raft/log_store.rs`: a node with a vote, a committed index, a purge point
   or a snapshot and no log is refused, and no log is created; a node with no state starts.
 - `cluster/clog/tests`: `open` with `IfMissing::Refuse` refuses a missing file and creates

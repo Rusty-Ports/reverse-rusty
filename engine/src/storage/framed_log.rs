@@ -76,15 +76,17 @@ pub(crate) fn header_was_interrupted(path: &Path, headers: &[&[u8]]) -> io::Resu
 
 /// The error for a log that its owner's commit record says existed and that is not there.
 ///
-/// A reopen that created an empty log in its place would drop every write acknowledged
-/// since that record without a word (ADR-213). `evidence` is what proves the log existed,
-/// and `way_out` is what the operator can do; both are the owner's to say.
+/// A reopen that created an empty log in its place would drop, without a word, every
+/// acknowledged write that was only in the log (ADR-213). Which writes those are is the
+/// owner's to say, and it is not always "the writes since the commit record": a single-node
+/// manifest can be newer than writes that are still only in the log. `evidence` is what
+/// proves the log existed, and `way_out` is what the operator can do.
 pub(crate) fn lost_log(log: &Path, evidence: &str, way_out: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "{} is missing, but {evidence}. The writes acknowledged since then were in it \
-             and are lost. {way_out}",
+            "{} is missing, but {evidence}. The acknowledged writes that were only in that \
+             log are lost. {way_out}",
             log.display()
         ),
     )

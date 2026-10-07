@@ -166,16 +166,17 @@ fn a_drop_never_removes_a_slot_it_did_not_tombstone() {
         .expect("slot")
         .loaded_state()
         .expect("loaded state");
-    let replacement = super::super::ShardSlot::loaded(super::super::ServerState {
-        dict: Arc::clone(&hosted.dict),
-        tag_dict: Arc::clone(&hosted.tag_dict),
-        shard: crate::cluster::shard::LocalShard::new(
+    let replacement = super::super::ShardSlot::loaded(super::super::ServerState::new(
+        Arc::clone(&hosted.dict),
+        Arc::clone(&hosted.tag_dict),
+        crate::cluster::shard::LocalShard::new(
             Arc::clone(&n),
             Arc::clone(&hosted.dict),
             Arc::clone(&hosted.tag_dict),
             EngineConfig::default(),
         ),
-    });
+        &srv.events,
+    ));
     let (shards, incoming) = (Arc::clone(&srv.shards), Arc::clone(&replacement));
     super::super::dropped::arm_while_recording_a_drop(move || {
         // `try_write`, so a regression that records under the map lock fails this test
