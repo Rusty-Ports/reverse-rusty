@@ -154,7 +154,7 @@ impl ClusterEngine {
                 }
                 // In-process (or lean build): map-only rebalance is correct — the advisory map; the
                 // local shards do not move. Unchanged, byte-identical.
-                self.rebalance(*rf)?;
+                self.rebalance_in(layout, *rf)?;
             }
         }
         // An advisory `Handoff` (the policy, ADR-045) is now DRIVEN through `execute_handoff`
@@ -248,7 +248,7 @@ impl ClusterEngine {
     ) -> Result<AutoscaleDecision, ShardError> {
         let stable = self.stable();
         let layout = &*stable.layout;
-        self.register_node(node)?;
+        self.register_node_in(layout, node)?;
         self.tick_in(layout, config)
     }
 
@@ -261,7 +261,7 @@ impl ClusterEngine {
     ) -> Result<AutoscaleDecision, ShardError> {
         let stable = self.stable();
         let layout = &*stable.layout;
-        self.deregister_node(id)?;
+        self.deregister_node_in(layout, id)?;
         self.tick_in(layout, config)
     }
 }

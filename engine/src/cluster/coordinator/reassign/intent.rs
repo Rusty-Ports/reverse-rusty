@@ -13,6 +13,7 @@ use crate::cluster::shard::ShardError;
 
 use super::super::distributed::handoff::normalized_endpoint;
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 const COMMAND_ATTEMPTS: usize = 3;
 
@@ -240,6 +241,7 @@ fn connect_and_adopt_source(
 /// intent resumable; only a committed assignment is allowed to clear the target fence.
 pub(super) fn commit_live_authority(
     engine: &ClusterEngine,
+    _layout: &Layout,
     move_intent: &MoveIntent,
     target_endpoint: &str,
     handle: &tokio::runtime::Handle,
@@ -379,7 +381,7 @@ pub(super) fn propose(
     ))
 }
 
-pub(super) fn abort(engine: &ClusterEngine, intent: &MoveIntent, context: &str) {
+pub(super) fn abort(engine: &ClusterEngine, _layout: &Layout, intent: &MoveIntent, context: &str) {
     if let Err(error) = propose(
         engine.control.as_ref(),
         &MoveCommand::Abort {

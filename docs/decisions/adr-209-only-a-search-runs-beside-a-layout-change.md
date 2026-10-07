@@ -26,14 +26,23 @@ takes its own lock around a rebuild; removing that is the next step.
    routes and their source fetch, a read of one stored document, and the accessors that say
    what the published layout is. Everything else is excluded, as it was when a change had the
    engine to itself: writes, repairs, bulk load, checkpoint, flush, backup, replica recovery,
-   point-in-time open and close, exhaustive reads, load snapshots, topology moves. A path
-   nobody thought about is excluded by default.
-3. **The allow-list is checked.** `coordinator/tests/layout_discipline.rs` names the searches.
-   Any other function that loads the layout without the lock fails the test, as does one that
-   loads twice, one that calls another that loads, and a helper that loads or calls one that
-   does. The last three matter more now: a second shared hold of the layout lock, on the same
-   thread or on a worker the first is waiting for, would wait behind a change that is waiting
-   for the first.
+   point-in-time open and close, exhaustive reads, load snapshots, topology moves, and every
+   write to the control state (a rebalance, a shard assignment, a node joining or leaving),
+   which is keyed by shard position. A path nobody thought about is excluded by default.
+   Beside the searches there is a second, shorter list of entry points that take no lock and
+   load no layout: they read one thing that no layout change replaces (the configuration, the
+   tag dictionary), or one thing atomically (the control state, the repair count), and write
+   nothing.
+3. **The allow-list is checked at the engine's public surface.**
+   `coordinator/tests/layout_discipline.rs` holds both lists and reads the coordinator's
+   source. Every method of the engine that code outside the coordinator can call must take
+   the layout lock, or call one that does, unless it is on a list. A function that loads the
+   layout without the lock and is not a search fails the test, as does one that loads twice,
+   one that calls another that loads, and a helper that loads or calls one that does. (The
+   last three matter more now: a second shared hold of the layout lock, on the same thread or
+   on a worker the first is waiting for, would wait behind a change that is waiting for the
+   first.) A write to the control state must sit in a function that takes the lock, or in a
+   helper that is handed the layout or the change it runs inside.
 4. **A layout change takes shared access to the engine.** `resize`, `set_vocab`, the learning
    and alias import paths, `resize_to_recommended`, `install_remote_resize` and
    `resize_remote` are `&self`. Deciding and changing are one change: an alias import and the
@@ -97,6 +106,12 @@ takes its own lock around a rebuild; removing that is the next step.
   control state. Each could be fixed. The list could not be shown to be complete: some 200
   methods had relied on the exclusivity without saying so. Listing what is allowed instead
   makes all five impossible and needs no fence.
+- **Check only the functions that touch the layout.** The rule test first looked at a function
+  only if it loaded the layout. `rebalance` never does: it reads the control state and writes
+  it back, by shard position. It ran beside a resize, committed assignments for positions the
+  resize had removed, and no later resize accepted the map. Review found it; the test could
+  not have. The rule is now stated where every path enters, at the engine's public methods,
+  and the same inventory showed three more control-state writers of the same kind.
 - **Hold the mutation barrier exclusively for the whole rebuild.** It would hold out every
   search that returns sources, which is the default on the ranked routes.
 - **Let writes through and carry them into the new layout.** It keeps writes available
@@ -153,9 +168,12 @@ hooks that stop a write or a rebuild half-way:
   operation whose deadline has already passed still takes a free lock;
 - an in-memory engine forgets the layouts it has replaced once they are released;
 - the events buffered for an observer, by the coordinator and by a shard, reach it once each
-  with the layout lock free.
+  with the layout lock free;
+- a rebalance, a shard assignment, a node registration and a deregistration wait for a layout
+  change, and after a resize that ran first the map has no assignment for a position it
+  removed and a later resize is accepted.
 
-Twenty-two mutations of the design were run against these tests and each fails one: a mutation
+Twenty-six mutations of the design were run against these tests and each fails one: a mutation
 that loads the layout before it holds its locks; an operation that does not keep the layout
 lock; a load snapshot, and an exhaustive read, taken without it (both also fail the rule
 test); a layout published outside the barrier; a replaced layout that is not remembered, and
@@ -167,7 +185,8 @@ its layout change; a layout change that queues behind a remote resize, and one t
 for it without the admission; an exhaustive read that ignores its deadline at the lock; a
 deadline that is checked before the lock is tried; and an observer called under the layout
 lock by `set_observer`, for the coordinator's buffered events or a shard's, or a shard's
-buffered events dropped.
+buffered events dropped; and each of the four control-state writers without the layout lock
+(the rule test fails these four as well).
 One survived at first and showed that nothing tested a change waiting for an operation in
 flight that is not a write; that test is in.
 

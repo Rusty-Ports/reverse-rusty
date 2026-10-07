@@ -21,6 +21,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
   `install_remote_resize` and `resize_remote` take `&self`.
 - The files of a layout that a rebuild replaced are removed once no search is still running on
   that layout, at the rebuild's own checkpoint or the next one.
+- Library: `rebalance`, `reassign_shard`, `register_node` and `deregister_node` wait for a
+  rebuild. A rebalance that overlapped a resize could commit assignments for shard positions
+  the resize had removed, after which every later resize was refused.
 - Library: an observer must not call back into the engine from inside an event. It runs on the
   thread that raised the event, under that operation's locks, and a read other than a search
   (`collect_load`, for one) now waits for a rebuild there. The events buffered before

@@ -14,6 +14,16 @@
 //! - A **helper** is handed its layout (`layout: &Layout`) or the change it runs inside
 //!   (`change: &LayoutChange`). It never loads, and never calls a method that does.
 //! - **Assembly** (the engine by value, before it is shared) may do as it likes.
+//!
+//! The rules above are about functions that touch the layout. Two more are about the ones
+//! that do not, because what a layout change replaces is more than the layout (the control
+//! state is keyed by shard position, for one):
+//!
+//! - Every **entry point** (a method of the engine that code outside the coordinator can
+//!   call) takes the layout lock, or calls one that does, unless it is a search or is named in
+//!   [`LAYOUT_FREE`]. A new method that nobody classified waits for a layout change.
+//! - A **write to the control state** happens under the layout lock: in a function that takes
+//!   it, or in a helper that is handed the layout or the change it runs inside.
 
 use std::path::{Path, PathBuf};
 
@@ -58,6 +68,37 @@ const SEARCHES: &[&str] = &[
     "learn_vocab",
 ];
 
+/// The entry points that take no lock and load no layout. Each reads one thing that no layout
+/// change replaces, or one thing atomically, and writes nothing. Adding a name here is a
+/// decision, as it is for [`SEARCHES`].
+const LAYOUT_FREE: &[&str] = &[
+    // compiled against the tag dictionary, which is the engine's and not the layout's
+    "compile_tag_predicate",
+    "compile_rank_spec",
+    "compile_rank_program",
+    "compile_rank_program_with_profiles",
+    // the frozen view a search with sources runs under: it holds the mutation barrier, which
+    // a layout is published under, and the searches inside it load for themselves
+    "consistent_read_view",
+    // configuration that is fixed at assembly, and counters
+    "include_broad",
+    "is_durable",
+    "is_remote",
+    "per_shard_config",
+    "replication_factor",
+    "transport_metrics",
+    "has_tagged_queries",
+    "epoch",
+    // one atomic read of something that changes: the answer may be a moment old
+    "control_state",
+    "control_version",
+    "assignment_for",
+    "pending_repairs",
+    "pending_repair_ids",
+    "open_pit_count",
+    "ensure_resize_write_fence_open",
+];
+
 /// The ways a function gets a layout for itself.
 const LOADS: [&str; 7] = [
     "self.layout()",
@@ -69,11 +110,37 @@ const LOADS: [&str; 7] = [
     "self.begin_cutover()",
 ];
 
+/// The ways a function writes the control state: a proposal of any kind, a membership change,
+/// or the control plane handed to a function that may do either. On `self`, or on an engine a
+/// free function was given.
+const WRITES: [&str; 3] = [
+    ".control.propose",
+    ".control.change_membership(",
+    ".control.as_ref()",
+];
+
 struct Function {
     file: String,
     name: String,
     signature: String,
     body: String,
+    /// What stands before `fn` on its line: the visibility, with any `const`.
+    visibility: String,
+    /// Defined in an `impl ClusterEngine` block.
+    of_engine: bool,
+}
+
+impl Function {
+    /// A method of the engine that code outside the coordinator can call on a shared engine.
+    fn is_entry_point(&self) -> bool {
+        let outside = match self.visibility.as_str() {
+            "pub" | "pub(crate)" | "pub(incrate::cluster)" => true,
+            // `super` of the coordinator's own root file is the cluster module.
+            "pub(super)" => self.file == "coordinator.rs",
+            _ => false,
+        };
+        self.of_engine && outside && self.signature.contains("(&self")
+    }
 }
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -129,6 +196,15 @@ fn close_of(text: &[u8], open: usize) -> usize {
 fn functions(file: &Path) -> Vec<Function> {
     let text = std::fs::read_to_string(file).expect("read source");
     let bytes = text.as_bytes();
+    // `impl ClusterEngine {`, or `impl super::ClusterEngine {`.
+    let engine_impls: Vec<(usize, usize)> = text
+        .match_indices("ClusterEngine {")
+        .filter(|(at, _)| {
+            let line = text[..*at].rfind('\n').map_or(0, |start| start + 1);
+            text[line..*at].starts_with("impl")
+        })
+        .map(|(at, opening)| (at, close_of(bytes, at + opening.len() - 1)))
+        .collect();
     let mut found = Vec::new();
     let mut from = 0;
     while let Some(offset) = text[from..].find("fn ") {
@@ -165,6 +241,7 @@ fn functions(file: &Path) -> Vec<Function> {
             continue;
         }
         let end = close_of(bytes, open);
+        let line = text[..start].rfind('\n').map_or(0, |at| at + 1);
         found.push(Function {
             file: file
                 .file_name()
@@ -174,6 +251,10 @@ fn functions(file: &Path) -> Vec<Function> {
             name,
             signature: squeeze(&text[start..open]),
             body: squeeze(&text[open..end]),
+            visibility: squeeze(&text[line..start]).replace("const", ""),
+            of_engine: engine_impls
+                .iter()
+                .any(|&(from, to)| from < start && start < to),
         });
     }
     found
@@ -186,10 +267,7 @@ fn squeeze(text: &str) -> String {
 
 #[test]
 fn every_operation_loads_the_layout_once_and_helpers_never_do() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cluster");
-    let mut files = vec![root.join("coordinator.rs")];
-    sources(&root.join("coordinator"), &mut files);
-    let functions: Vec<Function> = files.iter().flat_map(|file| functions(file)).collect();
+    let functions = coordinator_functions();
 
     let loads = |function: &Function| -> usize {
         LOADS
@@ -277,6 +355,135 @@ fn every_operation_loads_the_layout_once_and_helpers_never_do() {
     assert!(
         violations.is_empty(),
         "one operation, one layout; only a search runs beside a layout change:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+fn coordinator_functions() -> Vec<Function> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cluster");
+    let mut files = vec![root.join("coordinator.rs")];
+    sources(&root.join("coordinator"), &mut files);
+    files.iter().flat_map(|file| functions(file)).collect()
+}
+
+/// The ways a function takes the layout lock: every way of loading but the search's.
+fn takes_the_lock(function: &Function) -> bool {
+    LOADS
+        .iter()
+        .filter(|load| **load != "self.layout()")
+        .any(|load| function.body.contains(load))
+}
+
+#[test]
+fn every_entry_point_takes_the_layout_lock_or_is_named() {
+    let functions = coordinator_functions();
+    let methods: Vec<&Function> = functions.iter().filter(|f| f.of_engine).collect();
+    // The methods that take the lock, and then the ones that call one of those.
+    let mut guarded: Vec<&str> = methods
+        .iter()
+        .filter(|method| takes_the_lock(method))
+        .map(|method| method.name.as_str())
+        .collect();
+    loop {
+        let more: Vec<&str> = methods
+            .iter()
+            .filter(|method| !guarded.contains(&method.name.as_str()))
+            .filter(|method| {
+                guarded
+                    .iter()
+                    .any(|callee| method.body.contains(&format!("self.{callee}(")))
+            })
+            .map(|method| method.name.as_str())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        guarded.extend(more);
+    }
+
+    let entry_points: Vec<&&Function> = methods
+        .iter()
+        .filter(|method| method.is_entry_point())
+        .collect();
+    assert!(
+        entry_points.len() > 80,
+        "the scan found only {} entry points; it is not reading the code",
+        entry_points.len()
+    );
+    let mut violations = Vec::new();
+    for free in LAYOUT_FREE {
+        let Some(method) = entry_points.iter().find(|method| method.name == *free) else {
+            violations.push(format!(
+                "`{free}` is listed as layout-free and is not an entry point: take it off the list"
+            ));
+            continue;
+        };
+        if guarded.contains(free) || method.body.contains("self.layout()") {
+            violations.push(format!(
+                "`{free}` is listed as layout-free and gets a layout: take it off the list"
+            ));
+        }
+        if method.body.contains(".control.propose") || method.body.contains(".control.as_ref()") {
+            violations.push(format!(
+                "`{free}` is listed as layout-free and writes the control state"
+            ));
+        }
+    }
+    for method in &entry_points {
+        let name = method.name.as_str();
+        if guarded.contains(&name) || SEARCHES.contains(&name) || LAYOUT_FREE.contains(&name) {
+            continue;
+        }
+        violations.push(format!(
+            "{}::{name} can be called from outside the coordinator and takes no layout lock: \
+             use `stable()`, or name it in SEARCHES or LAYOUT_FREE if it may run beside a \
+             layout change",
+            method.file
+        ));
+    }
+    assert!(
+        violations.is_empty(),
+        "only a search runs beside a layout change:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn the_control_state_is_written_under_the_layout_lock() {
+    let functions = coordinator_functions();
+    let writers: Vec<&Function> = functions
+        .iter()
+        .filter(|function| WRITES.iter().any(|write| function.body.contains(write)))
+        .collect();
+    assert!(
+        writers.len() > 5,
+        "the scan found only {} writers of the control state; it is not reading the code",
+        writers.len()
+    );
+    let violations: Vec<String> = writers
+        .iter()
+        .filter(|function| {
+            // The engine by value, or a constructor that is still building it.
+            let assembly = [
+                "(&mutself",
+                "(mutself",
+                "(self,",
+                "(self)",
+                "->Self",
+                "<Self,",
+            ]
+            .iter()
+            .any(|mark| function.signature.contains(mark));
+            let handed = function.signature.contains("layout:&Layout")
+                || function.signature.contains("change:&LayoutChange");
+            !(assembly || handed || takes_the_lock(function))
+        })
+        .map(|function| format!("{}::{}", function.file, function.name))
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "these write the control state without the layout lock, and without a layout or a \
+         layout change handed to them:\n  {}",
         violations.join("\n  ")
     );
 }

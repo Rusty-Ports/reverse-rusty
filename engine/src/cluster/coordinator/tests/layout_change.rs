@@ -152,6 +152,57 @@ fn everything_but_a_search_waits_for_a_layout_change() {
     assert_eq!(cluster.num_shards(), 4);
 }
 
+/// The control state is keyed by shard position, so a write to it waits for a layout change
+/// like any other operation. A rebalance that read three positions, let a resize to one
+/// finish, and then committed its three assignments left a map that no later resize accepted.
+#[test]
+fn a_write_to_the_control_state_waits_for_a_layout_change() {
+    let cluster = in_memory(3, 100);
+    let before = cluster.control_state().expect("control state");
+    let node = before.nodes[0].clone();
+    let first = cluster.assignment_for(0).expect("assignment");
+    std::thread::scope(|scope| {
+        let change = cluster.begin_layout_change().expect("begin");
+        let rebalance = scope.spawn(|| cluster.rebalance(1));
+        let assign = scope.spawn(|| cluster.reassign_shard(first));
+        // Both leave the membership as it is: the node is already registered, and no node
+        // has the other id.
+        let join = scope.spawn(|| cluster.register_node(node));
+        let leave = scope.spawn(|| cluster.deregister_node(crate::cluster::NodeId(u64::MAX)));
+        std::thread::sleep(Duration::from_millis(150));
+        let ran_beside_it = [
+            ("a rebalance", rebalance.is_finished()),
+            ("a shard assignment", assign.is_finished()),
+            ("a node registration", join.is_finished()),
+            ("a node deregistration", leave.is_finished()),
+        ];
+        let resized = cluster.resize_in(&change, 1);
+        // Released before anything can fail: all four are waiting for it.
+        drop(change);
+        let rebalanced = rebalance.join().expect("rebalance thread");
+        let assigned = assign.join().expect("assign thread");
+        let joined = join.join().expect("join thread");
+        let left = leave.join().expect("leave thread");
+        resized.expect("resize");
+        rebalanced.expect("rebalance");
+        assigned.expect("assign");
+        joined.expect("register");
+        left.expect("deregister");
+        for (what, ran) in ran_beside_it {
+            assert!(!ran, "{what} ran beside a layout change");
+        }
+    });
+    let after = cluster.control_state().expect("control state");
+    assert_eq!(after.num_shards, 1);
+    assert_eq!(
+        after.assignments.len(),
+        1,
+        "the map has an assignment for a position the resize removed: {:?}",
+        after.assignments
+    );
+    cluster.resize(2).expect("a later resize");
+}
+
 /// The other direction: an operation that is not a search holds the layout lock until it is
 /// done, so a layout change that arrives meanwhile waits for it.
 #[test]

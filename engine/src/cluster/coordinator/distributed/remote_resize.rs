@@ -172,7 +172,7 @@ impl ClusterEngine {
         request: &RemoteResizeRequest,
         progress: &ResizeProgress,
     ) -> Result<PreparedRemoteResize, ShardError> {
-        self.register_resize_targets(&request.targets)?;
+        self.register_resize_targets(layout, &request.targets)?;
         let state = self.control_state()?;
         let state = self.finish_prior_resize(layout, state, request.operation_id)?;
         let intent = resize_intent(&state, request)?;
@@ -203,7 +203,7 @@ impl ClusterEngine {
         // move onto either.
         let source_durable = self.layout_is_durable(layout, handle, &expected_endpoints)?;
 
-        match self.propose_resize(ResizeCommand::Begin(intent.clone()))? {
+        match self.propose_resize(layout, ResizeCommand::Begin(intent.clone()))? {
             MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => {}
             outcome => {
                 return Err(ShardError::ControlPlane(format!(
@@ -320,7 +320,7 @@ impl ClusterEngine {
             retired_slots,
         } = retired;
         let finished = matches!(
-            self.propose_resize(ResizeCommand::Finish { operation_id }),
+            self.propose_resize(layout, ResizeCommand::Finish { operation_id }),
             Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
         );
         Ok(RemoteResizeReport {
@@ -352,7 +352,7 @@ impl ClusterEngine {
         if prior.operation_id == operation_id
             && !matches!(prior.phase, ResizeIntentPhase::Committed(_))
         {
-            self.expect_resize_outcome(ResizeCommand::Abort { operation_id })?;
+            self.expect_resize_outcome(layout, ResizeCommand::Abort { operation_id })?;
             return self.control_state();
         }
         let serving_committed = matches!(prior.phase, ResizeIntentPhase::Committed(_))
@@ -368,9 +368,12 @@ impl ClusterEngine {
                 prior.operation_id
             )));
         }
-        self.expect_resize_outcome(ResizeCommand::Finish {
-            operation_id: prior.operation_id,
-        })?;
+        self.expect_resize_outcome(
+            layout,
+            ResizeCommand::Finish {
+                operation_id: prior.operation_id,
+            },
+        )?;
         self.control_state()
     }
 
@@ -437,7 +440,11 @@ impl ClusterEngine {
     }
 
     /// Register unknown targets; refuse a target id already registered at another endpoint.
-    fn register_resize_targets(&self, targets: &[NodeDescriptor]) -> Result<(), ShardError> {
+    fn register_resize_targets(
+        &self,
+        _layout: &Layout,
+        targets: &[NodeDescriptor],
+    ) -> Result<(), ShardError> {
         let state = self.control_state()?;
         for target in targets {
             let wanted = target.addr.as_deref().map(normalized_move_endpoint);
@@ -459,7 +466,12 @@ impl ClusterEngine {
         Ok(())
     }
 
-    fn propose_resize(&self, command: ResizeCommand) -> Result<MoveCommandOutcome, ShardError> {
+    /// Under the caller's hold of the layout lock, which `_layout` stands for.
+    fn propose_resize(
+        &self,
+        _layout: &Layout,
+        command: ResizeCommand,
+    ) -> Result<MoveCommandOutcome, ShardError> {
         self.control
             .propose_resize(command)
             .map(|result| result.outcome)
@@ -490,7 +502,7 @@ impl ClusterEngine {
         let retired = progress.retired_endpoints.borrow().clone();
         let proven = !progress.commit_proposed.get() || {
             let aborted = matches!(
-                self.propose_resize(ResizeCommand::Abort { operation_id }),
+                self.propose_resize(layout, ResizeCommand::Abort { operation_id }),
                 Ok(MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied)
             );
             aborted
@@ -505,7 +517,7 @@ impl ClusterEngine {
             return failure;
         }
         self.unretire_all(handle, operation_id, &retired);
-        let _aborted = self.propose_resize(ResizeCommand::Abort { operation_id });
+        let _aborted = self.propose_resize(layout, ResizeCommand::Abort { operation_id });
         self.resize_write_fence.store(false, Ordering::Release);
         failure
     }
@@ -552,8 +564,12 @@ impl ClusterEngine {
         });
     }
 
-    fn expect_resize_outcome(&self, command: ResizeCommand) -> Result<(), ShardError> {
-        match self.propose_resize(command)? {
+    fn expect_resize_outcome(
+        &self,
+        layout: &Layout,
+        command: ResizeCommand,
+    ) -> Result<(), ShardError> {
+        match self.propose_resize(layout, command)? {
             MoveCommandOutcome::Applied | MoveCommandOutcome::AlreadyApplied => Ok(()),
             outcome => Err(ShardError::ControlPlane(format!(
                 "remote resize transition was refused ({outcome:?})"

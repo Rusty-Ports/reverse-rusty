@@ -427,6 +427,7 @@ impl ClusterEngine {
             )?;
             intent::commit_live_authority(
                 self,
+                layout,
                 &reconcile_intent,
                 &live_ep,
                 handle,
@@ -523,6 +524,7 @@ impl ClusterEngine {
                 cutover.set(true);
                 intent::commit_live_authority(
                     self,
+                    layout,
                     &move_intent,
                     &tgt_ep,
                     handle,
@@ -579,6 +581,7 @@ impl ClusterEngine {
                         if source.fence(0).is_ok_and(|fence| fence == 0) {
                             intent::abort(
                                 self,
+                                layout,
                                 &move_intent,
                                 "reassign_and_move: abort clean preparation",
                             );

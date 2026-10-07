@@ -724,6 +724,7 @@ impl ClusterEngine {
                 if abortable.get() {
                     intent::abort(
                         self,
+                        layout,
                         &move_intent,
                         "reassign_group_and_move: abort clean preparation",
                     );
