@@ -194,6 +194,50 @@ impl super::ClusterEngine {
         }
     }
 
+    /// [`Self::stable`] for an operation that has a deadline or can be cancelled: `keep_waiting`
+    /// is asked before each attempt and its error ends the wait. Without it such an operation
+    /// would sit out a whole rebuild after its caller had given up.
+    pub(in crate::cluster::coordinator) fn stable_while(
+        &self,
+        mut keep_waiting: impl FnMut() -> Result<(), ShardError>,
+    ) -> Result<Stable<'_>, ShardError> {
+        const POLL: std::time::Duration = std::time::Duration::from_millis(5);
+        loop {
+            keep_waiting()?;
+            match self.layout_lock.try_read() {
+                Ok(held) => {
+                    return Ok(Stable {
+                        layout: self.layout.load_full(),
+                        _held: held,
+                    })
+                }
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    return Ok(Stable {
+                        layout: self.layout.load_full(),
+                        _held: poisoned.into_inner(),
+                    })
+                }
+                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(POLL),
+            }
+        }
+    }
+
+    /// [`Self::stable`] that gives up at `deadline`.
+    #[cfg(feature = "distributed")]
+    pub(in crate::cluster::coordinator) fn stable_by(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Option<Stable<'_>> {
+        self.stable_while(|| {
+            if std::time::Instant::now() >= deadline {
+                Err(ShardError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        })
+        .ok()
+    }
+
     /// Admit one mutation: the layout lock shared, then the mutation barrier shared, then the
     /// layout. The mutation holds both until it has applied.
     pub(in crate::cluster::coordinator) fn admit_mutation(&self) -> Admitted<'_> {
@@ -226,12 +270,27 @@ impl super::ClusterEngine {
     ///
     /// It refuses, without waiting, while a remote resize is copying the corpus: that copy
     /// holds the layout lock shared for its whole run, and a change queued behind it would
-    /// hold every other operation back until the copy was done.
+    /// hold every other operation back until the copy was done. Checking for that copy and
+    /// asking for the lock are one step ([`Self::layout_admission`]), so a copy cannot start
+    /// in between.
     pub(in crate::cluster::coordinator) fn begin_layout_change(
         &self,
     ) -> Result<LayoutChange<'_>, ShardError> {
+        let _admission = self.layout_admission();
         self.ensure_resize_write_fence_open()?;
         Ok(self.begin_cutover())
+    }
+
+    /// Held by a layout change from its check for a remote copy until it has the layout
+    /// lock, and by a remote resize from before it takes the layout lock shared until its
+    /// write fence is up. Either the change sees the fence and is refused, or it has the
+    /// lock before the copy can start and the copy waits for it.
+    pub(in crate::cluster::coordinator) fn layout_admission(
+        &self,
+    ) -> std::sync::MutexGuard<'_, ()> {
+        self.layout_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The layout lock alone, for the cutover of a remote resize, whose own fence is up.
@@ -249,10 +308,13 @@ impl super::ClusterEngine {
     pub(in crate::cluster::coordinator) fn publish_layout(&self, next: Layout) -> Arc<Layout> {
         let next = Arc::new(next);
         let previous = self.layout.swap(Arc::clone(&next));
-        self.retired_layouts
+        let mut retired = self
+            .retired_layouts
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(Arc::downgrade(&previous));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // An in-memory engine never runs the cleanup that would drop the ones already gone.
+        retired.retain(|layout| layout.strong_count() > 0);
+        retired.push(Arc::downgrade(&previous));
         next
     }
 

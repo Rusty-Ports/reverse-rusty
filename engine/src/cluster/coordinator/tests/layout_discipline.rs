@@ -59,9 +59,11 @@ const SEARCHES: &[&str] = &[
 ];
 
 /// The ways a function gets a layout for itself.
-const LOADS: [&str; 5] = [
+const LOADS: [&str; 7] = [
     "self.layout()",
     "self.stable()",
+    "self.stable_while(",
+    "self.stable_by(",
     "self.admit_mutation()",
     "self.begin_layout_change()",
     "self.begin_cutover()",
@@ -208,8 +210,11 @@ fn every_operation_loads_the_layout_once_and_helpers_never_do() {
         .iter()
         .filter(|function| loads(function) > 0)
         .map(|function| function.name.as_str())
+        // The ways of getting a layout are not operations themselves.
         .filter(|name| {
-            !["layout", "stable", "admit_mutation", "begin_layout_change"].contains(name)
+            !LOADS
+                .iter()
+                .any(|load| load.starts_with(&format!("self.{name}(")))
         })
         .collect();
     assert!(
@@ -233,7 +238,7 @@ fn every_operation_loads_the_layout_once_and_helpers_never_do() {
         if is_assembly(function)
             || LOADS
                 .iter()
-                .any(|load| *load == format!("self.{}()", function.name))
+                .any(|load| load.starts_with(&format!("self.{}(", function.name)))
         {
             continue;
         }

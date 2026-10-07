@@ -18,7 +18,8 @@ takes its own lock around a rebuild; removing that is the next step.
 
 1. **The engine has a layout lock.** A layout change holds it alone for its whole run. Every
    other operation holds it shared, taken once at its entry and before any other lock. A
-   search does not take it.
+   search does not take it. An operation with a deadline, or one that can be cancelled (an
+   exhaustive read, a deadline-bound topology move), keeps that while it waits for the lock.
 2. **What runs beside a layout change is an allow-list.** A search is an operation that only
    reads shard data, through the one layout it loaded: the match routes, the ranked and batch
    routes and their source fetch, a read of one stored document, and the accessors that say
@@ -58,7 +59,10 @@ takes its own lock around a rebuild; removing that is the next step.
 8. **A layout change does not queue behind a remote resize.** That resize holds the layout
    lock shared for its whole copy. A change waiting behind it would hold every other
    operation back until the copy was done, so it is refused at once while the resize has
-   writes fenced. The cutover of the remote resize is itself a layout change.
+   writes fenced. Checking for the fence and asking for the lock are one step, and so are
+   taking the lock for a copy and raising its fence (a small admission lock covers both), so
+   a copy cannot start between a change's check and its request. The cutover of the remote
+   resize is itself a layout change.
 
 ## What changes for a caller
 
@@ -130,18 +134,24 @@ hooks that stop a write or a rebuild half-way:
 - a replaced shard refuses a seal, a flush and a delete, still answers reads, writes no
   segment, and the cluster reopens on what the new layout committed; a layout change that
   does not publish thaws the shards it froze;
-- a layout change is refused at once while a remote resize has writes fenced.
+- a layout change is refused at once while a remote resize has writes fenced, and one that
+  arrives while a copy is about to start waits where it holds nothing back and is then
+  refused;
+- an exhaustive read gives up at its deadline while a layout change holds it back;
+- an in-memory engine forgets the layouts it has replaced once they are released.
 
-Fifteen mutations of the design were run against these tests and each fails one: a mutation
+Eighteen mutations of the design were run against these tests and each fails one: a mutation
 that loads the layout before it holds its locks; an operation that does not keep the layout
 lock; a load snapshot, and an exhaustive read, taken without it (both also fail the rule
-test); a layout published outside the barrier; a replaced layout that is not remembered;
-cleanup that does not wait for replaced layouts; a logical-id directory that is not replaced
-with the layout; a repair queue that is not emptied at the swap; replaced shards that are not
-frozen, a failed change that does not thaw, a published change that thaws, and a frozen shard
-that still writes; a recommended resize measured before its layout change; and a layout change
-that queues behind a remote resize. One of them survived at first and showed that nothing
-tested a change waiting for an operation in flight that is not a write; that test is in.
+test); a layout published outside the barrier; a replaced layout that is not remembered, and
+one that is never forgotten; cleanup that does not wait for replaced layouts; a logical-id
+directory that is not replaced with the layout; a repair queue that is not emptied at the
+swap; replaced shards that are not frozen, a failed change that does not thaw, a published
+change that thaws, and a frozen shard that still writes; a recommended resize measured before
+its layout change; a layout change that queues behind a remote resize, and one that checks
+for it without the admission; and an exhaustive read that ignores its deadline at the lock.
+One survived at first and showed that nothing tested a change waiting for an operation in
+flight that is not a write; that test is in.
 
 **See also:** ADR-177 (the mutation barrier and id locks), ADR-180 (the remote resize and its
 write fence), ADR-197 (checkpoint excludes mutations), ADR-207 (the gate this work retires),

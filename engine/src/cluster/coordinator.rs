@@ -362,6 +362,8 @@ pub struct ClusterEngine {
     /// Held alone by a layout change for its whole run, and shared by every operation that is
     /// not a search. See [`Self::stable`] and `layout::LayoutChange`.
     layout_lock: RwLock<()>,
+    /// See [`Self::layout_admission`].
+    layout_admission: Mutex<()>,
     /// Layouts that have been replaced and may still be held by a running operation. Their
     /// files are removed only once they are released.
     retired_layouts: Mutex<Vec<std::sync::Weak<layout::Layout>>>,

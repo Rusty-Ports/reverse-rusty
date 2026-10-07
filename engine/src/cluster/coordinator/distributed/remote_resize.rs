@@ -121,16 +121,7 @@ impl ClusterEngine {
         &self,
         request: &RemoteResizeRequest,
     ) -> Result<PreparedRemoteResize, ShardError> {
-        let stable = self.stable();
-        self.prepare_remote_resize_in(&stable.layout, request)
-    }
-
-    pub(in crate::cluster::coordinator) fn prepare_remote_resize_in(
-        &self,
-        layout: &Layout,
-        request: &RemoteResizeRequest,
-    ) -> Result<PreparedRemoteResize, ShardError> {
-        self.prepare_remote_resize_then_in(layout, request, || {})
+        self.prepare_remote_resize_then(request, || {})
     }
 
     /// [`Self::prepare_remote_resize`], running `on_fenced` once the write fence is raised and
@@ -144,21 +135,27 @@ impl ClusterEngine {
         request: &RemoteResizeRequest,
         on_fenced: impl FnOnce(),
     ) -> Result<PreparedRemoteResize, ShardError> {
+        // Taking the layout lock for the copy and raising the fence are one step for a layout
+        // change that arrives meanwhile (ADR-209): it either sees the fence and is refused,
+        // or it has the lock already and this waits for it.
+        let admission = self.layout_admission();
         let stable = self.stable();
-        self.prepare_remote_resize_then_in(&stable.layout, request, on_fenced)
+        self.prepare_remote_resize_then_in(&stable.layout, request, on_fenced, admission)
     }
 
-    pub(in crate::cluster::coordinator) fn prepare_remote_resize_then_in(
+    fn prepare_remote_resize_then_in(
         &self,
         layout: &Layout,
         request: &RemoteResizeRequest,
         on_fenced: impl FnOnce(),
+        admission: std::sync::MutexGuard<'_, ()>,
     ) -> Result<PreparedRemoteResize, ShardError> {
         let handle = self.handle.clone().ok_or_else(|| {
             ShardError::Config("remote resize requires a gRPC-connected cluster".into())
         })?;
         self.validate_remote_resize_request(layout, request)?;
         self.raise_resize_write_fence()?;
+        drop(admission);
         on_fenced();
         let progress = ResizeProgress::default();
         self.begin_and_build(layout, &handle, request, &progress)

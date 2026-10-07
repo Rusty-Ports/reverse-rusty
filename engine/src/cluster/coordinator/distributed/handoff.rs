@@ -126,7 +126,9 @@ impl ClusterEngine {
     where
         F: FnOnce() -> bool,
     {
-        let stable = self.stable();
+        let Some(stable) = self.stable_by(deadline) else {
+            return Ok(None);
+        };
         let layout = &*stable.layout;
         let Some(_ticket) = self
             .move_ledger

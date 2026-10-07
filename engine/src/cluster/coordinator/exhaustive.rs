@@ -124,12 +124,19 @@ impl ClusterEngine {
         deadline: Option<Instant>,
         sink: &mut dyn ChunkSink,
     ) -> Result<ClusterExhaustiveMatch, ShardError> {
-        let stable = self.stable();
         if chunk_size == 0 || chunk_size > MAX_MATCH_CHUNK_SIZE {
             return Err(ShardError::Config(format!(
                 "exhaustive chunk size {chunk_size} is outside 1..={MAX_MATCH_CHUNK_SIZE}"
             )));
         }
+        // A rebuild holds the layout lock for as long as it runs. This read has a deadline
+        // and can be cancelled, and gives up on either while it waits.
+        let stable = self.stable_while(|| {
+            sink.check_cancelled().map_err(|error| {
+                ShardError::Protocol(format!("exhaustive sink failed: {error}"))
+            })?;
+            check_deadline(deadline)
+        })?;
         // Every incremental shard mutation holds this barrier for its complete
         // fan-out. Taking the exclusive side gives direct library callers the
         // same coherent cross-shard view as the HTTP wrapper: an upsert cannot

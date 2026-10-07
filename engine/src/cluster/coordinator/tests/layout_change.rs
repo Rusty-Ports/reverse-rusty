@@ -346,3 +346,82 @@ fn a_layout_change_is_refused_at_once_while_a_remote_resize_is_copying() {
     assert_eq!(cluster.num_shards(), 3);
     cluster.resize(4).expect("a resize once the fence is down");
 }
+
+/// The check for a remote copy and the request for the layout lock are one step. A copy
+/// that is about to start holds the admission, so a layout change waits there, where it
+/// holds nothing back, and is refused once the copy's fence is up. Without the admission it
+/// would pass the check, queue for the lock behind the copy, and hold every other operation
+/// back until the copy was done.
+#[test]
+fn a_layout_change_cannot_slip_in_before_a_remote_copy_starts() {
+    let cluster = in_memory(3, 50);
+    std::thread::scope(|scope| {
+        // A remote resize: admission first, then the layout lock shared, then the fence.
+        let admission = cluster.layout_admission();
+        let copying = cluster.stable();
+        let change = scope.spawn(|| cluster.resize(4));
+        std::thread::sleep(Duration::from_millis(150));
+        // Nothing is queued for the layout lock: another operation gets it at once.
+        let held_back = cluster.layout_lock.try_read().is_err();
+        cluster.resize_write_fence.store(true, Ordering::Release);
+        drop(admission);
+        // Released before the join: a change that did queue behind the copy needs it to end.
+        drop(copying);
+        let refused = change.join().expect("change thread");
+        cluster.resize_write_fence.store(false, Ordering::Release);
+        assert!(
+            !held_back,
+            "a layout change queued for the lock behind a copy that was about to start"
+        );
+        let error = refused.expect_err("the change is refused once the fence is up");
+        assert!(error.to_string().contains("writes are paused"), "{error}");
+    });
+    assert_eq!(cluster.num_shards(), 3);
+}
+
+/// An exhaustive read has a deadline and can be cancelled. It gives up on either while a
+/// layout change holds it back, where it would otherwise sit out the whole rebuild.
+#[test]
+fn an_exhaustive_read_keeps_its_deadline_while_a_layout_change_runs() {
+    let cluster = in_memory(3, 50);
+    let cluster = &cluster;
+    std::thread::scope(|scope| {
+        let change = cluster.begin_layout_change().expect("begin");
+        let (answer, answered) = mpsc::channel();
+        scope.spawn(move || {
+            let mut sink = RecordingExhaustiveSink::default();
+            let outcome = cluster.try_percolate_filtered_all(
+                "zzitem5 zzgroup5",
+                &[],
+                crate::result::QueryScope::Standard,
+                None,
+                16,
+                Some(Instant::now() + Duration::from_millis(30)),
+                &mut sink,
+            );
+            let _ = answer.send(outcome.map(|_| ()));
+        });
+        let gave_up = answered.recv_timeout(Duration::from_secs(3));
+        // Released before anything can fail: a read that ignored its deadline waits for it.
+        drop(change);
+        let outcome = gave_up.expect("the read waited past its deadline for the layout change");
+        assert!(
+            matches!(outcome, Err(ShardError::DeadlineExceeded)),
+            "{outcome:?}"
+        );
+    });
+}
+
+/// An in-memory engine never runs the cleanup that forgets the layouts it has replaced.
+#[test]
+fn replaced_layouts_are_forgotten_once_released() {
+    let cluster = in_memory(3, 50);
+    for shards in [4, 5, 6, 3, 4, 5, 6, 3] {
+        cluster.resize(shards).expect("resize");
+    }
+    let remembered = cluster.retired_layouts.lock().expect("retired").len();
+    assert!(
+        remembered <= 1,
+        "{remembered} replaced layouts are still remembered after they were released"
+    );
+}

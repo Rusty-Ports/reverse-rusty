@@ -198,7 +198,9 @@ impl ClusterEngine {
     where
         F: FnOnce() -> bool,
     {
-        let stable = self.stable();
+        let Some(stable) = self.stable_by(deadline) else {
+            return Ok(None);
+        };
         let layout = &*stable.layout;
         self.reassign_and_move_with_start(layout, position, to, handle, Some(deadline), try_start)
     }
