@@ -22,7 +22,8 @@ impl ClusterEngine {
     ) -> Result<(u64, u64), ShardError> {
         // Bound on the convergence loop (a safety cap, not a correctness requirement).
         const FINALIZE_PASSES: usize = 8;
-        let expected = self.layout.dict.fingerprint();
+        let layout = &*self.layout();
+        let expected = layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Pin the source's tail BEFORE the segment-copy seal trims it (ADR-040). Held across the
         // whole recovery; released below whether it converges or errors.
@@ -41,7 +42,7 @@ impl ClusterEngine {
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
         let recover = || -> Result<(u64, u64), ShardError> {
-            let dict_bytes = crate::storage::serialize_dict(&self.layout.dict);
+            let dict_bytes = crate::storage::serialize_dict(&layout.dict);
             // Ship the dict + frozen tag space so the fresh node attaches segments against the right
             // feature + tag space (ADR-055).
             let target = crate::cluster::remote::RemoteShard::
@@ -53,8 +54,8 @@ impl ClusterEngine {
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
                 shard_id,
-                self.placement_generation(),
-                self.num_shards() as u32,
+                layout.generation,
+                layout.num_shards() as u32,
                 self.coordinator_id,
                 &self.client_security,
             )?
@@ -69,8 +70,8 @@ impl ClusterEngine {
                 let next = crate::cluster::replica::catch_up_replica(
                     &target,
                     &source,
-                    &self.layout.norm,
-                    &self.layout.dict,
+                    &layout.norm,
+                    &layout.dict,
                     hwm,
                 )?;
                 source.renew_retention_lease(lease, next)?;
@@ -111,7 +112,8 @@ impl ClusterEngine {
         after: u64,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
-        let expected = self.layout.dict.fingerprint();
+        let layout = &*self.layout();
+        let expected = layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Catch up the target's slot `shard_id` from the source's same slot (ADR-093).
         let source = crate::cluster::remote::RemoteShard::connect_for_coordinator_with_security(
@@ -137,8 +139,8 @@ impl ClusterEngine {
         let hwm = crate::cluster::replica::catch_up_replica(
             &target,
             &source,
-            &self.layout.norm,
-            &self.layout.dict,
+            &layout.norm,
+            &layout.dict,
             LogPos(after),
         )?;
         Ok(hwm.0)

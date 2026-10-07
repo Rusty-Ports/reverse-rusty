@@ -105,8 +105,8 @@ pub(super) async fn compile(
             ));
         }
         let fingerprint = crate::pit::request_fingerprint(
-            cluster.normalizer(),
-            cluster.dict(),
+            &cluster.normalizer(),
+            &cluster.dict(),
             &title,
             scope,
             &rank,

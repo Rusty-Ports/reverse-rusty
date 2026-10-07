@@ -37,11 +37,15 @@ fn record_writes(
 fn shard_of(cluster: &ClusterEngine, dsl: &str) -> usize {
     let ast = crate::dsl::parse(dsl).expect("dsl");
     let mut lc = String::new();
-    let ex =
-        crate::compile::extract_readonly(&ast, &cluster.layout.norm, &cluster.layout.dict, &mut lc);
+    let ex = crate::compile::extract_readonly(
+        &ast,
+        &cluster.layout().norm,
+        &cluster.layout().dict,
+        &mut lc,
+    );
     match placement_of(
-        &cluster.layout.dict,
-        &cluster.layout.ring,
+        &cluster.layout().dict,
+        &cluster.layout().ring,
         &ex,
         true,
         cluster.per_shard.hot_anchor_threshold,

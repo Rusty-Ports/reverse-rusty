@@ -9,6 +9,17 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-07 — The coordinator's serving state is one published layout
+
+- Internal step towards serving searches during a vocabulary change or resize
+  ([ADR-208](decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)). The
+  coordinator's normalizer, dictionary, vocabulary, ring, shards and placement generation are now
+  one immutable layout, published atomically; every operation loads it once, and a rebuild
+  publishes a new one in a single step. No behaviour change: a rebuild still holds searches out,
+  which the next step removes.
+- Library: `ClusterEngine::normalizer`, `dict` and `vocab` return shared handles (`Arc`) where they
+  returned references.
+
 ## 2026-10-06 — A vocabulary change or resize no longer stops a coordinator that is searching
 
 - **Fixed: a coordinator could stop for good when a vocabulary change or a resize arrived

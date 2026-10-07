@@ -36,6 +36,7 @@ use crate::cluster::shard::{Shard, ShardError};
 
 use super::distributed::handoff::{normalized_endpoint, HandoffRoute};
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 /// Group-aware (RF>1) data-moving reassignment — `rebalance_group_targets` +
 /// `ClusterEngine::reassign_group_and_move` (ADR-094).
@@ -163,7 +164,17 @@ impl ClusterEngine {
         to: NodeId,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
-        match self.reassign_and_move_with_start(position, to, handle, None, || true)? {
+        self.reassign_and_move_in(&self.layout(), position, to, handle)
+    }
+
+    pub(in crate::cluster::coordinator) fn reassign_and_move_in(
+        &self,
+        layout: &Layout,
+        position: usize,
+        to: NodeId,
+        handle: &Handle,
+    ) -> Result<ReassignOutcome, ShardError> {
+        match self.reassign_and_move_with_start(layout, position, to, handle, None, || true)? {
             Some(outcome) => Ok(outcome),
             None => Err(ShardError::DeadlineExceeded),
         }
@@ -186,11 +197,13 @@ impl ClusterEngine {
     where
         F: FnOnce() -> bool,
     {
-        self.reassign_and_move_with_start(position, to, handle, Some(deadline), try_start)
+        let layout = &*self.layout();
+        self.reassign_and_move_with_start(layout, position, to, handle, Some(deadline), try_start)
     }
 
     fn reassign_and_move_with_start<F>(
         &self,
+        layout: &Layout,
         position: usize,
         to: NodeId,
         handle: &Handle,
@@ -259,7 +272,7 @@ impl ClusterEngine {
             };
             let from_ep = addr_of(from)?;
             let tgt_ep = addr_of(to)?;
-            let handoff = self.layout.handoffs.get(position).ok_or_else(|| {
+            let handoff = layout.handoffs.get(position).ok_or_else(|| {
                 ShardError::Config(format!(
                     "reassign_and_move: shard position {position} is not handoff-capable (the \
                      cluster was not built via connect_remote/connect_replicated)"
@@ -312,7 +325,7 @@ impl ClusterEngine {
             })?;
             let live_unchanged = normalized_endpoint(&live_now) == normalized_endpoint(&live_ep);
             if entry_unchanged && eps_unchanged && live_unchanged {
-                let route = self.validate_handoff_route(position, &live_ep, &tgt_ep)?;
+                let route = Self::validate_handoff_route(layout, position, &live_ep, &tgt_ep)?;
                 planned = Some(PlannedReassign {
                     state: now,
                     expected: assignment.clone(),
@@ -374,8 +387,7 @@ impl ClusterEngine {
                      reconcile that logical identity explicitly before moving onward"
                 )));
             }
-            let live_generation = self
-                .layout
+            let live_generation = layout
                 .handoffs
                 .get(position)
                 .ok_or_else(|| {
@@ -424,7 +436,9 @@ impl ClusterEngine {
                 "reassign_and_move: finish chained-source reconciliation",
             )?;
             drop(ticket);
-            return self.reassign_and_move(position, to, handle).map(Some);
+            return self
+                .reassign_and_move_in(layout, position, to, handle)
+                .map(Some);
         }
 
         // When the requested assignment is already committed, live routing must agree here. A
@@ -470,7 +484,7 @@ impl ClusterEngine {
                 )
             }
             HandoffRoute::Move => {
-                let handoff = self.layout.handoffs.get(position).ok_or_else(|| {
+                let handoff = layout.handoffs.get(position).ok_or_else(|| {
                     ShardError::Config(format!(
                         "reassign_and_move: shard position {position} is not handoff-capable"
                     ))
@@ -513,6 +527,7 @@ impl ClusterEngine {
                 Ok(generation)
             }
             HandoffRoute::Move => self.execute_handoff_inner_with_cutover(
+                layout,
                 position,
                 &live_ep,
                 &tgt_ep,
@@ -551,7 +566,7 @@ impl ClusterEngine {
                     if let Ok(source) = RemoteShard::connect_for_coordinator_with_security(
                         &live_ep,
                         handle.clone(),
-                        self.layout.dict.fingerprint(),
+                        layout.dict.fingerprint(),
                         self.tag_dict.fingerprint(),
                         pos,
                         self.coordinator_id,
@@ -609,7 +624,16 @@ impl ClusterEngine {
         rf: usize,
         handle: &Handle,
     ) -> Result<RebalanceMoveReport, ShardError> {
-        self.rebalance_and_move_with(rf, 1, handle)
+        self.rebalance_and_move_in(&self.layout(), rf, handle)
+    }
+
+    pub(in crate::cluster::coordinator) fn rebalance_and_move_in(
+        &self,
+        layout: &Layout,
+        rf: usize,
+        handle: &Handle,
+    ) -> Result<RebalanceMoveReport, ShardError> {
+        self.rebalance_and_move_with_in(layout, rf, 1, handle)
     }
 
     /// [`rebalance_and_move`](Self::rebalance_and_move) with wave parallelism (ADR-095): the
@@ -632,6 +656,16 @@ impl ClusterEngine {
         max_parallel_moves: usize,
         handle: &Handle,
     ) -> Result<RebalanceMoveReport, ShardError> {
+        self.rebalance_and_move_with_in(&self.layout(), rf, max_parallel_moves, handle)
+    }
+
+    pub(in crate::cluster::coordinator) fn rebalance_and_move_with_in(
+        &self,
+        layout: &Layout,
+        rf: usize,
+        max_parallel_moves: usize,
+        handle: &Handle,
+    ) -> Result<RebalanceMoveReport, ShardError> {
         let state = self.control_state()?;
         if state.nodes.is_empty() {
             return Err(ShardError::ControlPlane(
@@ -646,7 +680,7 @@ impl ClusterEngine {
         let mut report = RebalanceMoveReport::default();
         for (wi, wave) in waves.iter().enumerate() {
             let mut wave_failed = false;
-            for (pos, outcome) in self.execute_move_wave(&state, &targets, wave, handle) {
+            for (pos, outcome) in self.execute_move_wave(layout, &state, &targets, wave, handle) {
                 match outcome {
                     Ok(ReassignOutcome::Moved { .. } | ReassignOutcome::Reconciled { .. }) => {
                         report.moved.push(pos);

@@ -4,6 +4,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use super::{ClusterEngine, ShardError};
+use crate::cluster::coordinator::layout::Layout;
 
 /// One exported logical query: the canonical source plus the metadata a rebuild re-applies.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,8 +49,15 @@ impl ClusterEngine {
         &self,
         visit: &mut (dyn FnMut(ExportedQuery) -> Result<(), ShardError> + Send),
     ) -> Result<u64, ShardError> {
+        Self::export_live_corpus_in(&self.layout(), visit)
+    }
+
+    pub(in crate::cluster::coordinator) fn export_live_corpus_in(
+        layout: &Layout,
+        visit: &mut (dyn FnMut(ExportedQuery) -> Result<(), ShardError> + Send),
+    ) -> Result<u64, ShardError> {
         let mut seen: HashMap<u64, u64> = HashMap::new();
-        for shard in &self.layout.shards {
+        for shard in layout.shards.iter() {
             shard.visit_live_sources(&mut |(logical_id, dsl, version, tags)| {
                 let digest = copy_digest(&dsl, version, &tags);
                 match seen.entry(logical_id) {
@@ -101,8 +109,13 @@ mod tests {
     fn put(cluster: &ClusterEngine, shard: usize, logical: u64, version: u32, dsl: &str) {
         let ast = crate::dsl::parse(dsl).expect("dsl");
         let mut lc = String::new();
-        let ex = extract_readonly(&ast, &cluster.layout.norm, &cluster.layout.dict, &mut lc);
-        cluster.layout.shards[shard]
+        let ex = extract_readonly(
+            &ast,
+            &cluster.layout().norm,
+            &cluster.layout().dict,
+            &mut lc,
+        );
+        cluster.layout().shards[shard]
             .insert_extracted_with_tags(&ex, logical, version, dsl, &[])
             .expect("insert");
     }

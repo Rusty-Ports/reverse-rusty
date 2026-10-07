@@ -64,7 +64,7 @@ impl ClusterEngine {
             return self;
         }
         let mut collected = RemoteLogicalIds::default();
-        for (position, shard) in self.layout.shards.iter().enumerate() {
+        for (position, shard) in self.layout().shards.iter().enumerate() {
             collected.include(shard.as_ref(), position, 0);
         }
         self.with_collected_remote_logical_ids(collected)

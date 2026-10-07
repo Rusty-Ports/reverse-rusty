@@ -32,6 +32,7 @@ use crate::vocab::{CorpusLearnConfig, Vocab};
 
 use super::{ClusterEngine, CLUSTER_MANIFEST_FILE};
 use crate::cluster::control::ClusterStateChange;
+use crate::cluster::coordinator::layout::Layout;
 use crate::cluster::shard::ShardError;
 
 type LiveTaggedMetadata = (
@@ -63,10 +64,11 @@ impl ClusterEngine {
     /// Refuses (errors) if any shard is non-local or handoff-wrapped. A vocabulary
     /// that activates a multi-word alias is supported (ADR-076: P(T)-aware routing).
     pub fn set_vocab(&mut self, vocab: Vocab) -> Result<usize, ShardError> {
+        let before = self.layout();
         // 1. Correctness boundary: in-process only (see module doc). On a
         //    non-distributed build every shard is local, so this never fires — but
         //    it is always compiled, so a future non-local shard can't slip past it.
-        if self.layout.shards.iter().any(|s| !s.is_local()) {
+        if before.shards.iter().any(|s| !s.is_local()) {
             return Err(ShardError::Config(
                 "set_vocab is in-process only: a cross-process (remote) shard is not shipped \
                  the new normalizer in v1 (it would be a silent false negative)"
@@ -74,7 +76,7 @@ impl ClusterEngine {
             ));
         }
         #[cfg(feature = "distributed")]
-        if !self.layout.handoffs.is_empty() {
+        if !before.handoffs.is_empty() {
             return Err(ShardError::Config(
                 "set_vocab is in-process only: a handoff-wrapped (movable) shard position is not \
                  supported by a vocabulary change in v1"
@@ -98,7 +100,7 @@ impl ClusterEngine {
         let new_norm =
             if vocab
                 .aliases_mut()
-                .demote_unexpressible(&new_norm, &self.layout.dict)
+                .demote_unexpressible(&new_norm, &before.dict)
                 > 0
             {
                 Arc::new(vocab.to_normalizer().map_err(|e| {
@@ -125,22 +127,21 @@ impl ClusterEngine {
             .placement_generation()
             .next()
             .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
-        let rebuilt = self.rebuild_from_live(
-            new_norm,
-            self.layout.ring.clone(),
-            Some(vocab),
-            next_generation,
-        )?;
+        let ring = before.ring.clone();
+        // The old layout is released before the rebuild, which holds a second corpus.
+        drop(before);
+        let rebuilt = self.rebuild_from_live(new_norm, ring, Some(vocab), next_generation)?;
+        let after = self.layout();
 
         self.control.propose(ClusterStateChange::BumpModelVersion {
-            dict_fingerprint: self.layout.dict.fingerprint(),
+            dict_fingerprint: after.dict.fingerprint(),
         })?;
 
         // 4. Commit a durable cluster's rebuild via `checkpoint`: seal the green shards, write the
         //    new manifest (re-minted dict + serialized vocab + green segment registry — the atomic
         //    commit point), truncate the log, and GC the superseded old segment files.
         if self.data_dir.is_some() {
-            self.checkpoint_quiesced()?;
+            self.checkpoint_quiesced(&after)?;
         }
         Ok(rebuilt)
     }
@@ -168,9 +169,9 @@ impl ClusterEngine {
     /// The cluster's deduped live `(logical, dsl)` corpus, gathered across shards — the
     /// source set the index is a materialized view of. Errors on a non-local shard
     /// (the same boundary [`Self::set_vocab`] enforces).
-    fn live_corpus(&self) -> Result<Vec<(u64, String)>, ShardError> {
+    fn live_corpus(layout: &Layout) -> Result<Vec<(u64, String)>, ShardError> {
         let mut live: BTreeMap<u64, String> = BTreeMap::new();
-        for s in &self.layout.shards {
+        for s in layout.shards.iter() {
             for (logical, dsl) in s.live_sources()? {
                 live.entry(logical).or_insert(dsl);
             }
@@ -186,10 +187,10 @@ impl ClusterEngine {
     /// `pub(super)` so the shared rebuild core in `coordinator::resize` can gather the corpus
     /// for both a vocabulary change ([`set_vocab`](Self::set_vocab)) and a resize.
     pub(super) fn live_corpus_tagged(
-        &self,
+        layout: &Layout,
     ) -> Result<Vec<crate::cluster::shard::LiveTaggedQuery>, ShardError> {
         let mut live: BTreeMap<u64, LiveTaggedMetadata> = BTreeMap::new();
-        for s in &self.layout.shards {
+        for s in layout.shards.iter() {
             for (logical, dsl, version, source_generation, raw_tags, tag_ids, rank, placement) in
                 s.live_sources_tagged()?
             {
@@ -231,7 +232,8 @@ impl ClusterEngine {
     /// the caller reviews the learned [`Vocab`] and decides whether to `PUT /_vocab` it.
     /// Compute-only (`&self`); refuses a non-local cluster (the gather boundary).
     pub fn learn_vocab(&self, cfg: &CorpusLearnConfig) -> Result<Vocab, ShardError> {
-        let corpus = self.live_corpus()?;
+        let layout = &*self.layout();
+        let corpus = Self::live_corpus(layout)?;
         Ok(crate::vocab::learn_vocab_from_corpus(&corpus, cfg))
     }
 
@@ -245,10 +247,10 @@ impl ClusterEngine {
         &mut self,
         solr_text: &str,
     ) -> Result<crate::segment::AliasApplyReport, ShardError> {
-        let mut vocab = self.layout.vocab.as_deref().cloned().unwrap_or_default();
+        let mut vocab = self.layout().vocab.as_deref().cloned().unwrap_or_default();
         let before = vocab.aliases().clone();
         let activated = vocab
-            .import_solr_aliases(solr_text, &self.layout.norm, &self.layout.dict)
+            .import_solr_aliases(solr_text, &self.layout().norm, &self.layout().dict)
             .map_err(|error| ShardError::Config(error.to_string()))?;
         let changed = vocab.aliases() != &before;
         if !changed {
@@ -258,14 +260,14 @@ impl ClusterEngine {
                 activated,
                 recompiled: 0,
                 summary: self
-                    .layout
+                    .layout()
                     .vocab
                     .as_deref()
                     .map(Vocab::alias_summary)
                     .unwrap_or_default(),
             });
         }
-        let predecessor = self.capture_alias_import_predecessor()?;
+        let predecessor = self.capture_alias_import_predecessor(&self.layout())?;
         self.pending_alias_import_predecessor = predecessor;
         *self
             .pending_alias_import_manifest
@@ -278,7 +280,7 @@ impl ClusterEngine {
             activated,
             recompiled: rebuilt,
             summary: self
-                .layout
+                .layout()
                 .vocab
                 .as_deref()
                 .map(Vocab::alias_summary)
@@ -290,16 +292,17 @@ impl ClusterEngine {
     /// failed before publishing. A fully committed import remains a read-only
     /// no-op; incompatibility and attestation failures stay fail-loud.
     fn finish_pending_alias_import_commit(&mut self) -> Result<(), ShardError> {
+        let layout = self.layout();
         let generation = self.placement_generation();
-        let dict_fingerprint = self.layout.dict.fingerprint();
-        let manifest_state = self.alias_import_manifest_state(generation)?;
+        let dict_fingerprint = layout.dict.fingerprint();
+        let manifest_state = self.alias_import_manifest_state(&layout, generation)?;
         let state = self.control.cluster_state()?;
-        let live_shards = u32::try_from(self.layout.ring.num_shards()).map_err(|_| {
+        let live_shards = u32::try_from(layout.ring.num_shards()).map_err(|_| {
             ShardError::ControlPlane(
                 "live shard count exceeds the control-plane representation".into(),
             )
         })?;
-        let assignments_match = state.assignments.len() == self.layout.ring.num_shards()
+        let assignments_match = state.assignments.len() == layout.ring.num_shards()
             && state
                 .assignments
                 .iter()
@@ -312,7 +315,7 @@ impl ClusterEngine {
                 state.num_shards,
                 state.vnodes,
                 state.assignments.len(),
-                self.layout.ring.num_shards(),
+                layout.ring.num_shards(),
                 self.vnodes
             )));
         }
@@ -359,7 +362,9 @@ impl ClusterEngine {
                 self.epoch.store(manifest.epoch, Ordering::Relaxed);
                 self.record_committed_manifest(*manifest);
             }
-            AliasImportManifestState::ImmediatePredecessor => self.checkpoint_quiesced()?,
+            AliasImportManifestState::ImmediatePredecessor => {
+                self.checkpoint_quiesced(&layout)?;
+            }
         }
         self.clear_pending_alias_import_identity();
         Ok(())
@@ -378,6 +383,7 @@ impl ClusterEngine {
     /// commit-identity field, including vocabulary and segment registry.
     fn capture_alias_import_predecessor(
         &self,
+        layout: &Layout,
     ) -> Result<Option<crate::storage::ClusterManifest>, ShardError> {
         let Some(dir) = &self.data_dir else {
             return Ok(None);
@@ -388,19 +394,19 @@ impl ClusterEngine {
                     "reading cluster manifest before alias import: {error}"
                 ))
             })?;
-        self.attest_alias_import_manifest_common(&manifest)?;
+        self.attest_alias_import_manifest_common(layout, &manifest)?;
         let committed_matches = self
             .committed_manifest
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             == Some(&manifest);
-        let vocab_data = self.alias_import_vocab_data()?;
+        let vocab_data = Self::alias_import_vocab_data(layout)?;
         if !committed_matches
             || manifest.epoch != self.epoch()
-            || manifest.placement_generation != self.placement_generation()
-            || manifest.dict_fingerprint != self.layout.dict.fingerprint()
-            || manifest.dict_data != crate::storage::serialize_dict(&self.layout.dict)
+            || manifest.placement_generation != layout.generation
+            || manifest.dict_fingerprint != layout.dict.fingerprint()
+            || manifest.dict_data != crate::storage::serialize_dict(&layout.dict)
             || manifest.vocab_data != vocab_data
         {
             return Err(ShardError::Log(
@@ -416,6 +422,7 @@ impl ClusterEngine {
     /// manifest is divergent and must remain untouched.
     fn alias_import_manifest_state(
         &self,
+        layout: &Layout,
         generation: crate::ownership::PlacementGeneration,
     ) -> Result<AliasImportManifestState, ShardError> {
         let Some(dir) = &self.data_dir else {
@@ -427,7 +434,7 @@ impl ClusterEngine {
                     "reading cluster manifest before alias-import retry: {error}"
                 ))
             })?;
-        self.attest_alias_import_manifest_common(&manifest)?;
+        self.attest_alias_import_manifest_common(layout, &manifest)?;
         let committed_manifest = self
             .committed_manifest
             .lock()
@@ -481,8 +488,8 @@ impl ClusterEngine {
         Ok(AliasImportManifestState::ImmediatePredecessor)
     }
 
-    fn alias_import_vocab_data(&self) -> Result<Vec<u8>, ShardError> {
-        match &self.layout.vocab {
+    fn alias_import_vocab_data(layout: &Layout) -> Result<Vec<u8>, ShardError> {
+        match &layout.vocab {
             Some(vocab) => vocab.to_json().map(String::into_bytes).map_err(|error| {
                 ShardError::Log(format!("serializing cluster vocab for retry: {error}"))
             }),
@@ -492,15 +499,16 @@ impl ClusterEngine {
 
     fn attest_alias_import_manifest_common(
         &self,
+        layout: &Layout,
         manifest: &crate::storage::ClusterManifest,
     ) -> Result<(), ShardError> {
-        let topology_matches = manifest.num_shards as usize == self.layout.ring.num_shards()
+        let topology_matches = manifest.num_shards as usize == layout.ring.num_shards()
             && manifest.vnodes == self.vnodes
             && manifest.include_broad == self.include_broad
             && manifest.broad_replicate_all
-            && manifest.segment_registry.len() == self.layout.ring.num_shards()
-            && manifest.next_seg_ids.len() == self.layout.ring.num_shards()
-            && manifest.source_files.len() == self.layout.ring.num_shards();
+            && manifest.segment_registry.len() == layout.ring.num_shards()
+            && manifest.next_seg_ids.len() == layout.ring.num_shards()
+            && manifest.source_files.len() == layout.ring.num_shards();
         if !topology_matches
             || manifest.compiler_semantics_version
                 != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION
@@ -559,13 +567,13 @@ impl ClusterEngine {
         &mut self,
         min_count: usize,
     ) -> Result<crate::segment::AliasApplyReport, ShardError> {
-        let corpus = self.live_corpus()?;
-        let mut vocab = self.layout.vocab.as_deref().cloned().unwrap_or_default();
+        let corpus = Self::live_corpus(&self.layout())?;
+        let mut vocab = self.layout().vocab.as_deref().cloned().unwrap_or_default();
         let activated = vocab.learn_aliases_from_queries(
             &corpus,
             min_count,
-            &self.layout.norm,
-            &self.layout.dict,
+            &self.layout().norm,
+            &self.layout().dict,
         );
         let rebuilt = self.set_vocab(vocab)?;
         Ok(crate::segment::AliasApplyReport {
@@ -573,7 +581,7 @@ impl ClusterEngine {
             activated,
             recompiled: rebuilt,
             summary: self
-                .layout
+                .layout()
                 .vocab
                 .as_deref()
                 .map(Vocab::alias_summary)
@@ -590,11 +598,11 @@ impl ClusterEngine {
     /// `learn_and_apply(cfg.anyof_min_count)`. Phrases only — never aliases — so the
     /// same-normalizer gluing is lossless-cover safe. Refuses a non-local cluster.
     pub fn learn_and_apply_with(&mut self, cfg: &CorpusLearnConfig) -> Result<usize, ShardError> {
-        let corpus = self.live_corpus()?;
+        let corpus = Self::live_corpus(&self.layout())?;
         let learned = crate::vocab::learn_vocab_from_corpus(&corpus, cfg);
         // Merge learned rules UNDER the current vocab (declared aliases win), then rebuild.
         let mut merged = Vocab::new();
-        if let Some(v) = &self.layout.vocab {
+        if let Some(v) = &self.layout().vocab {
             merged.merge(v);
         }
         merged.merge(&learned);
@@ -604,7 +612,7 @@ impl ClusterEngine {
     /// The vocabulary behind the current normalizer, if one was installed via
     /// [`Self::set_vocab`]/[`Self::learn_and_apply`] (`None` when built directly from
     /// a `Normalizer`).
-    pub fn vocab(&self) -> Option<&Vocab> {
-        self.layout.vocab.as_deref()
+    pub fn vocab(&self) -> Option<Arc<Vocab>> {
+        self.layout().vocab.clone()
     }
 }

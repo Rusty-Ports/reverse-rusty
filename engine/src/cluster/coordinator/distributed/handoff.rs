@@ -3,6 +3,7 @@ use std::time::Instant;
 use crate::cluster::remote::RemoteShard;
 
 use super::{Arc, ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
+use crate::cluster::coordinator::layout::Layout;
 
 /// Clear a stale fence before a recovered target becomes live again.
 ///
@@ -88,14 +89,19 @@ impl ClusterEngine {
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
+        let layout = &*self.layout();
         let _ticket = self
             .move_ledger
             .reserve(&[source_endpoint, target_endpoint]);
-        match self.validate_handoff_route(position, source_endpoint, target_endpoint)? {
+        match Self::validate_handoff_route(layout, position, source_endpoint, target_endpoint)? {
             HandoffRoute::AlreadyAtTarget { generation } => Ok(generation),
-            HandoffRoute::Move => {
-                self.execute_handoff_inner(position, source_endpoint, target_endpoint, handle)
-            }
+            HandoffRoute::Move => self.execute_handoff_inner(
+                layout,
+                position,
+                source_endpoint,
+                target_endpoint,
+                handle,
+            ),
         }
     }
 
@@ -119,13 +125,15 @@ impl ClusterEngine {
     where
         F: FnOnce() -> bool,
     {
+        let layout = &*self.layout();
         let Some(_ticket) = self
             .move_ledger
             .reserve_until(&[source_endpoint, target_endpoint], deadline)
         else {
             return Ok(None);
         };
-        let route = self.validate_handoff_route(position, source_endpoint, target_endpoint)?;
+        let route =
+            Self::validate_handoff_route(layout, position, source_endpoint, target_endpoint)?;
         if !try_start() {
             return Ok(None);
         }
@@ -134,7 +142,7 @@ impl ClusterEngine {
                 Ok(Some(HandoffOutcome::NoChange { generation }))
             }
             HandoffRoute::Move => self
-                .execute_handoff_inner(position, source_endpoint, target_endpoint, handle)
+                .execute_handoff_inner(layout, position, source_endpoint, target_endpoint, handle)
                 .map(|generation| Some(HandoffOutcome::Moved { generation })),
         }
     }
@@ -144,12 +152,12 @@ impl ClusterEngine {
     /// move-ledger reservation is held, so the live backing cannot change
     /// between attestation and the first recovery RPC.
     pub(in crate::cluster::coordinator) fn validate_handoff_route(
-        &self,
+        layout: &Layout,
         position: usize,
         source_endpoint: &str,
         target_endpoint: &str,
     ) -> Result<HandoffRoute, ShardError> {
-        let handoff = self.layout.handoffs.get(position).ok_or_else(|| {
+        let handoff = layout.handoffs.get(position).ok_or_else(|| {
             ShardError::Config(format!(
                 "execute_handoff: shard position {position} is not handoff-capable (the cluster \
                  was not built via connect_remote/connect_replicated)"
@@ -182,12 +190,14 @@ impl ClusterEngine {
     /// sharing a node would interleave their fence windows.
     pub(in crate::cluster::coordinator) fn execute_handoff_inner(
         &self,
+        layout: &Layout,
         position: usize,
         source_endpoint: &str,
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
         self.execute_handoff_inner_with_cutover(
+            layout,
             position,
             source_endpoint,
             target_endpoint,
@@ -202,6 +212,7 @@ impl ClusterEngine {
     /// authority rather than this process guessing after an outcome-ambiguous control write.
     pub(in crate::cluster::coordinator) fn execute_handoff_inner_with_cutover<F>(
         &self,
+        layout: &Layout,
         position: usize,
         source_endpoint: &str,
         target_endpoint: &str,
@@ -220,9 +231,7 @@ impl ClusterEngine {
         // 0 to force the abort deterministically.
         let drain_passes = self.handoff_drain_passes;
         let final_drain_cap = self.handoff_final_drain_cap;
-        let handoff = self
-            .layout
-            .handoffs
+        let handoff = layout.handoffs
             .get(position)
             .ok_or_else(|| {
                 ShardError::Config(format!(
@@ -232,7 +241,7 @@ impl ClusterEngine {
             })?
             .clone();
         let new_gen = handoff.generation() + 1;
-        let expected = self.layout.dict.fingerprint();
+        let expected = layout.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
 
         // Connect to the source and pin its un-sealed tail for the WHOLE move, so the segment-copy
@@ -253,7 +262,7 @@ impl ClusterEngine {
         let do_move = || -> Result<u64, ShardError> {
             // Ship the dict + frozen tag space + drive the target to pull the source's segments at
             // snapshot `P` (the source keeps serving + writing — no quiesce).
-            let dict_bytes = crate::storage::serialize_dict(&self.layout.dict);
+            let dict_bytes = crate::storage::serialize_dict(&layout.dict);
             let target = crate::cluster::remote::RemoteShard::
                 connect_and_adopt_for_coordinator_with_security(
                 target_endpoint,
@@ -263,8 +272,8 @@ impl ClusterEngine {
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
                 position as u32,
-                self.placement_generation(),
-                self.num_shards() as u32,
+                layout.generation,
+                layout.num_shards() as u32,
                 self.coordinator_id,
                 &self.client_security,
             )?
@@ -280,8 +289,8 @@ impl ClusterEngine {
                 let next = crate::cluster::replica::catch_up_replica(
                     &target,
                     &source,
-                    &self.layout.norm,
-                    &self.layout.dict,
+                    &layout.norm,
+                    &layout.dict,
                     hwm,
                 )?;
                 source.renew_retention_lease(lease, next)?;
@@ -329,8 +338,8 @@ impl ClusterEngine {
                     let next = crate::cluster::replica::catch_up_replica(
                         &target,
                         &source,
-                        &self.layout.norm,
-                        &self.layout.dict,
+                        &layout.norm,
+                        &layout.dict,
                         hwm,
                     )?;
                     source.renew_retention_lease(lease, next)?;

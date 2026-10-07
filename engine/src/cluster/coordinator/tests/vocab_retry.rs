@@ -75,7 +75,10 @@ fn identical_alias_retry_repairs_a_failed_control_transition() {
         repaired.placement_generation,
         cluster.placement_generation().0
     );
-    assert_eq!(repaired.dict_fingerprint, cluster.layout.dict.fingerprint());
+    assert_eq!(
+        repaired.dict_fingerprint,
+        cluster.layout().dict.fingerprint()
+    );
 }
 
 #[test]

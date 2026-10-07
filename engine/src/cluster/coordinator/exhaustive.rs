@@ -13,6 +13,7 @@ use crate::result::QueryScope;
 use crate::segment::MatchStats;
 
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 /// Terminal metadata for one exact cluster-wide exhaustive stream. The caller
 /// may publish it only after every routed shard has succeeded.
@@ -123,6 +124,7 @@ impl ClusterEngine {
         deadline: Option<Instant>,
         sink: &mut dyn ChunkSink,
     ) -> Result<ClusterExhaustiveMatch, ShardError> {
+        let layout = &*self.layout();
         if chunk_size == 0 || chunk_size > MAX_MATCH_CHUNK_SIZE {
             return Err(ShardError::Config(format!(
                 "exhaustive chunk size {chunk_size} is outside 1..={MAX_MATCH_CHUNK_SIZE}"
@@ -139,15 +141,15 @@ impl ClusterEngine {
         // streams could certify a duplicate logical id as an exact completion.
         // Exhaustive delivery cannot repair that overlap in O(chunk) memory:
         // refuse before any provisional member escapes and require convergence.
-        self.ensure_exhaustive_converged()?;
+        self.ensure_exhaustive_converged(layout)?;
         check_deadline(deadline)?;
 
         let include_broad = query_scope == QueryScope::WithBroad;
         let pred = self.compile_tag_predicate(filter);
-        let (targets, broad_eval_shard) = self.route(title);
+        let (targets, broad_eval_shard) = Self::route(layout, title);
         let ownership = crate::ownership::OwnershipContext::new(
-            self.placement_generation(),
-            self.layout.shards.len() as u32,
+            layout.generation,
+            layout.shards.len() as u32,
             targets.iter().map(|&position| position as u32).collect(),
             include_broad.then_some(broad_eval_shard as u32),
         )?;
@@ -160,7 +162,7 @@ impl ClusterEngine {
             // Server callers serialize writes for the full job. Rechecking at
             // every boundary also makes a direct library caller fail closed if
             // a concurrent remote mutation queues a repair mid-stream.
-            self.ensure_exhaustive_converged()?;
+            self.ensure_exhaustive_converged(layout)?;
             check_deadline(deadline)?;
             let mut adapter = ResequencingSink {
                 inner: sink,
@@ -171,7 +173,7 @@ impl ClusterEngine {
                 observed_checksum: DeliveryChecksum::default(),
                 protocol_error: None,
             };
-            let part: ExhaustiveMatchResult = self.layout.shards[position].percolate_all_owned(
+            let part: ExhaustiveMatchResult = layout.shards[position].percolate_all_owned(
                 title,
                 include_broad && position == broad_eval_shard,
                 &pred,
@@ -183,14 +185,14 @@ impl ClusterEngine {
                 &mut adapter,
             )?;
             adapter.validate(part.summary)?;
-            self.ensure_exhaustive_converged()?;
+            self.ensure_exhaustive_converged(layout)?;
             exact_total = exact_total
                 .checked_add(part.summary.exact_total)
                 .ok_or_else(|| ShardError::Protocol("exhaustive total overflowed u64".into()))?;
             checksum.merge(part.summary.checksum);
             stats.merge(part.stats);
         }
-        self.ensure_exhaustive_converged()?;
+        self.ensure_exhaustive_converged(layout)?;
         check_deadline(deadline)?;
         stats.matches = u32::try_from(exact_total).unwrap_or(u32::MAX);
 
@@ -207,9 +209,11 @@ impl ClusterEngine {
         })
     }
 
-    fn ensure_exhaustive_converged(&self) -> Result<(), ShardError> {
+    fn ensure_exhaustive_converged(&self, layout: &Layout) -> Result<(), ShardError> {
+        #[cfg(not(feature = "distributed"))]
+        let _ = layout;
         #[cfg(feature = "distributed")]
-        if !self.layout.handoffs.is_empty() && self.coordinator_id.is_none() {
+        if !layout.handoffs.is_empty() && self.coordinator_id.is_none() {
             return Err(ShardError::Protocol(
                 "exact exhaustive delivery over remote shards requires an exclusive \
                  coordinator lease; assemble the cluster with \

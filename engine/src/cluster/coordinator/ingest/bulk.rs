@@ -2,6 +2,7 @@ use super::{
     extract_readonly, ClusterEngine, DurabilityOp, EngineEvent, PlacedQuery, ShardError,
     TaggedEntry, Target,
 };
+use crate::cluster::coordinator::layout::Layout;
 
 impl ClusterEngine {
     /// Bulk-load queries into an already-built (frozen-dict) cluster — the load path
@@ -14,7 +15,8 @@ impl ClusterEngine {
     /// queries, rather than silently re-indexing them as duplicates (use
     /// [`Self::add_query`] for incremental adds).
     pub fn ingest(&self, queries: &[(u64, String)]) -> Result<(), ShardError> {
-        self.ingest_with_tags(queries, &[])
+        let layout = &*self.layout();
+        self.ingest_with_tags_in(layout, queries, &[])
     }
 
     /// [`ingest`](Self::ingest) carrying per-query metadata tags (ADR-049/055) — the bulk-load
@@ -24,6 +26,15 @@ impl ClusterEngine {
     /// frozen tag space, so a later filtered percolate agrees on the `TagId`s.
     pub fn ingest_with_tags(
         &self,
+        queries: &[(u64, String)],
+        tags: &[Vec<(String, String)>],
+    ) -> Result<(), ShardError> {
+        self.ingest_with_tags_in(&self.layout(), queries, tags)
+    }
+
+    pub(in crate::cluster::coordinator) fn ingest_with_tags_in(
+        &self,
+        layout: &Layout,
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> Result<(), ShardError> {
@@ -40,7 +51,7 @@ impl ClusterEngine {
         let _logical_guard = self.logical_bulk_write_guard();
         // ingest re-indexes from scratch; on a populated cluster it would create duplicate
         // entries. Refuse loudly instead (the doc contract: a freshly assembled cluster).
-        if self.num_queries()? > 0 {
+        if layout.num_queries()? > 0 {
             return Err(ShardError::Config(
                 "ingest() requires an empty cluster; it re-indexes from scratch — use \
                  add_query for incremental adds"
@@ -59,15 +70,15 @@ impl ClusterEngine {
         // A load that stops part-way must be remembered by the shards, not by this process
         // (ADR-196): `bucket_and_ingest` marks them all before the first bucket, and the
         // marks are cleared below, after the last.
-        self.bucket_and_ingest(&entries)?;
+        self.bucket_and_ingest(layout, &entries)?;
         // These bulk adds bypassed the log (they go straight to base segments), so on a
         // durable cluster a checkpoint commits them into the coordinator manifest's
         // per-shard segment registry to survive reopen.
         if self.data_dir.is_some() {
             // This load holds the barrier shared and the bulk guard: it is the only writer.
-            self.checkpoint_quiesced()?;
+            self.checkpoint_quiesced(layout)?;
         }
-        self.mark_bulk_load_complete()
+        Self::mark_bulk_load_complete(layout)
     }
 
     /// Mark every shard as holding a bulk load in progress. Nothing has been loaded while
@@ -75,10 +86,10 @@ impl ClusterEngine {
     /// too: its refusal may have come after it recorded the mark) and the load does not
     /// start. A mark that cannot be taken back stays: the next coordinator then refuses the
     /// cluster, which is the safe side.
-    fn mark_bulk_load_begun(&self) -> Result<(), ShardError> {
-        for (position, shard) in self.layout.shards.iter().enumerate() {
+    fn mark_bulk_load_begun(layout: &Layout) -> Result<(), ShardError> {
+        for (position, shard) in layout.shards.iter().enumerate() {
             if let Err(error) = shard.set_bulk_load_incomplete(true) {
-                self.take_back_bulk_load_marks(position + 1);
+                Self::take_back_bulk_load_marks(layout, position + 1);
                 return Err(error);
             }
         }
@@ -88,16 +99,16 @@ impl ClusterEngine {
     /// Clear the marks of the first `marked` shards after a load that never wrote to one.
     /// Best effort: a mark that cannot be cleared stays, and the next coordinator refuses
     /// the cluster, which is the safe side.
-    fn take_back_bulk_load_marks(&self, marked: usize) {
-        for shard in &self.layout.shards[..marked] {
+    fn take_back_bulk_load_marks(layout: &Layout, marked: usize) {
+        for shard in &layout.shards[..marked] {
             drop(shard.set_bulk_load_incomplete(false));
         }
     }
 
     /// Clear the marks once every bucket has landed. A shard whose mark cannot be cleared
     /// fails the load: its mark would make the next coordinator refuse a complete cluster.
-    fn mark_bulk_load_complete(&self) -> Result<(), ShardError> {
-        for shard in &self.layout.shards {
+    fn mark_bulk_load_complete(layout: &Layout) -> Result<(), ShardError> {
+        for shard in layout.shards.iter() {
             shard.set_bulk_load_incomplete(false)?;
         }
         Ok(())
@@ -106,7 +117,13 @@ impl ClusterEngine {
     /// The first shard position that still carries the mark of a bulk load that began and
     /// was never completed (ADR-196), or `None`. Such a cluster holds part of a corpus.
     pub fn unfinished_bulk_load(&self) -> Result<Option<usize>, ShardError> {
-        for (position, shard) in self.layout.shards.iter().enumerate() {
+        Self::unfinished_bulk_load_in(&self.layout())
+    }
+
+    pub(in crate::cluster::coordinator) fn unfinished_bulk_load_in(
+        layout: &Layout,
+    ) -> Result<Option<usize>, ShardError> {
+        for (position, shard) in layout.shards.iter().enumerate() {
             if shard.bulk_load_incomplete()? {
                 return Ok(Some(position));
             }
@@ -121,7 +138,7 @@ impl ClusterEngine {
     pub(in crate::cluster::coordinator) fn refusing_unfinished_bulk_load(
         self,
     ) -> Result<Self, ShardError> {
-        match self.unfinished_bulk_load()? {
+        match Self::unfinished_bulk_load_in(&self.layout())? {
             None => Ok(self),
             Some(position) => Err(ShardError::Config(format!(
                 "shard position {position} holds a bulk load that did not complete: a coordinator \
@@ -136,20 +153,22 @@ impl ClusterEngine {
     /// e.g. remote, cluster). Compiles read-only against the frozen dict, so placement is
     /// byte-identical to the original build. (Recovery no longer re-ingests; [`Self::open`]
     /// attaches each shard's committed segments instead — ADR-032.)
-    fn bucket_and_ingest(&self, entries: &[TaggedEntry]) -> Result<(), ShardError> {
-        let mut buckets: Vec<Vec<PlacedQuery>> = (0..self.layout.ring.num_shards())
-            .map(|_| Vec::new())
-            .collect();
+    fn bucket_and_ingest(
+        &self,
+        layout: &Layout,
+        entries: &[TaggedEntry],
+    ) -> Result<(), ShardError> {
+        let mut buckets: Vec<Vec<PlacedQuery>> =
+            (0..layout.ring.num_shards()).map(|_| Vec::new()).collect();
         let mut lc = String::new();
         let mut accepted_ids = Vec::with_capacity(entries.len());
         for (logical, version, text, qtags) in entries {
             let Ok(ast) = crate::dsl::parse(text) else {
                 continue;
             };
-            let ex = extract_readonly(&ast, &self.layout.norm, &self.layout.dict, &mut lc);
-            let target = self.placement(&ex);
-            let placement =
-                target.placement(self.placement_generation(), self.layout.shards.len() as u32)?;
+            let ex = extract_readonly(&ast, &layout.norm, &layout.dict, &mut lc);
+            let target = self.placement(layout, &ex);
+            let placement = target.placement(layout.generation, layout.shards.len() as u32)?;
             if !matches!(&target, Target::Reject) {
                 accepted_ids.push(*logical);
             }
@@ -194,7 +213,7 @@ impl ClusterEngine {
         // corrected file could not be loaded without resetting the shards. The shards are
         // marked before the ids are reserved: a load that cannot be marked does not start,
         // and must not leave the ids of a corpus it never loaded reserved either.
-        self.mark_bulk_load_begun()?;
+        Self::mark_bulk_load_begun(layout)?;
         // Reserve the complete semantic corpus BEFORE the first shard mutation.
         // If a remote bulk write fails part-way, retaining these reservations is
         // fail-closed: an incremental Add cannot coexist with a physical row that
@@ -202,12 +221,12 @@ impl ClusterEngine {
         // replace this directory with the same corpus and continue.
         if let Err(error) = self.replace_logical_ids(accepted_ids) {
             // Still nothing loaded.
-            self.take_back_bulk_load_marks(self.layout.shards.len());
+            Self::take_back_bulk_load_marks(layout, layout.shards.len());
             return Err(error);
         }
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
-                if let Err(error) = self.layout.shards[s].ingest_extracted(&bucket) {
+                if let Err(error) = layout.shards[s].ingest_extracted(&bucket) {
                     // Unlike incremental writes, this initial base-segment fan-out
                     // has no per-logical repair record. Earlier shards may already
                     // hold their buckets, and a transport failure cannot prove the

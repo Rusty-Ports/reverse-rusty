@@ -18,6 +18,7 @@ use crate::segment::MatchStats;
 use crate::util::FastSet;
 
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 type FetchRequest = (usize, u64);
 type FetchedGroup = (usize, Vec<FetchRequest>, Vec<FetchedMatch>);
@@ -148,12 +149,13 @@ impl ClusterEngine {
         program: &CompiledRankProgram,
         deadline: Option<Instant>,
     ) -> Result<ClusterRankedMatch, ClusterRankedError> {
+        let layout = &*self.layout();
         // ADR-185: a pass that overlapped a placement-moving upsert — including one that
         // failed closed on the duplicate id such a move can expose — is repeated. A read
         // held back by a move past its own deadline fails with that deadline.
         self.move_fence
             .read_until(deadline, |_| {
-                self.top_k_core(None, title, filter, options, program, deadline)
+                self.top_k_core(layout, None, title, filter, options, program, deadline)
             })
             .unwrap_or(Err(ClusterRankedError::DeadlineExceeded))
     }
@@ -162,8 +164,10 @@ impl ClusterEngine {
     /// `pit: None` reads each shard's current snapshot; `Some(pit)` reads its
     /// ADR-113 pinned snapshot (callers gate placement identity first). One
     /// body means the current-view and pit paths cannot fork semantics.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn top_k_core(
         &self,
+        layout: &Layout,
         pit: Option<u64>,
         title: &str,
         filter: &[(String, Vec<String>)],
@@ -184,16 +188,16 @@ impl ClusterEngine {
 
         let include_broad = options.query_scope == QueryScope::WithBroad;
         let pred = self.compile_tag_predicate(filter);
-        let (targets, broad_eval_shard) = self.route(title);
+        let (targets, broad_eval_shard) = Self::route(layout, title);
         let ownership = crate::ownership::OwnershipContext::new(
-            self.placement_generation(),
-            self.layout.shards.len() as u32,
+            layout.generation,
+            layout.shards.len() as u32,
             targets.iter().map(|&position| position as u32).collect(),
             include_broad.then_some(broad_eval_shard as u32),
         )?;
 
         let collect_one = |&position: &usize| {
-            let shard = &self.layout.shards[position];
+            let shard = &layout.shards[position];
             let broad_here = include_broad && position == broad_eval_shard;
             match pit {
                 None => shard.percolate_top_k_owned(
@@ -288,7 +292,8 @@ impl ClusterEngine {
         ranked: &ClusterRankedMatch,
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, ClusterRankedError> {
-        self.fetch_ranked_sources_inner(ranked, None, deadline)
+        let layout = &*self.layout();
+        Self::fetch_ranked_sources_inner(layout, ranked, None, deadline)
     }
 
     /// [`Self::fetch_ranked_sources`] with a cumulative source-text credit.
@@ -301,18 +306,19 @@ impl ClusterEngine {
         max_source_bytes: usize,
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, ClusterRankedError> {
-        self.fetch_ranked_sources_inner(ranked, Some(max_source_bytes), deadline)
+        let layout = &*self.layout();
+        Self::fetch_ranked_sources_inner(layout, ranked, Some(max_source_bytes), deadline)
     }
 
     fn fetch_ranked_sources_inner(
-        &self,
+        layout: &Layout,
         ranked: &ClusterRankedMatch,
         max_source_bytes: Option<usize>,
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, ClusterRankedError> {
         check_deadline(deadline)?;
-        if self.placement_generation() != ranked.placement_generation
-            || self.layout.shards.len() as u32 != ranked.num_shards
+        if layout.generation != ranked.placement_generation
+            || layout.shards.len() as u32 != ranked.num_shards
         {
             return Err(ClusterRankedError::InvalidShardReply {
                 position: 0,
@@ -321,7 +327,7 @@ impl ClusterEngine {
             });
         }
         let mut groups: Vec<Vec<(usize, u64)>> =
-            (0..self.layout.shards.len()).map(|_| Vec::new()).collect();
+            (0..layout.shards.len()).map(|_| Vec::new()).collect();
         let mut seen = FastSet::default();
         seen.reserve(ranked.hits.len());
         for (index, hit) in ranked.hits.iter().enumerate() {
@@ -345,7 +351,7 @@ impl ClusterEngine {
             .collect();
         let fetch_one = |(position, requested): &(usize, Vec<(usize, u64)>), limit: usize| {
             let ids: Vec<u64> = requested.iter().map(|&(_, id)| id).collect();
-            self.layout.shards[*position]
+            layout.shards[*position]
                 .fetch_matches(&ids, limit, deadline)
                 .map(|fetched| (*position, requested.clone(), fetched))
                 .map_err(ClusterRankedError::from)
@@ -436,12 +442,13 @@ impl ClusterEngine {
         source: &str,
         title: &str,
     ) -> Option<crate::explain::ExplainDetail> {
+        let layout = &*self.layout();
         let mut lc = String::new();
         let compiled = crate::compile::compile_one_readonly(
             source,
             logical_id,
-            &self.layout.norm,
-            &self.layout.dict,
+            &layout.norm,
+            &layout.dict,
             &mut lc,
             self.per_shard.hot_anchor_threshold,
         )
@@ -449,8 +456,8 @@ impl ClusterEngine {
         Some(crate::explain::explain_match_structured(
             &compiled,
             title,
-            &self.layout.norm,
-            &self.layout.dict,
+            &layout.norm,
+            &layout.dict,
         ))
     }
 }

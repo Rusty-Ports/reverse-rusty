@@ -32,6 +32,7 @@ use crate::cluster::shard::ShardError;
 use crate::events::{DurabilityOp, EngineEvent};
 
 use super::{ClusterEngine, ReassignOutcome};
+use crate::cluster::coordinator::layout::Layout;
 
 /// The endpoints a move of `desired` will touch — the scheduling analogue of the reservation the
 /// move itself takes: every member of the position's COMMITTED assignment plus every desired
@@ -118,6 +119,7 @@ impl ClusterEngine {
     /// so a stale shape decision at worst dispatches a move that resolves to `NoChange`/re-plans.
     pub(in crate::cluster::coordinator) fn dispatch_move(
         &self,
+        layout: &Layout,
         state: &ClusterState,
         pos: u32,
         desired: &ShardAssignment,
@@ -129,9 +131,9 @@ impl ClusterEngine {
             .find(|a| a.position == pos)
             .is_none_or(|a| a.replicas.is_empty());
         if committed_bare && desired.replicas.is_empty() {
-            self.reassign_and_move(pos as usize, desired.primary, handle)
+            self.reassign_and_move_in(layout, pos as usize, desired.primary, handle)
         } else {
-            self.reassign_group_and_move(pos as usize, desired, handle)
+            self.reassign_group_and_move_in(layout, pos as usize, desired, handle)
         }
     }
 
@@ -143,6 +145,7 @@ impl ClusterEngine {
     /// ticket released by RAII during unwind).
     pub(in crate::cluster::coordinator) fn execute_move_wave(
         &self,
+        layout: &Layout,
         state: &ClusterState,
         targets: &[(u32, ShardAssignment)],
         wave: &[usize],
@@ -150,7 +153,10 @@ impl ClusterEngine {
     ) -> Vec<(u32, Result<ReassignOutcome, ShardError>)> {
         if let [i] = wave {
             let (pos, desired) = &targets[*i];
-            return vec![(*pos, self.dispatch_move(state, *pos, desired, handle))];
+            return vec![(
+                *pos,
+                self.dispatch_move(layout, state, *pos, desired, handle),
+            )];
         }
         std::thread::scope(|scope| {
             enum Slot<'s> {
@@ -167,7 +173,7 @@ impl ClusterEngine {
                 let spawned = std::thread::Builder::new()
                     .name(format!("rr-move-{pos}"))
                     .spawn_scoped(scope, move || {
-                        self.dispatch_move(state, pos, desired, handle)
+                        self.dispatch_move(layout, state, pos, desired, handle)
                     });
                 match spawned {
                     Ok(h) => slots.push(Slot::Spawned(pos, h)),
@@ -182,7 +188,7 @@ impl ClusterEngine {
                         });
                         slots.push(Slot::Done(
                             pos,
-                            self.dispatch_move(state, pos, desired, handle),
+                            self.dispatch_move(layout, state, pos, desired, handle),
                         ));
                     }
                 }

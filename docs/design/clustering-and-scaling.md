@@ -293,6 +293,13 @@ exhaustive job) takes it alone
 its shards one after another, and a remote position that does not answer costs each write that
 touches it the write deadline.
 
+The coordinator's serving state is one value, the layout: the normalizer, the dictionary, the
+vocabulary, the ring, the shards and the placement generation they were built under. It is
+published atomically. Every operation loads it once at its entry and uses that layout throughout,
+and a vocabulary change or a resize publishes a new one, so no operation routes by one layout and
+matches in another
+([ADR-208](../decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)).
+
 The served coordinator's search pool has a gate. A search holds it shared for as long as its work
 is in the pool. A vocabulary change, an in-process resize and a remote resize's cutover hold it
 alone before they ask for the cluster's write lock, so they wait for the search requests in flight

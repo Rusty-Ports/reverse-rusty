@@ -1,5 +1,6 @@
 //! `impl ClusterEngine` — the read path: routing, `percolate` (+ stats / explicit-broad
-//! variants), the cross-shard merge, and count / fan-out introspection.
+//! variants) and the cross-shard merge. Counts, fan-out introspection and document reads are
+//! in `inspect`.
 
 use crate::cluster::shard::ShardError;
 use crate::compile::is_hot;
@@ -8,6 +9,7 @@ use crate::exact::TagPredicate;
 use crate::segment::MatchStats;
 
 use super::ClusterEngine;
+use crate::cluster::coordinator::layout::Layout;
 
 /// A mutation-frozen cluster view for a read that must combine Boolean matches
 /// with later source enrichment.
@@ -160,30 +162,33 @@ impl ClusterEngine {
     /// N(T)` means fan-out only ever widens, and only on alias-bearing titles; with
     /// no active multi-word alias `P(T) == N(T)` and this takes the single-view
     /// path, byte-identical to the pre-ADR-076 routing.
-    pub(in crate::cluster::coordinator) fn route(&self, title: &str) -> (Vec<usize>, usize) {
+    pub(in crate::cluster::coordinator) fn route(
+        layout: &Layout,
+        title: &str,
+    ) -> (Vec<usize>, usize) {
         let mut lc = String::new();
         let mut sc = crate::normalize::NormScratch::new();
         let mut feats: Vec<FeatureId> = Vec::new();
-        if self.layout.norm.has_multiword_aliases() {
+        if layout.norm.has_multiword_aliases() {
             let mut neg: Vec<FeatureId> = Vec::new();
-            self.layout.norm.match_features_dual(
+            layout.norm.match_features_dual(
                 title,
-                &self.layout.dict,
+                &layout.dict,
                 &mut lc,
                 &mut sc,
                 &mut neg,
                 &mut feats,
             );
         } else {
-            self.layout
+            layout
                 .norm
-                .match_features(title, &self.layout.dict, &mut lc, &mut sc, &mut feats);
+                .match_features(title, &layout.dict, &mut lc, &mut sc, &mut feats);
         }
         // Selective targets: the shard owning each anchor-eligible (non-hot) feature.
         let mut targets: Vec<usize> = Vec::with_capacity(feats.len() + 1);
         for &f in &feats {
-            if !is_hot(&self.layout.dict, f) {
-                targets.push(self.layout.ring.lookup(f));
+            if !is_hot(&layout.dict, f) {
+                targets.push(layout.ring.lookup(f));
             }
         }
         targets.sort_unstable();
@@ -196,7 +201,7 @@ impl ClusterEngine {
         // shard it probes, and that shard holds the complete (replicated) broad lane.
         let h = crate::util::fnv1a64(title.as_bytes());
         let broad_eval_shard = if targets.is_empty() {
-            let s = (h % self.layout.ring.num_shards() as u64) as usize;
+            let s = (h % layout.ring.num_shards() as u64) as usize;
             targets.push(s);
             s
         } else {
@@ -208,14 +213,16 @@ impl ClusterEngine {
     /// Match one title against the cluster, using the cluster's default broad-lane
     /// setting. Returns matched logical ids (sorted, deduped).
     pub fn percolate(&self, title: &str) -> Result<Vec<u64>, ShardError> {
+        let layout = &*self.layout();
         Ok(self
-            .percolate_inner(title, self.include_broad, &TagPredicate::empty())?
+            .percolate_inner(layout, title, self.include_broad, &TagPredicate::empty())?
             .0)
     }
 
     /// [`Self::percolate`] plus merged [`MatchStats`] across the probed shards.
     pub fn percolate_with_stats(&self, title: &str) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        self.percolate_inner(title, self.include_broad, &TagPredicate::empty())
+        let layout = &*self.layout();
+        self.percolate_inner(layout, title, self.include_broad, &TagPredicate::empty())
     }
 
     /// Match one title with an explicit broad-lane toggle (overriding the cluster
@@ -225,8 +232,9 @@ impl ClusterEngine {
         title: &str,
         include_broad: bool,
     ) -> Result<Vec<u64>, ShardError> {
+        let layout = &*self.layout();
         Ok(self
-            .percolate_inner(title, include_broad, &TagPredicate::empty())?
+            .percolate_inner(layout, title, include_broad, &TagPredicate::empty())?
             .0)
     }
 
@@ -240,8 +248,11 @@ impl ClusterEngine {
         title: &str,
         filter: &[(String, Vec<String>)],
     ) -> Result<Vec<u64>, ShardError> {
+        let layout = &*self.layout();
         let pred = self.compile_tag_predicate(filter);
-        Ok(self.percolate_inner(title, self.include_broad, &pred)?.0)
+        Ok(self
+            .percolate_inner(layout, title, self.include_broad, &pred)?
+            .0)
     }
 
     /// [`Self::percolate_filtered`] with an explicit broad-lane toggle — used by the oracle to sweep
@@ -252,8 +263,9 @@ impl ClusterEngine {
         filter: &[(String, Vec<String>)],
         include_broad: bool,
     ) -> Result<Vec<u64>, ShardError> {
+        let layout = &*self.layout();
         let pred = self.compile_tag_predicate(filter);
-        Ok(self.percolate_inner(title, include_broad, &pred)?.0)
+        Ok(self.percolate_inner(layout, title, include_broad, &pred)?.0)
     }
 
     /// Compile a request filter — a conjunction of `(key, [values])` groups — into a
@@ -279,25 +291,26 @@ impl ClusterEngine {
     /// overlapped an upsert moving a query between shards is discarded and repeated.
     fn percolate_inner(
         &self,
+        layout: &Layout,
         title: &str,
         include_broad: bool,
         pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         self.move_fence
-            .read(|pass| self.percolate_pass(title, include_broad, pred, pass))
+            .read(|pass| Self::percolate_pass(layout, title, include_broad, pred, pass))
     }
 
     fn percolate_pass(
-        &self,
+        layout: &Layout,
         title: &str,
         include_broad: bool,
         pred: &TagPredicate,
         pass: &super::move_fence::ReadPass<'_>,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        let (targets, broad_eval_shard) = self.route(title);
+        let (targets, broad_eval_shard) = Self::route(layout, title);
         let ownership = crate::ownership::OwnershipContext::new(
-            self.placement_generation(),
-            self.layout.shards.len() as u32,
+            layout.generation,
+            layout.shards.len() as u32,
             targets.iter().map(|&position| position as u32).collect(),
             include_broad.then_some(broad_eval_shard as u32),
         )?;
@@ -310,7 +323,7 @@ impl ClusterEngine {
             targets
                 .iter()
                 .map(|&s| {
-                    self.layout.shards[s].percolate_filtered_owned(
+                    layout.shards[s].percolate_filtered_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
@@ -324,7 +337,7 @@ impl ClusterEngine {
             targets
                 .par_iter()
                 .map(|&s| {
-                    self.layout.shards[s].percolate_filtered_owned(
+                    layout.shards[s].percolate_filtered_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
@@ -386,24 +399,25 @@ impl ClusterEngine {
         include_broad: bool,
         rank: &crate::rank::RankSpec,
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        let layout = &*self.layout();
         let pred = self.compile_tag_predicate(filter);
         let spec = self.compile_rank_spec(rank);
         self.move_fence
-            .read(|pass| self.ranked_pass(title, include_broad, &pred, &spec, pass))
+            .read(|pass| Self::ranked_pass(layout, title, include_broad, &pred, &spec, pass))
     }
 
     fn ranked_pass(
-        &self,
+        layout: &Layout,
         title: &str,
         include_broad: bool,
         pred: &TagPredicate,
         spec: &crate::rank::CompiledRankSpec,
         pass: &super::move_fence::ReadPass<'_>,
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
-        let (targets, broad_eval_shard) = self.route(title);
+        let (targets, broad_eval_shard) = Self::route(layout, title);
         let ownership = crate::ownership::OwnershipContext::new(
-            self.placement_generation(),
-            self.layout.shards.len() as u32,
+            layout.generation,
+            layout.shards.len() as u32,
             targets.iter().map(|&position| position as u32).collect(),
             include_broad.then_some(broad_eval_shard as u32),
         )?;
@@ -413,7 +427,7 @@ impl ClusterEngine {
             targets
                 .iter()
                 .map(|&s| {
-                    self.layout.shards[s].percolate_filtered_ranked_owned(
+                    layout.shards[s].percolate_filtered_ranked_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
@@ -428,7 +442,7 @@ impl ClusterEngine {
             targets
                 .par_iter()
                 .map(|&s| {
-                    self.layout.shards[s].percolate_filtered_ranked_owned(
+                    layout.shards[s].percolate_filtered_ranked_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
@@ -457,181 +471,6 @@ impl ClusterEngine {
         stats.matches = out.len() as u32;
         Ok((out, stats))
     }
-
-    /// Introspection: the shards a title would be routed to (its fan-out) — the selective
-    /// targets plus the one broad-eval shard (ADR-080).
-    pub fn shard_fanout(&self, title: &str) -> Vec<usize> {
-        self.route(title).0
-    }
-
-    /// Number of shards.
-    pub fn num_shards(&self) -> usize {
-        self.layout.ring.num_shards()
-    }
-
-    /// How many replicas, across all positions, reads may not fail over to: a replicated write
-    /// to them failed, or they were not proven equal to their primary at connect (ADR-195).
-    /// Redundancy is reduced by that many copies until they are recovered. 0 without replicas.
-    #[must_use]
-    pub fn out_of_sync_replicas(&self) -> usize {
-        self.layout
-            .shards
-            .iter()
-            .map(|shard| shard.out_of_sync_replicas())
-            .sum()
-    }
-
-    /// A point-in-time snapshot of the cluster gRPC transport metrics (ADR-085): per-RPC
-    /// call counts, errors, timeouts, retries, and summed latency. All-zero for an
-    /// in-process cluster (no remote RPCs). Off the hot path — introspection / scraping.
-    pub fn transport_metrics(&self) -> crate::cluster::TransportMetricsSnapshot {
-        self.transport_metrics.snapshot()
-    }
-
-    /// Total physical query count across shards (a replicated/any-of query is
-    /// counted once per shard holding it — physical, not distinct-logical).
-    pub fn num_queries(&self) -> Result<usize, ShardError> {
-        self.layout.shards.iter().map(|s| s.num_queries()).sum()
-    }
-
-    /// Per-shard physical query counts (introspection / tests).
-    pub fn shard_query_counts(&self) -> Result<Vec<usize>, ShardError> {
-        self.layout.shards.iter().map(|s| s.num_queries()).collect()
-    }
-
-    /// Cluster-wide per-class entry tally `[A, B, C, D, H]`, summed across shards
-    /// (replicated/any-of queries counted per holding shard; H appended at index
-    /// 4 — ADR-105). Used by the oracle to assert each placement branch is
-    /// actually exercised.
-    pub fn class_counts(&self) -> Result<[u64; 5], ShardError> {
-        let mut total = [0u64; 5];
-        for s in &self.layout.shards {
-            let c = s.class_counts()?;
-            for i in 0..5 {
-                total[i] += c[i];
-            }
-        }
-        Ok(total)
-    }
-
-    /// [`Self::percolate_filtered_with_broad`] also returning the merged [`MatchStats`]
-    /// across the probed shards — the coordinator-mode server's `/_search` profile path
-    /// (ADR-070). An empty filter + the cluster default broad toggle is byte-identical
-    /// to [`Self::percolate_with_stats`].
-    pub fn percolate_filtered_with_stats(
-        &self,
-        title: &str,
-        filter: &[(String, Vec<String>)],
-        include_broad: bool,
-    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        let pred = self.compile_tag_predicate(filter);
-        self.percolate_inner(title, include_broad, &pred)
-    }
-
-    /// The live source DSL stored for `logical`, probing each shard's source store
-    /// (first live copy wins — every copy of one logical id is identical). `Ok(None)`
-    /// only when EVERY shard answered "not held"; a shard that cannot answer (a
-    /// `RemoteShard` in v1) fails the lookup loud rather than letting the coordinator
-    /// report a false "not found" (ADR-070).
-    pub fn get_source(&self, logical: u64) -> Result<Option<String>, ShardError> {
-        let mut first_err: Option<ShardError> = None;
-        for s in &self.layout.shards {
-            match s.source_of(logical) {
-                Ok(Some(dsl)) => return Ok(Some(dsl)),
-                Ok(None) => {}
-                Err(e) => {
-                    first_err.get_or_insert(e);
-                }
-            }
-        }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(None),
-        }
-    }
-
-    /// The canonical stored document for `logical`, including write version and
-    /// read-back tags. Like [`Self::get_source`], every shard must be capable of
-    /// answering before absence is reported; remote v1 shards fail loud.
-    pub fn get_document(
-        &self,
-        logical: u64,
-    ) -> Result<Option<crate::storage::StoredSource>, ShardError> {
-        let mut first_err: Option<ShardError> = None;
-        for shard in &self.layout.shards {
-            match shard.document_of(logical) {
-                Ok(Some(document)) => return Ok(Some(document)),
-                Ok(None) => {}
-                Err(error) => {
-                    first_err.get_or_insert(error);
-                }
-            }
-        }
-        match first_err {
-            Some(error) => Err(error),
-            None => Ok(None),
-        }
-    }
-
-    /// Whether any shard holds a live exact row for `logical`, without reading
-    /// source metadata. Used by document HEAD so a missing/damaged sidecar does
-    /// not change existence semantics. As with source lookup, an incapable shard
-    /// prevents a definitive negative and therefore fails loud.
-    pub fn document_exists(&self, logical: u64) -> Result<bool, ShardError> {
-        let mut first_err: Option<ShardError> = None;
-        for shard in &self.layout.shards {
-            match shard.has_live_query(logical) {
-                Ok(true) => return Ok(true),
-                Ok(false) => {}
-                Err(error) => {
-                    first_err.get_or_insert(error);
-                }
-            }
-        }
-        match first_err {
-            Some(error) => Err(error),
-            None => Ok(false),
-        }
-    }
-
-    /// The cluster's default broad-lane toggle (what [`Self::percolate`] uses).
-    pub fn include_broad(&self) -> bool {
-        self.include_broad
-    }
-
-    /// Replication factor (copies per shard position).
-    pub fn replication_factor(&self) -> usize {
-        self.replication_factor
-    }
-
-    /// Whether this cluster persists durable artifacts (built/opened with a `data_dir`).
-    pub fn is_durable(&self) -> bool {
-        self.data_dir.is_some()
-    }
-
-    /// Whether shard execution is hosted on remote nodes, each with its own durability.
-    pub fn is_remote(&self) -> bool {
-        #[cfg(feature = "distributed")]
-        {
-            self.handle.is_some()
-        }
-        #[cfg(not(feature = "distributed"))]
-        {
-            false
-        }
-    }
-
-    /// The per-shard engine configuration the cluster was assembled with.
-    pub fn per_shard_config(&self) -> &crate::config::EngineConfig {
-        &self.per_shard
-    }
-
-    /// True if the cluster holds (or has ever held) any tagged query (ADR-055).
-    /// Introspection for operators (cluster-mode `/_stats`, ADR-070); best-effort
-    /// across reopen (a checkpointed synthetic-only cluster restores it `false`).
-    /// No longer gates anything: a vocabulary change carries tags through the
-    /// rebuild by stored `TagId` (ADR-074).
-    pub fn has_tagged_queries(&self) -> bool {
-        self.has_tags()
-    }
 }
+
+mod inspect;

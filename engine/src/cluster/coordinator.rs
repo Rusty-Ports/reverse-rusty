@@ -311,8 +311,10 @@ impl ClusterDurable {
 
 /// An in-process multi-shard reverse query matcher.
 pub struct ClusterEngine {
-    /// What reads and writes are routed and matched by. See [`layout::Layout`].
-    layout: layout::Layout,
+    /// What reads and writes are routed and matched by, published as one value. An operation
+    /// loads it once ([`Self::layout`]) and uses that layout throughout; a vocabulary change or
+    /// a resize publishes a new one. See [`layout::Layout`].
+    layout: arc_swap::ArcSwap<layout::Layout>,
     /// The one shared, frozen per-query tag space (ADR-049/055), the `TagDict` analogue of `dict`:
     /// shared read-only into every shard so a tagged write and a percolate filter resolve a given
     /// `(key,value)` to the SAME `TagId` everywhere. Built over the corpus tags at
