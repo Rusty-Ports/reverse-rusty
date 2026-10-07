@@ -106,6 +106,11 @@ What the one mutex cost:
   [ADR-207](adr-207-cluster-writers-wait-outside-the-search-pool.md). A writer of the cluster
   lock now waits at the search pool's gate, the remote cutover holds write admission alone,
   and `write_cluster` checks the rule of item 4 where the lock is taken.
+  **2026-10-07:** [ADR-210](adr-210-the-coordinator-serves-beside-a-rebuild.md) removes the
+  cluster lock and the gate. Item 4 no longer holds: a search that returns sources takes no
+  write admission, only the cluster's mutation-frozen view, so that it does not wait for a
+  rebuild. Items 1 to 3 and 5 stand. The order in item 6 is now the topology guard, then
+  write admission, then (inside the engine) the layout lock and the mutation barrier.
 - **Not changed, and still limits of the coordinator:**
   - One write still visits its shards one after another.
   - A remote position that does not answer still costs every write that touches it the write

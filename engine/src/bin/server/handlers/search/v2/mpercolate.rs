@@ -472,8 +472,8 @@ async fn cluster_v2_mpercolate_inner(
             })
         } else {
             // Source-free bounded batches retain the fully concurrent path.
-            let cluster = cluster_state.cluster.read();
-            cluster_batch_delivery(&*cluster, &program, &filter, &spec)
+            let cluster = &cluster_state.cluster;
+            cluster_batch_delivery(cluster, &program, &filter, &spec)
         }
     };
     drive_batch(

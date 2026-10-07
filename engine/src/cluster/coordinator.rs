@@ -370,6 +370,10 @@ pub struct ClusterEngine {
     /// Called between the two steps of a mutation's admission, by a test of their order.
     #[cfg(test)]
     admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Called by a rebuild once it holds the layout lock alone and has frozen the shards it
+    /// replaces. A test outside this crate stops a rebuild there to show what answers beside
+    /// it. Never set in production.
+    rebuild_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Exact manifest a pending alias-import checkpoint attempted to publish.
     /// This is populated before the atomic write so a retry can distinguish a
     /// completed rename whose parent-directory sync failed from any divergent

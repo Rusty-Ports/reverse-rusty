@@ -250,33 +250,21 @@ rank metadata, fully sorts already-sorted shard runs, and clones request groups 
 **Completion.** Preserve exact ordering, totals, ownership, and winner-source behavior while
 `rankbench` demonstrates lower allocation and coordinator CPU at fixed K.
 
-### In-process rebuilds that keep serving
+### Writes during a rebuild, and what a rebuild costs
 
-**Problem.** An in-process resize and every vocabulary or alias change rebuild the live corpus
-while the coordinator holds the cluster's write lock, so searches, writes and health probes wait
-for the whole rebuild and its checkpoint. A search holds the cluster lock for each title it
-matches, which is also why the search pool needs a gate
-([ADR-207](decisions/adr-207-cluster-writers-wait-outside-the-search-pool.md)).
+**Problem.** A vocabulary change or an in-process resize now serves searches and reads while it
+rebuilds ([ADR-209](decisions/adr-209-only-a-search-runs-beside-a-layout-change.md),
+[ADR-210](decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)), but every write waits
+for the whole rebuild and its checkpoint. How long that is, and how much memory the two layouts
+need at their peak, has not been measured at scale.
 
-**Done so far.** The serving layout (normalizer, dictionary, vocabulary, ring, shards, placement
-generation) is one published value, and every operation loads it once
-([ADR-208](decisions/adr-208-the-coordinator-serves-from-a-published-layout.md)). In the library a
-rebuild now takes shared access and only searches run beside it
-([ADR-209](decisions/adr-209-only-a-search-runs-beside-a-layout-change.md)). The server still
-holds its cluster lock and the search pool's gate around a rebuild, so served searches still wait.
+**Direction.** Measure a rebuild's time and peak memory per phase at scale, and publish the
+numbers with sizing guidance. If the write pause is too long for real corpora, carry the writes
+that arrive during a rebuild into the new layout, so that only the swap pauses them.
 
-**Direction.** Take the cluster lock and the search pool's gate off the search path in the server,
-so that a served search and a health probe answer during a rebuild. Then measure a rebuild's time
-and peak memory per phase at scale. Later, if writes should stay available too, carry the writes
-that arrive during a rebuild into the new layout. First measure
-a rebuild's time and peak memory per phase at scale. Give the exclusive step a wait budget, so a
-change that cannot start soon gives up instead of holding searches behind it.
-
-**Completion.** While a resize or vocabulary change rebuilds, searches and health probes answer
-within their normal deadlines, each result equals the oracle before the swap or after it and never
-a mix, and a mutation that lands during the build is either carried into the new layout or makes
-the change fail without losing an acknowledged query. The cluster read lock and the pool's gate
-are gone from the search path.
+**Completion.** A measured capture of rebuild time and peak memory per phase is published, and
+either writes are accepted during a rebuild without losing an acknowledged query, or the
+measured pause is documented as acceptable with the corpus size at which it stops being so.
 
 ## Priority 4 — feature-model evolution and parity
 

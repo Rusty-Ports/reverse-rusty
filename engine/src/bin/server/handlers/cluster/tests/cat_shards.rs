@@ -10,11 +10,7 @@ use reverse_rusty::cluster::{
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn default_table_is_headerless_truthful_and_uncacheable() {
     let state = test_state(&seed());
-    let expected = state
-        .cluster
-        .read()
-        .shard_query_counts()
-        .expect("shard counts");
+    let expected = state.cluster.shard_query_counts().expect("shard counts");
     let (status, headers, bytes) = send_raw(&state, req_empty("GET", "/_cat/shards")).await;
 
     assert_eq!(status, StatusCode::OK);

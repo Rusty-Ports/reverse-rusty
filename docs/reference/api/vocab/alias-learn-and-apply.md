@@ -33,8 +33,9 @@ document if appropriate.
 The route is strictly bodyless. It rejects unknown, duplicate, and malformed query parameters,
 caps request-body collection at 64 KiB and 250 milliseconds, returns `Allow: POST` for other
 methods, and marks every route response `Cache-Control: no-store`. Admission, engine/coordinator lock
-waits, corpus learning, rebuild, durable commit, and standalone publication use the shared one-slot
-administrative blocking worker. The same timed response is returned in standalone and coordinator
+waits, corpus learning, rebuild, durable commit, and standalone publication use a one-slot
+blocking worker: the administrative slot in standalone mode, and in coordinator mode the slot for
+administrative changes, which administrative reads do not share. The same timed response is returned in standalone and coordinator
 modes.
 
 In standalone durable mode, unhealthy persistence is refused before mutation. A successful response

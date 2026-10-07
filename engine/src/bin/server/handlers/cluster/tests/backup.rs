@@ -26,7 +26,7 @@ fn durable_state(tag: &str) -> (Arc<ClusterAppState>, std::path::PathBuf) {
 async fn cluster_backup_uses_shared_contract_and_reports_checkpoint_epoch() {
     let (state, root) = durable_state("success");
     let dest = root.join("backup");
-    let epoch_before = state.cluster.read().epoch();
+    let epoch_before = state.cluster.epoch();
     let (status, body) = send(
         &state,
         req("POST", "/_backup", &serde_json::json!({"dest": dest})),
@@ -48,7 +48,7 @@ async fn cluster_backup_uses_shared_contract_and_reports_checkpoint_epoch() {
 #[tokio::test]
 async fn cluster_backup_rejects_invalid_or_nondurable_requests_before_checkpoint() {
     let (state, root) = durable_state("strict");
-    let epoch_before = state.cluster.read().epoch();
+    let epoch_before = state.cluster.epoch();
     let dest = root.join("backup");
     let (status, body) = send(
         &state,
@@ -61,7 +61,7 @@ async fn cluster_backup_rejects_invalid_or_nondurable_requests_before_checkpoint
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"]["type"], "validation_error", "{body}");
-    assert_eq!(state.cluster.read().epoch(), epoch_before);
+    assert_eq!(state.cluster.epoch(), epoch_before);
     assert!(!dest.exists());
 
     let in_memory = test_state(&seed());
@@ -86,7 +86,7 @@ async fn dropped_cluster_request_keeps_admission_until_blocking_backup_finishes(
     let (state, root) = durable_state("dropped");
     let dest = root.join("backup");
     let queued_dest = root.join("queued-backup");
-    let epoch_before = state.cluster.read().epoch();
+    let epoch_before = state.cluster.epoch();
     let held_state = Arc::clone(&state);
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -135,7 +135,7 @@ async fn dropped_cluster_request_keeps_admission_until_blocking_backup_finishes(
     .await
     .expect("detached cluster backup completes and releases admission");
     reverse_rusty::storage::verify_cluster_backup(&dest).expect("cluster backup verifies");
-    assert!(state.cluster.read().epoch() > epoch_before);
+    assert!(state.cluster.epoch() > epoch_before);
     assert!(!queued_dest.exists());
 
     drop(state);
@@ -146,7 +146,7 @@ async fn dropped_cluster_request_keeps_admission_until_blocking_backup_finishes(
 async fn detached_cluster_backup_failure_is_reported_and_counted() {
     let (state, root) = durable_state("detached-failure");
     let dest = root.join("raced-destination");
-    let epoch_before = state.cluster.read().epoch();
+    let epoch_before = state.cluster.epoch();
     let held_state = Arc::clone(&state);
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -189,7 +189,7 @@ async fn detached_cluster_backup_failure_is_reported_and_counted() {
     .await
     .expect("detached cluster failure is supervised and counted");
     assert_eq!(
-        state.cluster.read().epoch(),
+        state.cluster.epoch(),
         epoch_before,
         "raced destination is refused before checkpoint"
     );

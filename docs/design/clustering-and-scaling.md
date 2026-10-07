@@ -310,11 +310,19 @@ returns sources sees one layout. The old shards refuse to write from the moment 
 and their files stay until the last search running on them has returned
 ([ADR-209](../decisions/adr-209-only-a-search-runs-beside-a-layout-change.md)).
 
-The served coordinator's search pool has a gate. A search holds it shared for as long as its work
-is in the pool. A vocabulary change, an in-process resize and a remote resize's cutover hold it
-alone before they ask for the cluster's write lock, so they wait for the search requests in flight
-and no worker of the pool waits for them
-([ADR-207](../decisions/adr-207-cluster-writers-wait-outside-the-search-pool.md)).
+The served coordinator holds the engine with no lock of its own, so a search, a document read
+and a health or metrics probe answer while a vocabulary change or a resize runs, from the old
+layout until the swap. What the server adds is admission. A rebuild holds the topology guard and
+write admission alone for its whole run: a write waits at admission, and an operation with a time
+budget (a rebalance, a reassignment, a handoff, a reconcile, a GC, a node registration) gives up
+at the topology guard within its budget, where inside the engine it could not. A search takes
+neither, and one that returns sources takes only the engine's mutation-frozen view, so it waits for
+the swap and not for the rebuild. Administrative changes (the rebuilds, membership changes, a
+resync) are admitted one at a time on a slot of their own, apart from the slot that health,
+metrics, stats and the other administrative reads share, so those reads are never queued behind a
+rebuild. The search pool is a thread budget; nothing that runs in it may take a lock that a rebuild
+holds or waits for
+([ADR-210](../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)).
 
 The lock order is PIT/exhaustive mutation barrier, then bulk-load barrier, then ID lock. Individual
 mutations hold the bulk barrier's shared side; initial bulk ingest holds its exclusive side across

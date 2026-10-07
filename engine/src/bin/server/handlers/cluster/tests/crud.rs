@@ -366,7 +366,7 @@ async fn put_reports_the_class_the_query_was_stored_under() {
         (21, "1994 vertex", "b"),
         (22, "acme", "c"),
     ] {
-        let before = state.cluster.read().class_counts().expect("class counts");
+        let before = state.cluster.class_counts().expect("class counts");
         let (status, body) = send(
             &state,
             req(
@@ -383,7 +383,7 @@ async fn put_reports_the_class_the_query_was_stored_under() {
 
         // Every copy the shards stored is counted under the reported class, and under no
         // other: one copy of a selective row, one per shard of a replicated one.
-        let after = state.cluster.read().class_counts().expect("class counts");
+        let after = state.cluster.class_counts().expect("class counts");
         let slot = ["a", "b", "c", "d", "h"]
             .iter()
             .position(|name| *name == class)

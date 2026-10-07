@@ -2,8 +2,8 @@
 //!
 //! One brief read of the cluster engine: compile the rank program, pre-check the PIT and
 //! compute the request fingerprint. It runs on a blocking thread under read admission
-//! (ADR-191), because the cluster lock is not available while a vocabulary rebuild or a
-//! resize holds or waits for it, and a request waiting for it must not park an async worker.
+//! (ADR-191): the PIT check can call a remote shard, and a request waiting for that must not
+//! park an async worker.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use reverse_rusty::{CompiledRankProgram, PitId, QueryScope, RankProgramSpec, Top
 use super::delivery::{failure_response, DeliveryFailure};
 use super::{page, rank_program_error, record_outcome, ApiError, ClusterAppState, Reject};
 
-/// Run a compile step inside the request's deadline. The step waits for read admission, a
-/// blocking thread and the cluster lock, and all of that counts against the request's
+/// Run a compile step inside the request's deadline. The step waits for read admission and
+/// a blocking thread, and all of that counts against the request's
 /// timeout, as the wait for a search permit does (ADR-099). `None` when the deadline passed
 /// first; the admitted worker still finishes and frees its permit on its own.
 ///
@@ -65,7 +65,7 @@ pub(super) struct CompileRequest {
     pub(super) scope: QueryScope,
 }
 
-/// Compile under the cluster lock. The stale gate runs BEFORE the fingerprint so a rebuilt
+/// Compile against the cluster. The stale gate runs BEFORE the fingerprint so a rebuilt
 /// normalizer cannot mis-classify a dead cursor as a client mismatch; the kernel re-gates
 /// inside its own blocking closure, so the gap between here and there stays fail-closed.
 ///

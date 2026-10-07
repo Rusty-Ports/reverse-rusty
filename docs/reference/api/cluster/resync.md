@@ -59,8 +59,9 @@ duplicate query parameters are rejected.
 | `500` | `resync_unavailable` | An admitted worker panicked or its completion supervisor failed. |
 | `503` | `resync_unavailable` | Administrative admission or the dedicated worker is unavailable. |
 
-Repair shares the server's single expensive corpus-administration slot with stats, vocabulary,
-membership mutation, and in-process resize. The permit and writer/cluster guards remain owned by the
+Repair shares one admission slot with the other administrative changes (vocabulary and alias
+changes, an in-process resize, node registration and deregistration). Stats, health and the other
+administrative reads use a different slot. The permit and writer/cluster guards remain owned by the
 worker through completion, including after disconnect. Shutdown retains that same admission
 boundary before its final durability cleanup, so an admitted repair cannot begin after cleanup.
 

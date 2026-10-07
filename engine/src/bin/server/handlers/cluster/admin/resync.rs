@@ -275,7 +275,7 @@ pub(crate) async fn cluster_resync(
     };
 
     let permit = if no_wait {
-        match Arc::clone(&state.stats_permits).try_acquire_owned() {
+        match Arc::clone(&state.admin_change_permits).try_acquire_owned() {
             Ok(permit) => permit,
             Err(TryAcquireError::NoPermits) => {
                 return cluster_resync_not_started_timeout(&state.prom);
@@ -295,7 +295,7 @@ pub(crate) async fn cluster_resync(
         };
         match tokio::time::timeout(
             admission_budget,
-            Arc::clone(&state.stats_permits).acquire_owned(),
+            Arc::clone(&state.admin_change_permits).acquire_owned(),
         )
         .await
         {
@@ -332,16 +332,7 @@ pub(crate) async fn cluster_resync(
         let Some(_writes) = writes else {
             return ClusterResyncWorkerOutcome::NotStarted;
         };
-        let cluster = if no_wait {
-            worker_state.cluster.try_read()
-        } else {
-            deadline
-                .checked_duration_since(Instant::now())
-                .and_then(|budget| worker_state.cluster.try_read_for(budget))
-        };
-        let Some(cluster) = cluster else {
-            return ClusterResyncWorkerOutcome::NotStarted;
-        };
+        let cluster = &worker_state.cluster;
         if !begin_cluster_resync(&worker_gate, deadline, no_wait) {
             return ClusterResyncWorkerOutcome::NotStarted;
         }

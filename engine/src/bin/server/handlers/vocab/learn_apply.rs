@@ -77,7 +77,7 @@ impl LearnApplyParams {
 
 /// Method/query/body validation shared by standalone and coordinator modes.
 ///
-/// The timer begins before transport validation. No engine or cluster lock is
+/// The timer begins before transport validation. No engine lock or cluster guard is
 /// held while the bounded, bodyless request is decoded.
 pub(crate) struct VocabLearnApplyTransport {
     duration: HistogramTimer,

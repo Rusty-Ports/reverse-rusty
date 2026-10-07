@@ -141,10 +141,10 @@ async fn collect_once(state: &Arc<ClusterAppState>, deadline: Instant) -> Cluste
     let worker_state = Arc::clone(state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let cluster = worker_state.cluster.read();
+        let cluster = &worker_state.cluster;
         let shards = cluster.num_shards();
         let degraded = (cluster.pending_repairs(), cluster.out_of_sync_replicas());
-        collect_cluster_health(&cluster).map_err(|source| (source, shards, degraded))
+        collect_cluster_health(cluster).map_err(|source| (source, shards, degraded))
     });
     let Some(probe_budget) = deadline.checked_duration_since(Instant::now()) else {
         return unavailable_fallback(
@@ -252,14 +252,13 @@ fn unavailable_fallback(
     deadline_expired: bool,
 ) -> ClusterHealth {
     warn!(message = log_message, "cluster health unavailable");
-    let (shards, pending_repairs, out_of_sync_replicas) =
-        state.cluster.try_read().map_or((0, 0, 0), |cluster| {
-            (
-                cluster.num_shards(),
-                cluster.pending_repairs(),
-                cluster.out_of_sync_replicas(),
-            )
-        });
+    // Three reads that take no lock a rebuild holds, so this answers on an async worker.
+    let cluster = &state.cluster;
+    let (shards, pending_repairs, out_of_sync_replicas) = (
+        cluster.num_shards(),
+        cluster.pending_repairs(),
+        cluster.out_of_sync_replicas(),
+    );
     ClusterHealth {
         status: HealthStatus::Red,
         deadline_expired,

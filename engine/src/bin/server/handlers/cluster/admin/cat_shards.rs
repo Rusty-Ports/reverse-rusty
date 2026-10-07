@@ -120,8 +120,8 @@ pub(crate) async fn cluster_cat_shards(
     let worker_state = Arc::clone(&state);
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let cluster = worker_state.cluster.read();
-        collect_rows(&cluster)
+        let cluster = &worker_state.cluster;
+        collect_rows(cluster)
     });
     match worker.await {
         Ok(Ok(mut rows)) => finish_response(

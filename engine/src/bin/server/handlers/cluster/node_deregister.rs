@@ -297,7 +297,7 @@ fn cancel_queued_cluster_node_deregister(gate: &Mutex<ProposalStart>) -> bool {
 }
 
 /// Commit one descriptor removal off-runtime through the authoritative
-/// control plane, including admission and topology/cluster-lock waiting.
+/// control plane, including admission and the wait for the topology guard.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_deregister_node(
     State(state): State<Arc<ClusterAppState>>,
@@ -314,7 +314,7 @@ pub(crate) async fn cluster_deregister_node(
         );
     };
     let permit = if no_wait {
-        match Arc::clone(&state.stats_permits).try_acquire_owned() {
+        match Arc::clone(&state.admin_change_permits).try_acquire_owned() {
             Ok(permit) => permit,
             Err(TryAcquireError::NoPermits) => {
                 return cluster_node_deregister_not_started_timeout(&state.prom);
@@ -334,7 +334,7 @@ pub(crate) async fn cluster_deregister_node(
         };
         match tokio::time::timeout(
             admission_budget,
-            Arc::clone(&state.stats_permits).acquire_owned(),
+            Arc::clone(&state.admin_change_permits).acquire_owned(),
         )
         .await
         {
@@ -375,17 +375,7 @@ pub(crate) async fn cluster_deregister_node(
             };
             topology
         };
-        let cluster = if no_wait {
-            worker_state.cluster.read()
-        } else {
-            let Some(lock_budget) = deadline.checked_duration_since(Instant::now()) else {
-                return ClusterNodeDeregisterWorkerOutcome::NotStarted;
-            };
-            let Some(cluster) = worker_state.cluster.try_read_for(lock_budget) else {
-                return ClusterNodeDeregisterWorkerOutcome::NotStarted;
-            };
-            cluster
-        };
+        let cluster = &worker_state.cluster;
         let control_state = match cluster.control_state() {
             Ok(state) => state,
             Err(source) => {

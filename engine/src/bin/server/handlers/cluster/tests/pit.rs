@@ -183,7 +183,7 @@ async fn cluster_v2_pit_pages_concatenate_and_stale_after_resize() {
     // A resize (placement-generation bump) stales any further cursor use as
     // the ADR-113 read-surface 409 — never a silently mixed page. (The paging
     // loop above ended with next_cursor null; re-page from the pit instead.)
-    state.cluster.write().resize(4).expect("resize");
+    state.cluster.resize(4).expect("resize");
     let (status, stale) = send(
         &state,
         req(
@@ -237,7 +237,7 @@ async fn cluster_close_pit_supports_batches_and_counts_logical_contexts() {
             {"successful": true, "pit_id": opened[1]}
         ])
     );
-    assert_eq!(state.cluster.read().open_pit_count(), 0);
+    assert_eq!(state.cluster.open_pit_count(), 0);
     assert_eq!(state.prom.open_pits.get(), 0);
 
     let (status, gone) = send(

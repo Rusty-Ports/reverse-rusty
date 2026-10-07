@@ -5,12 +5,11 @@
 //! a request feature the cluster cannot honor (`rank`, `explain`) is a 400, never
 //! silently ignored.
 //!
-//! Concurrency (see [`crate::state::ClusterAppState`]): percolates and ordinary
-//! writes take the cluster READ lock (`ClusterEngine` reads are `&self` lock-free;
-//! writes are `&self`, log-ordered); writes additionally share `write_admission`,
-//! which whole-cluster operations take exclusively. Descriptor mutation takes the exclusive side of
-//! `topology_guard`, movement takes its shared side, and `&mut self` blue/green
-//! vocabulary/resize operations take the cluster WRITE lock.
+//! Concurrency (see [`crate::state::ClusterAppState`]): the engine is held with no lock
+//! (ADR-210). A percolate takes nothing and runs beside a rebuild. Writes share
+//! `write_admission`, which whole-cluster operations take exclusively. Descriptor mutation
+//! takes the exclusive side of `topology_guard`, movement takes its shared side, and a
+//! vocabulary change or resize takes both `topology_guard` and `write_admission` alone.
 //!
 //! Submodule map:
 //! - [`doc`]    — `_doc` CRUD (PUT = the single-frame cluster upsert) + `_bulk`.
@@ -51,7 +50,7 @@ pub(crate) async fn admit_cluster_write(
 }
 
 /// Run a cluster mutation on a blocking thread, never on an async worker. It waits on
-/// `write_admission` and the cluster lock and then makes remote write RPCs; a worker parked on those
+/// `write_admission` and then makes remote write RPCs; a worker parked on those
 /// waits would starve every other request. The RPCs themselves run on the dedicated cluster
 /// runtime (see `cluster_mode::rpc_runtime`), so the lock holder always progresses.
 pub(crate) async fn run_cluster_write<T: Send + 'static>(
@@ -63,8 +62,7 @@ pub(crate) async fn run_cluster_write<T: Send + 'static>(
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _writes = state.write_admission.read();
-        let cluster = state.cluster.read();
-        work(&cluster)
+        work(&state.cluster)
     })
     .await
     .unwrap_or_else(|error| {
@@ -75,10 +73,10 @@ pub(crate) async fn run_cluster_write<T: Send + 'static>(
 }
 
 /// Run a brief read of the cluster engine on a blocking thread, never on an async worker
-/// (ADR-191). `cluster.read()` waits whenever a vocabulary rebuild or a resize holds, or is
-/// queued for, the exclusive lock, and that can last as long as an O(corpus) rebuild. The permit
-/// is awaited, so queued readers wait as futures, and it is owned by the worker, so a request
-/// that disconnects keeps its slot until its thread is free again.
+/// (ADR-191). The read may call a remote shard, and one that is not a search waits inside the
+/// engine while a vocabulary rebuild or a resize runs (ADR-209), which can last as long as an
+/// O(corpus) rebuild. The permit is awaited, so queued readers wait as futures, and it is owned
+/// by the worker, so a request that disconnects keeps its slot until its thread is free again.
 pub(crate) async fn read_cluster<T: Send + 'static>(
     state: &std::sync::Arc<crate::state::ClusterAppState>,
     work: impl FnOnce(&reverse_rusty::cluster::ClusterEngine) -> T + Send + 'static,
@@ -90,8 +88,11 @@ pub(crate) async fn read_cluster<T: Send + 'static>(
     let state = std::sync::Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let cluster = state.cluster.read();
-        work(&cluster)
+        #[cfg(test)]
+        if let Some(pause) = state.read_pause.lock().clone() {
+            pause();
+        }
+        work(&state.cluster)
     })
     .await
     .map_err(|error| ShardError::Protocol(format!("cluster read worker failed: {error}")))

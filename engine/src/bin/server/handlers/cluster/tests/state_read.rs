@@ -152,7 +152,7 @@ fn state_with_control(control: Box<dyn ControlPlane>) -> Arc<ClusterAppState> {
 #[tokio::test]
 async fn upgraded_move_state_keeps_the_public_epoch_numeric() {
     let app = test_state(&seed());
-    let mut state = app.cluster.read().control_state().expect("state");
+    let mut state = app.cluster.control_state().expect("state");
     state.moves.format_version = MOVE_CONTROL_FORMAT_CURRENT;
     let epoch = state.epoch;
     let app = state_with_control(Box::new(FixedControlPlane {
@@ -344,13 +344,7 @@ async fn cluster_state_transport_is_strict_bounded_and_keeps_exact_familiar_cont
 async fn cluster_state_waits_off_runtime_and_deadline_covers_shared_admission() {
     let request_thread = std::thread::current().id();
     let seed_cluster = test_state(&seed());
-    let control_state = Arc::new(
-        seed_cluster
-            .cluster
-            .read()
-            .control_state()
-            .expect("control state"),
-    );
+    let control_state = Arc::new(seed_cluster.cluster.control_state().expect("control state"));
     drop(seed_cluster);
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(AtomicBool::new(false));
@@ -442,13 +436,7 @@ async fn cluster_state_waits_off_runtime_and_deadline_covers_shared_admission() 
 #[tokio::test(flavor = "current_thread")]
 async fn cluster_state_does_not_start_work_when_admission_wakes_after_deadline() {
     let seed_cluster = test_state(&seed());
-    let control_state = Arc::new(
-        seed_cluster
-            .cluster
-            .read()
-            .control_state()
-            .expect("control state"),
-    );
+    let control_state = Arc::new(seed_cluster.cluster.control_state().expect("control state"));
     drop(seed_cluster);
     let calls = Arc::new(AtomicUsize::new(0));
     let state = state_with_control(Box::new(CountingControlPlane {
@@ -497,13 +485,7 @@ async fn cluster_state_does_not_start_work_when_admission_wakes_after_deadline()
 async fn cluster_state_rejects_a_worker_result_completed_after_deadline() {
     let request_thread = std::thread::current().id();
     let seed_cluster = test_state(&seed());
-    let control_state = Arc::new(
-        seed_cluster
-            .cluster
-            .read()
-            .control_state()
-            .expect("control state"),
-    );
+    let control_state = Arc::new(seed_cluster.cluster.control_state().expect("control state"));
     drop(seed_cluster);
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(AtomicBool::new(false));
@@ -573,7 +555,7 @@ async fn cluster_state_fails_loud_sanitizes_backend_errors_and_bounds_output() {
     );
 
     let base = test_state(&seed());
-    let mut oversized = base.cluster.read().control_state().expect("control state");
+    let mut oversized = base.cluster.control_state().expect("control state");
     drop(base);
     oversized.nodes.push(NodeDescriptor {
         id: NodeId(77),

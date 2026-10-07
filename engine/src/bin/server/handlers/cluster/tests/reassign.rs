@@ -210,7 +210,7 @@ async fn unsafe_topologies_are_rejected_before_admission() {
         ),
     ] {
         let base = test_state(&seed());
-        let num_shards = { base.cluster.read().num_shards() };
+        let num_shards = { base.cluster.num_shards() };
         let replacement = reverse_rusty::cluster::ClusterEngine::build(
             reverse_rusty::Normalizer::default_vocab().expect("vocab"),
             &reverse_rusty::cluster::ClusterConfig {

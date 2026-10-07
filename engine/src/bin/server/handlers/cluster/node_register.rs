@@ -344,8 +344,8 @@ fn cancel_queued_cluster_node_register(gate: &Mutex<ProposalStart>) -> bool {
 }
 
 /// Commit one member descriptor through the authoritative control plane.
-/// Admission, cluster-lock waiting, the synchronous consensus write, and
-/// response construction all happen away from Tokio request workers.
+/// Admission, the wait for the topology guard, the synchronous consensus write,
+/// and response construction all happen away from Tokio request workers.
 #[instrument(skip_all)]
 pub(crate) async fn cluster_register_node(
     State(state): State<Arc<ClusterAppState>>,
@@ -362,7 +362,7 @@ pub(crate) async fn cluster_register_node(
         );
     };
     let permit = if no_wait {
-        match Arc::clone(&state.stats_permits).try_acquire_owned() {
+        match Arc::clone(&state.admin_change_permits).try_acquire_owned() {
             Ok(permit) => permit,
             Err(TryAcquireError::NoPermits) => {
                 return cluster_node_register_not_started_timeout(&state.prom);
@@ -382,7 +382,7 @@ pub(crate) async fn cluster_register_node(
         };
         match tokio::time::timeout(
             admission_budget,
-            Arc::clone(&state.stats_permits).acquire_owned(),
+            Arc::clone(&state.admin_change_permits).acquire_owned(),
         )
         .await
         {
@@ -418,7 +418,7 @@ pub(crate) async fn cluster_register_node(
         let _permit = permit;
         // Descriptor replacement is exclusive with topology movement so a
         // move cannot resolve one endpoint/role and commit against another.
-        // Serving uses the separate cluster READ lock and remains concurrent.
+        // Serving takes no guard and remains concurrent.
         let _topology = if no_wait {
             worker_state.topology_guard.write()
         } else {
@@ -430,17 +430,7 @@ pub(crate) async fn cluster_register_node(
             };
             topology
         };
-        let cluster = if no_wait {
-            worker_state.cluster.read()
-        } else {
-            let Some(lock_budget) = deadline.checked_duration_since(Instant::now()) else {
-                return ClusterNodeRegisterWorkerOutcome::NotStarted;
-            };
-            let Some(cluster) = worker_state.cluster.try_read_for(lock_budget) else {
-                return ClusterNodeRegisterWorkerOutcome::NotStarted;
-            };
-            cluster
-        };
+        let cluster = &worker_state.cluster;
         if !begin_cluster_node_register_proposal(&worker_gate, deadline, no_wait) {
             return ClusterNodeRegisterWorkerOutcome::NotStarted;
         }

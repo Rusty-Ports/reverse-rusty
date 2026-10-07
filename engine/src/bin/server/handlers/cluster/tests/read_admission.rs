@@ -1,33 +1,32 @@
-//! Brief cluster-lock reads wait on blocking threads under bounded admission (ADR-191).
+//! Brief reads of the cluster run on blocking threads under bounded admission (ADR-191).
 
 use std::sync::mpsc::{sync_channel, SyncSender};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::*;
 use crate::state::MAX_QUEUED_CLUSTER_READS;
 
-/// Hold the exclusive cluster lock on a helper thread until the returned sender is used or
-/// dropped, the way a vocabulary rebuild or an in-process resize does. Tests drop it before
-/// asserting, so a failed assertion cannot leave readers parked behind it.
-fn hold_cluster_exclusively(state: &Arc<ClusterAppState>) -> (JoinHandle<()>, SyncSender<()>) {
-    let holder_state = Arc::clone(state);
-    let (locked_sender, locked_receiver) = sync_channel(1);
+/// Park every brief read of the cluster on its blocking thread, where it would wait for a
+/// slow shard or for a rebuild inside the engine, until the returned sender is used or
+/// dropped. Tests drop it before asserting, so a failed assertion cannot leave readers parked.
+fn park_reads(state: &Arc<ClusterAppState>) -> SyncSender<()> {
     let (release_sender, release_receiver) = sync_channel::<()>(1);
-    let holder = std::thread::spawn(move || {
-        let _cluster = holder_state.cluster.write();
-        locked_sender.send(()).expect("signal the held cluster");
-        let _ = release_receiver.recv();
-    });
-    locked_receiver.recv().expect("cluster held");
-    (holder, release_sender)
+    let release_receiver = std::sync::Mutex::new(release_receiver);
+    *state.read_pause.lock() = Some(Arc::new(move || {
+        // The first reader waits for the release; the ones behind it find it gone.
+        let _ = release_receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv();
+    }));
+    release_sender
 }
 
-/// Every data-plane route that only needs a brief read of the cluster must wait for it on a
-/// blocking thread. With the exclusive lock held and the request queued, a timer still fires on
-/// a single-threaded runtime; a request that took the lock on the async worker would stop it.
+/// Every data-plane route that needs a brief read of the cluster must do it on a blocking
+/// thread. With the read parked there, a timer still fires on a single-threaded runtime; a
+/// request that read on the async worker would stop it.
 #[test]
-fn a_read_waiting_for_the_cluster_lock_never_parks_the_async_runtime() {
+fn a_read_that_waits_never_parks_the_async_runtime() {
     type Case = (&'static str, fn() -> Request<Body>, StatusCode);
     let cases: [Case; 6] = [
         ("GET /_doc", || req_empty("GET", "/_doc/1"), StatusCode::OK),
@@ -76,7 +75,7 @@ fn a_read_waiting_for_the_cluster_lock_never_parks_the_async_runtime() {
     ];
     for (route, request, expected) in cases {
         let state = test_state(&seed());
-        let (holder, release) = hold_cluster_exclusively(&state);
+        let release = park_reads(&state);
         let (alive_sender, alive_receiver) = std::sync::mpsc::channel();
         let server_state = Arc::clone(&state);
         let server = std::thread::spawn(move || {
@@ -87,7 +86,7 @@ fn a_read_waiting_for_the_cluster_lock_never_parks_the_async_runtime() {
             runtime.block_on(async move {
                 let read_state = Arc::clone(&server_state);
                 let read = tokio::spawn(async move { send(&read_state, request()).await });
-                // Let the request start and queue behind the held lock.
+                // Let the request start and park on its blocking thread.
                 for _ in 0..8 {
                     tokio::task::yield_now().await;
                 }
@@ -98,24 +97,23 @@ fn a_read_waiting_for_the_cluster_lock_never_parks_the_async_runtime() {
         });
         let alive = alive_receiver.recv_timeout(Duration::from_secs(10));
         drop(release);
-        holder.join().expect("holder");
         let (status, body) = server.join().expect("server");
         assert!(
             alive.is_ok(),
-            "{route}: the runtime must keep running while the request waits for the cluster lock"
+            "{route}: the runtime must keep running while the request waits for its read"
         );
         assert_eq!(status, expected, "{route}: {body}");
     }
 }
 
 /// A read whose client disconnects keeps its admission permit until its blocking worker
-/// finishes, so the threads parked behind one long exclusive holder stay bounded.
+/// finishes, so the threads parked behind one slow read stay bounded.
 #[test]
 fn a_cancelled_read_keeps_its_admission_until_the_worker_finishes() {
     let admitted = MAX_QUEUED_CLUSTER_READS;
     let requested = admitted + 4;
     let state = test_state(&seed());
-    let (holder, release) = hold_cluster_exclusively(&state);
+    let release = park_reads(&state);
     let run_state = Arc::clone(&state);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -160,22 +158,21 @@ fn a_cancelled_read_keeps_its_admission_until_the_worker_finishes() {
             run_state.read_permits.available_permits(),
         )
     });
-    holder.join().expect("holder");
     assert_eq!(
         held_after_cancel, admitted,
         "cancelled reads must keep their admission while their workers are parked"
     );
     assert_eq!(
         restored, admitted,
-        "every permit returns once the lock frees"
+        "every permit returns once the reads finish"
     );
 }
 
-/// A ranked request's timeout covers its compile step. That step waits for read admission, a
-/// blocking thread and the cluster lock; while the exclusive lock is held, the request must
-/// answer 408 at its deadline instead of waiting for the rebuild to finish.
+/// A ranked request's timeout covers its compile step. That step waits for read admission and
+/// a blocking thread; while it is parked there, the request must answer 408 at its deadline
+/// instead of waiting for it.
 #[test]
-fn a_ranked_request_times_out_while_its_compile_waits_for_the_cluster_lock() {
+fn a_ranked_request_times_out_while_its_compile_waits() {
     type Case = (&'static str, fn() -> Request<Body>);
     let cases: [Case; 2] = [
         ("POST /v2/_search", || {
@@ -195,7 +192,7 @@ fn a_ranked_request_times_out_while_its_compile_waits_for_the_cluster_lock() {
     ];
     for (route, request) in cases {
         let state = test_state(&seed());
-        let (holder, release) = hold_cluster_exclusively(&state);
+        let release = park_reads(&state);
         let run_state = Arc::clone(&state);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -206,7 +203,6 @@ fn a_ranked_request_times_out_while_its_compile_waits_for_the_cluster_lock() {
             tokio::time::timeout(Duration::from_secs(5), send(&run_state, request())).await
         });
         drop(release);
-        holder.join().expect("holder");
         drop(runtime);
         let (status, body) =
             answer.unwrap_or_else(|_| panic!("{route}: the request ignored its timeout"));
@@ -223,12 +219,12 @@ fn ranked_outcomes(state: &ClusterAppState, outcome: &str) -> u64 {
 }
 
 /// A request that timed out is counted once, as a timeout. Its compile worker is still
-/// queued when the request answers; when the lock frees, the worker finds the rank program
+/// parked when the request answers; when it is released, the worker finds the rank program
 /// invalid, and that result has no request left to belong to.
 #[test]
 fn a_timed_out_ranked_request_is_counted_once() {
     let state = test_state(&seed());
-    let (holder, release) = hold_cluster_exclusively(&state);
+    let release = park_reads(&state);
     let run_state = Arc::clone(&state);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -263,7 +259,6 @@ fn a_timed_out_ranked_request_is_counted_once() {
             ),
         )
     });
-    holder.join().expect("holder");
     drop(runtime);
     let (status, body) = answer.expect("the request answers at its deadline");
     assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{body}");

@@ -75,14 +75,19 @@ A successful response is terminal:
 
 ## Execution and timeout contract
 
-The rebuild is `O(corpus)` and temporarily needs blue and green state. One shared administrative
-slot admits it alongside stats and vocabulary work. After admission, one independently supervised
-OS thread acquires exclusive topology, REST-write, and cluster guards, rebuilds the corpus, swaps
+The rebuild is `O(corpus)` and temporarily needs blue and green state. One slot admits it, shared
+with the other administrative changes (vocabulary changes, membership changes, a resync) and not
+with stats, health or the other administrative reads. After admission, one independently supervised OS thread acquires the
+exclusive topology and REST-write guards, builds the new shards beside the serving ones, swaps
 the ring/shards, commits control state, checkpoints when durable, and reads the final version. Tokio
-request workers never wait on those blocking locks or perform the rebuild. Requests that arrive
-during it wait off the runtime too: document writes, point reads, `GET /` and the ranked-search
-compile step queue on blocking threads under bounded admission (ADR-183, ADR-191), so health
-checks and requests that need no cluster lock keep being served.
+request workers never wait on those blocking locks or perform the rebuild.
+
+Searches, point reads, `/_health`, `/_metrics`, `/_stats` and the other reads answer during the
+rebuild, from the old layout until the swap
+([ADR-210](../../../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)). Document writes
+wait for it, off the runtime and under bounded admission (ADR-183). A topology operation with a
+manager timeout (a rebalance, a reassignment, a handoff, a reconcile, a GC) answers its
+"not started" timeout within that budget.
 
 Supported query controls:
 
@@ -90,16 +95,16 @@ Supported query controls:
 - `master_timeout` is the Elasticsearch and legacy OpenSearch spelling.
 
 They are aliases; specify at most one. Values use `nanos`, `micros`, `ms`, `s`, `m`, `h`, or `d`,
-default to 30 seconds, and cannot exceed 30 seconds. Exact `0` performs a non-waiting admission and
-exclusive-lock probe. A positive value covers admission, dedicated-worker dispatch, and lock
-waiting until the rebuild atomically starts.
+default to 30 seconds, and cannot exceed 30 seconds. Exact `0` performs a non-waiting probe of
+admission and of the two exclusive guards. A positive value covers admission, dedicated-worker
+dispatch, and the wait for those guards until the rebuild atomically starts.
 
 A deadline before start returns `408 resize_timeout` and guarantees no delayed resize can begin.
 Once all exclusive guards are held and the rebuild starts, the manager timeout does not cancel it:
 arbitrary cancellation could strand a swapped in-memory ring, control state, and durable manifest
 at different generations. The request waits for the exact terminal result. If the client
 disconnects after start, the supervised worker retains admission and completes; graceful shutdown
-acquires and retains the shared corpus-administration admission slot before its final checkpoint,
+acquires and retains that admission slot before its final checkpoint,
 so an admitted worker cannot start after cleanup. Inspect `/_health` and `/_cluster/state` after any
 connection loss before retrying.
 

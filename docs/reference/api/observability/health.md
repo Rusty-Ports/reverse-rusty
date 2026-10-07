@@ -73,6 +73,9 @@ out. The coordinator rechecks the wall clock after each blocking result rather t
 the async timeout race. Explicit status waits and dependency-probe deadlines have distinct stable
 reasons. A coordinator request that times out cannot forcibly stop already-running blocking/network
 work; that work retains its single shared stats permit until its own transport bounds complete.
+A vocabulary change or a resize does not hold that permit, so in coordinator mode a probe answers
+while one rebuilds the cluster
+([ADR-210](../../../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)).
 
 Coordinator green requires a successful committed control-state read, a count from every logical
 serving position, matching committed/ring shard counts, and exactly one in-range committed

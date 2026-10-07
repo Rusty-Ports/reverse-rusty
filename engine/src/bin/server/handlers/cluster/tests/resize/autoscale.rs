@@ -40,7 +40,7 @@ fn titles(n: u64) -> Vec<String> {
 }
 
 fn matches(state: &Arc<ClusterAppState>, titles: &[String]) -> Vec<Vec<u64>> {
-    let cluster = state.cluster.read();
+    let cluster = &state.cluster;
     titles
         .iter()
         .map(|t| {
@@ -57,7 +57,7 @@ async fn a_persistent_recommendation_grows_once_then_cools_down() {
     let probe = titles(60);
     let state = state_from_cluster(selective_cluster(&queries));
     let before = matches(&state, &probe);
-    let start_shards = state.cluster.read().num_shards();
+    let start_shards = state.cluster.num_shards();
 
     let task = spawn_resize_loop(
         Arc::clone(&state),
@@ -101,7 +101,7 @@ async fn a_persistent_recommendation_grows_once_then_cools_down() {
         .filter(|r| r.origin == ResizeOrigin::Autoscaler)
         .count();
     assert_eq!(autoscaler_ops, 1, "no second resize within the cooldown");
-    assert_eq!(state.cluster.read().num_shards(), start_shards + 2);
+    assert_eq!(state.cluster.num_shards(), start_shards + 2);
 
     let status = state
         .resize_operations
@@ -154,7 +154,7 @@ async fn a_failed_automatic_commit_is_retried_until_it_heals() {
             remaining: AtomicUsize::new(1),
         },
     )));
-    let start_shards = state.cluster.read().num_shards();
+    let start_shards = state.cluster.num_shards();
 
     // max_shards equals the first target, so after the failed swap the governor would only
     // report `at_ceiling`: the retry must not depend on a new growth decision.
@@ -196,10 +196,10 @@ async fn a_failed_automatic_commit_is_retried_until_it_heals() {
         1,
         "the heal reuses the failed operation's ID"
     );
-    let control = state.cluster.read().control_state().expect("state");
+    let control = state.cluster.control_state().expect("state");
     assert_eq!(control.num_shards as usize, start_shards + 2);
     assert_eq!(
         control.placement_generation,
-        state.cluster.read().placement_generation().0
+        state.cluster.placement_generation().0
     );
 }

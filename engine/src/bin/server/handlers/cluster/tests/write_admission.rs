@@ -291,83 +291,64 @@ fn a_write_waits_for_an_operation_that_holds_admission_alone() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
-/// A search that returns sources shares write admission with writes. With a write or a bulk
-/// batch in flight (its shared admission held here) all three enriched surfaces answer;
-/// before ADR-206 they queued behind it for as long as it ran.
-#[test]
-fn a_search_with_sources_does_not_wait_for_a_write() {
-    let state = test_state(&seed());
-    let (holder, release) = hold_admission(&state, Held::Shared);
-    let run_state = Arc::clone(&state);
-    let answers = multi_thread_runtime().block_on(async move {
-        let mut answers = Vec::new();
-        for (path, body) in [
-            (
-                "/v2/_search",
-                serde_json::json!({ "document": { "title": "1994 acme" } }),
-            ),
-            (
-                "/v2/_mpercolate",
-                serde_json::json!({ "documents": [{ "title": "1994 acme" }] }),
-            ),
-            (
-                "/_search",
-                serde_json::json!({
-                    "document": { "title": "1994 acme" },
-                    "include_broad": true,
-                    "_source": true
-                }),
-            ),
-        ] {
-            let answer = tokio::time::timeout(
-                Duration::from_secs(5),
-                send(&run_state, req("POST", path, &body)),
-            )
-            .await;
-            answers.push((path, answer));
-        }
-        // Release before leaving the runtime, as above.
-        drop(release);
-        answers
-    });
-    holder.join().expect("holder");
-    for (path, answer) in answers {
-        let (status, body) = answer.unwrap_or_else(|_| panic!("{path} waited for a write"));
-        assert_eq!(status, StatusCode::OK, "{path}: {body}");
-    }
+/// The three surfaces that return sources or an explanation by default or on request.
+fn searches_with_sources() -> [(&'static str, serde_json::Value); 3] {
+    [
+        (
+            "/v2/_search",
+            serde_json::json!({ "document": { "title": "1994 acme" } }),
+        ),
+        (
+            "/v2/_mpercolate",
+            serde_json::json!({ "documents": [{ "title": "1994 acme" }] }),
+        ),
+        (
+            "/_search",
+            serde_json::json!({
+                "document": { "title": "1994 acme" },
+                "include_broad": true,
+                "_source": true
+            }),
+        ),
+    ]
 }
 
-/// It waits, like a write, for an operation that holds admission alone, and answers afterwards.
+/// A search that returns sources takes no write admission (ADR-210). What it has to wait
+/// for, a write that is being applied or the moment a rebuild swaps its layout in, it waits
+/// for at the cluster's frozen view. So it answers while admission is held: shared, as by a
+/// write or a bulk batch in flight (before ADR-206 it queued behind those), and alone, as by
+/// a vocabulary change or a resize for its whole run.
 #[test]
-fn a_search_with_sources_waits_for_an_operation_that_holds_admission_alone() {
-    let state = test_state(&seed());
-    let (holder, release) = hold_admission(&state, Held::Alone);
-    let run_state = Arc::clone(&state);
-    let (early, late) = multi_thread_runtime().block_on(async move {
-        let request_state = Arc::clone(&run_state);
-        let mut search = tokio::spawn(async move {
-            let body = serde_json::json!({ "document": { "title": "1994 acme" } });
-            send(&request_state, req("POST", "/v2/_search", &body)).await
+fn a_search_with_sources_does_not_wait_for_write_admission() {
+    for held in [Held::Shared, Held::Alone] {
+        let state = test_state(&seed());
+        let (holder, release) = hold_admission(&state, held);
+        let run_state = Arc::clone(&state);
+        let answers = multi_thread_runtime().block_on(async move {
+            let mut answers = Vec::new();
+            for (path, body) in searches_with_sources() {
+                let answer = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    send(&run_state, req("POST", path, &body)),
+                )
+                .await;
+                answers.push((path, answer));
+            }
+            // Release before leaving the runtime, as above.
+            drop(release);
+            answers
         });
-        let early = tokio::time::timeout(Duration::from_millis(200), &mut search).await;
-        drop(release);
-        match early {
-            Ok(answer) => (true, Ok(answer)),
-            Err(_) => (
-                false,
-                tokio::time::timeout(Duration::from_secs(10), search).await,
-            ),
+        holder.join().expect("holder");
+        let how = match held {
+            Held::Shared => "shared",
+            Held::Alone => "alone",
+        };
+        for (path, answer) in answers {
+            let (status, body) =
+                answer.unwrap_or_else(|_| panic!("{path} waited for write admission (held {how})"));
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
         }
-    });
-    holder.join().expect("holder");
-    let (status, body) = late
-        .expect("the search answers once admission is free")
-        .expect("search task");
-    assert!(
-        !early,
-        "the search ran beside an operation that needs it out"
-    );
-    assert_eq!(status, StatusCode::OK, "{body}");
+    }
 }
 
 type MakeRequest = fn() -> Request<Body>;

@@ -163,8 +163,7 @@ impl RankedBackendError for ClusterRankedError {
 /// permit race, metrics, and epilogue for both.
 pub(super) trait RankedSearchCtx {
     fn prom(&self) -> &PrometheusMetrics;
-    /// Run `work` in the search pool. The coordinator's pool is entered through its gate
-    /// (ADR-207).
+    /// Run `work` in the search pool.
     fn run_in_pool<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T;
     fn ranked_search_permits(&self) -> &Arc<tokio::sync::Semaphore>;
     fn max_ranked_enrichment_bytes(&self) -> usize;
@@ -194,7 +193,7 @@ impl RankedSearchCtx for ClusterAppState {
         &self.prom
     }
     fn run_in_pool<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
-        self.pool.run(work)
+        self.pool.install(work)
     }
     fn ranked_search_permits(&self) -> &Arc<tokio::sync::Semaphore> {
         &self.ranked_search_permits

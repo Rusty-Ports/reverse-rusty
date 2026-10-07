@@ -97,6 +97,9 @@ const LAYOUT_FREE: &[&str] = &[
     "pending_repair_ids",
     "open_pit_count",
     "ensure_resize_write_fence_open",
+    // test seams: the hook a rebuild calls, and the flag a remote resize raises
+    "set_rebuild_hook_for_test",
+    "set_resize_write_fence_for_test",
 ];
 
 /// The ways a function gets a layout for itself.

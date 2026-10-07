@@ -1,7 +1,14 @@
 # ADR-207 — A cluster writer waits outside the search pool
 
 > [Clustering — core & transport decisions](areas/clustering-core-and-transport.md) ·
-> [Decision hub](../DECISIONS.md) · **Status:** Accepted
+> [Decision hub](../DECISIONS.md) · **Status:** Superseded by
+> [ADR-210](adr-210-the-coordinator-serves-beside-a-rebuild.md) (2026-10-07)
+
+> **2026-10-07:** the gate, `ClusterLock`, `write_cluster` and the cluster lock itself are gone.
+> The server holds the engine with no lock, so no worker of the search pool can wait behind a
+> rebuild, and a search answers while one runs. The deadlock described below is the reason
+> nothing that runs in the pool may take a lock a rebuild holds or waits for. This record is
+> kept for that reasoning and for the prior art it surveys.
 
 ## Problem
 

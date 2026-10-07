@@ -312,9 +312,9 @@ async fn cluster_search_inner(
         };
 
     // ADR-099: arm cooperative (per-title) cancellation only for an EXPLICIT
-    // timeout/timeout_ms. Lock-free here — the dynamic kill-switch is resolved INSIDE the
-    // blocking task (under the timeout race), so a held cluster write lock (e.g. a
-    // vocab rebuild) can never stall this async handler past its own deadline (codex).
+    // timeout/timeout_ms. Nothing is read from the cluster here — the dynamic kill-switch is
+    // resolved INSIDE the blocking task (under the timeout race), so nothing the cluster
+    // waits for can stall this async handler past its own deadline (codex).
     let deadline = if controls.explicit_timeout {
         Some(
             start
@@ -630,7 +630,7 @@ async fn percolate_blocking(
             // Admission and the dynamic cancellation knob are read on this blocking
             // thread so a queued cluster writer remains inside the request timeout.
             let (max_batch, cooperative_cancel) = {
-                let cluster = state_inner.cluster.read();
+                let cluster = &state_inner.cluster;
                 let config = cluster.per_shard_config();
                 (config.max_percolate_batch, config.cooperative_cancel)
             };
@@ -646,9 +646,11 @@ async fn percolate_blocking(
                     use rayon::prelude::*;
                     let deadline = requested_deadline.filter(|_| cooperative_cancel);
                     // Without source enrichment each title reads the cluster on the worker
-                    // that matches it. No writer comes between two titles: it waits at the
-                    // pool's gate for the whole request (ADR-207). Source requests use the
-                    // core mutation-frozen view through match and source cloning.
+                    // that matches it, on the layout that is published at that moment. A
+                    // vocabulary change or a resize can swap its layout in between two
+                    // titles of one batch (ADR-210); each title is matched whole on one
+                    // layout. Source requests use the core mutation-frozen view through
+                    // match and source cloning, so they see one layout throughout.
                     let one = |t: &str| -> Result<(ScoredIds, MatchStats), ShardError> {
                         match (stable_view, rank.as_ref()) {
                             (Some(view), Some(spec)) => {
@@ -671,7 +673,7 @@ async fn percolate_blocking(
                                 Ok((ids.into_iter().map(|id| (id, None)).collect(), stats))
                             }
                             (None, Some(spec)) => {
-                                let cluster = state_inner.cluster.read();
+                                let cluster = &state_inner.cluster;
                                 let (rows, stats) = cluster.percolate_filtered_ranked(
                                     t,
                                     &filter,
@@ -686,7 +688,7 @@ async fn percolate_blocking(
                                 ))
                             }
                             (None, None) => {
-                                let cluster = state_inner.cluster.read();
+                                let cluster = &state_inner.cluster;
                                 let (ids, stats) = cluster.percolate_filtered_with_stats(
                                     t,
                                     &filter,
@@ -746,7 +748,7 @@ async fn percolate_blocking(
                 // (ADR-206).
                 state_inner.run_with_stable_view(|stable_view| run(Some(stable_view)))
             } else {
-                state_inner.pool.run(|| run(None))
+                state_inner.pool.install(|| run(None))
             }
         })
         .await

@@ -125,6 +125,7 @@ impl ClusterEngine {
             retired_layouts: Mutex::new(Vec::new()),
             #[cfg(test)]
             admission_hook: Mutex::new(None),
+            rebuild_hook: Mutex::new(None),
             pending_alias_import_manifest: Mutex::new(None),
             committed_placement_generation: AtomicU64::new(
                 durable

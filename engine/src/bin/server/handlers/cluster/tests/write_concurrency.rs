@@ -88,7 +88,7 @@ fn overlapping_bulk_batches_leave_what_the_log_replays() {
         }
     });
 
-    let live = live_bodies(&state.cluster.read(), IDS);
+    let live = live_bodies(&state.cluster, IDS);
     for (id, body) in &live {
         let body = body
             .as_deref()
@@ -146,7 +146,7 @@ fn concurrent_puts_and_deletes_on_distinct_ids_all_land() {
 
     let ids = || (0..WRITERS).flat_map(|writer| (0..PER_WRITER).map(move |step| (writer, step)));
     let live = live_bodies(
-        &state.cluster.read(),
+        &state.cluster,
         ids().map(|(writer, step)| 10_000 + writer * 1_000 + step),
     );
     for (writer, step) in ids() {

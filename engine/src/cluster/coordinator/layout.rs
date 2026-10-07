@@ -368,6 +368,29 @@ impl super::ClusterEngine {
         self.edit_layout(|layout| layout.shards = Arc::new(wrap(shards)));
     }
 
+    /// Have every later rebuild call `hook` once it holds the layout lock alone and has frozen
+    /// the shards it replaces, or stop doing so. A test seam: a test of the server stops a
+    /// real rebuild half-way with it.
+    #[doc(hidden)]
+    pub fn set_rebuild_hook_for_test(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self
+            .rebuild_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    /// Run the test's hook, if one is set, at the start of a rebuild.
+    pub(in crate::cluster::coordinator) fn pause_rebuild(&self) {
+        let hook = self
+            .rebuild_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Run the test's hook between the two steps of an admission.
     #[cfg(test)]
     fn pause_admission(&self) {

@@ -256,7 +256,7 @@ fn collect_cluster_state(
     state: &ClusterAppState,
     selection: ClusterStateSelection,
 ) -> Result<Vec<u8>, ClusterStateWorkerError> {
-    let cluster = state.cluster.read();
+    let cluster = &state.cluster;
     let encoded = match selection {
         ClusterStateSelection::All => {
             let doc = cluster
@@ -281,9 +281,9 @@ fn collect_cluster_state(
     Ok(encoded)
 }
 
-/// Return one authoritative committed state document. Admission, cluster-lock
-/// waiting, any remote linearizable RPC, and JSON serialization all run away
-/// from Tokio request workers.
+/// Return one authoritative committed state document. Admission, any remote
+/// linearizable RPC, and JSON serialization all run away from Tokio request
+/// workers.
 pub(crate) async fn cluster_state(
     State(state): State<Arc<ClusterAppState>>,
     transport: ClusterStateTransport,

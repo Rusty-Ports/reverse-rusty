@@ -184,7 +184,7 @@ async fn execute_checkpoint(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _writer = work_state.write_admission.write();
-        let cluster = work_state.cluster.read();
+        let cluster = &work_state.cluster;
         let durable = cluster.is_durable();
         let shards_checkpointed = if durable || cluster.is_remote() {
             cluster.num_shards()

@@ -69,10 +69,9 @@ async fn deregistration_commits_exact_version_without_changing_voters_or_assignm
     let state = test_state(&seed());
     state
         .cluster
-        .read()
         .register_node(node(7, NodeRole::Data))
         .expect("register");
-    let before = state.cluster.read().control_state().expect("state");
+    let before = state.cluster.control_state().expect("state");
 
     let (status, headers, bytes) = send_raw(
         &state,
@@ -93,7 +92,7 @@ async fn deregistration_commits_exact_version_without_changing_voters_or_assignm
     assert_eq!(body["version"], before.epoch + 1, "{body}");
     assert_eq!(body["node_id"], 7, "{body}");
 
-    let after = state.cluster.read().control_state().expect("state");
+    let after = state.cluster.control_state().expect("state");
     assert_eq!(after.epoch, body["version"].as_u64().expect("version"));
     assert_eq!(after.voters, before.voters);
     assert_eq!(after.assignments, before.assignments);
@@ -119,7 +118,7 @@ async fn deregistration_commits_exact_version_without_changing_voters_or_assignm
         after.epoch + 1,
         "a repeated state-idempotent delete is still a committed transition"
     );
-    let repeated = state.cluster.read().control_state().expect("state");
+    let repeated = state.cluster.control_state().expect("state");
     assert_eq!(repeated.nodes, after.nodes);
     assert_eq!(repeated.voters, after.voters);
     assert_eq!(repeated.assignments, after.assignments);
@@ -150,10 +149,9 @@ async fn deregistration_refuses_voters_and_assigned_nodes_without_proposing() {
     ] {
         let base = test_state(&seed());
         base.cluster
-            .read()
             .register_node(node(7, NodeRole::Data))
             .expect("register");
-        let mut initial = base.cluster.read().control_state().expect("state");
+        let mut initial = base.cluster.control_state().expect("state");
         drop(base);
         if voter {
             initial.voters.push(NodeId(7));
@@ -179,7 +177,7 @@ async fn deregistration_refuses_voters_and_assigned_nodes_without_proposing() {
             "{bytes:?}"
         );
         assert_eq!(
-            state.cluster.read().control_state().expect("state"),
+            state.cluster.control_state().expect("state"),
             initial,
             "an in-use rejection must not propose or mutate cluster state"
         );
@@ -288,11 +286,10 @@ async fn admission_deadlines_do_not_start_a_proposal() {
     let state = test_state(&seed());
     state
         .cluster
-        .read()
         .register_node(node(7, NodeRole::Data))
         .expect("register");
-    let before = state.cluster.read().control_state().expect("state");
-    let held = Arc::clone(&state.stats_permits)
+    let before = state.cluster.control_state().expect("state");
+    let held = Arc::clone(&state.admin_change_permits)
         .acquire_owned()
         .await
         .expect("admin permit");
@@ -319,13 +316,13 @@ async fn admission_deadlines_do_not_start_a_proposal() {
     }
     drop(held);
     assert_eq!(
-        state.cluster.read().control_state().expect("state"),
+        state.cluster.control_state().expect("state"),
         before,
         "admission timeout must not mutate cluster state"
     );
 
     let closed = test_state(&seed());
-    closed.stats_permits.close();
+    closed.admin_change_permits.close();
     let (status, _, bytes) = send_raw(
         &closed,
         deregister_request("/_cluster/nodes/7", Body::empty()),
@@ -351,10 +348,9 @@ fn blocking_pool_queue_cannot_start_a_proposal_after_the_deadline() {
         let state = test_state(&seed());
         state
             .cluster
-            .read()
             .register_node(node(7, NodeRole::Data))
             .expect("register");
-        let before = state.cluster.read().control_state().expect("state");
+        let before = state.cluster.control_state().expect("state");
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let blocker = tokio::task::spawn_blocking(move || {
@@ -391,14 +387,14 @@ fn blocking_pool_queue_cannot_start_a_proposal_after_the_deadline() {
         release_tx.send(()).expect("release blocking pool");
         blocker.await.expect("blocking-pool blocker");
         tokio::time::timeout(Duration::from_secs(1), async {
-            while state.stats_permits.available_permits() != 1 {
+            while state.admin_change_permits.available_permits() != 1 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("cancelled queued worker released admission");
         assert_eq!(
-            state.cluster.read().control_state().expect("state"),
+            state.cluster.control_state().expect("state"),
             before,
             "a request-deadline cancellation must prevent the queued proposal"
         );
@@ -448,10 +444,9 @@ async fn timed_out_proposal_is_supervised_off_runtime_and_retains_admission() {
     let request_thread = std::thread::current().id();
     let base = test_state(&seed());
     base.cluster
-        .read()
         .register_node(node(7, NodeRole::Data))
         .expect("register");
-    let initial = base.cluster.read().control_state().expect("state");
+    let initial = base.cluster.control_state().expect("state");
     drop(base);
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(AtomicBool::new(false));
@@ -488,7 +483,7 @@ async fn timed_out_proposal_is_supervised_off_runtime_and_retains_admission() {
     assert!(off_request_thread.load(Ordering::SeqCst));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        state.stats_permits.available_permits(),
+        state.admin_change_permits.available_permits(),
         0,
         "detached proposal must retain admission"
     );
@@ -497,19 +492,19 @@ async fn timed_out_proposal_is_supervised_off_runtime_and_retains_admission() {
         "detached proposal must retain the exclusive topology guard"
     );
     assert!(
-        state.cluster.try_read().is_some(),
+        state.cluster.percolate("1994 acme").is_ok(),
         "a slow topology proposal must not exclude serving cluster reads"
     );
 
     release.wait();
     tokio::time::timeout(Duration::from_secs(1), async {
-        while state.stats_permits.available_permits() != 1 {
+        while state.admin_change_permits.available_permits() != 1 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("detached proposal released admission");
-    let committed = state.cluster.read().control_state().expect("state");
+    let committed = state.cluster.control_state().expect("state");
     assert!(
         committed
             .nodes
@@ -550,7 +545,7 @@ impl ControlPlane for FailingProposalControlPlane {
 #[tokio::test]
 async fn control_failure_is_fail_loud_but_sanitized() {
     let base = test_state(&seed());
-    let initial = Arc::new(base.cluster.read().control_state().expect("state"));
+    let initial = Arc::new(base.cluster.control_state().expect("state"));
     drop(base);
     let state = state_with_control(Box::new(FailingProposalControlPlane { state: initial }));
     let (status, headers, bytes) = send_raw(

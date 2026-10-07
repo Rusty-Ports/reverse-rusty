@@ -3,8 +3,8 @@
 > [Cluster control APIs](../cluster.md) · [REST API hub](../../api.md)
 
 These read-only routes report the resize operations this coordinator process has retained and the
-latest observation of the opt-in governed resize loop (ADR-179). They never take the cluster lock,
-so they respond while a rebuild holds its exclusive guards.
+latest observation of the opt-in governed resize loop (ADR-179). They read neither the cluster nor
+the guards a rebuild holds, so they respond while one runs.
 
 ```bash
 curl localhost:9200/_cluster/resize

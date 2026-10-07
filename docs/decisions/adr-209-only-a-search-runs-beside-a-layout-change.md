@@ -93,6 +93,8 @@ takes its own lock around a rebuild; removing that is the next step.
   true of one that calls a read other than a search, such as `collect_load`.
 - **Server:** nothing yet. It still holds its cluster lock and the search pool's gate around
   a rebuild (ADR-207), so searches still wait.
+  **2026-10-07:** [ADR-210](adr-210-the-coordinator-serves-beside-a-rebuild.md) removes both;
+  a served search answers during a rebuild.
 
 ## Designs that were tried first
 

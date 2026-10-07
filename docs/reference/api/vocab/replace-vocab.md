@@ -5,8 +5,10 @@
 Replace the engine's vocabulary. Existing stored queries are **automatically recompiled** under the
 new normalizer before the new snapshot is published, so the change takes effect immediately with
 zero false negatives. Standalone mode performs the replacement and recompile under its engine writer
-lock. Coordinator mode performs one blue/green re-placement under the cluster write lock and
-checkpoints a durable cluster before success. Both return the same response shape;
+lock. Coordinator mode builds the new placement beside the serving one, swaps it in, and
+checkpoints a durable cluster before success; searches and reads answer from the old vocabulary
+until the swap, and writes wait
+([ADR-210](../../../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)). Both return the same response shape;
 `recompiled` reports how many live queries were rebuilt.
 
 The request is strict and synchronous:
@@ -22,7 +24,10 @@ The decoded request waits asynchronously for the server's single administrative-
 O(corpus) replacement then runs on a blocking worker, so lock acquisition and compilation do not
 occupy a Tokio request worker. The operation has no cancellable execution timeout: after admission,
 it runs to a terminal result and publishes a coherent snapshot even if the client disconnects.
-Concurrent stats and vocabulary read/write operations serialize through the same bounded slot.
+In standalone mode, concurrent stats and vocabulary read/write operations serialize through the
+same bounded slot. In coordinator mode the slot is one for administrative changes (vocabulary and
+alias changes, an in-process resize, node registration and deregistration, a resync); stats, health
+and vocabulary reads use a different one and are not queued behind a replacement.
 
 > **Durability:** on a successful response, the recompiled queries have committed like a flush,
 > and the same manifest commit records the new vocabulary and its feature-model fingerprint

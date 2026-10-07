@@ -710,9 +710,9 @@ async fn cluster_v2_search_inner(
             })
         } else {
             // Source-free top-K retains the fully concurrent path.
-            let cluster = cluster_state.cluster.read();
+            let cluster = &cluster_state.cluster;
             delivery::cluster_delivery(
-                &*cluster,
+                cluster,
                 mint.as_ref().map(|mint| mint.pit),
                 &program,
                 &filter,

@@ -36,7 +36,6 @@ async fn has_standalone_parity_and_true_noop_semantics() {
     assert!(body["took_ms"].is_number(), "{body}");
     assert!(state
         .cluster
-        .read()
         .percolate("pkg adaptor")
         .expect("percolate")
         .contains(&7));
@@ -67,10 +66,10 @@ async fn has_standalone_parity_and_true_noop_semantics() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn waits_for_admission_and_cluster_lock_off_runtime() {
+async fn waits_for_admission_and_a_running_rebuild_off_runtime() {
     let state = test_state(&[(7, "package adapter".to_string())]);
     let document = serde_json::json!({"synonyms": "package, pkg"});
-    let held = Arc::clone(&state.stats_permits)
+    let held = Arc::clone(&state.admin_change_permits)
         .acquire_owned()
         .await
         .expect("admin permit");
@@ -92,17 +91,8 @@ async fn waits_for_admission_and_cluster_lock_off_runtime() {
     drop(held);
     assert_eq!(request.await.expect("request task").0, StatusCode::OK);
 
-    let lock_state = Arc::clone(&state);
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let lock_thread = std::thread::spawn(move || {
-        let _cluster = lock_state.cluster.write();
-        held_tx.send(()).expect("held signal");
-        release_rx.recv().expect("release signal");
-    });
-    held_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("cluster lock held");
+    // Another rebuild is running: the import waits for it inside the engine.
+    let other_rebuild = pause_a_rebuild(&state);
 
     let request_state = Arc::clone(&state);
     let mut request = tokio::spawn(async move {
@@ -116,7 +106,7 @@ async fn waits_for_admission_and_cluster_lock_off_runtime() {
         tokio::time::timeout(Duration::from_millis(50), &mut request)
             .await
             .is_err(),
-        "blocking worker should wait on the coordinator lock"
+        "the import should wait for the rebuild that is running"
     );
     tokio::time::timeout(
         Duration::from_millis(100),
@@ -124,7 +114,7 @@ async fn waits_for_admission_and_cluster_lock_off_runtime() {
     )
     .await
     .expect("Tokio worker remained responsive");
-    release_tx.send(()).expect("release cluster");
-    lock_thread.join().expect("lock thread");
+    let rebuilt = other_rebuild.finish();
     assert_eq!(request.await.expect("request task").0, StatusCode::OK);
+    rebuilt.expect("the other rebuild");
 }

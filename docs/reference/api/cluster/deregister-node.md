@@ -77,9 +77,11 @@ Supported query controls:
 
 They are aliases; specify at most one. Values use the shared time syntax (`nanos`, `micros`, `ms`,
 `s`, `m`, `h`, or `d`), default to 30 seconds, and cannot exceed 30 seconds. Exact `0` performs a
-non-queuing administrative-admission probe; when admitted, one proposal runs to completion.
-Positive values cover administrative admission, topology/cluster-lock waiting, and the synchronous
-control-plane proposal.
+non-queuing admission probe; when admitted, one proposal runs to completion.
+Positive values cover admission, the wait for the topology guard, and the synchronous
+control-plane proposal. Admission is the slot shared by administrative changes (membership changes,
+vocabulary changes, an in-process resize, a resync), so a membership change sent during a rebuild
+waits there, within its budget.
 
 A timeout before proposal start returns `408 node_deregistration_timeout` and states that nothing
 was started. At the deadline the server atomically cancels a still-queued blocking worker, so

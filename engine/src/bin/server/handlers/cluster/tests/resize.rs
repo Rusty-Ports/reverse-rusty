@@ -64,7 +64,7 @@ impl tokio_stream::Stream for LateReadyBodyStream {
 #[tokio::test]
 async fn resize_reports_final_state_and_preserves_matching() {
     let state = test_state(&seed());
-    let before_version = state.cluster.read().control_version().expect("version").0;
+    let before_version = state.cluster.control_version().expect("version").0;
     let (status, headers, bytes) = send_raw(
         &state,
         resize_request(
@@ -92,7 +92,7 @@ async fn resize_reports_final_state_and_preserves_matching() {
         body["version"].as_u64().expect("version") > before_version,
         "{body}"
     );
-    assert_eq!(state.cluster.read().num_shards(), 4);
+    assert_eq!(state.cluster.num_shards(), 4);
 
     let (status, search) = send(
         &state,
@@ -263,7 +263,7 @@ async fn resize_transport_is_strict_and_bounded() {
 #[tokio::test]
 async fn manager_timeout_bounds_admission_and_exclusive_lock_waits() {
     let state = test_state(&seed());
-    let held = Arc::clone(&state.stats_permits)
+    let held = Arc::clone(&state.admin_change_permits)
         .acquire_owned()
         .await
         .expect("hold admin admission");
@@ -284,7 +284,7 @@ async fn manager_timeout_bounds_admission_and_exclusive_lock_waits() {
         );
     }
     drop(held);
-    assert_eq!(state.cluster.read().num_shards(), 3);
+    assert_eq!(state.cluster.num_shards(), 3);
 
     let topology_state = Arc::clone(&state);
     let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
@@ -316,13 +316,13 @@ async fn manager_timeout_bounds_admission_and_exclusive_lock_waits() {
     release_sender.send(()).expect("release topology holder");
     topology_holder.join().expect("topology holder");
     assert_eq!(
-        state.cluster.read().num_shards(),
+        state.cluster.num_shards(),
         3,
         "timed-out workers must not resize later"
     );
 
     let closed = test_state(&seed());
-    closed.stats_permits.close();
+    closed.admin_change_permits.close();
     let (status, _, bytes) = send_raw(
         &closed,
         resize_request("/_cluster/resize", r#"{"num_shards":4}"#),
@@ -353,7 +353,7 @@ async fn remote_topology_is_rejected_before_admission() {
         cluster,
         crate::state::ClusterRebalanceTopology::StaticRemote,
     );
-    let _held = Arc::clone(&state.stats_permits)
+    let _held = Arc::clone(&state.admin_change_permits)
         .acquire_owned()
         .await
         .expect("hold admission");
@@ -375,7 +375,7 @@ async fn remote_topology_is_rejected_before_admission() {
         String::from_utf8_lossy(&bytes).contains("separate cluster"),
         "{bytes:?}"
     );
-    assert_eq!(state.cluster.read().num_shards(), 3);
+    assert_eq!(state.cluster.num_shards(), 3);
 }
 
 #[test]
@@ -411,11 +411,11 @@ fn zero_timeout_dispatch_is_independent_of_the_shared_blocking_pool() {
         .await
         .expect("dedicated resize dispatch remains bounded");
         assert_eq!(status, StatusCode::OK, "{bytes:?}");
-        assert_eq!(state.cluster.read().num_shards(), 4);
+        assert_eq!(state.cluster.num_shards(), 4);
 
         release_tx.send(()).expect("release blocking pool");
         blocker.await.expect("blocking-pool blocker");
-        assert_eq!(state.stats_permits.available_permits(), 1);
+        assert_eq!(state.admin_change_permits.available_permits(), 1);
     });
 }
 
@@ -459,7 +459,7 @@ impl ControlPlane for BlockingResizeControlPlane {
 async fn manager_timeout_only_bounds_start_and_disconnect_keeps_resize_running() {
     let request_thread = std::thread::current().id();
     let base = test_state(&seed());
-    let initial = base.cluster.read().control_state().expect("state");
+    let initial = base.cluster.control_state().expect("state");
     drop(base);
     let started = Arc::new(AtomicBool::new(false));
     let off_request_thread = Arc::new(AtomicBool::new(false));
@@ -496,32 +496,24 @@ async fn manager_timeout_only_bounds_start_and_disconnect_keeps_resize_running()
         "manager timeout must not claim to cancel an already-started rebuild"
     );
     assert!(off_request_thread.load(Ordering::SeqCst));
-    assert_eq!(state.stats_permits.available_permits(), 0);
+    assert_eq!(state.admin_change_permits.available_permits(), 0);
 
     request.abort();
     assert_eq!(
-        state.stats_permits.available_permits(),
+        state.admin_change_permits.available_permits(),
         0,
         "a disconnected request must not release resize admission"
     );
     release.wait();
     tokio::time::timeout(Duration::from_secs(1), async {
-        while state.stats_permits.available_permits() != 1 {
+        while state.admin_change_permits.available_permits() != 1 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("detached resize released admission after completion");
-    assert_eq!(state.cluster.read().num_shards(), 4);
-    assert_eq!(
-        state
-            .cluster
-            .read()
-            .control_state()
-            .expect("state")
-            .num_shards,
-        4
-    );
+    assert_eq!(state.cluster.num_shards(), 4);
+    assert_eq!(state.cluster.control_state().expect("state").num_shards, 4);
 }
 
 fn assert_error(status: StatusCode, bytes: &Bytes, expected: StatusCode, kind: &str) {

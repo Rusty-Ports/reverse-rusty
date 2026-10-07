@@ -2,8 +2,8 @@
 //! `POST /_cluster/resize` idempotency, `GET /_cluster/resize` progress, and the
 //! autoscaler's accepted operations.
 //!
-//! The registry never touches the cluster lock, so a status read stays responsive
-//! while a rebuild holds the exclusive guards. Records are process-local: a
+//! The registry never touches the cluster or the guards a rebuild holds, so a status read
+//! stays responsive while one runs. Records are process-local: a
 //! restart forgets them. That is safe because resize targets are absolute and
 //! the optional `if_placement_generation` precondition is checked against durable
 //! serving state, so a retry after a restart either converges on the same
