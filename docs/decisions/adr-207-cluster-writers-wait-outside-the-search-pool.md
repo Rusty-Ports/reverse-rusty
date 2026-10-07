@@ -128,6 +128,11 @@ cluster lock.
 
 ## Consequences
 
+- **The gate is a stopgap, and it has an exit.** It stops the deadlock. It does not stop a
+  rebuild from holding searches out for its whole run. The design the coordinator is meant to
+  reach is the published snapshot described under prior art, and the roadmap item "In-process
+  rebuilds that keep serving" is complete only when the cluster read lock and this gate are
+  gone from the search path. This decision is superseded by the one that does that.
 - ADR-206's item 4 no longer carries the safety of the pool alone. A search that returns
   sources holds the gate like every other request. It still shares write admission.
 - The two cycles ADR-206 recorded as open are closed.

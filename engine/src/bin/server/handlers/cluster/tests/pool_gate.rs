@@ -235,6 +235,8 @@ fn a_timed_cluster_writer_gives_up_at_the_gate_and_reopens_it() {
 /// pool's workers for as long as its budget.
 #[test]
 fn a_timed_cluster_writer_waits_at_the_gate_without_the_cluster_lock() {
+    // Long enough that this thread sees the writer waiting on a busy machine.
+    const BUDGET: Duration = Duration::from_secs(1);
     let state = test_state(&seed());
     let entered = state.pool.enter();
     let (tell, told) = mpsc::channel();
@@ -243,13 +245,13 @@ fn a_timed_cluster_writer_waits_at_the_gate_without_the_cluster_lock() {
         let admission = writer_state.write_admission.write();
         let started = Instant::now();
         let wrote = writer_state
-            .try_write_cluster_until(&admission, Some(started + Duration::from_millis(300)))
+            .try_write_cluster_until(&admission, Some(started + BUDGET))
             .is_some();
         let _ = tell.send((wrote, started.elapsed()));
     });
     let writer_waits = wait_until(|| state.pool.try_enter().is_none());
     let lock_free_to_read = state.cluster.try_read().is_some();
-    let gave_up = told.recv_timeout(Duration::from_secs(3)).ok();
+    let gave_up = told.recv_timeout(BUDGET + Duration::from_secs(3)).ok();
     // A writer that ignored its deadline is still at the gate: this lets it finish.
     drop(entered);
     writer.join().expect("writer thread");
@@ -263,10 +265,7 @@ fn a_timed_cluster_writer_waits_at_the_gate_without_the_cluster_lock() {
         !wrote,
         "the writer got the lock beside a request in the pool"
     );
-    assert!(
-        waited >= Duration::from_millis(250),
-        "it waits for its budget"
-    );
+    assert!(waited >= BUDGET.mul_f32(0.9), "it waits for its budget");
 }
 
 /// Within its budget a timed writer waits for a request to leave the pool, and for a reader
@@ -390,12 +389,16 @@ fn searches_and_a_cluster_writer_keep_each_other_moving() {
                     Err(_) => return Err(format!("a search never answered ({answered} had)")),
                 }
             }
-            // A round of large searches takes far longer than one turn of the writer.
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            if run_writes.load(Ordering::SeqCst) == writes_before {
-                return Err(format!(
-                    "the writer made no progress during a round ({writes_before} turns so far)"
-                ));
+            // The writer waits at the gate while a round is in the pool and takes its turn
+            // when the round leaves.
+            let turn_by = Instant::now() + Duration::from_secs(5);
+            while run_writes.load(Ordering::SeqCst) == writes_before {
+                if Instant::now() >= turn_by {
+                    return Err(format!(
+                        "the writer got no turn after a round ({writes_before} turns so far)"
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         }
         Ok(answered)
