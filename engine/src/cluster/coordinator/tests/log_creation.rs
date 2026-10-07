@@ -21,8 +21,15 @@ fn matched(cluster: &ClusterEngine, title: &str) -> Vec<u64> {
     ids
 }
 
-/// Make the manifest the one a release before ADR-213 wrote at build: epoch 0, written
-/// before the log was created.
+fn epoch_on_disk(dir: &std::path::Path) -> u64 {
+    crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
+        .expect("read manifest")
+        .epoch
+}
+
+/// Make the manifest the one `build` writes before it creates the log: epoch 0. That is how
+/// a build that stopped part-way leaves it, and how a release before ADR-213 left every
+/// cluster until its first checkpoint.
 fn as_an_older_release_built_it(dir: &std::path::Path) {
     let path = dir.join(CLUSTER_MANIFEST_FILE);
     let mut manifest = crate::storage::read_cluster_manifest(&path).expect("read manifest");
@@ -61,11 +68,11 @@ fn open(dir: &std::path::Path, cfg: &ClusterConfig, what: &str) -> ClusterEngine
     }
 }
 
-/// Releases before ADR-213 wrote the manifest (at epoch 0) and then created the log, and
-/// releases before ADR-212 created the log file and then wrote its header. A crash or a full
-/// disk in between left a built cluster with a log shorter than its header, and every later
-/// start refused it ("clog too small"). Under that manifest the cluster reopens: it serves
-/// what was built, takes a write, and reopens again with that write.
+/// `build` writes its manifest at epoch 0 and then creates the log, and releases before
+/// ADR-212 created the log file and then wrote its header. A crash or a full disk in between
+/// left a built cluster with a log shorter than its header, and every later start refused it
+/// ("clog too small"). Under that manifest the cluster reopens: it serves what was built,
+/// takes a write, and reopens again with that write.
 #[test]
 fn a_cluster_whose_log_creation_was_interrupted_reopens() {
     for held in [0usize, 3, 7] {
@@ -84,6 +91,11 @@ fn a_cluster_whose_log_creation_was_interrupted_reopens() {
         std::fs::write(&log, &header[..held]).expect("interrupt the creation");
 
         let reopened = open(&dir, &cfg, &format!("{held} header bytes"));
+        assert_eq!(
+            epoch_on_disk(&dir),
+            1,
+            "the reopen finished the build: the manifest now says the log exists"
+        );
         assert_eq!(matched(&reopened, "blue wireless mouse"), vec![1]);
         reopened
             .add_query(2, "mechanical keyboard")
@@ -98,9 +110,9 @@ fn a_cluster_whose_log_creation_was_interrupted_reopens() {
     }
 }
 
-/// A manifest at epoch 1 or later was written with the log in place: by `build`, which
-/// creates the log first, or by a checkpoint, which needs the log open and replaces it
-/// through a rename. Under it a log shorter than its header has lost its content. The
+/// A manifest at epoch 1 or later was written by a checkpoint, which needs the log open and
+/// replaces it through a rename; `build` ends with one. Under it a log shorter than its
+/// header has lost its content. The
 /// cluster is refused and the file is left as it was found. That holds for a checkpoint that
 /// ran before the first write too: it records position zero, and the write that follows it
 /// is acknowledged into the log.
@@ -127,7 +139,7 @@ fn a_cluster_whose_manifest_says_the_log_was_whole_is_not_given_an_empty_log() {
         assert_eq!(
             manifest.epoch,
             if order == "built" { 1 } else { 2 },
-            "{order}: `build` writes epoch 1 and a checkpoint bumps it"
+            "{order}: `build` ends at epoch 1 and a checkpoint bumps it"
         );
         assert_eq!(
             manifest.snapshot_pos != 0,
@@ -241,42 +253,108 @@ fn accepting_a_lost_log_changes_nothing_when_the_log_is_there() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Under the manifest an older release wrote before it created the log (epoch 0), a missing
-/// log may be a build that was interrupted. It is created, as before.
+/// Under a manifest at epoch 0 a missing log may be a build that stopped before it created
+/// one. It is created, as before, and the reopen then finishes the build: it writes the
+/// manifest that says the log exists. From then on a log that goes missing is refused. So a
+/// cluster from an older release is lenient about its log for one start, not for ever.
 #[test]
-fn a_cluster_an_older_release_built_may_have_no_log_yet() {
+fn a_reopen_finishes_a_build_that_stopped_before_its_log() {
     let (dir, cfg) = durable("log_not_yet");
     let built = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
         .expect("durable cluster");
     drop(built);
     as_an_older_release_built_it(&dir);
-    std::fs::remove_file(dir.join(CLUSTER_LOG_FILE)).expect("the log was never created");
-    let reopened = open(&dir, &cfg, "an older release's build");
+    let log = dir.join(CLUSTER_LOG_FILE);
+    std::fs::remove_file(&log).expect("the log was never created");
+    let reopened = open(&dir, &cfg, "an unfinished build");
     assert!(lost_log_events(&reopened).is_empty());
     assert_eq!(matched(&reopened, "blue wireless mouse"), vec![1]);
+    assert_eq!(reopened.epoch(), 1);
+    assert_eq!(
+        epoch_on_disk(&dir),
+        1,
+        "the manifest now says the log exists"
+    );
     drop(reopened);
+
+    std::fs::remove_file(&log).expect("lose the log");
+    assert!(
+        ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).is_err(),
+        "after the reopen finished the build, a lost log was still recreated"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `build` creates the log before it writes the manifest, so nothing says the cluster exists
-/// before its log does. A build that cannot create the log leaves no manifest, and the
-/// directory is not a cluster.
+/// `build` ends with a checkpoint, so a built cluster is at epoch 1: its manifest says its log
+/// exists.
 #[test]
-fn a_build_that_cannot_create_its_log_leaves_no_manifest() {
-    let (dir, cfg) = durable("build_without_log");
-    let blocker = crate::storage::framed_log::replacement_path(&dir.join(CLUSTER_LOG_FILE));
-    std::fs::create_dir_all(&blocker).expect("block the log's creation");
-    let built = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())]);
-    assert!(built.is_err(), "the cluster was built without a log");
-    assert!(
-        !dir.join(CLUSTER_MANIFEST_FILE).exists(),
-        "a manifest was written before the log existed"
-    );
-    assert!(
-        !ClusterEngine::cluster_exists(&dir),
-        "the directory passes for a cluster"
-    );
+fn a_built_cluster_has_a_manifest_that_says_its_log_exists() {
+    let (dir, cfg) = durable("built_epoch");
+    let built = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
+        .expect("durable cluster");
+    assert_eq!(built.epoch(), 1);
+    assert_eq!(epoch_on_disk(&dir), 1);
+    assert_eq!(std::fs::read(dir.join(CLUSTER_LOG_FILE)).unwrap().len(), 8);
+    drop(built);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A build that cannot create its log fails, and the next start recovers: it finds the
+/// manifest the build wrote first (epoch 0), creates the log, finishes the build, and serves
+/// each built query once.
+///
+/// The manifest is written before the log for this reason. With the log first, the failed
+/// build left shard state and no manifest; the next start built again over that state, each
+/// shard restored the rows its own checkpoint file listed, and the corpus was ingested a
+/// second time on top of them.
+#[test]
+fn a_start_after_a_build_that_could_not_create_its_log_recovers() {
+    let (dir, cfg) = durable("build_without_log");
+    let corpus = [
+        (1u64, "wireless mouse".to_string()),
+        (2, "mechanical keyboard".to_string()),
+    ];
+    let log = dir.join(CLUSTER_LOG_FILE);
+    let blocker = crate::storage::framed_log::replacement_path(&log);
+    std::fs::create_dir_all(&blocker).expect("block the log's creation");
+    assert!(
+        ClusterEngine::build(vocab(), &cfg, &corpus).is_err(),
+        "the cluster was built without a log"
+    );
+    assert!(!log.exists());
+    assert_eq!(
+        epoch_on_disk(&dir),
+        0,
+        "the manifest of a build that did not finish does not say a log exists"
+    );
+    std::fs::remove_dir_all(&blocker).expect("unblock");
+
+    // What the server does at its next start: a manifest is there, so it opens.
+    assert!(ClusterEngine::cluster_exists(&dir));
+    let reopened = open(&dir, &cfg, "the start after the failed build");
+    assert_eq!(epoch_on_disk(&dir), 1);
+    // The same rows as a build that was never interrupted: nothing was ingested twice.
+    // (The count is of stored rows, and a row that every shard holds counts on each.)
+    let (reference_dir, reference_cfg) = durable("build_without_log_reference");
+    let reference =
+        ClusterEngine::build(vocab(), &reference_cfg, &corpus).expect("an undisturbed build");
+    assert_eq!(
+        reopened.num_queries().expect("count"),
+        reference.num_queries().expect("count"),
+        "the recovered cluster holds other rows than an undisturbed build"
+    );
+    drop(reference);
+    assert_eq!(matched(&reopened, "blue wireless mouse"), vec![1]);
+    assert_eq!(matched(&reopened, "a mechanical keyboard"), vec![2]);
+    reopened
+        .add_query(3, "usb hub")
+        .expect("the id directory is complete: an insert is admitted");
+    drop(reopened);
+    let again = open(&dir, &cfg, "second start");
+    assert_eq!(matched(&again, "a usb hub"), vec![3]);
+    drop(again);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&reference_dir);
 }
 
 fn shard_translogs(dir: &std::path::Path, shards: usize) -> Vec<Vec<u8>> {

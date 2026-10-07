@@ -290,8 +290,8 @@ impl ClusterEngine {
             }
         }
 
-        // Durability: open an empty log and commit the coordinator manifest (the atomic
-        // base = per-shard segment registry + dict + ring + epoch 1), or fall back
+        // Durability: commit the coordinator manifest (the atomic base = per-shard
+        // segment registry + dict + ring + epoch 0) and open an empty log, or fall back
         // to an in-memory log. Construction fails loud on a durable-setup error (fresh
         // construction — nothing to lose yet); a shard whose segment write fell back to
         // in-memory makes `segment_filenames` error, aborting the build rather than
@@ -362,12 +362,13 @@ impl ClusterEngine {
         if tags.iter().any(|t| !t.is_empty()) {
             engine.tags_present.store(true, Ordering::Relaxed);
         }
+        engine.commit_the_log_into_the_manifest()?;
         Ok(engine)
     }
 
     /// Commit the initial durable base for a freshly built cluster: collect each shard's
-    /// segment registry + next-seg-id, create an empty log, and write the coordinator
-    /// manifest (epoch 1, snapshot_pos 0 — the atomic commit point). The per-shard
+    /// segment registry + next-seg-id, write the coordinator manifest (epoch 0,
+    /// snapshot_pos 0 — the atomic commit point), and open an empty log. The per-shard
     /// `.seg` files were already written by pass-B ingest; this records which ones are
     /// committed. Returns the durability bundle for [`from_parts`].
     #[allow(clippy::too_many_arguments)]
@@ -405,7 +406,7 @@ impl ClusterEngine {
             next_seg_ids.push(p.next_seg_id()?);
         }
         let manifest = crate::storage::ClusterManifest {
-            epoch: crate::storage::ClusterManifest::FIRST_EPOCH_WITH_A_LOG,
+            epoch: 0,
             placement_generation: PlacementGeneration::INITIAL,
             snapshot_pos: 0,
             dict_fingerprint: dict.fingerprint(),
@@ -438,10 +439,16 @@ impl ClusterEngine {
             // ADR-184: the feature model the base was compiled under, checked on every reopen.
             feature_model_fingerprint: Some(norm.fingerprint()),
         };
-        // The log first, then the manifest (ADR-213). A manifest is what makes this directory
-        // a cluster, and a reopen under it refuses a log that is not there; so nothing may
-        // say the cluster exists before its log does. A crash between the two leaves a log
-        // and no manifest, which is no cluster, and the build runs again.
+        // The manifest first, at epoch 0, and then the log. Epoch 0 says "the log may not exist
+        // yet": a reopen under it creates the log if this build stopped here. `build` ends
+        // with a checkpoint, which writes the manifest that says the log exists (ADR-213).
+        //
+        // The log is not created first. A build that then failed to create it would leave
+        // shard state and no manifest; the next start would build again over that state, and
+        // a shard that finds its own checkpoint file restores its rows before the corpus is
+        // ingested a second time.
+        crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
+            .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
         let log = FileClusterLog::open(
             &dir.join(CLUSTER_LOG_FILE),
             config.wal_sync_on_write,
@@ -449,12 +456,10 @@ impl ClusterEngine {
             IfMissing::Create,
         )
         .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
-        crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
-            .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
         Ok(ClusterDurable {
             log: Box::new(log),
             data_dir: Some(dir.to_path_buf()),
-            epoch: crate::storage::ClusterManifest::FIRST_EPOCH_WITH_A_LOG,
+            epoch: 0,
             placement_generation: PlacementGeneration::INITIAL,
             source_files: vec!["sources.dat".to_string(); ring.num_shards()],
             manifest: Some(manifest),
