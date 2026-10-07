@@ -110,8 +110,8 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   header-only file beside the path, syncing it, renaming it into place and syncing the directory.
   A crash or a full disk leaves no file or a whole one. A file shorter than its header is
   refused, except where an older release could have left it and nothing on disk says the log
-  ever held a record: the WAL (the manifest covers what it held), a coordinator log with no
-  checkpoint behind it, and a Raft log on a node with no other Raft state.
+  ever held a record: the WAL (the manifest covers what it held), a coordinator log under the manifest
+  `build` wrote (no checkpoint since), and a Raft log on a node with no other Raft state.
 - **Segments are immutable** (Lucene/LSM): the write path is append-only; complexity is pushed to
   the merge, which is the right place for it.
 - **Updates/deletes are tombstones**, not in-place edits: update = compile new version into the

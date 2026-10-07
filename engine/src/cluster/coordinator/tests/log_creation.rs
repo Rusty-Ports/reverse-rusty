@@ -61,37 +61,52 @@ fn a_cluster_whose_log_creation_was_interrupted_reopens() {
     }
 }
 
-/// After a checkpoint the manifest records a log position, so the log has been whole, and it
-/// is only ever replaced through a rename. A log shorter than its header there has lost its
-/// content. The cluster is refused and the file is left as it was found.
+/// A checkpoint needs the log open and replaces it through a rename, so after one the log has
+/// been whole, and a log shorter than its header has lost its content. The cluster is refused
+/// and the file is left as it was found. That holds for a checkpoint that ran before the
+/// first write too: it records position zero, like the manifest `build` writes, and is told
+/// from it by its epoch. The write that follows it is acknowledged into the log, and a
+/// reopen that took the short log for an interrupted creation would drop it without a word.
 #[test]
 fn a_cluster_that_has_checkpointed_is_not_given_an_empty_log() {
-    let (dir, cfg) = durable("log_lost_after_checkpoint");
-    let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
-        .expect("durable cluster");
-    cluster.add_query(2, "mechanical keyboard").expect("write");
-    cluster.checkpoint().expect("checkpoint");
-    drop(cluster);
-    let manifest = crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
-        .expect("read manifest");
-    assert!(
-        manifest.snapshot_pos > 0,
-        "the checkpoint recorded no position"
-    );
-
-    let log = dir.join(CLUSTER_LOG_FILE);
-    let header = std::fs::read(&log).expect("read log");
-    std::fs::write(&log, &header[..4]).expect("shorten the log");
-    match ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)) {
-        Err(ShardError::Log(reason)) => {
-            assert!(
-                reason.contains("clog too small"),
-                "refused for another reason: {reason}"
-            );
+    for checkpoint_first in [false, true] {
+        let (dir, cfg) = durable(&format!("log_lost_after_checkpoint_{checkpoint_first}"));
+        let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
+            .expect("durable cluster");
+        if checkpoint_first {
+            cluster.checkpoint().expect("checkpoint");
+            cluster.add_query(2, "mechanical keyboard").expect("write");
+        } else {
+            cluster.add_query(2, "mechanical keyboard").expect("write");
+            cluster.checkpoint().expect("checkpoint");
         }
-        Err(other) => panic!("refused for another reason: {other:?}"),
-        Ok(_) => panic!("a cluster that had checkpointed was given an empty log"),
+        drop(cluster);
+        let manifest = crate::storage::read_cluster_manifest(&dir.join(CLUSTER_MANIFEST_FILE))
+            .expect("read manifest");
+        assert_eq!(manifest.epoch, 1, "one checkpoint");
+        assert_eq!(
+            manifest.snapshot_pos == 0,
+            checkpoint_first,
+            "a checkpoint before the first write records position zero"
+        );
+
+        let log = dir.join(CLUSTER_LOG_FILE);
+        let header = std::fs::read(&log).expect("read log");
+        std::fs::write(&log, &header[..4]).expect("shorten the log");
+        match ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)) {
+            Err(ShardError::Log(reason)) => {
+                assert!(
+                    reason.contains("clog too small"),
+                    "refused for another reason: {reason}"
+                );
+            }
+            Err(other) => panic!("refused for another reason: {other:?}"),
+            Ok(_) => panic!(
+                "a cluster that had checkpointed was given an empty log \
+                 (checkpoint before the first write: {checkpoint_first})"
+            ),
+        }
+        assert_eq!(std::fs::read(&log).expect("read log"), &header[..4]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    assert_eq!(std::fs::read(&log).expect("read log"), &header[..4]);
-    let _ = std::fs::remove_dir_all(&dir);
 }

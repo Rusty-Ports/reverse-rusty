@@ -48,11 +48,12 @@ ADR-198 fixed the same weakness in the single-node write-ahead log. These two we
    refuses both, as before, and leaves the file as it found it.
 3. **The owner decides, from what else is on disk, and only an owner with nothing that says
    the log was ever whole has it finished:**
-   - **Coordinator.** `build` writes the manifest and then creates the log, so a manifest that
-     records no checkpoint (`snapshot_pos == 0`) is no evidence that the log was whole. On
-     reopen such a cluster's short log is replaced with an empty one. After a checkpoint the
-     log has been whole, and it is only ever replaced through a rename, so a short one has lost
-     its content and the cluster is refused.
+   - **Coordinator.** `build` writes its manifest (epoch 0, position 0) and then creates the
+     log, so that manifest is no evidence that the log was whole. On reopen under it, a short
+     log is replaced with an empty one. Every later manifest is written by a checkpoint, which
+     needs the log open and replaces it through a rename, and which bumps the epoch even when
+     it records position 0 (a checkpoint before the first write). Under any manifest but the
+     first, a short log has lost its content and the cluster is refused.
    - **Control node.** A short raft log is removed, and the node starts as the fresh node it
      is, only when it has no vote, no committed index, no purge point and no snapshot. A node
      with any of those once had a log. It is refused with an error that names the file it
@@ -99,9 +100,12 @@ ADR-198 fixed the same weakness in the single-node write-ahead log. These two we
 - One extra file, rename and directory sync when a log is first created. Appends are
   unchanged.
 - The directory entry of a new log is durable before the first append is acknowledged.
-- A coordinator's short log with no checkpoint behind it is taken for an interrupted creation.
-  For it to be anything else, a filesystem would have to shorten a file below bytes that were
-  synced. That is the same judgement ADR-198 makes.
+- A coordinator's short log under the manifest `build` wrote is taken for an interrupted
+  creation. A cluster that has taken writes and never checkpointed has that manifest too, so
+  if its log were then cut below the header, the reopen would not tell. For that a filesystem
+  has to shorten a file below bytes that were synced, which is the judgement ADR-198 makes
+  for the write-ahead log. The roadmap item below removes the case: once `build` creates the
+  log before the manifest, a manifest always means a whole log.
 - **Not decided here:** a log that is missing altogether is still created empty on reopen,
   also where a checkpoint, a checkpoint file or a vote says it once existed. That is a log
   that was lost, not one that was interrupted, and it should be refused the same way. It is
@@ -121,7 +125,8 @@ ADR-198 fixed the same weakness in the single-node write-ahead log. These two we
 - `cluster/coordinator/tests/log_creation.rs`: a built durable cluster whose log is cut to 0,
   3 or 7 bytes reopens, serves what was built, takes a write, and reopens again with it (it
   was refused before); the same cut after a checkpoint is refused with `clog too small` and
-  the file is not changed.
+  the file is not changed, also when the checkpoint ran before the first write and so records
+  position zero.
 - `cluster/shard/tests/recovery.rs`: a restarting shard whose translog is cut to 0, 4 or 7
   bytes is refused and the file is not changed; a shard with a short translog and no
   checkpoint file starts fresh.
@@ -132,7 +137,8 @@ ADR-198 fixed the same weakness in the single-node write-ahead log. These two we
 - By hand: a `controlserver` data directory holding a 0-byte `raft-log.bin` (what the full
   disk left) starts and bootstraps. Before, it answered `header is truncated`.
 - Mutation checks, each after an unmutated baseline: the coordinator not finishing a
-  creation; finishing one after a checkpoint; any short file taken for an interrupted
+  creation; finishing one after a checkpoint; telling a checkpoint by its position alone; any
+  short file taken for an interrupted
   creation; the raft guard removed; the raft repair not called; a log created at its own
   path, header second; only the current format's header recognised; `open` finishing a
   creation itself; a short file finished whatever it holds, for the cluster log and for the

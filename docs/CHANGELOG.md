@@ -19,8 +19,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
   They are now written beside their path and renamed into place, with the directory synced, as
   the write-ahead log already was (ADR-198).
 - **A node that an earlier release left that way starts after the upgrade,** with nothing to
-  delete: a control node that has no other raft state, and a coordinator whose manifest records
-  no checkpoint. Neither can have held an acknowledged record.
+  delete: a control node that has no other raft state, and a coordinator that has never
+  checkpointed. Neither can have held an acknowledged record.
 - **A short log that may have held records is still refused,** and left as it was found: a
   control node with a vote, a committed index, a purge point or a snapshot; a coordinator after a
   checkpoint; a restarting shard. A short file that is not the start of a supported header is
