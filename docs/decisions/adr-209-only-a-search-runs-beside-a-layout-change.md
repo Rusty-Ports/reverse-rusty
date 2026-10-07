@@ -20,6 +20,7 @@ takes its own lock around a rebuild; removing that is the next step.
    other operation holds it shared, taken once at its entry and before any other lock. A
    search does not take it. An operation with a deadline, or one that can be cancelled (an
    exhaustive read, a deadline-bound topology move), keeps that while it waits for the lock.
+   It always tries the lock once: no time left means "do not wait", not "do not start".
 2. **What runs beside a layout change is an allow-list.** A search is an operation that only
    reads shard data, through the one layout it loaded: the match routes, the ranked and batch
    routes and their source fetch, a read of one stored document, and the accessors that say
@@ -137,10 +138,11 @@ hooks that stop a write or a rebuild half-way:
 - a layout change is refused at once while a remote resize has writes fenced, and one that
   arrives while a copy is about to start waits where it holds nothing back and is then
   refused;
-- an exhaustive read gives up at its deadline while a layout change holds it back;
+- an exhaustive read gives up at its deadline while a layout change holds it back, and an
+  operation whose deadline has already passed still takes a free lock;
 - an in-memory engine forgets the layouts it has replaced once they are released.
 
-Eighteen mutations of the design were run against these tests and each fails one: a mutation
+Nineteen mutations of the design were run against these tests and each fails one: a mutation
 that loads the layout before it holds its locks; an operation that does not keep the layout
 lock; a load snapshot, and an exhaustive read, taken without it (both also fail the rule
 test); a layout published outside the barrier; a replaced layout that is not remembered, and
@@ -149,7 +151,8 @@ directory that is not replaced with the layout; a repair queue that is not empti
 swap; replaced shards that are not frozen, a failed change that does not thaw, a published
 change that thaws, and a frozen shard that still writes; a recommended resize measured before
 its layout change; a layout change that queues behind a remote resize, and one that checks
-for it without the admission; and an exhaustive read that ignores its deadline at the lock.
+for it without the admission; an exhaustive read that ignores its deadline at the lock; and a
+deadline that is checked before the lock is tried.
 One survived at first and showed that nothing tested a change waiting for an operation in
 flight that is not a write; that test is in.
 

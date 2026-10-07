@@ -412,6 +412,26 @@ fn an_exhaustive_read_keeps_its_deadline_while_a_layout_change_runs() {
     });
 }
 
+/// A deadline that has already passed means "do not wait", not "do not start": an operation
+/// takes the layout lock when it is free and gives up at once when a layout change holds it.
+#[test]
+fn an_expired_deadline_still_takes_a_free_layout_lock() {
+    let cluster = in_memory(3, 50);
+    let expired = || Err(ShardError::DeadlineExceeded);
+    assert!(
+        cluster.stable_while(expired).is_ok(),
+        "an operation with no time left did not start though nothing held it back"
+    );
+    let change = cluster.begin_layout_change().expect("begin");
+    let held_back = cluster.stable_while(expired).map(|_| ());
+    // Released before anything can fail.
+    drop(change);
+    assert!(
+        matches!(held_back, Err(ShardError::DeadlineExceeded)),
+        "{held_back:?}"
+    );
+}
+
 /// An in-memory engine never runs the cleanup that forgets the layouts it has replaced.
 #[test]
 fn replaced_layouts_are_forgotten_once_released() {

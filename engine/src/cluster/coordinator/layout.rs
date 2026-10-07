@@ -195,7 +195,7 @@ impl super::ClusterEngine {
     }
 
     /// [`Self::stable`] for an operation that has a deadline or can be cancelled: `keep_waiting`
-    /// is asked before each attempt and its error ends the wait. Without it such an operation
+    /// is asked after each attempt that found the lock taken, and its error ends the wait. Without it such an operation
     /// would sit out a whole rebuild after its caller had given up.
     pub(in crate::cluster::coordinator) fn stable_while(
         &self,
@@ -203,7 +203,8 @@ impl super::ClusterEngine {
     ) -> Result<Stable<'_>, ShardError> {
         const POLL: std::time::Duration = std::time::Duration::from_millis(5);
         loop {
-            keep_waiting()?;
+            // Try first: a deadline that has already passed still gets the lock when it is
+            // free, as a zero timeout means "do not wait", not "do not start".
             match self.layout_lock.try_read() {
                 Ok(held) => {
                     return Ok(Stable {
@@ -217,8 +218,10 @@ impl super::ClusterEngine {
                         _held: poisoned.into_inner(),
                     })
                 }
-                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(POLL),
+                Err(std::sync::TryLockError::WouldBlock) => {}
             }
+            keep_waiting()?;
+            std::thread::sleep(POLL);
         }
     }
 
