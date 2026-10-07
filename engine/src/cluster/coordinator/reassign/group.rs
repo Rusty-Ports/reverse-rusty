@@ -343,7 +343,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         if resumes_ready {
             // A retry of this exact Ready intent must preserve the write-quiescent interval under
             // which its evidence was recorded. `Begin` above proved the immutable identity is the
@@ -401,7 +401,7 @@ impl ClusterEngine {
                     self.coordinator_id,
                     &self.client_security,
                 )?
-                .with_metrics(Arc::clone(&self.transport_metrics));
+                .with_metrics(self.transport_metrics.load_full());
                 // A fresh member may RE-ENTER a group it was dropped from (its slot preserved a
                 // stale fence through RecoverFrom) — clear it or the committed member would
                 // reject every write / desync on first fan-out.
@@ -535,7 +535,7 @@ impl ClusterEngine {
                         self.coordinator_id,
                         &self.client_security,
                     )?
-                    .with_metrics(Arc::clone(&self.transport_metrics));
+                    .with_metrics(self.transport_metrics.load_full());
                     // Same stale-fence hazard as a fresh member: a committed replica can carry a
                     // fence from a move that dropped it as this position's PRIMARY long ago (map
                     // edits can re-add it replica-first). Clear it — post-swap it must accept
@@ -623,7 +623,7 @@ impl ClusterEngine {
                         self.coordinator_id,
                         &self.client_security,
                     )?
-                    .with_metrics(Arc::clone(&self.transport_metrics));
+                    .with_metrics(self.transport_metrics.load_full());
                     Ok(Box::new(t))
                 };
                 let mut members = d_members.iter();

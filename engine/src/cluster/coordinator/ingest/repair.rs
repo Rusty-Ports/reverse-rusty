@@ -87,17 +87,28 @@ impl ClusterEngine {
     /// stays queued. A no-op (empty report) on the in-process / RF=1 path, which never queues
     /// anything.
     pub fn resync(&self) -> ResyncReport {
-        self.resync_in(&self.layout())
+        let admitted = self.admit_mutation();
+        self.resync_admitted(&admitted.layout)
     }
 
+    /// [`Self::resync`] for a caller that loaded `layout` before it could hold the mutation
+    /// barrier. It takes the barrier and does nothing when the layout has been replaced
+    /// meanwhile; the next pass repairs under the new one.
     pub(in crate::cluster::coordinator) fn resync_in(&self, layout: &Layout) -> ResyncReport {
-        // Exhaustive cross-shard reads take the exclusive side of the same
-        // barrier. A repair re-drive mutates shard visibility just like a live
-        // add/upsert/remove and must not slip between sequential shard reads.
-        let _pit_barrier = self
+        let _barrier = self
             .pit_open_barrier
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.is_published(layout) {
+            return ResyncReport::default();
+        }
+        self.resync_admitted(layout)
+    }
+
+    /// The repair pass, for a caller that holds the mutation barrier. Exhaustive cross-shard
+    /// reads take the exclusive side of that barrier: a repair re-drive changes what shards
+    /// show, like a live write, and must not slip between sequential shard reads.
+    fn resync_admitted(&self, layout: &Layout) -> ResyncReport {
         // A remote resize starts only with no queued repairs and refuses new writes, so a
         // re-drive during its copy could only diverge the layout it is exporting (ADR-180).
         if self.ensure_resize_write_fence_open().is_err() {
@@ -270,8 +281,9 @@ impl ClusterEngine {
     /// checkpoints while it runs (ADR-197): a flush that wrote a segment between a
     /// checkpoint's registry snapshot and its orphan sweep would have that file deleted.
     pub fn flush(&self) -> Result<(), ShardError> {
-        let layout = &*self.layout();
+        let _maintenance = self.maintenance();
         let _quiesced = self.quiesce_mutations();
+        let layout = &*self.layout();
         for s in layout.shards.iter() {
             s.flush()?;
         }

@@ -1,4 +1,4 @@
-use super::{Arc, ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
+use super::{ClusterEngine, DurabilityOp, EngineEvent, LogPos, Shard, ShardError};
 
 impl ClusterEngine {
     /// Cross-node peer recovery (ADR-036 + ADR-039 + ADR-040): bring a fresh, durable, **pending**
@@ -38,7 +38,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
         let recover = || -> Result<(u64, u64), ShardError> {
@@ -59,7 +59,7 @@ impl ClusterEngine {
                 self.coordinator_id,
                 &self.client_security,
             )?
-            .with_metrics(Arc::clone(&self.transport_metrics));
+            .with_metrics(self.transport_metrics.load_full());
             // Bulk copy: segments at snapshot position P (the source keeps serving + writing).
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
             // Tail replay + convergence: drain the source tail (> P) through the SAME apply funnel
@@ -125,7 +125,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let target = crate::cluster::remote::RemoteShard::connect_for_coordinator_with_security(
             target_endpoint,
             handle.clone(),
@@ -135,7 +135,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let hwm = crate::cluster::replica::catch_up_replica(
             &target,
             &source,

@@ -34,9 +34,19 @@ impl ClusterEngine {
     /// set of writes. PIT opens, exhaustive delivery, `flush` and other checkpoints wait too;
     /// ordinary reads do not. Lock order: this barrier, then a logical-id lock, then a shard.
     pub fn checkpoint(&self) -> Result<(), ShardError> {
-        let layout = &*self.layout();
+        let _maintenance = self.maintenance();
         let _quiesced = self.quiesce_mutations();
+        let layout = &*self.layout();
         self.checkpoint_quiesced(layout)
+    }
+
+    /// One layout change, checkpoint, flush or backup at a time. A layout change holds this
+    /// for its whole run, so the others never seal or sweep a directory in which a new layout
+    /// is being built. Take it before the mutation barrier, and load the layout after both.
+    pub(in crate::cluster::coordinator) fn maintenance(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.maintenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Take the exclusive side of the mutation barrier: wait for every write that has been
@@ -129,7 +139,7 @@ impl ClusterEngine {
         // rename succeeds but the parent-directory sync fails; the next
         // identical request may acknowledge that document only when every
         // recovery-defining field matches this retained identity.
-        if self.pending_alias_import_predecessor.is_some() {
+        if self.alias_import_predecessor().is_some() {
             *self
                 .pending_alias_import_manifest
                 .lock()

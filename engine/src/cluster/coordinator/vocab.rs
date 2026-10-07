@@ -268,7 +268,7 @@ impl ClusterEngine {
             });
         }
         let predecessor = self.capture_alias_import_predecessor(&self.layout())?;
-        self.pending_alias_import_predecessor = predecessor;
+        *self.alias_import_predecessor() = predecessor;
         *self
             .pending_alias_import_manifest
             .lock()
@@ -370,8 +370,18 @@ impl ClusterEngine {
         Ok(())
     }
 
+    /// The durable predecessor an alias import captured before it swapped the model, while
+    /// that import's commit is incomplete.
+    pub(in crate::cluster::coordinator) fn alias_import_predecessor(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<crate::storage::ClusterManifest>> {
+        self.pending_alias_import_predecessor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn clear_pending_alias_import_identity(&mut self) {
-        self.pending_alias_import_predecessor = None;
+        *self.alias_import_predecessor() = None;
         *self
             .pending_alias_import_manifest
             .lock()
@@ -447,7 +457,7 @@ impl ClusterEngine {
             .clone();
 
         if manifest.placement_generation == generation {
-            if self.pending_alias_import_predecessor.is_some()
+            if self.alias_import_predecessor().is_some()
                 && self
                     .epoch()
                     .checked_add(1)
@@ -477,7 +487,7 @@ impl ClusterEngine {
         })?;
         if manifest.placement_generation.0 != prior_generation
             || manifest.epoch != self.epoch()
-            || self.pending_alias_import_predecessor.as_ref() != Some(&manifest)
+            || self.alias_import_predecessor().as_ref() != Some(&manifest)
             || committed_manifest.as_ref() != Some(&manifest)
         {
             return Err(ShardError::Log(format!(

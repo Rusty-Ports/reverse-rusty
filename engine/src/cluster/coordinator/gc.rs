@@ -198,7 +198,7 @@ impl ClusterEngine {
                 self.coordinator_id,
                 &self.client_security,
             ) {
-                Ok(c) => c.with_metrics(std::sync::Arc::clone(&self.transport_metrics)),
+                Ok(c) => c.with_metrics(self.transport_metrics.load_full()),
                 Err(e) => {
                     report.skipped_nodes.push((node, e.to_string()));
                     continue;
@@ -296,7 +296,7 @@ impl ClusterEngine {
             self.coordinator_id,
             &self.client_security,
         )?
-        .with_metrics(std::sync::Arc::clone(&self.transport_metrics));
+        .with_metrics(self.transport_metrics.load_full());
         let probed = client.fence(0)?;
         let armed = if probed == 0 {
             // A restart cleared the fence (fences are not durable) — re-arm it. The epoch is a

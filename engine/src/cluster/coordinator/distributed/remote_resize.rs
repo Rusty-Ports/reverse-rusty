@@ -275,7 +275,8 @@ impl ClusterEngine {
             handoffs: staged_layout.handoffs.clone(),
             generation,
         }));
-        self.transport_metrics = staged.transport_metrics;
+        self.transport_metrics
+            .store(staged.transport_metrics.load_full());
         self.pending_repair
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

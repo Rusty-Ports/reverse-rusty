@@ -6,7 +6,8 @@
 //! coordinator's source:
 //!
 //! - a **helper** is handed `layout: &Layout` and never loads another;
-//! - an **operation** loads once, at its entry, and calls no other method that loads;
+//! - an **operation** loads once, at its entry, and calls no other method that loads (a
+//!   mutation loads through `admit_mutation`, after it holds the mutation barrier);
 //! - a **writer** (`&mut self`, or the engine by value) holds the engine alone and may load
 //!   whenever it likes.
 
@@ -120,7 +121,11 @@ fn every_operation_loads_the_layout_once_and_helpers_never_do() {
     sources(&root.join("coordinator"), &mut files);
     let functions: Vec<Function> = files.iter().flat_map(|file| functions(file)).collect();
 
-    let loads = |function: &Function| function.body.matches("self.layout()").count();
+    // A mutation loads through `admit_mutation`, which takes the mutation barrier first.
+    let loads = |function: &Function| {
+        function.body.matches("self.layout()").count()
+            + function.body.matches("self.admit_mutation()").count()
+    };
     let is_writer = |function: &Function| {
         ["(&mutself", "(mutself", "(self,", "(self)"]
             .iter()
@@ -153,6 +158,7 @@ fn every_operation_loads_the_layout_once_and_helpers_never_do() {
         for other in &loaders {
             if *other != function.name
                 && *other != "layout"
+                && *other != "admit_mutation"
                 && function.body.contains(&format!("self.{other}("))
             {
                 violations.push(format!(

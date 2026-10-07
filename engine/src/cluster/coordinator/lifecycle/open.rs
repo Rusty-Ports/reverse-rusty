@@ -119,7 +119,8 @@ impl ClusterEngine {
             epoch: AtomicU64::new(durable.epoch),
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
-            pending_alias_import_predecessor: None,
+            pending_alias_import_predecessor: Mutex::new(None),
+            maintenance: Mutex::new(()),
             pending_alias_import_manifest: Mutex::new(None),
             committed_placement_generation: AtomicU64::new(
                 durable
@@ -133,7 +134,9 @@ impl ClusterEngine {
             // A fresh transport-metrics collector (ADR-085); the gRPC builders REPLACE it with
             // the shared one they also hand to each `RemoteShard` (via `with_transport_metrics`),
             // so remote per-RPC stats aggregate here. The in-process path keeps this empty one.
-            transport_metrics: Arc::new(crate::cluster::transport_metrics::TransportMetrics::new()),
+            transport_metrics: arc_swap::ArcSwap::from_pointee(
+                crate::cluster::transport_metrics::TransportMetrics::new(),
+            ),
             observer: Mutex::new(None),
             pending_events: Mutex::new(Vec::new()),
             pending_repair: Mutex::new(std::collections::BTreeMap::new()),

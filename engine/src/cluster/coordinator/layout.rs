@@ -61,12 +61,42 @@ impl Layout {
     }
 }
 
+/// A mutation that holds the mutation barrier shared. Its layout stays the published one
+/// until this is dropped. See [`ClusterEngine::admit_mutation`](super::ClusterEngine).
+pub(in crate::cluster::coordinator) struct Admitted<'a> {
+    pub(in crate::cluster::coordinator) layout: Arc<Layout>,
+    _barrier: std::sync::RwLockReadGuard<'a, ()>,
+}
+
 impl super::ClusterEngine {
     /// The layout to run one operation under. Load it once, at the operation's entry, and
     /// hand it down: a rebuild may publish another at any moment, and an operation that
     /// routed by one layout and matched in another would be wrong.
     pub(in crate::cluster::coordinator) fn layout(&self) -> Arc<Layout> {
         self.layout.load_full()
+    }
+
+    /// Admit one mutation: take the mutation barrier shared, then load the layout.
+    ///
+    /// The order is what makes the layout safe to write to. A layout change first refuses new
+    /// writes and then takes the barrier exclusively once, so it waits for every mutation
+    /// admitted before it and publishes only after they have applied. A mutation that loaded
+    /// the layout before it held the barrier could find, by the time it applied, that the
+    /// layout had been replaced, and write to shards nothing reads any more.
+    pub(in crate::cluster::coordinator) fn admit_mutation(&self) -> Admitted<'_> {
+        let barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Admitted {
+            layout: self.layout.load_full(),
+            _barrier: barrier,
+        }
+    }
+
+    /// Whether `layout` is the one published now.
+    pub(in crate::cluster::coordinator) fn is_published(&self, layout: &Layout) -> bool {
+        std::ptr::eq(Arc::as_ptr(&self.layout.load()), layout)
     }
 
     /// Publish a copy of the current layout with `edit` applied. For assembly and for the

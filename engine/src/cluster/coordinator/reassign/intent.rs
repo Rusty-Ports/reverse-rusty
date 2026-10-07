@@ -1,6 +1,5 @@
 //! Shared durable-move protocol helpers.
 
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -159,7 +158,7 @@ fn connect(
         engine.coordinator_id,
         &engine.client_security,
     )
-    .map(|member| member.with_metrics(Arc::clone(&engine.transport_metrics)))
+    .map(|member| member.with_metrics(engine.transport_metrics.load_full()))
 }
 
 /// Choose the exact source fence that will make an already-live desired endpoint authoritative.
@@ -231,7 +230,7 @@ fn connect_and_adopt_source(
         engine.coordinator_id,
         &engine.client_security,
     )
-    .map(|member| member.with_metrics(Arc::clone(&engine.transport_metrics)))
+    .map(|member| member.with_metrics(engine.transport_metrics.load_full()))
 }
 
 /// Persist evidence and conditionally commit an RF=1 target that is already the live authority.

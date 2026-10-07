@@ -15,8 +15,8 @@ impl ClusterEngine {
     /// queries, rather than silently re-indexing them as duplicates (use
     /// [`Self::add_query`] for incremental adds).
     pub fn ingest(&self, queries: &[(u64, String)]) -> Result<(), ShardError> {
-        let layout = &*self.layout();
-        self.ingest_with_tags_in(layout, queries, &[])
+        let admitted = self.admit_mutation();
+        self.ingest_with_tags_in(&admitted.layout, queries, &[])
     }
 
     /// [`ingest`](Self::ingest) carrying per-query metadata tags (ADR-049/055) — the bulk-load
@@ -29,7 +29,8 @@ impl ClusterEngine {
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> Result<(), ShardError> {
-        self.ingest_with_tags_in(&self.layout(), queries, tags)
+        let admitted = self.admit_mutation();
+        self.ingest_with_tags_in(&admitted.layout, queries, tags)
     }
 
     pub(in crate::cluster::coordinator) fn ingest_with_tags_in(
@@ -38,12 +39,6 @@ impl ClusterEngine {
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> Result<(), ShardError> {
-        // ADR-113: bulk load is a mutation like any other for the PIT-open
-        // barrier — a pin fan interleaving mid-load would freeze half a corpus.
-        let _pit_barrier = self
-            .pit_open_barrier
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.ensure_resize_write_fence_open()?;
         // Initial bulk load is one exclusive logical-id admission boundary. A
         // concurrent incremental mutation cannot slip between the empty check,
