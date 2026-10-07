@@ -476,9 +476,7 @@ impl Wal {
 
     /// Where an empty replacement is built before it is renamed over the log.
     pub(super) fn replacement_path(path: &Path) -> std::path::PathBuf {
-        let mut name = path.as_os_str().to_os_string();
-        name.push(".tmp");
-        std::path::PathBuf::from(name)
+        crate::storage::framed_log::replacement_path(path)
     }
 
     /// Write a complete, synced, header-only log beside `path` and return where it is.
@@ -492,9 +490,7 @@ impl Wal {
 
     /// Put an empty log at `path` atomically and return an append handle on it.
     fn publish_empty_log(path: &Path) -> io::Result<std::fs::File> {
-        let replacement = Self::write_empty_log_beside(path)?;
-        crate::storage::durable_rename(&replacement, path)?;
-        std::fs::OpenOptions::new().append(true).open(path)
+        crate::storage::framed_log::publish_empty_log(path, &Self::header(WAL_VERSION))
     }
 
     /// Test-only: swap the underlying file for a read-only handle so subsequent

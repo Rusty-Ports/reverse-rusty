@@ -38,7 +38,9 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::storage::framed_log::{repair_tail, scan_records, write_frame, LogAppender};
+use crate::storage::framed_log::{
+    header_was_interrupted, publish_empty_log, repair_tail, scan_records, write_frame, LogAppender,
+};
 
 /// Header of the record log: magic + format version. V4 is a one-way compatibility fence: an old
 /// binary knows only `RRRL` (or one of the unsupported move prototypes) and therefore rejects a log
@@ -64,6 +66,15 @@ impl LogFormat {
             Self::DurableMoves => (LOG_MAGIC_V4, 4),
             Self::DurableResize => (LOG_MAGIC_V5, 5),
         }
+    }
+
+    /// The eight bytes that open a log of this format.
+    fn header_bytes(self) -> [u8; LOG_HEADER] {
+        let (magic, version) = self.header();
+        let mut header = [0u8; LOG_HEADER];
+        header[..4].copy_from_slice(&magic);
+        header[4..].copy_from_slice(&version.to_le_bytes());
+        header
     }
 }
 
@@ -141,16 +152,65 @@ pub(super) fn ensure_log(path: &Path, format: LogFormat) -> io::Result<LogAppend
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })?;
         repair_tail(path, data.len(), scan.valid_len)?;
+        Ok(LogAppender::new(
+            std::fs::OpenOptions::new().append(true).open(path)?,
+        ))
     } else {
-        let mut f = std::fs::File::create(path)?;
-        let (magic, version) = format.header();
-        f.write_all(&magic)?;
-        f.write_all(&version.to_le_bytes())?;
-        f.sync_all()?;
+        // Written beside the path and renamed in, so a crash or a full disk leaves no
+        // file or a whole one.
+        Ok(LogAppender::new(publish_empty_log(
+            path,
+            &format.header_bytes(),
+        )?))
     }
-    Ok(LogAppender::new(
-        std::fs::OpenOptions::new().append(true).open(path)?,
-    ))
+}
+
+/// Remove a raft log whose creation was interrupted, so that the node starts as the fresh
+/// node it is.
+///
+/// Releases before this one created the log file and then wrote its header. A crash, a power
+/// loss or a full disk between the two left a file shorter than its header, and every later
+/// start refused it ("header is truncated"). Such a file never held an entry.
+///
+/// It is removed only when the node has no other raft state. A node that has a vote, a
+/// committed index, a purge point or a snapshot once had a log; if that log is now shorter
+/// than its header it has lost entries the node may have acknowledged, and bringing the node
+/// back with an empty log would break what Raft promises its peers. That stays an error.
+pub(super) fn repair_interrupted_creation(paths: &RaftPaths) -> io::Result<()> {
+    let log = paths.log();
+    if !log.exists() {
+        return Ok(());
+    }
+    let headers = [
+        LogFormat::Legacy.header_bytes(),
+        LogFormat::DurableMoves.header_bytes(),
+        LogFormat::DurableResize.header_bytes(),
+    ];
+    let headers: Vec<&[u8]> = headers.iter().map(<[u8; LOG_HEADER]>::as_slice).collect();
+    if !header_was_interrupted(&log, &headers)? {
+        return Ok(());
+    }
+    let other_state = [
+        paths.vote(),
+        paths.committed(),
+        paths.purged(),
+        paths.snapshot(),
+    ];
+    if let Some(found) = other_state.iter().find(|path| path.exists()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "raft log: header is truncated, and this node has other raft state ({}); it \
+                 will not start with an empty log",
+                found.display()
+            ),
+        ));
+    }
+    std::fs::remove_file(&log)?;
+    if let Some(parent) = log.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Append one serde record to an open append handle: `len u32 | crc u32 | json(body)`. fsync

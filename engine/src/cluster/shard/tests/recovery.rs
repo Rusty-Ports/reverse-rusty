@@ -101,3 +101,54 @@ fn self_restart_repairs_tail_reports_it_outside_locks_and_preserves_new_appends(
     assert_eq!(ids, vec![1, 2]);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A durable shard writes its checkpoint file after its translog exists whole. So when a
+/// restarting shard finds that file and a translog shorter than its header, the translog has
+/// lost its content, whatever position the checkpoint records, and the shard is refused. It
+/// is not an interrupted creation (ADR-212): that leaves no checkpoint file, and the next
+/// start is a fresh one that makes a new translog.
+#[test]
+fn a_restarting_shard_is_not_given_an_empty_translog() {
+    let norm = Arc::new(Normalizer::default_vocab().unwrap());
+    let mut dict = Dict::new();
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tags = TagDict::new();
+    tags.mark_finalized();
+    let tags = Arc::new(tags);
+    let dir = std::env::temp_dir().join(format!("rr_shard_short_translog_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        wal_sync_on_write: true,
+        ..EngineConfig::default()
+    };
+    let open = || {
+        LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tags),
+            config.clone(),
+        )
+    };
+    // An interrupted first start: a translog with no header and no checkpoint file. The next
+    // start is a fresh one, and makes a new translog.
+    let path = dir.join(TRANSLOG_FILE);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&path, b"").unwrap();
+    drop(open().expect("a fresh durable shard"));
+    let header = std::fs::read(&path).unwrap();
+    assert_eq!(header.len(), 8, "a fresh translog holds only its header");
+    for held in [0usize, 4, 7] {
+        std::fs::write(&path, &header[..held]).unwrap();
+        assert!(
+            open().is_err(),
+            "{held} header bytes: a restarting shard was given an empty translog"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), &header[..held]);
+    }
+    // With the translog whole again the shard restarts.
+    std::fs::write(&path, &header).unwrap();
+    drop(open().expect("restart"));
+    let _ = std::fs::remove_dir_all(dir);
+}

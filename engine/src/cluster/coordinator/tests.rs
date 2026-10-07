@@ -360,6 +360,7 @@ mod directory;
 mod exhaustive;
 mod layout_change;
 mod layout_discipline;
+mod log_creation;
 mod repair;
 mod retry_contract;
 mod upsert;

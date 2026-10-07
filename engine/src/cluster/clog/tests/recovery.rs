@@ -131,3 +131,120 @@ fn complete_crc_failure_and_damaged_length_before_later_records_refuse_repair() 
     }
     let _ = std::fs::remove_file(path);
 }
+
+/// The eight bytes of a current cluster log's header.
+fn current_header() -> Vec<u8> {
+    let mut header = CLOG_MAGIC.to_vec();
+    header.extend_from_slice(&CLOG_VERSION.to_le_bytes());
+    header
+}
+
+/// A log whose creation was interrupted is a file shorter than its header. Releases that
+/// created the file and then wrote the header could leave one after a crash or a full disk.
+/// It never held a record, so its owner can have it finished: it then opens as the empty
+/// log it is, takes a write, and reads it back.
+#[test]
+fn a_log_whose_creation_was_interrupted_is_finished_as_an_empty_log() {
+    let header = current_header();
+    for held in 0..header.len() {
+        let path = scratch_path(&format!("interrupted_{held}"));
+        std::fs::write(&path, &header[..held]).unwrap();
+        FileClusterLog::finish_interrupted_creation(&path)
+            .unwrap_or_else(|error| panic!("{held} header bytes: {error}"));
+        assert_eq!(std::fs::read(&path).unwrap(), header, "{held} header bytes");
+        {
+            let log = FileClusterLog::open(&path, true, LogPos(0)).expect("open");
+            log.append(&add(7, "alpha beta")).expect("append");
+        }
+        let reopened = FileClusterLog::open(&path, true, LogPos(0)).expect("reopen");
+        let held_records = reopened.replay(LogPos(0)).expect("replay");
+        assert_eq!(
+            held_records.entries,
+            vec![(LogPos(1), add(7, "alpha beta"))],
+            "{held} header bytes"
+        );
+        assert!(
+            !crate::storage::framed_log::replacement_path(&path).exists(),
+            "a replacement file was left beside the log"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// An older release's header, cut short, is the same thing.
+#[test]
+fn an_interrupted_header_of_an_older_format_is_finished() {
+    let path = scratch_path("interrupted_older");
+    let mut older = CLOG_MAGIC.to_vec();
+    older.extend_from_slice(&(CLOG_VERSION - 1).to_le_bytes());
+    std::fs::write(&path, &older[..6]).unwrap();
+    FileClusterLog::finish_interrupted_creation(&path).expect("an interrupted older header");
+    assert_eq!(std::fs::read(&path).unwrap(), current_header());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Opening a log never decides that a short file is an interrupted creation. The file cannot
+/// say whether it was interrupted or has lost its content; only the owner knows, and a
+/// restarting data node, whose checkpoint file proves the log was once whole, must be
+/// refused. So `open` refuses every file shorter than a header and leaves it as it found it.
+#[test]
+fn open_refuses_a_log_shorter_than_its_header() {
+    let header = current_header();
+    for floor in [LogPos(0), LogPos(12)] {
+        for held in 0..header.len() {
+            let path = scratch_path(&format!("short_{}_{held}", floor.0));
+            std::fs::write(&path, &header[..held]).unwrap();
+            assert!(
+                FileClusterLog::open(&path, true, floor).is_err(),
+                "{held} header bytes, floor {}: opened",
+                floor.0
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                &header[..held],
+                "the file was changed"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// A short file that is not the start of a header is damage. It is not finished into an
+/// empty log, and it is still refused.
+#[test]
+fn a_short_log_that_is_no_header_is_left_alone_and_refused() {
+    let path = scratch_path("short_other");
+    std::fs::write(&path, b"XY").unwrap();
+    FileClusterLog::finish_interrupted_creation(&path).expect("nothing to finish");
+    assert_eq!(std::fs::read(&path).unwrap(), b"XY", "the file was changed");
+    assert!(FileClusterLog::open(&path, true, LogPos(0)).is_err());
+    // A whole log, and no log at all, are not touched either.
+    std::fs::write(&path, current_header()).unwrap();
+    FileClusterLog::finish_interrupted_creation(&path).expect("a whole log");
+    assert_eq!(std::fs::read(&path).unwrap(), current_header());
+    std::fs::remove_file(&path).unwrap();
+    FileClusterLog::finish_interrupted_creation(&path).expect("no log");
+    assert!(!path.exists(), "a log was created where there was none");
+}
+
+/// A new log is written beside its path and renamed in, so a creation that fails part-way
+/// leaves nothing at the path. Here the replacement cannot be written at all.
+#[test]
+fn a_creation_that_fails_leaves_no_file_at_the_path() {
+    let path = scratch_path("blocked_creation");
+    let blocker = crate::storage::framed_log::replacement_path(&path);
+    let _ = std::fs::remove_dir_all(&blocker);
+    std::fs::create_dir_all(&blocker).unwrap();
+    let failed = FileClusterLog::open(&path, true, LogPos(0)).is_err();
+    let left_behind = path.exists();
+    std::fs::remove_dir_all(&blocker).unwrap();
+    assert!(failed, "the log was created without its replacement");
+    assert!(
+        !left_behind,
+        "a failed creation left a file at the log's path"
+    );
+    // With the way clear it is created whole.
+    FileClusterLog::open(&path, true, LogPos(0)).expect("create");
+    assert_eq!(std::fs::read(&path).unwrap(), current_header());
+    let _ = std::fs::remove_file(&path);
+}

@@ -250,6 +250,30 @@ rank metadata, fully sorts already-sorted shard runs, and clones request groups 
 **Completion.** Preserve exact ordering, totals, ownership, and winner-source behavior while
 `rankbench` demonstrates lower allocation and coordinator CPU at fixed K.
 
+### A lost log is refused, not recreated
+
+**Problem.** A reopen that finds no log file creates an empty one, also where something on disk
+says the log once existed: a coordinator whose manifest records a checkpoint, a restarting shard
+with its checkpoint file, a control node with a vote. Writes acknowledged after the last
+checkpoint were in that file. If it is deleted or lost, they are gone and nothing says so, and a
+control node comes back with an empty log beside its vote.
+[ADR-212](decisions/adr-212-a-log-is-created-whole.md) refuses a log that is too short in
+those places; a log that is missing is the same loss.
+
+**Direction.** Refuse a missing log wherever its owner holds evidence that it existed, with an
+error that names the evidence. For the coordinator, create the log before the manifest in
+`build`, so that a manifest always means a log. Established systems make the commit record name the log it
+expects and check it at open: RocksDB can track its write-ahead logs in the manifest
+(`track_and_verify_wals_in_manifest`, added because a missing log was otherwise recovered
+from silently), Elasticsearch ties each Lucene commit to its translog by a UUID and refuses a
+shard whose translog is missing, and PostgreSQL refuses to start without the log segment its
+control file's checkpoint points at. Each keeps going only through an explicit tool that says
+data may be lost.
+
+**Completion.** Each of the three owners refuses a missing log when its other state says one
+existed, the error names what to do, and a test deletes the log of a store that holds
+acknowledged writes and sees the refusal.
+
 ### Writes during a rebuild, and what a rebuild costs
 
 **Problem.** A vocabulary change or an in-process resize now serves searches and reads while it

@@ -141,6 +141,11 @@ pre-upgrade backup:
   (`bulk_load.incomplete`, present only while a bulk load is unfinished) and two additive RPCs.
   An old shard answers `UNIMPLEMENTED`: a new coordinator still attaches to it, but refuses to
   bulk-load through it. Upgrade shards first, as usual. An old coordinator ignores the file.
+- **ADR-212 log creation:** no durable or wire format change, and no roll-order constraint. A
+  control node or coordinator that an earlier release left with a log shorter than its header
+  (a first start interrupted by a crash or a full disk) starts on this release with nothing to
+  delete, provided nothing on disk says the log ever held a record. A downgrade reads what this
+  release writes.
 - **ADR-193 inbound request size:** no durable or wire format change. A coordinator sends a
   bulk bucket on the `StageIngest` stream (ADR-180), which every shard node it can connect to
   already serves: the ADR-185 capability check refuses older nodes at connect. A dictionary

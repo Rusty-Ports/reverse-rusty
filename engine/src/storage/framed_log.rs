@@ -29,6 +29,51 @@ fn u32_at(data: &[u8], offset: usize) -> io::Result<u32> {
     Ok(u32::from_le_bytes(bytes))
 }
 
+/// Where a log's replacement is written before it is renamed into place.
+pub(crate) fn replacement_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".tmp");
+    std::path::PathBuf::from(name)
+}
+
+/// Put a log that holds only `header` at `path`, atomically, and return an append handle on
+/// it: the file is written beside `path`, synced, renamed into place, and the directory is
+/// synced.
+///
+/// A log is created this way so that a crash, a power loss or a full disk leaves no file or
+/// a whole one. Creating the file at its own path and then writing the header leaves, when
+/// it is interrupted between the two, a file that is shorter than its header, and every
+/// later start refuses that.
+pub(crate) fn publish_empty_log(path: &Path, header: &[u8]) -> io::Result<File> {
+    let replacement = replacement_path(path);
+    let mut file = File::create(&replacement)?;
+    file.write_all(header)?;
+    file.sync_all()?;
+    drop(file);
+    crate::storage::durable_rename(&replacement, path)?;
+    std::fs::OpenOptions::new().append(true).open(path)
+}
+
+/// Whether `path` holds less than a whole header, and every byte it does hold is the byte one
+/// of `headers` has there. (The headers of a log are all one length.)
+///
+/// That is a log whose creation was interrupted, by a release that still created the file at
+/// its own path before writing the header. It never held a record: the header is written and
+/// synced before the first append. A short file with any other content is not ours to
+/// reinterpret and stays an error.
+///
+/// Whether such a file may be replaced with an empty log is the caller's to decide. A log
+/// that something else says once held records (a checkpoint behind it, a vote beside it) has
+/// not been interrupted in its creation; it has lost its content.
+pub(crate) fn header_was_interrupted(path: &Path, headers: &[&[u8]]) -> io::Result<bool> {
+    let whole = headers.first().map_or(0, |header| header.len());
+    if std::fs::metadata(path)?.len() >= whole as u64 {
+        return Ok(false);
+    }
+    let held = std::fs::read(path)?;
+    Ok(headers.iter().any(|header| header.starts_with(&held)))
+}
+
 /// A damaged length prefix can hide later acknowledged records. Refuse repair when a
 /// complete CRC-valid record exists behind it. Bound CRC work to keep hostile length
 /// patterns linear in suffix size; an exhausted budget is ambiguous and also refused.

@@ -21,15 +21,15 @@ impl Wal {
     /// every record the old log held. So it is an empty log, not a damaged one. A short
     /// file with any other content is not ours to reinterpret and stays an error.
     pub(super) fn header_was_interrupted(path: &Path) -> io::Result<bool> {
-        let len = std::fs::metadata(path)?.len();
-        if len >= WAL_HEADER_SIZE as u64 {
-            return Ok(false);
-        }
-        let held = std::fs::read(path)?;
         // The version bytes changed between releases, so any supported header may have been
         // the one in progress. A prefix of no supported header (a later format's, or bytes
         // no header has) is refused like the full header would be.
-        Ok((1..=WAL_VERSION).any(|version| Self::header(version).starts_with(&held)))
+        let supported: Vec<[u8; WAL_HEADER_SIZE]> = (1..=WAL_VERSION).map(Self::header).collect();
+        let supported: Vec<&[u8]> = supported
+            .iter()
+            .map(<[u8; WAL_HEADER_SIZE]>::as_slice)
+            .collect();
+        crate::storage::framed_log::header_was_interrupted(path, &supported)
     }
 
     /// The eight bytes that open a log of format `version`.
