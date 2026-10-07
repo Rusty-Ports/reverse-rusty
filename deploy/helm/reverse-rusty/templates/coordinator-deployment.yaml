@@ -148,21 +148,34 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.ports.coordinatorHttp }}
-          # /_health is an unauthenticated GET (ADR-062 default-deny is non-GET only).
+          # Process-local probes (ADR-211): they answer for this process only, need no
+          # credentials, and do not wait for a shard, the control plane or an admission slot.
+          # /_health, which does all three, is for operators and alerts.
+          {{- with .Values.coordinator.probes }}
+          startupProbe:
+            httpGet:
+              path: {{ .liveness.path }}
+              port: http
+            periodSeconds: {{ .startup.periodSeconds }}
+            timeoutSeconds: {{ .startup.timeoutSeconds }}
+            failureThreshold: {{ .startup.failureThreshold }}
+            terminationGracePeriodSeconds: {{ .startup.terminationGracePeriodSeconds }}
           livenessProbe:
             httpGet:
-              path: /_health
+              path: {{ .liveness.path }}
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 6
+            periodSeconds: {{ .liveness.periodSeconds }}
+            timeoutSeconds: {{ .liveness.timeoutSeconds }}
+            failureThreshold: {{ .liveness.failureThreshold }}
+            terminationGracePeriodSeconds: {{ .liveness.terminationGracePeriodSeconds }}
           readinessProbe:
             httpGet:
-              path: /_health
+              path: {{ .readiness.path }}
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 3
+            periodSeconds: {{ .readiness.periodSeconds }}
+            timeoutSeconds: {{ .readiness.timeoutSeconds }}
+            failureThreshold: {{ .readiness.failureThreshold }}
+          {{- end }}
           {{- if or .Values.tls.enabled $rankingProfilesEnabled }}
           volumeMounts:
             {{- if .Values.tls.enabled }}

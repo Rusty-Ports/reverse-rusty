@@ -59,6 +59,15 @@ shard:
   # Broad-lane kill switches (ADR-026). False changes cost, never results.
   broadColumnar: true
   broadMaterialize: true
+  probes:
+    # Every probe sets its timeout: the kubelet's default is 1 second.
+    timeoutSeconds: 3
+    startup:
+      # A shard opens its durable store before it serves its health port, and that takes as
+      # long as the store is large. failureThreshold x periodSeconds is how long it may
+      # take before the kubelet restarts it: 10 minutes here.
+      periodSeconds: 10
+      failureThreshold: 60
 
 ports:
   shardGrpc: 50051
@@ -94,6 +103,8 @@ controlPlane:
   enabled: true
   replicas: 3
   wireToCoordinator: true
+  probes:
+    timeoutSeconds: 3
 
 coordinator:
   # Keep at 1. Stateless means restartable without a coordinator volume, not active-active:
@@ -124,6 +135,36 @@ coordinator:
   # rebalance handoff. Kubernetes SIGKILLs the pod when this total budget expires.
   # Default: 30s drain + 1h move allowance; tune upward for the largest corpus.
   terminationGracePeriodSeconds: 3630
+  # Probes (ADR-211). Liveness and startup ask only whether this process is up; readiness
+  # whether it has assembled its cluster and is accepting connections. None of them asks
+  # whether every shard is well. That is GET /_health, which stays the operator's status
+  # endpoint: watch it and alert on it, but do not let the kubelet restart on it.
+  probes:
+    liveness:
+      path: /_health/live
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 6
+      # A liveness kill would otherwise wait out terminationGracePeriodSeconds above, which is
+      # sized for a rebalance drain. A process that fails liveness is not draining anything.
+      terminationGracePeriodSeconds: 30
+    readiness:
+      # Set this to /_health to take the coordinator out of the Service whenever a shard or
+      # the control plane does not answer. With replicas: 1 that turns one shard's outage
+      # into an outage of the whole API; left on /_health/ready, requests that need the
+      # missing shard fail loudly and the rest are served.
+      path: /_health/ready
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    startup:
+      # The HTTP listener binds only once the cluster is assembled (every shard connected and
+      # adopted, move intents resolved), so nothing answers until then.
+      # failureThreshold x periodSeconds is how long assembly may take: 5 minutes here.
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 60
+      terminationGracePeriodSeconds: 30
   service:
     type: ClusterIP
     annotations: {}

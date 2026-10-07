@@ -66,6 +66,9 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [[ "$(curl -fs "$BASE/_health" | jq -r '.status')" == "green" ]] || fail "coordinator never went green"
+# The probe routes (ADR-211), on the coordinator's own router. No credentials.
+[[ "$(curl -fs "$BASE/_health/live" | jq -r '.status')" == "alive" ]] || fail "/_health/live did not answer alive"
+[[ "$(curl -fs "$BASE/_health/ready" | jq -r '.status')" == "ready" ]] || fail "/_health/ready did not answer ready"
 
 echo "==> ingest one query (auth-gated write) and percolate a matching title"
 # Document ids are u64 logical ids in BOTH modes (the REST `_doc/{id}` route extracts

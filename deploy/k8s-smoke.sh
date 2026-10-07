@@ -2,7 +2,9 @@
 # Minimal Kubernetes smoke test for the Helm chart (deploy/helm/reverse-rusty, ADR-084):
 # spin up a throwaway kind cluster, install the chart (TLS off + dev tokens for
 # simplicity), wait for the coordinator to be Ready, ingest one query over REST, prove a
-# title percolates to it, then tear down. The k8s analogue of deploy/cluster-smoke.sh.
+# title percolates to it, take one shard away for long enough to exhaust a liveness probe's
+# budget and check the coordinator is neither restarted nor taken out of service (ADR-211),
+# then tear down. The k8s analogue of deploy/cluster-smoke.sh.
 #
 # Runs in the RELEASE gate (ADR-098): .github/workflows/release.yml executes this against
 # the exact candidate image before anything is published. Per-PR CI still validates the
@@ -13,6 +15,9 @@
 #   deploy/k8s-smoke.sh                                   # create kind cluster, build+load the image
 #   RR_IMAGE=reverse-rusty:latest deploy/k8s-smoke.sh     # reuse an existing image (still kind-loaded)
 #   RR_KEEP=1 deploy/k8s-smoke.sh                         # leave the kind cluster up for inspection
+#   RR_SMOKE_PORT=19201 deploy/k8s-smoke.sh               # local port for the port-forward
+#   RR_FAULT_SECONDS=100 deploy/k8s-smoke.sh              # how long the fault leg keeps a shard down
+#   RR_HELM_ARGS='--set a=b' deploy/k8s-smoke.sh          # extra chart values (word-split)
 #
 # Requires: kind, kubectl, helm, docker, curl, jq. Exits 0 on PASS.
 set -euo pipefail
@@ -25,7 +30,7 @@ NS="rr-smoke"
 RELEASE="rr"
 COORD="$RELEASE-reverse-rusty-coordinator"
 export RR_IMAGE="${RR_IMAGE:-reverse-rusty:k8s-smoke}"
-LOCAL_PORT=19200
+LOCAL_PORT="${RR_SMOKE_PORT:-19200}"
 TOKEN="smoke-$$"
 AUTH="smokeauth-$$"
 
@@ -67,6 +72,7 @@ helm install "$RELEASE" "$CHART" -n "$NS" --create-namespace \
   --set clusterToken.create=true --set clusterToken.value="$TOKEN" \
   --set auth.create=true --set auth.value="$AUTH" \
   --set persistence.size=1Gi \
+  ${RR_HELM_ARGS:-} \
   --wait --timeout 5m >/dev/null
 
 echo "==> wait for coordinator rollout"
@@ -94,4 +100,58 @@ hits=$(curl -s -X POST "$BASE/_search" -H 'content-type: application/json' \
   -d '{"document":{"title":"2024 acme smokeproduct pro"},"size":10}' | jq -c '[.hits.hits[]._id]|sort')
 [[ "$hits" == '[1]' ]] || fail "percolate did not return the ingested query (got $hits)"
 
-echo "PASS: Helm chart came up on kind and served a match (hits=$hits)"
+echo "ok: Helm chart came up on kind and served a match (hits=$hits)"
+
+# Fault leg (ADR-211): one shard down must not restart the coordinator or take it out of
+# service. The coordinator's liveness and readiness probes answer for the coordinator
+# itself; /_health, which answers for the whole cluster, goes red meanwhile and comes back.
+# RR_FAULT_SECONDS is how long the shard stays down. It has to outlast the liveness probe's
+# whole failure budget (failureThreshold x periodSeconds, 60s by default), or a probe that
+# still depended on the shard would not have had time to restart anything.
+FAULT_SECONDS="${RR_FAULT_SECONDS:-100}"
+SHARDS="$RELEASE-reverse-rusty-shard"
+coordinator() { # jsonpath
+  kubectl -n "$NS" get pod -l app.kubernetes.io/component=coordinator -o "jsonpath=$1"
+}
+status_of() { curl -s -o /dev/null -m 5 -w '%{http_code}' "$BASE$1" || true; }
+
+echo "==> fault: take shard 2 away for ${FAULT_SECONDS}s"
+pod_before=$(coordinator '{.items[0].metadata.name}')
+restarts_before=$(coordinator '{.items[0].status.containerStatuses[0].restartCount}')
+kubectl -n "$NS" scale "sts/$SHARDS" --replicas=2 >/dev/null
+kubectl -n "$NS" wait --for=delete "pod/$SHARDS-2" --timeout=120s >/dev/null
+
+saw_red=0
+deadline=$((SECONDS + FAULT_SECONDS))
+while ((SECONDS < deadline)); do
+  [[ "$(status_of /_health/live)" == "200" ]] || fail "the liveness route did not answer with a shard down"
+  [[ "$(status_of /_health/ready)" == "200" ]] || fail "the readiness route did not answer with a shard down"
+  [[ "$(status_of '/_health?timeout=2s')" == "503" ]] && saw_red=1
+  sleep 5
+done
+[[ "$saw_red" == "1" ]] || fail "/_health never reported the missing shard (expected 503)"
+[[ "$(coordinator '{.items[0].metadata.name}')" == "$pod_before" ]] ||
+  fail "the coordinator pod was replaced while a shard was down"
+restarts=$(coordinator '{.items[0].status.containerStatuses[0].restartCount}')
+[[ "$restarts" == "$restarts_before" ]] ||
+  fail "the coordinator was restarted $((restarts - restarts_before)) time(s) because a shard was down"
+[[ "$(coordinator '{.items[0].status.conditions[?(@.type=="Ready")].status}')" == "True" ]] ||
+  fail "the coordinator left the Service because a shard was down"
+echo "ok: with a shard down for ${FAULT_SECONDS}s the coordinator was not restarted and stayed Ready"
+
+echo "==> fault: bring the shard back"
+kubectl -n "$NS" scale "sts/$SHARDS" --replicas=3 >/dev/null
+kubectl -n "$NS" rollout status "sts/$SHARDS" --timeout=180s >/dev/null
+for _ in $(seq 1 60); do
+  [[ "$(curl -fs -m 5 "$BASE/_health" 2>/dev/null | jq -r '.status' 2>/dev/null)" == "green" ]] && break
+  sleep 2
+done
+[[ "$(curl -fs -m 5 "$BASE/_health" | jq -r '.status')" == "green" ]] ||
+  fail "/_health did not return to green after the shard came back"
+restarts=$(coordinator '{.items[0].status.containerStatuses[0].restartCount}')
+[[ "$restarts" == "$restarts_before" ]] || fail "the coordinator was restarted while the shard came back"
+hits=$(curl -s -X POST "$BASE/_search" -H 'content-type: application/json' \
+  -d '{"document":{"title":"2024 acme smokeproduct pro"},"size":10}' | jq -c '[.hits.hits[]._id]|sort')
+[[ "$hits" == '[1]' ]] || fail "the ingested query is not matched after the shard came back (got $hits)"
+
+echo "PASS: Helm chart came up on kind, served a match, and rode out a shard outage without a coordinator restart"

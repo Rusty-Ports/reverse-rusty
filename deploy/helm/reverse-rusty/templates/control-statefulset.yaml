@@ -70,6 +70,7 @@ spec:
               port: {{ .Values.ports.controlHealth }}
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: {{ .Values.controlPlane.probes.timeoutSeconds }}
             failureThreshold: 6
           readinessProbe:
             grpc:
@@ -77,6 +78,7 @@ spec:
               service: ready
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: {{ .Values.controlPlane.probes.timeoutSeconds }}
             failureThreshold: 3
           volumeMounts:
             - name: data

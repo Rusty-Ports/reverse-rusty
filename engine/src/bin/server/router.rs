@@ -170,6 +170,15 @@ pub(crate) fn build_router(state: Arc<AppState>, max_in_flight_per_endpoint: usi
             "/_health",
             any(health).layer(DefaultBodyLimit::max(HEALTH_BODY_LIMIT)),
         )
+        // The two probe routes read no body and take no permit (ADR-211).
+        .route(
+            crate::handlers::LIVENESS_PATH,
+            any(crate::handlers::liveness::<AppState>),
+        )
+        .route(
+            crate::handlers::READINESS_PATH,
+            any(crate::handlers::readiness::<AppState>),
+        )
         .route(
             "/_metrics",
             any(prometheus_metrics).layer(DefaultBodyLimit::max(METRICS_BODY_LIMIT)),

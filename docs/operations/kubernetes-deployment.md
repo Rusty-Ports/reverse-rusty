@@ -118,7 +118,24 @@ plaintext** port (`ports.shardHealth` / `ports.controlHealth`) — the chart wir
 | livenessProbe (shard/control) | `""` | the gRPC server is up |
 | readinessProbe (shard) | `ready` | a dict has been adopted (a pending shard is **not** ready) |
 | readinessProbe (control) | `ready` | this node currently sees an elected leader |
-| liveness+readiness (coordinator) | — | HTTP `GET /_health` (200) |
+| startupProbe (shard) | `""` | the durable store is open and the gRPC server is up; its budget is `shard.probes.startup` (10 minutes by default) |
+| startup + livenessProbe (coordinator) | — | HTTP `GET /_health/live` (200): this process is up and answering. It does not look at shards or the control plane |
+| readinessProbe (coordinator) | — | HTTP `GET /_health/ready` (200): this process has assembled its cluster and is accepting connections |
+
+The coordinator's probes answer for the coordinator only
+([ADR-211](../decisions/adr-211-probes-answer-for-the-process.md)). `GET /_health` is the status of
+the whole cluster and is red when any shard or the control plane does not answer: watch it and
+alert on it, but the kubelet does not act on it. So with one shard down the coordinator is not
+restarted and stays in the Service; requests that need the missing shard fail loudly and the rest
+are served. To take the coordinator out of the Service whenever any shard is down instead, set
+`coordinator.probes.readiness.path=/_health`; with one coordinator replica that makes one shard's
+outage an outage of the whole API.
+
+Every probe sets `timeoutSeconds` (3 by default; the kubelet's own default is 1). The coordinator
+has five minutes to assemble before the kubelet gives up on it (`coordinator.probes.startup`). A
+coordinator still cannot *start* while a shard is unreachable, because assembly connects to every
+shard; restart a coordinator only when its shards are up, and run `POST /_cluster/resync` before a
+planned restart, because its repair queue is in memory.
 
 `kubectl get pods -n rr` readiness reflects real serving state. Each shard / control pod ALSO serves
 its own Prometheus `/_metrics` on a plaintext `--metrics-addr` port (ADR-091, closing ADR-084 deferral

@@ -7,6 +7,7 @@ mod compact;
 mod flush;
 mod health;
 mod metrics;
+mod probes;
 mod segments;
 mod stats;
 
@@ -23,6 +24,7 @@ pub(crate) use metrics::{
     encode_metrics, finish_metrics_response, metrics_rejection, prometheus_metrics,
     MetricsTransport, METRICS_BODY_LIMIT,
 };
+pub(crate) use probes::{liveness, readiness, LIVENESS_PATH, READINESS_PATH};
 pub(crate) use segments::{
     cat_segments, finish_cat_segments_response, validate_cat_segments_method,
     validate_cat_segments_request, CatSegmentsParams, CAT_SEGMENTS_BODY_LIMIT,
@@ -75,3 +77,6 @@ mod health_tests;
 
 #[cfg(test)]
 mod metrics_tests;
+
+#[cfg(test)]
+mod probes_tests;

@@ -40,6 +40,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [168](../adr-168-inactive-rkyv-advisory.md) | Inactive `rkyv` advisory qualification | Narrows one lockfile-only RustSec exception behind an all-feature/all-target activation guard. | Accepted |
 | [191](../adr-191-data-plane-handlers-wait-off-the-runtime.md) | Data-plane handlers wait off the runtime | Runs standalone PUT, DELETE, bulk and flush, and the coordinator's brief cluster reads, on blocking threads under bounded admission, so requests queued behind maintenance never park an async worker. | Accepted |
 | [199](../adr-199-request-limit-per-endpoint.md) | Request limit per endpoint | Keeps the 256-request limit per endpoint on purpose, tested on the real routers, and corrects the record that called it server-wide: a pool shared between endpoints lets waiting requests keep out the request they wait for. | Accepted |
+| [211](../adr-211-probes-answer-for-the-process.md) | Probes answer for the process | Adds process-local `/_health/live` and `/_health/ready` and points the chart's coordinator probes at them, with timeouts and a startup probe, so a shard outage no longer restarts a healthy coordinator or takes it out of service. `/_health` stays the strict cluster status. | Accepted |
 
 ---
 

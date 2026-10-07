@@ -243,6 +243,15 @@ pub(crate) fn build_cluster_router(
             "/_health",
             any(cluster_health).layer(DefaultBodyLimit::max(HEALTH_BODY_LIMIT)),
         )
+        // The two probe routes read no body and take no permit (ADR-211).
+        .route(
+            crate::handlers::LIVENESS_PATH,
+            any(crate::handlers::liveness::<ClusterAppState>),
+        )
+        .route(
+            crate::handlers::READINESS_PATH,
+            any(crate::handlers::readiness::<ClusterAppState>),
+        )
         .route(
             "/_metrics",
             any(cluster_metrics).layer(DefaultBodyLimit::max(METRICS_BODY_LIMIT)),

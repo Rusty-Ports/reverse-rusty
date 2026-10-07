@@ -307,6 +307,11 @@ jobs:
       - name: Topology parity (compose ≡ rendered chart)
         run: ./deploy/check-topology-parity.sh
 
+      # Probe tripwire (ADR-211): no probe restarts the coordinator for its dependencies,
+      # and every probe sets a timeout.
+      - name: Probes (rendered chart)
+        run: ./deploy/check-probes.sh
+
       - name: Version drift (Cargo.toml == Chart appVersion)
         run: ./deploy/check-versions.sh
 
