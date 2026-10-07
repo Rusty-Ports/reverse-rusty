@@ -6,15 +6,22 @@
 //! shard counts beside a shard total of nine, or the old committed topology beside the new
 //! shards, which a health probe takes for a fault.
 //!
-//! This test reads the server's source. A function that reads the layout twice, or the layout
-//! and something a layout change replaces with it (the control state, the repair queue, the
-//! open points in time), must do so inside `read_on_one_layout` or
-//! `read_between_layout_changes`, or be named below with the reason it need not.
+//! The rule is the one for anything behind an atomic pointer: load it once for an operation
+//! and hand it down. A request that reports several things pins the layout
+//! (`ClusterEngine::published`) and reads them from the pin. This test reads the server's
+//! source and fails a function that
+//!
+//! - reads the layout from the engine more than once, or
+//! - reads the layout and something a layout change replaces with it, one after the other
+//!   (the control state, the repair queue, the open points in time),
+//!
+//! unless it is named below with the reason it may.
 
 use std::path::{Path, PathBuf};
 
-/// Reads of the published layout.
+/// Reads of the published layout, each of which loads it anew. `published` pins it.
 const LAYOUT_READS: &[&str] = &[
+    "published",
     "shard_fanout",
     "num_shards",
     "num_queries",
@@ -40,37 +47,31 @@ const COUPLED_READS: &[&str] = &[
     "open_pit_count",
 ];
 
-/// The two ways of reading coherently.
-const COHERENT: [&str; 2] = ["read_on_one_layout(", "read_between_layout_changes("];
-
-/// A function whose reads are made coherent by the one function that calls it:
-/// `(function, caller)`. The caller is checked.
-const UNDER: &[(&str, &str)] = &[
-    ("compare_topology", "collect_cluster_health"),
-    ("join_rows", "collect_rows"),
-];
-
 /// A function that holds the topology guard and write admission alone, so that the only
-/// layout change that can run is its own.
+/// layout change that can run is its own. It may read as it likes.
 const ALONE: &[&str] = &["resize_worker", "remote_resize_worker"];
 
-/// A function whose reads need not belong together, and why.
-const EACH_STANDS_ALONE: &[(&str, &str)] = &[
+/// A function that reads the layout from the engine more than once, and why it may.
+const MORE_THAN_ONCE: &[(&str, &str)] = &[(
+    "cluster_get_doc",
+    "one read for each request: the existence check for HEAD, the document for GET",
+)];
+
+/// A function that compares the pinned layout with the control state. A rebuild publishes
+/// the one and then commits the other, so each of these asks whether a rebuild is running
+/// before it calls a difference a fault. That is checked.
+const JOINS: &[&str] = &["collect_cluster_health", "collect_rows"];
+
+/// A function that reports something coupled to the layout beside it without comparing the
+/// two, and why the pair need not belong together.
+const BESIDE: &[(&str, &str)] = &[
     (
-        "cluster_get_doc",
-        "one read for each request: the existence check for HEAD, the document for GET",
+        "cluster_stats",
+        "the repair count is a number of its own beside the pinned layout's counts",
     ),
     (
-        "collect_once",
-        "three counts reported beside a probe that failed",
-    ),
-    (
-        "unavailable_fallback",
-        "three counts reported beside a probe that did not finish",
-    ),
-    (
-        "rebuilding_health",
-        "counts reported beside a status that says a rebuild is replacing them",
+        "counts_beside_a_failure",
+        "counts reported with a red status, for whoever reads the failure",
     ),
     (
         "cluster_open_pit_route",
@@ -220,63 +221,101 @@ fn what_a_request_reports_about_the_layout_it_reads_from_one_layout() {
         functions.len()
     );
 
-    let combines = |function: &Function| {
-        let layout = reads(function, LAYOUT_READS);
-        layout >= 2 || (layout >= 1 && reads(function, COUPLED_READS) >= 1)
-    };
-    let coherent =
-        |function: &Function| COHERENT.iter().any(|reader| function.body.contains(reader));
-    let named = |name: &str| {
-        UNDER.iter().any(|(function, _)| *function == name)
-            || ALONE.contains(&name)
-            || EACH_STANDS_ALONE
-                .iter()
-                .any(|(function, _)| *function == name)
-    };
+    // The scan knows the engine by the name `cluster`. A parameter of that type under another
+    // name would read past it.
+    for file in &files {
+        let text = std::fs::read_to_string(file).expect("read source");
+        for (at, _) in text.match_indices("ClusterEngine") {
+            let before = text[..at].trim_end_matches("reverse_rusty::cluster::");
+            let Some(before) = before.strip_suffix(": &") else {
+                continue;
+            };
+            let name: String = before
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            assert_eq!(
+                name,
+                "cluster",
+                "{}: a parameter of type `&ClusterEngine` is named `{name}`; name it `cluster` \
+                 so this test can see what it reads",
+                file.display()
+            );
+        }
+    }
+
+    let layout_reads = |function: &Function| reads(function, LAYOUT_READS);
+    let coupled_reads = |function: &Function| reads(function, COUPLED_READS);
+    let in_pairs = |list: &[(&str, &str)], name: &str| list.iter().any(|(named, _)| *named == name);
 
     let mut violations = Vec::new();
-    for function in functions.iter().filter(|function| combines(function)) {
-        if !coherent(function) && !named(&function.name) {
+    let mut pinned = 0;
+    for function in &functions {
+        let name = function.name.as_str();
+        let (layout, coupled) = (layout_reads(function), coupled_reads(function));
+        if function.body.contains("cluster.published()") {
+            pinned += 1;
+        }
+        if ALONE.contains(&name) {
+            continue;
+        }
+        if layout >= 2 && !in_pairs(MORE_THAN_ONCE, name) {
             violations.push(format!(
-                "{}::{} reads the layout more than once, or the layout and something replaced \
-                 with it, outside `read_on_one_layout` and `read_between_layout_changes`",
-                function.file, function.name
+                "{}::{name} reads the published layout from the engine {layout} times; pin it \
+                 once with `cluster.published()` and read from the pin",
+                function.file
+            ));
+        }
+        if layout >= 1 && coupled >= 1 && !JOINS.contains(&name) && !in_pairs(BESIDE, name) {
+            violations.push(format!(
+                "{}::{name} reads the layout and something a layout change replaces with it; \
+                 name it in JOINS (it compares them) or BESIDE (it only reports them)",
+                function.file
+            ));
+        }
+    }
+    for join in JOINS {
+        let asks = functions.iter().any(|function| {
+            function.name == *join
+                && function
+                    .body
+                    .contains("cluster.layout_change_in_progress()")
+        });
+        if !asks {
+            violations.push(format!(
+                "`{join}` compares the layout with the control state and does not ask whether a \
+                 rebuild is running"
             ));
         }
     }
     // Every name on a list is a function that still needs to be there.
-    let all_named = UNDER
+    let still_twice = |function: &Function| layout_reads(function) >= 2;
+    let still_beside =
+        |function: &Function| layout_reads(function) >= 1 && coupled_reads(function) >= 1;
+    let listed: Vec<(&str, bool)> = ALONE
         .iter()
-        .map(|(function, _)| *function)
-        .chain(ALONE.iter().copied())
-        .chain(EACH_STANDS_ALONE.iter().map(|(function, _)| *function));
-    for name in all_named {
-        match functions.iter().find(|function| function.name == name) {
-            Some(function) if combines(function) && !coherent(function) => {}
-            _ => violations.push(format!(
-                "`{name}` is named as an exception and no longer combines reads outside a \
-                 coherent reader: take it off the list"
-            )),
-        }
-    }
-    for (function, caller) in UNDER {
-        let hands_it_on = functions.iter().any(|candidate| {
-            candidate.name == *caller && coherent(candidate) && candidate.body.contains(function)
+        .map(|name| (*name, true))
+        .chain(MORE_THAN_ONCE.iter().map(|(name, _)| (*name, false)))
+        .chain(JOINS.iter().map(|name| (*name, true)))
+        .chain(BESIDE.iter().map(|(name, _)| (*name, true)))
+        .collect();
+    for (name, either) in listed {
+        let needed = functions.iter().any(|function| {
+            function.name == name && (still_twice(function) || (either && still_beside(function)))
         });
-        if !hands_it_on {
+        if !needed {
             violations.push(format!(
-                "`{function}` is said to read under `{caller}`, which does not hand it to a \
-                 coherent reader"
+                "`{name}` is named as an exception and no longer needs to be: take it off the list"
             ));
         }
     }
-    let readers = functions
-        .iter()
-        .filter(|function| combines(function) && coherent(function))
-        .count();
     assert!(
-        readers >= 2,
-        "only {readers} functions read coherently; the scan is not seeing them"
+        pinned >= 4,
+        "only {pinned} functions pin the layout; the scan is not seeing them"
     );
     assert!(
         violations.is_empty(),

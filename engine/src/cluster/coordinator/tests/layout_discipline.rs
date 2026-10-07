@@ -55,6 +55,7 @@ const SEARCHES: &[&str] = &[
     "get_document",
     "document_exists",
     // what the published layout is
+    "published",
     "shard_fanout",
     "num_shards",
     "num_queries",
@@ -97,10 +98,8 @@ const LAYOUT_FREE: &[&str] = &[
     "pending_repair_ids",
     "open_pit_count",
     "ensure_resize_write_fence_open",
-    // run the caller's lock-free read, and run it again or refuse it if a layout change
-    // overlapped it
-    "read_on_one_layout",
-    "read_between_layout_changes",
+    // whether a layout change is running: a probe of the layout lock, which it does not hold
+    "layout_change_in_progress",
     // test seams: the hook a rebuild calls, and the flag a remote resize raises
     "set_rebuild_hook_for_test",
     "set_resize_write_fence_for_test",

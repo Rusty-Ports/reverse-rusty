@@ -146,15 +146,13 @@ async fn budgeted_rebalance(state: &Arc<ClusterAppState>) -> Option<(StatusCode,
     ))
 }
 
-/// `/_health`: its HTTP status, its colour, and whether its reason says a rebuild is running.
+/// `/_health`: its HTTP status, its colour, and whether it reports a rebuild in progress.
 async fn health(state: &Arc<ClusterAppState>) -> (StatusCode, String, bool) {
     let (status, body) = send(state, req_empty("GET", "/_health")).await;
     (
         status,
         body["status"].as_str().unwrap_or_default().to_string(),
-        body["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("rebuilding the cluster")),
+        body["rebuild_in_progress"].as_bool().unwrap_or_default(),
     )
 }
 
@@ -223,14 +221,14 @@ async fn searches_and_reads_answer_while_a_vocabulary_change_is_half_done() {
     assert!(failures.is_empty(), "{failures:#?}");
     assert_eq!(
         health_meanwhile,
-        (StatusCode::OK, "yellow".to_string(), true),
-        "health says the cluster serves and is rebuilding, and does not compare a topology \
-         that is being replaced"
+        (StatusCode::OK, "green".to_string(), true),
+        "a rebuild does not change the colour, since every search still answers exactly; \
+         health reports it beside the colour"
     );
     assert_eq!(
         health(&state).await,
         (StatusCode::OK, "green".to_string(), false),
-        "health is green again once the rebuild is done"
+        "health no longer reports a rebuild once it is done"
     );
     assert!(resync_waited, "a resync ran beside a vocabulary change");
     assert_eq!(resynced, StatusCode::OK, "{resync_body}");

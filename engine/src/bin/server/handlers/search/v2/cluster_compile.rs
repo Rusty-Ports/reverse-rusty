@@ -68,10 +68,10 @@ pub(super) struct CompileRequest {
 /// Check a cursor's point in time and compute the request's fingerprint, in that order.
 ///
 /// The stale gate runs first, so that a rebuilt normalizer cannot make a dead cursor look
-/// like a client's mistake. A rebuild can also swap its layout in between the gate and the
-/// fingerprint: the fingerprint is then computed under a normalizer the cursor was not minted
-/// under, and it does not match. That cursor is stale too, so the gate is asked again before
-/// the request is blamed.
+/// like a client's mistake. The caller computes the fingerprint from a layout it pinned
+/// before the gate, so a rebuild cannot come between the two. The gate is still asked again
+/// before a request is blamed for a fingerprint that does not match: a cursor that has gone
+/// stale is never reported as a mismatch, whatever the fingerprint was computed from.
 pub(super) fn cursor_fingerprint(
     cluster: &reverse_rusty::cluster::ClusterEngine,
     pit: PitId,
@@ -128,18 +128,20 @@ pub(super) async fn compile(
         let Some(pit) = pit else {
             return Ok((program, None));
         };
+        // Pinned before the stale gate. If the gate passes, the point in time is alive on
+        // the layout published then, which is this one or a later one; and a later one
+        // would have made it stale. So a cursor that passes is fingerprinted under the
+        // normalizer and dictionary it was minted under, both from one layout.
+        let layout = cluster.published();
         let fingerprint = cursor_fingerprint(cluster, pit, expected_fingerprint, || {
-            // The normalizer and the dictionary of one layout.
-            cluster.read_on_one_layout(|| {
-                crate::pit::request_fingerprint(
-                    &cluster.normalizer(),
-                    &cluster.dict(),
-                    &title,
-                    scope,
-                    &rank,
-                    &filter,
-                )
-            })
+            crate::pit::request_fingerprint(
+                &layout.normalizer(),
+                &layout.dict(),
+                &title,
+                scope,
+                &rank,
+                &filter,
+            )
         })?;
         Ok((program, Some(page::MintCtx { pit, fingerprint })))
     })

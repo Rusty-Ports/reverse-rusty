@@ -483,111 +483,61 @@ fn an_expired_deadline_still_takes_a_free_layout_lock() {
     );
 }
 
-/// Two accessors called one after the other can straddle a swap. A read on one layout is run
-/// again when that happens, and returns what it read the second time.
+/// Two accessors called one after the other can straddle a swap. A pinned layout stays what
+/// it was when it was pinned, so everything read through it belongs together.
 #[test]
-fn a_read_on_one_layout_is_run_again_when_a_swap_lands_inside_it() {
+fn a_pinned_layout_stays_what_it_was_across_a_swap() {
     let cluster = in_memory(3, 100);
-    let mut runs = 0;
-    let (counts, shards) = cluster.read_on_one_layout(|| {
-        runs += 1;
-        let counts = cluster.shard_query_counts().expect("counts");
-        if runs == 1 {
-            // The swap lands between the two reads.
-            cluster.resize(5).expect("resize");
-        }
-        (counts, cluster.num_shards())
-    });
-    assert_eq!(
-        runs, 2,
-        "a read that straddled a swap was returned as it was"
-    );
-    assert_eq!((counts.len(), shards), (5, 5));
+    let pinned = cluster.published();
+    let generation = pinned.placement_generation();
+    let dict = pinned.dict().fingerprint();
+    cluster.resize(5).expect("resize");
 
-    // With no swap it runs once.
-    let mut runs = 0;
-    let shards = cluster.read_on_one_layout(|| {
-        runs += 1;
-        cluster.num_shards()
-    });
-    assert_eq!((runs, shards), (1, 5));
+    // The engine answers from the new layout; the pin from the one it was taken on.
+    assert_eq!(cluster.num_shards(), 5);
+    assert_eq!(cluster.shard_query_counts().expect("counts").len(), 5);
+    assert_eq!(pinned.num_shards(), 3);
+    assert_eq!(pinned.shard_query_counts().expect("counts").len(), 3);
+    assert_eq!(
+        pinned.num_queries().expect("total"),
+        pinned
+            .shard_query_counts()
+            .expect("counts")
+            .iter()
+            .sum::<usize>()
+    );
+    assert_eq!(pinned.placement_generation(), generation);
+    assert_ne!(cluster.placement_generation(), generation);
+    assert_eq!(pinned.dict().fingerprint(), dict);
+    assert_eq!(pinned.out_of_sync_replicas(), 0);
+    assert_eq!(pinned.class_counts().expect("classes").len(), 5);
+
+    // A new pin is of the new layout.
+    let again = cluster.published();
+    assert_eq!(again.num_shards(), 5);
+    assert_eq!(again.placement_generation(), cluster.placement_generation());
 }
 
-/// A reader that takes no lock and combines the layout with the control state is told when a
-/// layout change overlapped it: `None` while one is running, and a second run when one came
-/// and went.
+/// A reader that compares the layout with the control state can ask whether a rebuild is in
+/// the middle of replacing them.
 #[test]
-fn a_lock_free_read_is_told_when_a_layout_change_overlapped_it() {
+fn a_layout_change_in_progress_can_be_seen_without_waiting_for_it() {
     let cluster = in_memory(3, 50);
-    let pair = || {
-        (
-            cluster.num_shards(),
-            cluster.control_state().expect("control").num_shards as usize,
-        )
-    };
-    assert_eq!(cluster.read_between_layout_changes(pair), Some((3, 3)));
-
-    // One is running from before the read to after it.
+    assert!(!cluster.layout_change_in_progress());
     let change = cluster.begin_layout_change().expect("begin");
-    let during = cluster.read_between_layout_changes(pair);
+    let during = cluster.layout_change_in_progress();
     drop(change);
-    assert_eq!(during, None, "a read beside a running change was passed");
+    assert!(during, "a running layout change was not seen");
+    assert!(!cluster.layout_change_in_progress());
 
-    // One is running when the read would start. It may already have replaced half of what
-    // the read combines, so the read is refused before it begins. A helper that began it
-    // anyway would pass it here: the change ends inside the read, and by the time the read
-    // ends nothing is running and the layout is the one it started with.
-    let mut change = Some(cluster.begin_layout_change().expect("begin"));
-    let begun_under_one = cluster.read_between_layout_changes(|| {
-        drop(change.take());
-        pair()
-    });
-    drop(change);
-    assert_eq!(
-        begun_under_one, None,
-        "a read that began under a running change was passed"
+    // An operation in flight is not a layout change.
+    let in_flight = cluster.stable();
+    let beside_an_operation = cluster.layout_change_in_progress();
+    drop(in_flight);
+    assert!(
+        !beside_an_operation,
+        "an operation in flight was taken for one"
     );
-
-    // One comes and goes inside the read: the read is run again, on the new layout.
-    let mut runs = 0;
-    let across = cluster.read_between_layout_changes(|| {
-        runs += 1;
-        if runs == 1 {
-            let before = pair();
-            cluster.resize(4).expect("resize");
-            before
-        } else {
-            pair()
-        }
-    });
-    assert_eq!((across, runs), (Some((4, 4)), 2));
-
-    // One begins inside the read and is still running when the read ends.
-    let cluster = &cluster;
-    std::thread::scope(|scope| {
-        let (begun, has_begun) = mpsc::channel();
-        let (release, released) = mpsc::channel::<()>();
-        let mut released = Some(released);
-        let overlapped = cluster.read_between_layout_changes(|| {
-            let seen = (cluster.num_shards(), 0);
-            let released = released.take().expect("the read runs once");
-            let begun = begun.clone();
-            scope.spawn(move || {
-                let change = cluster.begin_layout_change().expect("begin");
-                begun.send(()).expect("begun");
-                let _ = released.recv();
-                drop(change);
-            });
-            has_begun.recv().expect("the change began");
-            seen
-        });
-        // Released before anything can fail.
-        drop(release);
-        assert_eq!(
-            overlapped, None,
-            "a read that a change began under was passed"
-        );
-    });
 }
 
 /// An in-memory engine never runs the cleanup that forgets the layouts it has replaced.

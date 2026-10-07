@@ -192,17 +192,15 @@ pub(crate) async fn cluster_stats(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let cluster = &worker_state.cluster;
-        // The counts below are reported together, so they are read from one layout: a
-        // resize that swaps in between two of them would put eight shard counts beside a
-        // shard total of nine.
-        let counted = cluster.read_on_one_layout(|| {
-            // One count pass is enough: the aggregate is the sum of the returned
-            // per-position rows. The old path called every shard twice.
-            let per_shard = cluster.shard_query_counts()?;
-            let cc = cluster.class_counts()?;
-            Ok::<_, reverse_rusty::cluster::ShardError>((per_shard, cc, cluster.num_shards()))
-        });
-        let (per_shard, cc, shards) = counted?;
+        // The counts below are reported together, so they are read from one pinned layout:
+        // a resize that swapped in between two of them would put eight shard counts beside
+        // a shard total of nine.
+        let layout = cluster.published();
+        // One count pass is enough: the aggregate is the sum of the returned
+        // per-position rows. The old path called every shard twice.
+        let per_shard = layout.shard_query_counts()?;
+        let cc = layout.class_counts()?;
+        let shards = layout.num_shards();
         let total = per_shard
             .iter()
             .copied()
@@ -231,7 +229,7 @@ pub(crate) async fn cluster_stats(
             },
             epoch: cluster.epoch(),
             pending_repairs: cluster.pending_repairs(),
-            out_of_sync_replicas: cluster.out_of_sync_replicas(),
+            out_of_sync_replicas: layout.out_of_sync_replicas(),
             has_tagged_queries: cluster.has_tagged_queries(),
         })
     });

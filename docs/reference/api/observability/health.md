@@ -24,7 +24,7 @@ Standalone response:
 | Status | Meaning |
 |---|---|
 | `green` | Single-node durability is healthy, or every cluster position answers with no queued repair and every replica in sync |
-| `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync, or a replica is outside the in-sync set so reads cannot fail over to it (ADR-195), or a vocabulary change or resize is rebuilding the cluster (searches answer, writes wait; ADR-210) |
+| `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync, or a replica is outside the in-sync set so reads cannot fail over to it (ADR-195) |
 | `red` | Single-node WAL/persistence failure, or a required cluster shard/control/topology check failed |
 
 Cluster health uses a deliberately smaller native payload:
@@ -36,7 +36,8 @@ Cluster health uses a deliberately smaller native payload:
   "timed_out": false,
   "shards": 8,
   "pending_repairs": 0,
-  "out_of_sync_replicas": 0
+  "out_of_sync_replicas": 0,
+  "rebuild_in_progress": false
 }
 ```
 
@@ -75,10 +76,12 @@ reasons. A coordinator request that times out cannot forcibly stop already-runni
 work; that work retains its single shared stats permit until its own transport bounds complete.
 A vocabulary change or a resize does not hold that permit, so in coordinator mode a probe answers
 while one rebuilds the cluster
-([ADR-210](../../../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)). It answers
-`yellow` with a reason that says so, and does not compare the committed topology with the serving
-shards until the rebuild is done, because the rebuild replaces the one after the other.
-`wait_for_status=green` therefore waits for a rebuild to finish.
+([ADR-210](../../../decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)). A rebuild
+does not change the colour, because searches answer exactly throughout. The cluster payload
+reports it in `rebuild_in_progress`, which is `true` while a vocabulary change or a resize is
+rebuilding the cluster or is about to; writes wait until it is `false` again. While it is `true`,
+a difference between the committed topology and the serving shards is not treated as a failure,
+because the rebuild replaces the one and then the other.
 
 Coordinator green requires a successful committed control-state read, a count from every logical
 serving position, matching committed/ring shard counts, and exactly one in-range committed

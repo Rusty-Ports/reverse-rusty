@@ -19,7 +19,7 @@ use axum::{
 use serde::Deserialize;
 use tracing::{error, instrument};
 
-use reverse_rusty::cluster::{ClusterEngine, ShardAssignment, ShardError};
+use reverse_rusty::cluster::{ClusterEngine, ClusterState, ShardAssignment, ShardError};
 
 use crate::dto::ApiError;
 use crate::handlers::admin::cat_table::{
@@ -189,28 +189,42 @@ fn validate_request(
     })
 }
 
-/// The rows of the table. Each joins a serving shard with its committed assignment, and a
-/// vocabulary change or a resize replaces the one after the other. A read that no such change
-/// overlapped stands, whatever it says. One that a change overlapped stands if its two halves
-/// agree; if they do not, it is read again, for as long as a swap can take.
+/// The rows of the table: the serving shards of one pinned layout, each joined with its
+/// committed assignment.
+///
+/// A rebuild publishes its layout and then commits the control state, so for a moment the
+/// two halves do not join. They are read again while a rebuild is running or may just have
+/// finished; a difference that outlasts that is reported.
 fn collect_rows(cluster: &ClusterEngine) -> Result<Vec<CatRow>, ShardError> {
-    const TRIES: usize = 200;
+    const LOOKS: usize = 3;
     const PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
-    for _ in 0..TRIES {
-        if let Some(rows) = cluster.read_between_layout_changes(|| join_rows(cluster)) {
-            return rows;
+    const WHILE_REBUILDING: std::time::Duration = std::time::Duration::from_secs(1);
+    let started = std::time::Instant::now();
+    let mut looks = 0;
+    loop {
+        looks += 1;
+        let layout = cluster.published();
+        let counts = layout.shard_query_counts()?;
+        let control = cluster.control_state()?;
+        let rebuilding = cluster.layout_change_in_progress();
+        match join_rows(control, counts) {
+            Ok(rows) => return Ok(rows),
+            Err(difference) => {
+                let look_again = if rebuilding {
+                    started.elapsed() < WHILE_REBUILDING
+                } else {
+                    looks < LOOKS
+                };
+                if !look_again {
+                    return Err(difference);
+                }
+                std::thread::sleep(PAUSE);
+            }
         }
-        if let Ok(rows) = join_rows(cluster) {
-            return Ok(rows);
-        }
-        std::thread::sleep(PAUSE);
     }
-    join_rows(cluster)
 }
 
-fn join_rows(cluster: &ClusterEngine) -> Result<Vec<CatRow>, ShardError> {
-    let control = cluster.control_state()?;
-    let counts = cluster.shard_query_counts()?;
+fn join_rows(control: ClusterState, counts: Vec<usize>) -> Result<Vec<CatRow>, ShardError> {
     if control.num_shards as usize != counts.len() {
         return Err(ShardError::ControlPlane(format!(
             "committed shard count {} does not match the serving ring count {}",
