@@ -9,6 +9,26 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-07 — A shard outage no longer restarts the coordinator on Kubernetes
+
+- **Two probe routes, `/_health/live` and `/_health/ready`**, in both modes
+  ([ADR-211](decisions/adr-211-probes-answer-for-the-process.md)). They answer for the process
+  alone: no admission, no engine read, no call to a shard or the control plane. They need no
+  credentials.
+- **Helm: the coordinator's liveness and startup probes call `/_health/live` and its readiness
+  probe calls `/_health/ready`.** They called `/_health`, which is red when any shard is down, so
+  one shard's outage took the coordinator out of the Service after about thirty seconds and had
+  the kubelet restart it after about a minute, into a process that could not start without that
+  shard. Now the coordinator keeps running and serving; requests that need the missing shard
+  fail loudly. `/_health` is unchanged and still reports the outage.
+- **Behaviour change for an existing deployment:** on upgrade the coordinator stays Ready with a
+  shard down. To keep the old behaviour set `coordinator.probes.readiness.path=/_health`. An
+  upgrade with `--reuse-values` gets the new probes too: the templates carry their defaults.
+- Helm: every probe sets `timeoutSeconds`; the coordinator and the shards have startup probes
+  (`coordinator.probes.startup`, `shard.probes.startup`); the coordinator's liveness and startup
+  probes have their own termination grace. `deploy/check-probes.sh` checks all of this in CI, and
+  `deploy/k8s-smoke.sh` takes a shard away and checks the coordinator is not restarted.
+
 ## 2026-10-07 — A coordinator serves searches and health during a vocabulary change or resize
 
 - **A coordinator answers searches and reads while a vocabulary change or an in-process resize

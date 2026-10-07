@@ -252,6 +252,14 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
             )),
         )
         .route(
+            crate::handlers::LIVENESS_PATH,
+            any(crate::handlers::liveness::<ClusterAppState>),
+        )
+        .route(
+            crate::handlers::READINESS_PATH,
+            any(crate::handlers::readiness::<ClusterAppState>),
+        )
+        .route(
             "/_metrics",
             any(cluster_metrics).layer(axum::extract::DefaultBodyLimit::max(
                 crate::handlers::METRICS_BODY_LIMIT,

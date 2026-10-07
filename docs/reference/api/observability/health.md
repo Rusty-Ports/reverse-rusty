@@ -91,3 +91,22 @@ runs off the async request workers.
 This is deliberately not Elasticsearch/OpenSearch `/_cluster/health`. Those APIs describe Lucene
 index-shard allocation; Reverse Rusty has no honest equivalent for their index, active-primary,
 relocating, or unassigned-shard fields, so no `/_cluster/health` alias is exposed (ADR-144).
+
+## Probe routes
+
+`GET`/`HEAD /_health/live` and `GET`/`HEAD /_health/ready` answer for this process and nothing
+else ([ADR-211](../../../decisions/adr-211-probes-answer-for-the-process.md)). They are what a
+Kubernetes liveness probe and readiness probe should call.
+
+| Route | 200 means | Body |
+|---|---|---|
+| `/_health/live` | the process is up and its runtime is answering | `{"status":"alive"}` |
+| `/_health/ready` | the process has assembled its engine or cluster and is accepting connections | `{"status":"ready"}` |
+
+They take no admission, read nothing from the engine, and call no shard and no control plane, so
+they answer while `/_health` is red or waiting. They accept no parameters and no body, answer
+`HEAD` without a body, send `Cache-Control: no-store`, refuse other methods with 405 and
+`Allow: GET, HEAD`, and need no credentials even under `--auth-protect-reads`.
+
+`/_health` remains the status to watch and alert on. Do not point a liveness probe at it: it is red
+when a shard is down, and restarting the coordinator does not bring a shard back.

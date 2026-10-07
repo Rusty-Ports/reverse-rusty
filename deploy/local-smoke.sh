@@ -144,6 +144,11 @@ run_mode() { # $1 = mode name, $2 = port, rest = extra server flags
   echo "==> [$mode] start: server $* --port $port --data-dir $data"
   start_server "$log" "$@" --port "$port" --data-dir "$data"
   wait_green "$base" || fail "[$mode] server never went green"
+  # The probe routes (ADR-211), on the server's own router.
+  [[ "$(req -fs "$base/_health/live" | jq -r '.status')" == "alive" ]] ||
+    fail "[$mode] /_health/live did not answer alive"
+  [[ "$(req -fs "$base/_health/ready" | jq -r '.status')" == "ready" ]] ||
+    fail "[$mode] /_health/ready did not answer ready"
 
   # ADR-062 posture: with a token set, a write WITHOUT the bearer is a 401.
   code=$(req -s -o /dev/null -w '%{http_code}' -X PUT "$base/_doc/1" \

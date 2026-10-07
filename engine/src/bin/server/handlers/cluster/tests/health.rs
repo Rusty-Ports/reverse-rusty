@@ -328,3 +328,85 @@ async fn probe_completed_after_deadline_is_still_timed_out() {
     assert_eq!(body["status"], "green");
     assert_eq!(body["timed_out"], true);
 }
+
+/// The probe routes answer for this process and nothing else (ADR-211). With a shard or the
+/// control plane failing, `/_health` is red, as it should be; a liveness or readiness probe
+/// pointed at it would restart a healthy coordinator or take it out of service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_probes_answer_while_health_is_red() {
+    let state = broken_control_state();
+    let (health, _, _) = send_raw(&state, req_empty("GET", "/_health")).await;
+    assert_eq!(health, StatusCode::SERVICE_UNAVAILABLE);
+    for (path, says) in [("/_health/live", "alive"), ("/_health/ready", "ready")] {
+        let (status, headers, bytes) = send_raw(&state, req_empty("GET", path)).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(
+            headers.get(header::CACHE_CONTROL).expect("cache"),
+            "no-store"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+        assert_eq!(body, serde_json::json!({ "status": says }), "{path}");
+        let (status, _, bytes) = send_raw(&state, req_empty("HEAD", path)).await;
+        assert_eq!(status, StatusCode::OK, "HEAD {path}");
+        assert!(bytes.is_empty(), "HEAD {path} has a body");
+    }
+}
+
+/// They take no admission. With the administrative slot held (a stats scan against a slow
+/// shard holds it for as long as the scan takes) and every health permit taken, `/_health`
+/// waits or is refused, and the probes still answer at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_probes_answer_while_health_cannot_be_admitted() {
+    let state = test_state(&seed());
+    let slot = Arc::clone(&state.stats_permits)
+        .acquire_owned()
+        .await
+        .expect("administrative slot");
+    let health_state = Arc::clone(&state);
+    let health =
+        tokio::spawn(async move { send_raw(&health_state, req_empty("GET", "/_health")).await });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let health_waited = !health.is_finished();
+    let every_health_permit = Arc::clone(&state.health_permits)
+        .acquire_many_owned(state.health_permits.available_permits() as u32)
+        .await
+        .expect("health permits");
+    let mut answers = Vec::new();
+    for path in ["/_health/live", "/_health/ready"] {
+        let answer = tokio::time::timeout(
+            Duration::from_millis(500),
+            send_raw(&state, req_empty("GET", path)),
+        )
+        .await;
+        answers.push((path, answer.map(|(status, _, _)| status)));
+    }
+    // Released before anything can fail.
+    drop(every_health_permit);
+    drop(slot);
+    let _ = health.await;
+    assert!(
+        health_waited,
+        "health did not wait for the administrative slot"
+    );
+    for (path, answer) in answers {
+        assert_eq!(
+            answer.ok(),
+            Some(StatusCode::OK),
+            "{path} waited for admission"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_probes_accept_only_get_and_head() {
+    let state = test_state(&seed());
+    for path in ["/_health/live", "/_health/ready"] {
+        for method in ["POST", "PUT", "DELETE"] {
+            let (status, headers, bytes) = send_raw(&state, req_empty(method, path)).await;
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+            assert_eq!(headers.get(header::ALLOW).expect("allow"), "GET, HEAD");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON error");
+            assert_eq!(body["error"]["type"], "method_not_allowed", "{body}");
+        }
+    }
+}

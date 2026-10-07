@@ -23,8 +23,9 @@ requires the token. Exhaustive job inspection/streaming stays open through GET; 
 DELETE is protected. The default-deny rule also covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
 `_forcemerge`, `_backup`, `_vocab` writes (including `/_vocab/learn*` and
 `/_vocab/aliases/*`), `_settings` writes, and any future mutating endpoint. `--auth-protect-reads`
-extends the gate to every read surface in the allowlist/GET/HEAD set; only `GET`/`HEAD /_health`
-remains open for liveness probes.
+extends the gate to every read surface in the allowlist/GET/HEAD set; only `GET`/`HEAD` on
+`/_health` and the two probe routes (`/_health/live`, `/_health/ready`) remain open, because a
+probe cannot send credentials.
 
 Failures return **401** with the standard error envelope (`"type": "security_exception"`) and an
 RFC 6750 `WWW-Authenticate: Bearer` challenge (`error="invalid_token"` when a wrong token was

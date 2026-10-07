@@ -177,7 +177,8 @@ query, an always-candidate is returned only when the request includes the broad 
 
 | Check | Endpoint | Meaning |
 |---|---|---|
-| Liveness/readiness | `GET`/`HEAD /_health` | `green` = every shard and the complete committed topology validate; `yellow` = repairs are queued or a replica is out of sync; `red`/`503` = a required shard/control/topology check failed (ADR-144). |
+| Probes | `GET`/`HEAD /_health/live`, `/_health/ready` | 200 = this coordinator process is up and has assembled its cluster. They do not look at shards or the control plane, and they are what a liveness or readiness probe should call (ADR-211). |
+| Cluster status | `GET`/`HEAD /_health` | `green` = every shard and the complete committed topology validate; `yellow` = repairs are queued or a replica is out of sync; `red`/`503` = a required shard/control/topology check failed (ADR-144). |
 | Corpus + segments | `GET /_stats` | Physical `total_queries` and per-position `shard_queries[]` (includes tombstones and content-driven copies; ADR-140). |
 | Per-shard view | `GET /_cat/shards` | Logical position → physical stored-query count + committed node assignment (ADR-143). |
 

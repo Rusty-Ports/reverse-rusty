@@ -104,12 +104,16 @@ impl AuthConfig {
 ///
 /// All non-GET `/_vocab*` verbs are protected — including the compute-only
 /// `/_vocab/learn` — because they are operator surface. Under `protect_reads`
-/// only `GET`/`HEAD /_health` stay open: Kubernetes-style liveness probes
-/// cannot send credentials, and the endpoint exposes only sanitized readiness
-/// data.
+/// only `GET`/`HEAD` on `/_health` and the two probe routes (`/_health/live`,
+/// `/_health/ready`) stay open: a Kubernetes probe cannot send credentials, and
+/// these expose only sanitized readiness data.
 pub(crate) fn requires_auth(method: &Method, path: &str, protect_reads: bool) -> bool {
     if protect_reads {
-        return !(path == "/_health" && (*method == Method::GET || *method == Method::HEAD));
+        // The probe routes are open for the same reason as `/_health`, and say less.
+        let probe = path == "/_health"
+            || path == crate::handlers::LIVENESS_PATH
+            || path == crate::handlers::READINESS_PATH;
+        return !(probe && (*method == Method::GET || *method == Method::HEAD));
     }
     // ES/OpenSearch expose flush through GET as well as POST. It is still a
     // mutating maintenance operation, so the compatibility verb must not ride
@@ -302,6 +306,13 @@ mod tests {
         assert!(requires_auth(&Method::POST, "/_health", true));
         assert!(!requires_auth(&Method::GET, "/_health", true));
         assert!(!requires_auth(&Method::HEAD, "/_health", true));
+        // A kubelet cannot send credentials: the probe routes are open too (ADR-211).
+        for path in ["/_health/live", "/_health/ready"] {
+            assert!(!requires_auth(&Method::GET, path, true), "{path}");
+            assert!(!requires_auth(&Method::HEAD, path, true), "{path}");
+            assert!(requires_auth(&Method::POST, path, true), "{path}");
+        }
+        assert!(requires_auth(&Method::GET, "/_health/other", true));
     }
 
     // -- token resolution

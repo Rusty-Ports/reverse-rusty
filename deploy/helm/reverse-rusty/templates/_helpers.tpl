@@ -60,3 +60,34 @@ do at the boundary, collapsing shard/control/coordinator onto the same name).
 {{- $i := .index -}}
 {{- printf "%s-%d.%s.%s.svc.%s" (include "reverse-rusty.controlName" .root) $i (include "reverse-rusty.controlName" .root) .root.Release.Namespace .root.Values.clusterDomain -}}
 {{- end -}}
+
+{{/*
+Probe settings (ADR-211): the chart's defaults, under whatever the values set.
+
+The defaults are written here as well as in values.yaml because `helm upgrade --reuse-values`
+renders with the values a release was installed with, and a release installed before these
+settings existed has no `probes` map at all. Without the defaults here such an upgrade would
+fail to render, or render a coordinator with no probes. deploy/check-probes.sh renders the
+chart both ways and fails if the two disagree.
+*/}}
+{{- define "reverse-rusty.coordinatorProbes" -}}
+{{- $defaults := dict
+    "liveness" (dict "path" "/_health/live" "periodSeconds" 10 "timeoutSeconds" 3 "failureThreshold" 6 "terminationGracePeriodSeconds" 30)
+    "readiness" (dict "path" "/_health/ready" "periodSeconds" 10 "timeoutSeconds" 3 "failureThreshold" 3)
+    "startup" (dict "periodSeconds" 5 "timeoutSeconds" 3 "failureThreshold" 60 "terminationGracePeriodSeconds" 30) -}}
+{{- $set := deepCopy (((.Values.coordinator | default dict).probes) | default dict) -}}
+{{- mustMergeOverwrite $defaults $set | toYaml -}}
+{{- end -}}
+
+{{- define "reverse-rusty.shardProbes" -}}
+{{- $defaults := dict "timeoutSeconds" 3 "startup" (dict "periodSeconds" 10 "failureThreshold" 60) -}}
+{{- $set := deepCopy (((.Values.shard | default dict).probes) | default dict) -}}
+{{- mustMergeOverwrite $defaults $set | toYaml -}}
+{{- end -}}
+
+{{- define "reverse-rusty.controlProbes" -}}
+{{- $defaults := dict "timeoutSeconds" 3 -}}
+{{- $set := deepCopy (((.Values.controlPlane | default dict).probes) | default dict) -}}
+{{- mustMergeOverwrite $defaults $set | toYaml -}}
+{{- end -}}
+

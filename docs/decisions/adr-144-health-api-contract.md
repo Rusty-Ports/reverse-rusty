@@ -71,6 +71,14 @@ The endpoint remains deliberately native. ES/OpenSearch clients that require
 coordinator request can leave a detached blocking probe running until its transport-level bounds
 complete; its stats permit remains held during that work, preventing unbounded fan-out.
 
+## Later outcome — 2026-10-07
+
+`/_health` is no longer what the Helm chart's probes call. Two process-local routes,
+`/_health/live` and `/_health/ready`, answer for the process alone, and the kubelet acts on those
+([ADR-211](adr-211-probes-answer-for-the-process.md)). This contract is unchanged: `/_health` is
+still strict and still red when a shard or the control plane does not answer. It is the status an
+operator watches, and "readiness" in this ADR means that, not the kubelet's readiness probe.
+
 ## Later outcome — 2026-10-06
 
 The "server-wide request" limit this ADR measures the health surface against is a limit per

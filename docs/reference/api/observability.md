@@ -11,5 +11,6 @@ Machine-readable state, human-readable CAT views, readiness, and metrics.
 | [`GET /_cat/segments`](observability/cat-segments.md) | Per-segment LSM detail with strict CAT controls. | Single-node only |
 | [`GET /_cat/shards`](observability/cat-shards.md) | Logical shard counts and committed assignments. | Coordinator mode |
 | [`GET\|HEAD /_cluster/state[/_all\|/version]`](observability/cluster-state.md) | Authoritative control-plane state or exact version projection. | Coordinator mode |
-| [`GET\|HEAD /_health`](observability/health.md) | Waitable, fail-loud readiness status. | Single-node and coordinator modes |
+| [`GET\|HEAD /_health`](observability/health.md) | Waitable, fail-loud status of the engine or the whole cluster. | Single-node and coordinator modes |
+| [`GET\|HEAD /_health/live`, `/_health/ready`](observability/health.md#probe-routes) | Process-local liveness and readiness probes. | Single-node and coordinator modes |
 | [`GET\|HEAD /_metrics`](observability/metrics.md) | Prometheus text-format metrics with complete coordinator collection. | Single-node and coordinator modes |

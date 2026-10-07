@@ -253,6 +253,12 @@ kubectl rollout status statefulset/rr-reverse-rusty-shard   --timeout=10m
 kubectl rollout status deployment/rr-reverse-rusty-coordinator --timeout=10m
 ```
 
+`--reuse-values` renders the new chart with the values the release was installed with, so a
+setting the chart has gained since then is not in them. The chart's templates carry the defaults
+for those (the probe settings of ADR-211 are the first), so the upgrade renders and gets them.
+`--reset-then-reuse-values` (Helm 3.14 and later) is the flag that applies a chart's new defaults
+in general.
+
 What the chart guarantees while that runs:
 
 - Both StatefulSets set `updateStrategy: RollingUpdate` explicitly: pods restart **one at a time,
