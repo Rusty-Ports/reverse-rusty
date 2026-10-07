@@ -318,10 +318,7 @@ impl ClusterEngine {
         let per_shard = config.map(|c| c.per_shard.clone()).unwrap_or_default();
 
         // The log is opened, or refused, BEFORE any shard is attached (see `open_cluster_log`).
-        let super::cluster_log::OpenedLog {
-            log,
-            was_lost: log_was_lost,
-        } = super::cluster_log::open_cluster_log(&data_dir, &manifest, config)?;
+        let log = super::cluster_log::open_cluster_log(&data_dir, &manifest, config)?;
 
         // Attach each shard's committed compiled segments (mmap) against the shared dict —
         // NOT re-ingest. Fails loud on a missing / CRC-corrupt segment (a skipped segment
@@ -470,18 +467,6 @@ impl ClusterEngine {
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
         // log tail strictly after snapshot_pos, through the SAME apply funnel as live
         // writes — those entries are not in the attached segments, so no double-apply.
-        if log_was_lost {
-            engine.emit(EngineEvent::DurabilityFailure {
-                op: DurabilityOp::LogLost,
-                detail: "the cluster log was missing and `accept_lost_log` is set: started \
-                         with an empty one"
-                    .to_string(),
-                error: format!(
-                    "every write acknowledged after log position {} (manifest epoch {}) is lost",
-                    manifest.snapshot_pos, manifest.epoch
-                ),
-            });
-        }
         let replay = engine.log.replay(LogPos(manifest.snapshot_pos))?;
         if replay.skipped_bytes > 0 {
             engine.emit(EngineEvent::DurabilityFailure {

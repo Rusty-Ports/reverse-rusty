@@ -8,14 +8,6 @@ use crate::cluster::coordinator::{ClusterConfig, ClusterEngine, CLUSTER_LOG_FILE
 use crate::cluster::shard::ShardError;
 use crate::storage::ClusterManifest;
 
-/// The cluster log of a reopened cluster, and whether it had been lost and the loss accepted.
-pub(super) struct OpenedLog {
-    pub(super) log: FileClusterLog,
-    /// The manifest said the log existed, it was gone, and `accept_lost_log` was set: an
-    /// empty log was put in its place. The caller reports it.
-    pub(super) was_lost: bool,
-}
-
 /// Open the cluster log under `manifest`, or refuse.
 ///
 /// A manifest at epoch 1 or later was written by a checkpoint, which needs the log open and
@@ -32,40 +24,35 @@ pub(super) struct OpenedLog {
 ///
 /// This runs before any shard is attached: attaching resets a shard's translog, and when the
 /// cluster log is gone those translogs are the only place its writes still exist. An open
-/// that is going to refuse must not have touched them.
+/// that refuses must not have touched them.
 pub(super) fn open_cluster_log(
     data_dir: &Path,
     manifest: &ClusterManifest,
     config: Option<&ClusterConfig>,
-) -> Result<OpenedLog, ShardError> {
+) -> Result<FileClusterLog, ShardError> {
     let refused = |e: std::io::Error| ShardError::Log(format!("opening cluster log: {e}"));
     let log_path = data_dir.join(CLUSTER_LOG_FILE);
     let fsync = config.is_some_and(|c| c.wal_sync_on_write);
-    let accept_lost_log = config.is_some_and(|c| c.accept_lost_log);
-    let written_with_its_log = manifest.written_with_its_log();
-    let was_lost = written_with_its_log && !log_path.exists();
-    if was_lost && !accept_lost_log {
-        return Err(refused(crate::storage::framed_log::lost_log(
-            &log_path,
-            &format!(
-                "the cluster manifest (epoch {}, log position {}) was written after it existed",
-                manifest.epoch, manifest.snapshot_pos
-            ),
-            "Restore the data directory from a backup, or start once with `accept_lost_log` \
-             (`--accept-lost-log`) to continue from the last checkpoint without those writes.",
-        )));
-    }
-    if !written_with_its_log {
-        FileClusterLog::finish_interrupted_creation(&log_path).map_err(refused)?;
-    }
-    let if_missing = if written_with_its_log && !was_lost {
+    let if_missing = if manifest.written_with_its_log() {
+        if !log_path.exists() {
+            return Err(refused(crate::storage::framed_log::lost_log(
+                &log_path,
+                &format!(
+                    "the cluster manifest (epoch {}, log position {}) was written after it \
+                     existed",
+                    manifest.epoch, manifest.snapshot_pos
+                ),
+                "Restore the data directory from a backup. The shards' translogs have not \
+                 been touched.",
+            )));
+        }
         IfMissing::Refuse
     } else {
+        FileClusterLog::finish_interrupted_creation(&log_path).map_err(refused)?;
         IfMissing::Create
     };
-    let log = FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos), if_missing)
-        .map_err(refused)?;
-    Ok(OpenedLog { log, was_lost })
+    FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos), if_missing)
+        .map_err(refused)
 }
 
 impl ClusterEngine {

@@ -137,11 +137,6 @@ impl PrometheusMetrics {
             &["op"],
         )
         .unwrap();
-        // Every operation is listed at zero from the start: a series that first appears at 1
-        // shows no increase, and the alert on this counter is on its increase (ADR-213).
-        for op in reverse_rusty::events::DurabilityOp::ALL {
-            let _ = durability_failures_total.with_label_values(&[op.as_str()]);
-        }
 
         let flush_time_seconds_total = Counter::with_opts(Opts::new(
             "flush_time_seconds_total",

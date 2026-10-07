@@ -27,28 +27,6 @@ groups:
           summary: "Shard {{ $labels.shard }} not serving (pending or lost its dict) for 5m"
           runbook: docs/operations/alerting.md#rrshardnotready
 
-      - alert: RRShardLogLost
-        # The node was started with --accept-lost-log and a shard's translog was gone
-        # (ADR-213): the writes since that shard's checkpoint are lost. On the VALUE, not an
-        # increase: the loss happens at start-up, before the first scrape, so the series
-        # begins at 1 and never rises. It clears when the node is restarted without the flag.
-        expr: reverse_rusty_shard_durability_failures_total{op="log_lost"} > 0
-        labels:
-          severity: page
-        annotations:
-          summary: "Shard node {{ $labels.instance }} started without a lost translog — acknowledged writes are gone"
-          runbook: docs/operations/alerting.md#rrshardloglost
-
-      - alert: RRShardDurabilityFailure
-        # Any other durability event a shard node's shards reported. A repaired torn tail
-        # after a crash (wal_torn_tail) is routine and is left out.
-        expr: increase(reverse_rusty_shard_durability_failures_total{op!~"log_lost|wal_torn_tail"}[5m]) > 0
-        labels:
-          severity: page
-        annotations:
-          summary: "Shard node {{ $labels.instance }} reported a durability failure ({{ $labels.op }}) in the last 5m"
-          runbook: docs/operations/alerting.md#rrsharddurabilityfailure
-
       - alert: RRShardCompactionBacklog
         # Tombstoned-but-not-compacted entries growing without a compaction catching up.
         # Threshold: tune to corpus size (this fires at 1M dead entries sustained).
@@ -150,18 +128,6 @@ groups:
         annotations:
           summary: "Durability failure recorded in the last 5m — investigate disk NOW"
           runbook: docs/operations/alerting.md#rrdurabilityfailure
-
-      - alert: RRLogLost
-        # The server was started with --accept-lost-log and its log was gone (ADR-213): the
-        # writes since the last flush or checkpoint are lost. On the VALUE, not an increase:
-        # the loss happens at start-up, before the first scrape, so the series begins at 1
-        # and never rises. It clears when the server is restarted without the flag.
-        expr: reverse_rusty_durability_failures_total{op="log_lost"} > 0
-        labels:
-          severity: page
-        annotations:
-          summary: "Server {{ $labels.instance }} started without its lost log — acknowledged writes are gone"
-          runbook: docs/operations/alerting.md#rrloglost
 
       - alert: RRTransportErrors
         # The coordinator's fan-out is failing loud against some shard (ADR-085) — reads are

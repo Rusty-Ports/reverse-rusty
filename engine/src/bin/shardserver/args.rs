@@ -89,11 +89,7 @@ pub(crate) fn parse(args: &[String]) -> Result<ShardServerArgs, String> {
         max_grpc_request_bytes: DEFAULT_MAX_GRPC_REQUEST_BYTES,
         max_concurrent_exhaustive_streams: DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
         max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
-        engine: EngineConfig {
-            // Presence flag, like `--pending`: start although the translog is gone (ADR-213).
-            accept_lost_log: args.iter().any(|a| a == "--accept-lost-log"),
-            ..EngineConfig::default()
-        },
+        engine: EngineConfig::default(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -249,15 +245,8 @@ pub(crate) fn engine_banner(engine: &EngineConfig, durable: bool) -> String {
         (true, true) => "fsync on every write (survives power loss)",
         (true, false) => "fsync at flush checkpoints (survives a process crash)",
     };
-    // Said at every start while the flag is set, so that one left in place is seen (ADR-213).
-    let lost_log = if engine.accept_lost_log {
-        "; --accept-lost-log IS SET: a shard whose translog is gone starts from its checkpoint \
-         without the writes that were in it. Remove the flag after this start"
-    } else {
-        ""
-    };
     format!(
-        "translog {fsync}; retain-source {}; max-segments {}; memtable-flush-threshold {}{lost_log}",
+        "translog {fsync}; retain-source {}; max-segments {}; memtable-flush-threshold {}",
         engine.retain_source, engine.max_segments, engine.memtable_flush_threshold
     )
 }
@@ -269,24 +258,6 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn a_lost_translog_is_accepted_only_when_asked() {
-        let default = parse(&args(&["0.0.0.0:50051", "--data-dir", "/data"])).expect("valid");
-        assert!(!default.engine.accept_lost_log);
-        let asked = parse(&args(&[
-            "0.0.0.0:50051",
-            "--data-dir",
-            "/data",
-            "--accept-lost-log",
-        ]))
-        .expect("valid");
-        assert!(asked.engine.accept_lost_log);
-        assert_eq!(asked.addr.as_deref(), Some("0.0.0.0:50051"));
-        // The banner says so at every start while the flag is set, and not otherwise.
-        assert!(engine_banner(&asked.engine, true).contains("--accept-lost-log IS SET"));
-        assert!(!engine_banner(&default.engine, true).contains("accept-lost-log"));
     }
 
     #[test]

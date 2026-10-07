@@ -321,16 +321,6 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = false)]
     pub(crate) recover_divergent_replicas: bool,
 
-    /// Start although the log is gone (ADR-213). A data directory whose commit record says a
-    /// log existed (`wal.log` beside a manifest in single-node mode; `cluster.log` beside a
-    /// cluster manifest in coordinator mode) is refused at startup when that log is missing:
-    /// the writes acknowledged since the last flush or checkpoint were in it. With this flag
-    /// the server starts from that flush or checkpoint with an empty log, and reports the
-    /// loss as a `log_lost` durability event. It changes nothing when the log is there. Pass
-    /// it for one start, to accept a loss that has already happened, then remove it.
-    #[arg(long, default_value_t = false)]
-    pub(crate) accept_lost_log: bool,
-
     /// Run the unattended re-point reconciler every N seconds (ADR-092): periodically reconcile the
     /// committed shard→node map to the desired HRW placement by MOVING data (not the underlying
     /// map-only library primitive), so a membership change converges routing automatically with no
@@ -441,7 +431,6 @@ impl Cli {
             },
             wal_sync_on_write: self.wal_sync_on_write,
             recover_divergent_replicas: self.recover_divergent_replicas,
-            accept_lost_log: self.accept_lost_log,
             ..reverse_rusty::cluster::ClusterConfig::default()
         }
     }
@@ -467,7 +456,6 @@ impl Cli {
             broad_materialize: self.broad_materialize,
             max_percolate_batch: self.max_percolate_batch,
             accept_class_d: self.accept_class_d,
-            accept_lost_log: self.accept_lost_log,
             ..reverse_rusty::config::EngineConfig::default()
         }
     }
@@ -487,27 +475,6 @@ mod tests {
 
     /// Recovery discards a replica's data, so it happens only when the operator asks, and
     /// the request has to reach the cluster configuration.
-    /// One flag for both modes: the single-node engine reads it from the engine
-    /// configuration, the coordinator from the cluster configuration.
-    #[test]
-    fn a_lost_log_is_accepted_only_when_asked_in_both_modes() {
-        let parse = |args: &[&str]| Cli::try_parse_from(args).expect("arguments");
-        let default = parse(&["reverse-rusty-server"]);
-        assert!(!default.engine_config().accept_lost_log);
-        assert!(
-            !default
-                .cluster_config(3, default.engine_config(), true)
-                .accept_lost_log
-        );
-        let asked = parse(&["reverse-rusty-server", "--accept-lost-log"]);
-        assert!(asked.engine_config().accept_lost_log);
-        assert!(
-            asked
-                .cluster_config(3, asked.engine_config(), true)
-                .accept_lost_log
-        );
-    }
-
     #[test]
     fn divergent_replicas_are_recovered_only_when_asked() {
         let config = |args: &[&str]| {

@@ -95,38 +95,9 @@ pub enum DurabilityOp {
     /// Reconstructing remote create-only admission failed. No mutation or match
     /// data was lost; explicit upserts remain available while creates fail closed.
     LogicalIdDirectory,
-    /// A log that the store's commit record says existed was not there at startup, and the
-    /// operator asked to start without it (`accept_lost_log`, ADR-213): the store opened
-    /// with an empty log in its place. Every write acknowledged since the last checkpoint
-    /// or flush is gone. Data at risk. Without that request the store refuses to open.
-    LogLost,
 }
 
 impl DurabilityOp {
-    /// Every operation, in declaration order. A metrics exposition lists each of them at
-    /// zero from the start: a counter series that first appears at 1 shows no increase, so an
-    /// alert on the increase would miss the first failure of its kind (ADR-213).
-    pub const ALL: [DurabilityOp; 18] = [
-        DurabilityOp::WalInit,
-        DurabilityOp::WalAppend,
-        DurabilityOp::WalCheckpoint,
-        DurabilityOp::WalReset,
-        DurabilityOp::SegmentWrite,
-        DurabilityOp::SegmentMmap,
-        DurabilityOp::SegmentRecovery,
-        DurabilityOp::ManifestWrite,
-        DurabilityOp::SourceStoreWrite,
-        DurabilityOp::SourceStoreRemap,
-        DurabilityOp::SourceStoreLoad,
-        DurabilityOp::WalTornTail,
-        DurabilityOp::IngestRollback,
-        DurabilityOp::Compaction,
-        DurabilityOp::ReplicaDesync,
-        DurabilityOp::ClusterPartialApply,
-        DurabilityOp::LogicalIdDirectory,
-        DurabilityOp::LogLost,
-    ];
-
     /// Stable snake_case identifier, suitable as a metric label value or a
     /// structured-log field. Kept in lockstep with the variant set.
     #[must_use]
@@ -149,7 +120,6 @@ impl DurabilityOp {
             DurabilityOp::ReplicaDesync => "replica_desync",
             DurabilityOp::ClusterPartialApply => "cluster_partial_apply",
             DurabilityOp::LogicalIdDirectory => "logical_id_directory",
-            DurabilityOp::LogLost => "log_lost",
         }
     }
 
@@ -167,8 +137,7 @@ impl DurabilityOp {
             | DurabilityOp::SegmentRecovery
             | DurabilityOp::ManifestWrite
             | DurabilityOp::IngestRollback
-            | DurabilityOp::ClusterPartialApply
-            | DurabilityOp::LogLost => true,
+            | DurabilityOp::ClusterPartialApply => true,
             DurabilityOp::WalCheckpoint
             | DurabilityOp::WalReset
             | DurabilityOp::SourceStoreWrite
@@ -459,50 +428,4 @@ pub struct SegmentInfo {
     /// logical→local reverse index, and liveness overlay. Real for **both** kinds
     /// (an mmap'd segment still keeps these structures resident).
     pub overhead_bytes: usize,
-}
-
-#[cfg(test)]
-mod durability_op_tests {
-    use super::DurabilityOp;
-
-    /// `ALL` lists every operation once. The match is exhaustive, so a new operation does
-    /// not compile until it is given a place here, and the assertions then fail until it is
-    /// added to `ALL` at that place.
-    #[test]
-    fn all_lists_every_operation_once() {
-        fn place(op: DurabilityOp) -> usize {
-            match op {
-                DurabilityOp::WalInit => 0,
-                DurabilityOp::WalAppend => 1,
-                DurabilityOp::WalCheckpoint => 2,
-                DurabilityOp::WalReset => 3,
-                DurabilityOp::SegmentWrite => 4,
-                DurabilityOp::SegmentMmap => 5,
-                DurabilityOp::SegmentRecovery => 6,
-                DurabilityOp::ManifestWrite => 7,
-                DurabilityOp::SourceStoreWrite => 8,
-                DurabilityOp::SourceStoreRemap => 9,
-                DurabilityOp::SourceStoreLoad => 10,
-                DurabilityOp::WalTornTail => 11,
-                DurabilityOp::IngestRollback => 12,
-                DurabilityOp::Compaction => 13,
-                DurabilityOp::ReplicaDesync => 14,
-                DurabilityOp::ClusterPartialApply => 15,
-                DurabilityOp::LogicalIdDirectory => 16,
-                DurabilityOp::LogLost => 17,
-            }
-        }
-        assert_eq!(DurabilityOp::ALL.len(), 18);
-        for (index, op) in DurabilityOp::ALL.iter().enumerate() {
-            assert_eq!(place(*op), index, "{}", op.as_str());
-        }
-        let mut names: Vec<&str> = DurabilityOp::ALL.iter().map(|op| op.as_str()).collect();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(
-            names.len(),
-            DurabilityOp::ALL.len(),
-            "two operations share a name"
-        );
-    }
 }

@@ -101,7 +101,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(dir) => ShardServer::open_durable(norm, engine_cfg.clone(), dir.clone())?,
             None => ShardServer::pending(norm, engine_cfg.clone()),
         };
-        server.set_event_sink(report_durability_event);
         let server = server
             .with_rank_profiles(Arc::clone(&rank_profiles))
             .with_max_grpc_result_bytes(max_grpc_result_bytes)?
@@ -163,7 +162,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         None => ShardServer::new(Arc::clone(&norm), Arc::new(dict), engine_cfg.clone()),
     };
-    server.set_event_sink(report_durability_event);
     let server = server
         .with_rank_profiles(rank_profiles)
         .with_max_grpc_result_bytes(max_grpc_result_bytes)?
@@ -232,15 +230,6 @@ fn configure(
     match health_addr {
         Some(addr) => server.with_health_addr(addr),
         None => server,
-    }
-}
-
-/// Print what this node's shards report about durability (ADR-213). The library reports
-/// through events and does not log; this is where a shard node's become visible. They are
-/// also counted in `reverse_rusty_shard_durability_failures_total` on `--metrics-addr`.
-fn report_durability_event(event: &reverse_rusty::events::EngineEvent) {
-    if let reverse_rusty::events::EngineEvent::DurabilityFailure { op, detail, error } = event {
-        eprintln!("DURABILITY {}: {detail}: {error}", op.as_str());
     }
 }
 

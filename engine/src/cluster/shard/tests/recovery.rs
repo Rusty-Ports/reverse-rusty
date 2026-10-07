@@ -156,9 +156,10 @@ fn a_restarting_shard_is_not_given_an_empty_translog() {
 /// A restarting shard has a checkpoint file, written after its translog existed. A translog
 /// that is not there has been lost with every write the shard acknowledged since that
 /// checkpoint, and the shard is refused; before ADR-213 it made an empty one and served
-/// without them. With `accept_lost_log` it starts from its checkpoint and says what it lost.
+/// without them. The refusal changes nothing: with the translog back the shard restarts with
+/// its row.
 #[test]
-fn a_restarting_shard_whose_translog_is_gone_is_refused_unless_the_loss_is_accepted() {
+fn a_restarting_shard_whose_translog_is_gone_is_refused() {
     let norm = Arc::new(Normalizer::default_vocab().unwrap());
     let mut dict = Dict::new();
     let mut lc = String::new();
@@ -176,7 +177,7 @@ fn a_restarting_shard_whose_translog_is_gone_is_refused_unless_the_loss_is_accep
         wal_sync_on_write: true,
         ..EngineConfig::default()
     };
-    let open = |config: &EngineConfig| {
+    let open = || {
         LocalShard::new_durable(
             Arc::clone(&norm),
             Arc::clone(&dict),
@@ -184,62 +185,38 @@ fn a_restarting_shard_whose_translog_is_gone_is_refused_unless_the_loss_is_accep
             config.clone(),
         )
     };
-    let lost_log_events = |shard: &LocalShard| -> Vec<String> {
-        shard
-            .set_event_sink(Arc::new(|_| {}))
-            .into_iter()
-            .filter_map(|event| match event {
-                EngineEvent::DurabilityFailure {
-                    op: DurabilityOp::LogLost,
-                    error,
-                    ..
-                } => Some(error),
-                _ => None,
-            })
-            .collect()
-    };
-    let shard = open(&config).expect("a fresh durable shard");
+    let shard = open().expect("a fresh durable shard");
     shard
         .insert_extracted_with_tags(&extracted, 1, 1, "wireless mouse", &[])
         .unwrap();
     drop(shard);
     let path = dir.join(TRANSLOG_FILE);
+    let held = std::fs::read(&path).expect("the translog");
     std::fs::remove_file(&path).expect("lose the translog");
 
-    match open(&config) {
-        Err(error) => {
-            let reason = error.to_string();
-            assert!(
-                reason.contains("is missing") && reason.contains("accept_lost_log"),
-                "refused for another reason: {reason}"
-            );
+    for attempt in 1..=2 {
+        match open() {
+            Err(error) => {
+                let reason = error.to_string();
+                assert!(
+                    reason.contains("is missing") && reason.contains("Recover the shard"),
+                    "refused for another reason: {reason}"
+                );
+            }
+            Ok(shard) => panic!(
+                "attempt {attempt}: restarted without its translog; it holds {:?}",
+                shard.live_logical_ids().unwrap()
+            ),
         }
-        Ok(shard) => panic!(
-            "restarted without its translog; it holds {:?}",
-            shard.live_logical_ids().unwrap()
-        ),
+        assert!(!path.exists(), "a refused restart created a translog");
     }
-    assert!(!path.exists(), "a refused restart created a translog");
 
-    let accepting = EngineConfig {
-        accept_lost_log: true,
-        ..config.clone()
-    };
-    let shard = open(&accepting).expect("the loss was accepted");
-    let lost = lost_log_events(&shard);
-    assert_eq!(lost.len(), 1, "the loss is reported once: {lost:?}");
-    assert!(shard.live_logical_ids().unwrap().is_empty());
-    shard
-        .insert_extracted_with_tags(&extracted, 2, 1, "wireless mouse", &[])
-        .unwrap();
-    drop(shard);
-
-    // The translog exists again: no flag is needed, and nothing is reported. The flag
-    // changes nothing when the translog is there.
-    for config in [&config, &accepting] {
-        let shard = open(config).expect("restart");
-        assert!(lost_log_events(&shard).is_empty());
-        assert_eq!(shard.live_logical_ids().unwrap(), vec![2]);
-    }
+    std::fs::write(&path, &held).expect("put the translog back");
+    let shard = open().expect("with its translog");
+    assert_eq!(
+        shard.live_logical_ids().unwrap(),
+        vec![1],
+        "the refusals changed something: the row in the translog did not come back"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

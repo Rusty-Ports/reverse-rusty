@@ -2,8 +2,6 @@
 //! has lost its content, or is gone, does not.
 
 use super::*;
-use crate::events::EngineEvent;
-use std::sync::{Arc, Mutex};
 
 fn durable(tag: &str) -> (PathBuf, ClusterConfig) {
     let dir = scratch_dir(tag);
@@ -41,24 +39,6 @@ fn as_an_older_release_built_it(dir: &std::path::Path) {
     assert_eq!(manifest.snapshot_pos, 0);
     manifest.epoch = 0;
     crate::storage::write_cluster_manifest(&manifest, &path).expect("write manifest");
-}
-
-/// What the cluster reported about a lost log when it started.
-fn lost_log_events(cluster: &ClusterEngine) -> Vec<String> {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::clone(&events);
-    cluster.set_observer(Arc::new(move |event: &EngineEvent| {
-        if let EngineEvent::DurabilityFailure {
-            op: DurabilityOp::LogLost,
-            error,
-            ..
-        } = event
-        {
-            seen.lock().unwrap().push(error.clone());
-        }
-    }));
-    let seen = events.lock().unwrap().clone();
-    seen
 }
 
 fn open(dir: &std::path::Path, cfg: &ClusterConfig, what: &str) -> ClusterEngine {
@@ -150,37 +130,27 @@ fn a_cluster_whose_manifest_says_the_log_was_whole_is_not_given_an_empty_log() {
         let log = dir.join(CLUSTER_LOG_FILE);
         let header = std::fs::read(&log).expect("read log");
         std::fs::write(&log, &header[..4]).expect("shorten the log");
-        // Accepting a lost log is about a log that is gone. It does not make a damaged
-        // one acceptable.
-        let accepting = ClusterConfig {
-            accept_lost_log: true,
-            ..cfg.clone()
-        };
-        for config in [&cfg, &accepting] {
-            match ClusterEngine::open(dir.clone(), vocab(), Some(config)) {
-                Err(ShardError::Log(reason)) => {
-                    assert!(
-                        reason.contains("clog too small"),
-                        "{order}: refused for another reason: {reason}"
-                    );
-                }
-                Err(other) => panic!("{order}: refused for another reason: {other:?}"),
-                Ok(_) => panic!("{order}: the cluster was given an empty log"),
+        match ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)) {
+            Err(ShardError::Log(reason)) => {
+                assert!(
+                    reason.contains("clog too small"),
+                    "{order}: refused for another reason: {reason}"
+                );
             }
-            assert_eq!(std::fs::read(&log).expect("read log"), &header[..4]);
+            Err(other) => panic!("{order}: refused for another reason: {other:?}"),
+            Ok(_) => panic!("{order}: the cluster was given an empty log"),
         }
+        assert_eq!(std::fs::read(&log).expect("read log"), &header[..4]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
 /// A log that is gone is refused the same way, and nothing is created in its place: the
 /// writes acknowledged since the manifest were in it. Before ADR-213 the reopen made an
-/// empty log and served without them.
-///
-/// With `accept_lost_log` the cluster starts from its last checkpoint, says what it lost, and
-/// from then on reopens as usual.
+/// empty log and served without them. The refusal changes nothing: with the log back in
+/// place the same directory opens with every write.
 #[test]
-fn a_cluster_whose_log_is_gone_is_refused_unless_the_loss_is_accepted() {
+fn a_cluster_whose_log_is_gone_is_refused() {
     for checkpointed in [false, true] {
         let (dir, cfg) = durable(&format!("log_gone_{checkpointed}"));
         let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
@@ -191,66 +161,38 @@ fn a_cluster_whose_log_is_gone_is_refused_unless_the_loss_is_accepted() {
         cluster.add_query(2, "mechanical keyboard").expect("write");
         drop(cluster);
         let log = dir.join(CLUSTER_LOG_FILE);
+        let held = std::fs::read(&log).expect("the log");
         std::fs::remove_file(&log).expect("lose the log");
 
-        match ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)) {
-            Err(ShardError::Log(reason)) => {
-                assert!(
-                    reason.contains("is missing") && reason.contains("accept_lost_log"),
-                    "refused for another reason: {reason}"
-                );
+        for attempt in 1..=2 {
+            match ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)) {
+                Err(ShardError::Log(reason)) => {
+                    assert!(
+                        reason.contains("is missing") && reason.contains("Restore"),
+                        "refused for another reason: {reason}"
+                    );
+                }
+                Err(other) => panic!("refused for another reason: {other:?}"),
+                Ok(cluster) => panic!(
+                    "attempt {attempt}: opened without its log; the acknowledged write \
+                     matches: {:?}",
+                    matched(&cluster, "a mechanical keyboard")
+                ),
             }
-            Err(other) => panic!("refused for another reason: {other:?}"),
-            Ok(cluster) => panic!(
-                "opened without its log; the acknowledged write matches: {:?}",
-                matched(&cluster, "a mechanical keyboard")
-            ),
+            assert!(!log.exists(), "a refused open created a log");
         }
-        assert!(!log.exists(), "a refused open created a log");
 
-        let accepting = ClusterConfig {
-            accept_lost_log: true,
-            ..cfg.clone()
-        };
-        let reopened = open(&dir, &accepting, "the loss was accepted");
-        let lost = lost_log_events(&reopened);
-        assert_eq!(lost.len(), 1, "the loss is reported once: {lost:?}");
+        std::fs::write(&log, &held).expect("put the log back");
+        let reopened = open(&dir, &cfg, "with its log");
         assert_eq!(matched(&reopened, "blue wireless mouse"), vec![1]);
-        assert!(
-            matched(&reopened, "a mechanical keyboard").is_empty(),
-            "the write that was only in the log"
+        assert_eq!(
+            matched(&reopened, "a mechanical keyboard"),
+            vec![2],
+            "the refusals changed something: the write in the log did not come back"
         );
-        reopened
-            .add_query(3, "usb hub")
-            .expect("a write after the reopen");
         drop(reopened);
-
-        // The log exists again: no flag is needed, and nothing is reported.
-        let again = open(&dir, &cfg, "second start");
-        assert!(lost_log_events(&again).is_empty());
-        assert_eq!(matched(&again, "a usb hub"), vec![3]);
-        drop(again);
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// The flag accepts a loss; it does not make one. With the log present it changes nothing.
-#[test]
-fn accepting_a_lost_log_changes_nothing_when_the_log_is_there() {
-    let (dir, cfg) = durable("log_there_and_accepted");
-    let cluster = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
-        .expect("durable cluster");
-    cluster.add_query(2, "mechanical keyboard").expect("write");
-    drop(cluster);
-    let accepting = ClusterConfig {
-        accept_lost_log: true,
-        ..cfg.clone()
-    };
-    let reopened = open(&dir, &accepting, "the log is there");
-    assert!(lost_log_events(&reopened).is_empty());
-    assert_eq!(matched(&reopened, "a mechanical keyboard"), vec![2]);
-    drop(reopened);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Under a manifest at epoch 0 a missing log may be a build that stopped before it created
@@ -267,7 +209,6 @@ fn a_reopen_finishes_a_build_that_stopped_before_its_log() {
     let log = dir.join(CLUSTER_LOG_FILE);
     std::fs::remove_file(&log).expect("the log was never created");
     let reopened = open(&dir, &cfg, "an unfinished build");
-    assert!(lost_log_events(&reopened).is_empty());
     assert_eq!(matched(&reopened, "blue wireless mouse"), vec![1]);
     assert_eq!(reopened.epoch(), 1);
     assert_eq!(

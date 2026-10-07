@@ -89,40 +89,32 @@ pub(crate) fn null() -> Box<ShardLog> {
 ///
 /// The caller is a shard that found its checkpoint file, which is written after the translog
 /// exists. So a translog that is not there has been lost, with every write the shard
-/// acknowledged since that checkpoint, and this refuses (ADR-213). With `accept_lost_log` it
-/// creates an empty one instead and returns `true` beside it, for the caller to report.
+/// acknowledged since that checkpoint, and this refuses instead of creating one (ADR-213).
 pub(crate) fn open_existing(
     dir: &Path,
     fsync_each_write: bool,
     floor: LogPos,
-    accept_lost_log: bool,
-) -> Result<(Box<ShardLog>, bool), ShardError> {
+) -> Result<Box<ShardLog>, ShardError> {
     let path = dir.join(TRANSLOG_FILE);
-    let lost = !path.exists();
-    if lost && !accept_lost_log {
+    if !path.exists() {
         return Err(ShardError::Log(
             crate::storage::framed_log::lost_log(
                 &path,
                 "this shard's checkpoint file was written after it existed",
                 "Recover the shard into an empty data directory from a replica or from the \
-                 coordinator, or start once with `accept_lost_log` (`--accept-lost-log`) to \
-                 continue without those writes.",
+                 coordinator, or restore its volume from a snapshot.",
             )
             .to_string(),
         ));
     }
-    let if_missing = if lost {
-        IfMissing::Create
-    } else {
-        IfMissing::Refuse
-    };
-    let log = FileClusterLog::open(&path, fsync_each_write, floor, if_missing).map_err(|e| {
-        ShardError::Log(format!(
-            "opening existing shard translog {}: {e}",
-            path.display()
-        ))
-    })?;
-    Ok((Box::new(log), lost))
+    let log =
+        FileClusterLog::open(&path, fsync_each_write, floor, IfMissing::Refuse).map_err(|e| {
+            ShardError::Log(format!(
+                "opening existing shard translog {}: {e}",
+                path.display()
+            ))
+        })?;
+    Ok(Box::new(log))
 }
 
 // ---- per-shard checkpoint sidecar (ADR-039 §6: data-node self-restart) ----

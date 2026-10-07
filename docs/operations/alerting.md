@@ -26,21 +26,6 @@ On a healthy roll this flickers for seconds; 5 minutes means a shard is not comi
 own. **Do:** `kubectl describe pod` / `rrc ps` for the pod state; if the volume is gone, the
 DR flow ([`disaster-recovery.md` §3.1](disaster-recovery.md)).
 
-### RRShardLogLost
-`reverse_rusty_shard_durability_failures_total{op="log_lost"} > 0` — **page.** A shard node was
-started with `--accept-lost-log` and a shard's translog was gone (ADR-213): the writes that
-shard acknowledged since its checkpoint are lost. On the value, for the reason given under
-`RRLogLost`. The node's standard error has a `DURABILITY log_lost: …` line with the position.
-**Do:** as for `RRLogLost`; replicas of that shard that still hold the lost writes are found
-unequal at the coordinator's next connect ([disaster recovery §3.4](disaster-recovery.md)).
-
-### RRShardDurabilityFailure
-`increase(reverse_rusty_shard_durability_failures_total{op!~"log_lost|wal_torn_tail"}[5m]) > 0`
-— **page.** A shard on this node reported that something could not be made durable. Shard nodes
-reported nothing before ADR-213. `wal_torn_tail`, the repair of a torn translog tail after a
-crash, is routine and left out. **Do:** read the node's standard error for the
-`DURABILITY <op>: …` line, and check its disk.
-
 ### RRShardCompactionBacklog
 `tombstoned_entries > 1M` for 30m — deletes are outpacing compaction. Cost problem first (dead
 entries burn memory + scan time), disk-pressure problem later. **Do:** check compaction is
@@ -105,20 +90,11 @@ member self-heals on restart from its durable log (ADR-041).
 made durable (WAL append / segment write / manifest commit failed — ADR-021/051). The engine
 fails closed, but the underlying cause (disk full, volume failure) compounds. **Do:** check disk
 space/health immediately; do not take a backup onto the same failing disk; once resolved, verify
-with a sentinel write and take a fresh backup. `op="log_lost"` has its own rule, below. The `op="replica_desync"` series is different: a
+with a sentinel write and take a fresh backup. The `op="replica_desync"` series is different: a
 replica left the in-sync set (a replicated write to it failed, or it was not proven equal to its
 primary when the coordinator connected, ADR-195). No write was lost, but that position has less
 redundancy until the replica is recovered ([runbook §6](cluster-deployment.md), *Replica
 replacement*); `/_health` reports `out_of_sync_replicas`.
-
-### RRLogLost
-`reverse_rusty_durability_failures_total{op="log_lost"} > 0` — **page.** The server was started
-with `--accept-lost-log` and its log was gone (ADR-213): every write acknowledged since its last
-flush or checkpoint is lost. The rule is on the counter's value, not on an increase, because
-the loss happens at start-up, before the first scrape: the series begins at 1 and never rises,
-so `increase()` would miss it after any outage longer than the window. **Do:** replay the
-missing window from the upstream system of record, take a fresh backup, then restart without the
-flag, which also clears the alert ([disaster recovery §3.4](disaster-recovery.md)).
 
 ### RRTransportErrors
 Shard-RPC errors from the coordinator sustained for 5m — the fan-out is failing **loud** against

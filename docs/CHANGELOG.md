@@ -14,39 +14,27 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **A lost log is refused, not recreated** ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)).
   A reopen that found no log file created an empty one, also where the store's own commit record
   proved a log had existed: a single-node `manifest.bin`, a cluster manifest, a shard's checkpoint
-  file, a control node's vote. Every write acknowledged since the last flush or checkpoint was
-  dropped without an error, an event or a change in health, and a control node rejoined with an
-  empty log beside its vote. All four now refuse to start, name the file and what proves it
-  existed, and create nothing in its place.
-- **`--accept-lost-log`** (`server` and `shardserver`; `accept_lost_log` in the library): start
-  from the last flush or checkpoint with an empty log, and report a `log_lost` durability event
-  that says what was lost. For one start; both binaries say at every start that it is set. It changes nothing when the log
-  is there and does not make a damaged log acceptable. A control node has no such flag and no
-  repair of its own: it stays down while the others keep their majority, and the control plane
-  is recovered as a whole.
+  file, a control node's vote. Every acknowledged write that was only in the log was dropped
+  without an error, an event or a change in health, and a control node rejoined with an empty
+  log beside its vote. All four now refuse to start, and name the file and what proves it
+  existed.
+- **A refused start changes nothing.** No log is created in the lost one's place, and the
+  coordinator checks its log before it attaches a shard, so the shards' translogs are left as
+  they were. With the file put back, the directory opens with every write.
 - **`build` ends with a checkpoint,** which writes the manifest that says the cluster log exists
   (epoch 1). The manifest `build` writes first, before it creates the log, stays at epoch 0, and
   a reopen that finds epoch 0 (a build that stopped part-way, or a cluster from an earlier
   release that never checkpointed) creates the log if there is none and makes that checkpoint
   itself. A cluster built by this release reports epoch 1 where it reported 0.
+- **A translog reset replaces the file by a rename** instead of removing it first, so a crash
+  never leaves a shard's checkpoint file without a translog.
 - **A backup of a store whose log is gone is refused,** and a backup directory without its log
   does not verify.
-- **A shard node reports durability events.** It gave its shards no event sink, so nothing they
-  reported reached a log or a metric. `shardserver` now prints a `DURABILITY <op>: …` line for
-  each and counts them in `reverse_rusty_shard_durability_failures_total{op}` on
-  `--metrics-addr`. That covers the new `log_lost` and the existing `wal_torn_tail` (a torn
-  translog tail repaired at start-up).
-- **Every durability operation is listed at zero from the first scrape,** in the server's
-  `reverse_rusty_durability_failures_total{op}` and in the shard node's new counter. A series
-  that first appears at 1 shows no increase, so the `RRDurabilityFailure` alert used to miss
-  the first failure of each kind. New rules: `RRLogLost` and `RRShardLogLost` (on the value,
-  because that loss happens at start-up) and `RRShardDurabilityFailure`.
-- **A refused start touches nothing.** The coordinator checks its log before it attaches a
-  shard, so a refusal leaves the shards' translogs as they were; and a translog reset replaces
-  the file by a rename instead of removing it first.
-- **Behaviour change:** a data directory whose log was deleted or lost does not start until it is
-  restored from a backup or started once with `--accept-lost-log`. Do not delete a log to get a
-  node started. No format change.
+- **Behaviour change:** a data directory whose log was deleted or lost does not start. Restore it
+  from a backup; for a shard node, recover it into an empty directory; a control node stays down
+  while the others keep their majority. Do not delete a log to get a node started. There is not
+  yet a supported way to start without the lost writes when there is no backup (roadmap:
+  "Starting without a lost log"). No format change.
 
 ## 2026-10-07 — A node whose first start was interrupted starts again
 

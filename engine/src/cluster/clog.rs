@@ -227,9 +227,8 @@ pub(crate) struct FileClusterLog {
 /// What [`FileClusterLog::open`] does when no file is at the log's path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IfMissing {
-    /// Nothing says this log exists yet (a new store; a store an older release wrote its
-    /// commit record for before it created the log; an owner that was asked to accept the
-    /// loss): create it.
+    /// Nothing says this log exists yet (a new store, or one whose build has not finished):
+    /// create it.
     Create,
     /// The owner's commit record was written after the log existed. A missing file is then
     /// a lost log, and the writes acknowledged since that record went with it. Refuse.

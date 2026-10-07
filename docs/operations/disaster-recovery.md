@@ -140,36 +140,25 @@ between the oldest and newest snapshot as lost and replay it from upstream.
 
 ### 3.4 A store refuses to start because its log is gone
 
-The start-up error reads `<file> is missing, but <what proves it existed>. The writes
-acknowledged since then were in it and are lost.` (ADR-213). The store still has everything up
-to its last flush or checkpoint. What it has lost is every write it acknowledged after that.
-Earlier releases started in this state without those writes and said nothing; this is the same
-loss, reported.
+The start-up error reads `<file> is missing, but <what proves it existed>. The acknowledged
+writes that were only in that log are lost.` (ADR-213). The store still has everything up to
+its last flush or checkpoint. Earlier releases started in this state without the lost writes
+and said nothing; this is the same loss, reported.
 
-First find out why the file is gone (someone removed it, a restore left it out, the volume lost
-it) and delete nothing else. **Never remove a log to get a node started.** Then, by role:
+The refusal has changed nothing on disk. First find out why the file is gone (someone removed
+it, a restore left it out, the volume lost it), and if it can be put back, put it back: the
+store then opens with every write. **Never remove a log to get a node started,** and do not
+create an empty one by hand. Otherwise, by role:
 
-| Role | File | Ways on |
+| Role | File | What to do |
 |---|---|---|
-| Single-node server | `wal.log` | Restore the data directory from a backup ([`backup-restore.md`](backup-restore.md)). Or start **once** with `--accept-lost-log`: it serves from its last flush. |
-| In-process cluster coordinator | `cluster.log` | The same; it serves from its last checkpoint. |
-| Shard node of a remote cluster | `translog.clog` | Treat it as a lost volume: §3.1 at RF=1, the replica-replacement row of [runbook §6](cluster-deployment.md) at RF≥2. Or start it **once** with `--accept-lost-log`: it serves from its last checkpoint, and replicas that still hold the lost writes are found unequal at the coordinator's next connect and kept out of the in-sync set (ADR-195). |
-| Control node | `raft-log.bin` | **No flag, and no repair of this node alone.** A node that has voted must not come back with an empty log, and an older copy of its directory rolls its vote and log back just the same. Leave it down: the other control nodes keep their majority. To return to full strength, recover the control plane as a whole (§3.2). |
+| Single-node server | `wal.log` | Restore the data directory from a backup ([`backup-restore.md`](backup-restore.md)), then replay the window since that backup from the upstream system of record (§3.1 step 3). |
+| In-process cluster coordinator | `cluster.log` | The same. The shards' translogs are left untouched by the refusal. |
+| Shard node of a remote cluster | `translog.clog` | Treat it as a lost volume: §3.1 at RF=1, the replica-replacement row of [runbook §6](cluster-deployment.md) at RF≥2. |
+| Control node | `raft-log.bin` | **Leave it down.** A node that has voted must not come back with an empty log, and an older copy of its directory rolls its vote and log back just the same. The other control nodes keep their majority. To return to full strength, recover the control plane as a whole (§3.2). |
 
-After an accepted loss:
-
-1. The server logs the loss and `reverse_rusty_durability_failures_total{op="log_lost"}` is 1
-   from its first scrape (`RRLogLost`). A shard node prints a `DURABILITY log_lost: …` line on
-   standard error and shows it in `reverse_rusty_shard_durability_failures_total{op="log_lost"}`
-   (`RRShardLogLost`). Both alerts stay up until the restart in step 3. For a cluster or a shard
-   the event names the log position after which writes were lost. For a single-node server it
-   says that every unflushed write is lost and that these can be older than the manifest's
-   log watermark, so replay from before the last flush, not from that number.
-2. Replay the window since the last flush or checkpoint from the upstream system of record
-   (§3.1 step 3); upserts are idempotent per id.
-3. Remove `--accept-lost-log` and restart. Left in place it would accept the next loss as
-   well; the restart without it also clears the alert.
-4. Take a fresh backup, then **verify** (§4).
+There is not yet a supported way to start a store without its lost writes when no backup
+exists (roadmap, "Starting without a lost log").
 
 A backup taken from a store in this state is refused, and a backup directory that lacks its log
 does not verify, so a restore cannot bring the problem back.

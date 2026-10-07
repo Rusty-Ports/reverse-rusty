@@ -205,14 +205,6 @@ async fn main() {
     if config.data_dir.is_none() {
         warn!("no --data-dir specified: engine is in-memory only, data will not survive restarts");
     }
-    if cli.accept_lost_log {
-        // Said at every start while the flag is set, so that one left in place is seen.
-        warn!(
-            "--accept-lost-log is set: a data directory whose log is gone starts from its last \
-             flush or checkpoint without the writes that were in the log (ADR-213). Remove the \
-             flag after this start"
-        );
-    }
 
     // Load vocab file if provided, otherwise use minimal (domain-free) normalizer.
     let vocab = if let Some(ref path) = cli.vocab_file {

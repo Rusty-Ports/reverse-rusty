@@ -14,8 +14,6 @@ pub struct ShardMetricsSource {
     /// `render` emits one `{shard="<id>"}`-labeled series per LOADED slot (Stage 3). A node serving a
     /// single non-zero position renders exactly that slot; a pending node renders the not-ready body.
     pub(super) shards: ShardMap,
-    /// The node's event channel, for its durability-failure counts (ADR-213).
-    pub(super) events: Arc<super::node_events::NodeEvents>,
 }
 
 impl ShardMetricsSource {
@@ -23,15 +21,6 @@ impl ShardMetricsSource {
     /// (metrics + segment infos + class counts from the same point-in-time) off the engine write
     /// lock; a pending (not-yet-adopted) server reports only `reverse_rusty_shard_ready 0`.
     pub fn render(&self) -> String {
-        let mut body = self.render_shards();
-        crate::cluster::node_metrics::push_durability_failures(
-            &mut body,
-            &self.events.durability_failures(),
-        );
-        body
-    }
-
-    fn render_shards(&self) -> String {
         // ALL loaded slots this node hosts (ADR-093 multi-shard): a co-located node renders one
         // `{shard="<id>"}` series per slot. Collect the slot Arc + an `Arc<ServerState>` handle to
         // each loaded slot under the map read-lock, then DROP the lock before snapshotting —

@@ -274,22 +274,29 @@ it created when it cannot finish.)
 serves exactly the corpus once; a directory with shard state and neither manifest nor mark is
 refused with an error that says what it may be.
 
-### Durability alerts and start-up
+### Starting without a lost log
 
-**Problem.** `RRDurabilityFailure` fires on an increase of the durability counter. A failure
-that is reported while a process starts (a corrupt segment skipped at recovery, a source store
-that did not load, a log that could not be opened) is already in the counter at the first
-scrape, so the series begins above zero and never rises. After an outage longer than the alert
-window, or on a new scrape target, the alert does not fire. The lost-log rules avoid this by
-alerting on the value ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)); the others do
-not.
+**Problem.** A store whose log is gone refuses to start
+([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)), and the only supported way on is to
+restore it. An operator with no backup has a store that holds everything up to its last flush
+or checkpoint and cannot be started. An override was built with ADR-213 and taken out: the
+evidence that a loss had been accepted lived in memory and in event delivery, and review found
+a way around it each round (a shard node that reports events to nobody; an alert that never
+fires for a count that is already 1 at the first scrape; a start that accepts the loss, fails
+at a later step, and leaves an empty log for the next start to open in silence).
 
-**Direction.** Decide, per operation, whether a start-up report should page until it is
-acknowledged, and expose that as a gauge of its own (start-up durability faults since this
-process began) instead of overloading the counter. Health already reports some of these.
+**Direction.** Accept the loss through an explicit step that first writes durable evidence
+into the data directory (what was lost, and when), and only then puts an empty log in place.
+Every later start reports that evidence, in health and as a gauge, until an operator clears
+it. Elasticsearch's `elasticsearch-shard remove-corrupted-data` (a new history UUID, and
+`accept_data_loss` to allocate the shard) and PostgreSQL's `pg_resetwal` are the models. A
+control node gets no such step: it needs a new identity, and so a control plane that can add
+a member.
 
-**Completion.** Each durability operation that can be reported at start-up has an alert that
-fires for it without a pre-restart sample, with a test that renders the first scrape.
+**Completion.** For the single-node engine, the coordinator and a shard node: a store whose
+log is gone can be started by one documented step; the loss is on disk before the empty log
+is; a start that fails after accepting it still reports it the next time; and an alert fires
+on it without a pre-restart sample.
 
 ### A log has an identity
 

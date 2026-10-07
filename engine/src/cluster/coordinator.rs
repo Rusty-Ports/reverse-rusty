@@ -137,8 +137,6 @@ fn replica_dir(base: &Path, shard: usize, r: usize) -> PathBuf {
 }
 
 /// Configuration for a [`ClusterEngine`].
-// Independent knobs, like `EngineConfig`'s: an enum for each would not make them clearer.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct ClusterConfig {
     /// Number of shards (K). Must be ≥ 1; K = 1 reduces to a single-node engine.
@@ -195,14 +193,6 @@ pub struct ClusterConfig {
     /// authoritative copies; when a primary is the copy that lost data, recovery would erase the
     /// surviving one. Ignored by every other builder.
     pub recover_divergent_replicas: bool,
-    /// Start a durable cluster although its log is gone (ADR-213). A cluster whose manifest
-    /// was written after its log existed refuses to reopen when `cluster.log` is not there:
-    /// the writes acknowledged since the last checkpoint were in it. With this set,
-    /// [`ClusterEngine::open`] starts with an empty log in their place and reports a
-    /// [`LogLost`](crate::events::DurabilityOp::LogLost) durability event. It changes nothing
-    /// when the log is present. Set it for one start, to accept a loss that has already
-    /// happened, and then remove it. Default `false`.
-    pub accept_lost_log: bool,
 }
 
 impl ClusterConfig {
@@ -226,7 +216,6 @@ impl Default for ClusterConfig {
             handoff_final_drain_cap: Self::DEFAULT_HANDOFF_FINAL_DRAIN_CAP,
             remote_placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
             recover_divergent_replicas: false,
-            accept_lost_log: false,
         }
     }
 }

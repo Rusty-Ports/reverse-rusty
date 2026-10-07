@@ -221,12 +221,11 @@ pub(super) async fn recover_from(
     let segments_attached = files.len() as u64;
     // Store into THIS slot's state cell (preserving its fence generation) — never a node-wide swap,
     // so a recovery never clobbers a co-located shard (ADR-093, the codex-P1 fix's read side).
-    slot.state.store(Some(Arc::new(ServerState::new(
-        Arc::clone(&st.dict),
-        Arc::clone(&st.tag_dict),
+    slot.state.store(Some(Arc::new(ServerState {
+        dict: Arc::clone(&st.dict),
+        tag_dict: Arc::clone(&st.tag_dict),
         shard,
-        &server.events,
-    ))));
+    })));
     // The slot now holds the current owner's data: it is no longer the empty stand-in for a
     // shard this node gave up (ADR-189). If the record cannot be updated the recovery fails and
     // the slot keeps refusing, which a retry repairs.
