@@ -483,6 +483,36 @@ fn an_expired_deadline_still_takes_a_free_layout_lock() {
     );
 }
 
+/// Two accessors called one after the other can straddle a swap. A read on one layout is run
+/// again when that happens, and returns what it read the second time.
+#[test]
+fn a_read_on_one_layout_is_run_again_when_a_swap_lands_inside_it() {
+    let cluster = in_memory(3, 100);
+    let mut runs = 0;
+    let (counts, shards) = cluster.read_on_one_layout(|| {
+        runs += 1;
+        let counts = cluster.shard_query_counts().expect("counts");
+        if runs == 1 {
+            // The swap lands between the two reads.
+            cluster.resize(5).expect("resize");
+        }
+        (counts, cluster.num_shards())
+    });
+    assert_eq!(
+        runs, 2,
+        "a read that straddled a swap was returned as it was"
+    );
+    assert_eq!((counts.len(), shards), (5, 5));
+
+    // With no swap it runs once.
+    let mut runs = 0;
+    let shards = cluster.read_on_one_layout(|| {
+        runs += 1;
+        cluster.num_shards()
+    });
+    assert_eq!((runs, shards), (1, 5));
+}
+
 /// A reader that takes no lock and combines the layout with the control state is told when a
 /// layout change overlapped it: `None` while one is running, and a second run when one came
 /// and went.

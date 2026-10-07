@@ -192,15 +192,21 @@ pub(crate) async fn cluster_stats(
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let cluster = &worker_state.cluster;
-        // One count pass is enough: the aggregate is the sum of the returned
-        // per-position rows. The old path called every shard twice.
-        let per_shard = cluster.shard_query_counts()?;
+        // The counts below are reported together, so they are read from one layout: a
+        // resize that swaps in between two of them would put eight shard counts beside a
+        // shard total of nine.
+        let counted = cluster.read_on_one_layout(|| {
+            // One count pass is enough: the aggregate is the sum of the returned
+            // per-position rows. The old path called every shard twice.
+            let per_shard = cluster.shard_query_counts()?;
+            let cc = cluster.class_counts()?;
+            Ok::<_, reverse_rusty::cluster::ShardError>((per_shard, cc, cluster.num_shards()))
+        });
+        let (per_shard, cc, shards) = counted?;
         let total = per_shard
             .iter()
             .copied()
             .fold(0usize, usize::saturating_add);
-        let cc = cluster.class_counts()?;
-        let shards = cluster.num_shards();
         Ok::<_, reverse_rusty::cluster::ShardError>(ClusterStatsResponse {
             took: 0,
             took_ms: 0.0,

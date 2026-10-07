@@ -368,6 +368,29 @@ impl super::ClusterEngine {
         self.edit_layout(|layout| layout.shards = Arc::new(wrap(shards)));
     }
 
+    /// Run `read` and return what it read from one layout. `read` runs again if a layout
+    /// change swapped its layout in meanwhile.
+    ///
+    /// Each accessor of this engine reads the layout that is published when it is called. Two
+    /// of them called one after the other can therefore straddle a swap: eight shard counts
+    /// from the old layout beside a shard total of nine from the new. This is for a reader
+    /// that takes no lock and reports several such things together. For one that also reads
+    /// the control state, see [`Self::read_between_layout_changes`].
+    ///
+    /// `read` holds no lock. It may call a search or a lock-free accessor. It must not call
+    /// an operation that waits for a layout change.
+    pub fn read_on_one_layout<T>(&self, mut read: impl FnMut() -> T) -> T {
+        loop {
+            // Held until the comparison, so the published layout cannot be a new one at
+            // the same address.
+            let before = self.layout.load_full();
+            let seen = read();
+            if self.is_published(&before) {
+                return seen;
+            }
+        }
+    }
+
     /// Run `read` and return what it read, if no layout change was running at any point while
     /// it ran. `None` if one is running, or is waiting for the operations in flight to
     /// finish. `read` runs again if a change came and went meanwhile.

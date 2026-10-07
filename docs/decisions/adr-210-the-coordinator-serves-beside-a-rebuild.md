@@ -52,17 +52,27 @@ its rebuild methods take shared access. The server's lock and the slot were what
    waited for the guard would wait for the copy. `admit_rebuild` looks at the fence when the
    change arrives and again while it waits for the guard; the engine checks it once more when
    the change begins.
-6. **A read that combines the layout with the control state is told when a rebuild
-   overlapped it.** The lock used to hold such a read together. A rebuild replaces the layout
-   and then commits the control state, so a health probe that read the committed topology
-   before a resize's swap and the shard counts after it took the difference for a fault and
-   answered red. The engine has `read_between_layout_changes`: it runs a lock-free read and
-   returns it only if no layout change was running at any point while it ran. `/_health`
-   compares the topology under it, and answers yellow with a reason while a rebuild runs.
-   `/_cat/shards` reads again until its two halves agree. A cursor request asks the stale
-   gate a second time before it calls a fingerprint a mismatch, because a rebuild that swaps
-   in between the gate and the fingerprint leaves a fingerprint computed under a normalizer
-   the cursor was not minted under.
+6. **What a request reports about the layout, it reads from one layout.** Each accessor of
+   the engine reads the layout that is published when it is called, and the server's lock
+   used to keep two such reads of one request on one layout. Without it a rebuild can swap in
+   between them. Review found three: `/_stats` put eight shard counts beside a shard total of
+   nine; a health probe read the committed topology before a resize's swap and the shard
+   counts after it, took the difference for a fault, and answered red; a cursor request
+   passed the stale gate on the old layout and computed its fingerprint under the new
+   normalizer, and answered "mismatch" for a cursor that was stale.
+
+   The engine has two readers for this, both lock-free. `read_on_one_layout` runs a read and
+   runs it again if a swap landed inside it. `read_between_layout_changes` is for a read that
+   also takes in the control state, which a rebuild commits after its swap: it returns the
+   read only if no layout change was running at any point while it ran. `/_stats` and the
+   cursor fingerprint use the first. `/_health` compares the topology under the second and
+   answers yellow with a reason while a rebuild runs; `/_cat/shards` reads again until its two
+   halves agree. A cursor request also asks the stale gate a second time before it calls a
+   fingerprint a mismatch.
+
+   A test reads the server's source (`handlers/cluster/tests/one_layout.rs`) and fails a
+   function that reads the layout twice, or the layout and something replaced with it,
+   outside one of the two readers. The exceptions are named in it with their reasons.
 7. **Nothing that runs in the search pool takes a lock that a rebuild holds or waits for.**
    A worker that waited behind a rebuild would hold up the workers that are waiting for it,
    which is the deadlock ADR-207 describes. The types no longer enforce this (there is no
@@ -152,16 +162,20 @@ search waiting for a pool worker stops nothing; both finish once a worker is fre
 tests of vocabulary, alias, resize and membership handlers that used to hold the cluster's
 write lock now stop a real rebuild, or hold the guard or the slot the handler waits for.
 
-`coordinator/tests/layout_change.rs`: a lock-free read is passed with no change about, is
+`coordinator/tests/layout_change.rs`: a read on one layout runs again when a swap lands
+between two of its accessors, and once when none does. A read between layout changes is
+passed with no change about, is
 refused while one runs, is refused when one was running as it began even if that one has
 finished by the time it ends, is run again when one came and went inside it, and is refused
 when one began inside it. `cluster_compile.rs`: a cursor that a rebuild overtook between the
 stale gate and the fingerprint is reported stale (409), and a live cursor is judged by its
 fingerprint.
 
-Thirteen mutations were run and each fails a test: the three checks of
-`read_between_layout_changes` removed one at a time; a health probe that compares the topology
-whatever is running; a mismatched fingerprint not checked against the stale gate again; a
+Seventeen mutations were run and each fails a test: `read_on_one_layout` returning whatever
+happened under it; the three checks of `read_between_layout_changes` removed one at a time;
+`/_stats` reading its counts outside one layout, a new function that combines two layout
+reads, and a health probe that no longer hands its comparison to a coherent reader (the
+source test fails all three); a health probe that compares the topology whatever is running; a mismatched fingerprint not checked against the stale gate again; a
 search with sources that shares write
 admission again; a vocabulary change that does not take the topology guard; a vocabulary
 change, a resize, and a resync, on the slot for administrative reads; a pool worker that takes write admission

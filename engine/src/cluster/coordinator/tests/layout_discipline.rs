@@ -97,7 +97,9 @@ const LAYOUT_FREE: &[&str] = &[
     "pending_repair_ids",
     "open_pit_count",
     "ensure_resize_write_fence_open",
-    // runs the caller's lock-free read and says whether a layout change overlapped it
+    // run the caller's lock-free read, and run it again or refuse it if a layout change
+    // overlapped it
+    "read_on_one_layout",
     "read_between_layout_changes",
     // test seams: the hook a rebuild calls, and the flag a remote resize raises
     "set_rebuild_hook_for_test",

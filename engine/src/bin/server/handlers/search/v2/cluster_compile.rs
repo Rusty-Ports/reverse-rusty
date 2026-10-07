@@ -129,14 +129,17 @@ pub(super) async fn compile(
             return Ok((program, None));
         };
         let fingerprint = cursor_fingerprint(cluster, pit, expected_fingerprint, || {
-            crate::pit::request_fingerprint(
-                &cluster.normalizer(),
-                &cluster.dict(),
-                &title,
-                scope,
-                &rank,
-                &filter,
-            )
+            // The normalizer and the dictionary of one layout.
+            cluster.read_on_one_layout(|| {
+                crate::pit::request_fingerprint(
+                    &cluster.normalizer(),
+                    &cluster.dict(),
+                    &title,
+                    scope,
+                    &rank,
+                    &filter,
+                )
+            })
         })?;
         Ok((program, Some(page::MintCtx { pit, fingerprint })))
     })
