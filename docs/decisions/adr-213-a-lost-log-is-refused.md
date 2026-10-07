@@ -69,6 +69,13 @@ removed, opened without complaint and without the second write.
 7. **A backup of a store whose log is gone is refused,** and so is verifying one. Such a
    backup would restore to a store that refuses to open, and the running store is
    acknowledging writes into a file no restart will read.
+8. **Nothing of ours leaves a commit record without its log.** A shard's translog reset
+   (at attach, and when a recovery target installs what it received) removed the old file
+   and then created a new one. A recovery target does that while its old checkpoint file is
+   still in place, so a crash between the two steps would have left exactly the state
+   decision 3 refuses, and a node that could not restart by itself. The reset now writes the
+   new translog beside the old one and renames it over it: a crash leaves the old translog
+   or the new one, and both restart.
 
 ## What changes for a deployment
 
@@ -148,6 +155,8 @@ removed, opened without complaint and without the second write.
   manifest at epoch 1 or 2 is refused with or without the setting; a build that cannot
   create its log leaves no manifest, and the directory is not a cluster.
 - `cluster/shard/tests/recovery.rs`: the same for a restarting shard and its translog.
+- `cluster/translog.rs`: a translog reset that cannot finish leaves the old translog as it
+  was; before, the old file was already gone.
 - `cluster/control_raft/log_store.rs`: a node with a vote, a committed index, a purge point
   or a snapshot and no log is refused, and no log is created; a node with no state starts.
 - `cluster/clog/tests`: `open` with `IfMissing::Refuse` refuses a missing file and creates

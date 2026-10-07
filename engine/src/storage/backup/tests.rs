@@ -354,9 +354,13 @@ fn copy_verifies_before_commit_so_a_bad_source_leaves_no_dest() {
     );
 }
 
-fn is_a_lost_log(result: Result<(), BackupError>) -> bool {
+/// Whether `result` is the refusal of a store whose log at `log` is gone. The path matters:
+/// the copy must refuse on the source's own log, before it copies anything, and not leave it
+/// to the verification of the staged copy, whose message would name a temporary directory.
+fn is_a_lost_log(result: Result<(), BackupError>, log: &Path) -> bool {
     matches!(result, Err(BackupError::Io(error))
-        if error.kind() == std::io::ErrorKind::NotFound && error.to_string().contains("is missing"))
+        if error.kind() == std::io::ErrorKind::NotFound
+            && error.to_string().starts_with(&format!("{} is missing", log.display())))
 }
 
 /// A single-node directory with a manifest once had a log (ADR-213). A store whose log is
@@ -372,12 +376,12 @@ fn an_engine_whose_log_is_gone_is_not_backed_up() {
     write_valid_sources(&src.join(SOURCES));
     let dest = root.join("dest");
     assert!(
-        is_a_lost_log(copy_engine_dir(&src, &dest)),
+        is_a_lost_log(copy_engine_dir(&src, &dest), &src.join(ENGINE_WAL)),
         "a store without its log was backed up"
     );
     assert!(!dest.exists(), "a refused backup left a destination");
     assert!(
-        is_a_lost_log(verify_backup(&src)),
+        is_a_lost_log(verify_backup(&src), &src.join(ENGINE_WAL)),
         "a directory with a manifest and no log verified"
     );
     // With its log it is backed up and verifies.
@@ -419,12 +423,12 @@ fn a_cluster_whose_log_is_gone_is_not_backed_up() {
         let dest = root.join("dest");
         if written_with_its_log {
             assert!(
-                is_a_lost_log(copy_cluster_dir(&src, &dest)),
+                is_a_lost_log(copy_cluster_dir(&src, &dest), &src.join(CLUSTER_LOG)),
                 "epoch {epoch}: a cluster without its log was backed up"
             );
             assert!(!dest.exists(), "a refused backup left a destination");
             assert!(
-                is_a_lost_log(verify_cluster_backup(&src)),
+                is_a_lost_log(verify_cluster_backup(&src), &src.join(CLUSTER_LOG)),
                 "epoch {epoch}: a cluster directory without its log verified"
             );
             std::fs::write(src.join(CLUSTER_LOG), b"clog").unwrap();
