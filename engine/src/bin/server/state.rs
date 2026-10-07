@@ -22,12 +22,15 @@ use parking_lot::{Mutex, RwLock};
 use prometheus::IntGauge;
 use tracing::Instrument;
 
-use reverse_rusty::cluster::ClusterEngine;
 use reverse_rusty::segment::{Engine, EngineSnapshot};
 use reverse_rusty::vocab::AliasFeedback;
 
 use crate::auth::AuthConfig;
 use crate::metrics::PrometheusMetrics;
+
+mod cluster_access;
+
+pub(crate) use cluster_access::{ClusterLock, ClusterWrite, SearchPool};
 
 /// Static winner-enrichment budget shared by local and coordinator v2 search.
 pub(crate) const DEFAULT_MAX_RANKED_ENRICHMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -260,11 +263,12 @@ pub(crate) enum ClusterRebalanceTopology {
 /// Coordinator-mode state (ADR-070): the cluster analogue of [`AppState`].
 pub(crate) struct ClusterAppState {
     /// Read lock for percolates AND ordinary writes (both `&self`); write lock only
-    /// for the `&mut self` vocabulary rebuilds. A read that returns ids only never waits
-    /// for a write. A read that also returns sources or an explanation takes the
+    /// for the `&mut self` vocabulary rebuilds and resizes, and only through
+    /// [`ClusterAppState::write_cluster`] (ADR-207). A read that returns ids only never
+    /// waits for a write. A read that also returns sources or an explanation takes the
     /// cluster's mutation-frozen view, so it waits for the writes in flight and runs
     /// alone (`ClusterEngine::consistent_read_view`).
-    pub(crate) cluster: RwLock<ClusterEngine>,
+    pub(crate) cluster: ClusterLock,
     /// Excludes descriptor mutation from in-flight topology movement. Movement
     /// operations take a shared guard (so their own conflict-aware concurrency
     /// remains available); registration, deregistration, and resize take the
@@ -328,15 +332,11 @@ pub(crate) struct ClusterAppState {
     /// Coordinator analogue of [`AppState::stats_permits`], including bounded
     /// vocabulary reads, learning, and blue/green replacements.
     pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// The search pool. Its workers take `cluster.read()` for each title they match, and a
-    /// reader waits when a writer is queued for that lock (a vocabulary rebuild, a resize).
-    ///
-    /// **Wait for this pool while holding the `cluster` lock only if you also hold
-    /// `write_admission`.** Otherwise a writer can queue behind you, the workers then wait
-    /// for the writer, the writer for you, and you for a worker. Whoever takes the cluster's
-    /// write lock holds write admission alone, so holding it shared keeps every such writer
-    /// from queueing. See [`ClusterAppState::run_with_stable_view`] (ADR-206).
-    pub(crate) pool: rayon::ThreadPool,
+    /// The search pool, behind its gate (ADR-207). Work enters it only through
+    /// [`SearchPool::enter`], so a request holds the gate for as long as its work is in the
+    /// pool, and whatever takes the cluster's write lock closes the gate first. Its workers
+    /// take `cluster.read()` for each title they match and never find a writer queued.
+    pub(crate) pool: SearchPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
     /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,
     /// and the permit is moved INTO the closure — released when the blocking work
@@ -361,30 +361,6 @@ pub(crate) struct ClusterAppState {
     pub(crate) pit_config: reverse_rusty::PitConfig,
     /// Retained resize operations and the latest autoscaler observation (ADR-179).
     pub(crate) resize_operations: Arc<crate::resize_ops::ResizeOperations>,
-}
-
-impl ClusterAppState {
-    /// Run `work` in the search pool under the cluster's mutation-frozen view: the path of a
-    /// search that returns sources or an explanation (ADR-206). Call it from a blocking
-    /// thread that holds no lock.
-    ///
-    /// The request shares write admission, as a write does. It does not need it to be kept
-    /// apart from writes; the view does that. It needs it because it then holds the cluster
-    /// lock while it waits for the view and for a pool worker, and nothing that takes the
-    /// cluster's write lock may queue behind it meanwhile (see `pool`). Sharing admission
-    /// means it waits for a vocabulary change, a resize, a checkpoint or an exhaustive job,
-    /// which it would wait for at the cluster lock or the view anyway, and not for other
-    /// writes or for a whole bulk batch. The waits happen on the caller's thread, and the
-    /// work runs inside the pool, within the configured thread budget.
-    pub(crate) fn run_with_stable_view<T: Send>(
-        &self,
-        work: impl FnOnce(&reverse_rusty::cluster::ClusterReadView<'_>) -> T + Send,
-    ) -> T {
-        let _admission = self.write_admission.read();
-        let cluster = self.cluster.read();
-        let stable_view = cluster.consistent_read_view();
-        self.pool.install(|| work(&stable_view))
-    }
 }
 
 /// What the request-scoped middleware needs from either backend's state — the seam

@@ -102,6 +102,10 @@ What the one mutex cost:
   worker that holds the cluster's read lock for one title can pick up another title's job
   while it waits on its own fan-out, which blocks if a writer has queued meanwhile. They are
   recorded as a separate issue.
+  **2026-10-06:** both are closed by
+  [ADR-207](adr-207-cluster-writers-wait-outside-the-search-pool.md). A writer of the cluster
+  lock now waits at the search pool's gate, the remote cutover holds write admission alone,
+  and `write_cluster` checks the rule of item 4 where the lock is taken.
 - **Not changed, and still limits of the coordinator:**
   - One write still visits its shards one after another.
   - A remote position that does not answer still costs every write that touches it the write

@@ -176,7 +176,8 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   with the new flags), `/_cat/stats`, `/_cat/segments`.
 - **Vocabulary admin** (`PUT /_vocab`, `/_vocab/learn_and_apply`, `/_vocab/aliases/*`) maps onto the
   cluster blue/green rebuild (ADR-046); its one refusal — non-local (gRPC) shards — surfaces as a 400
-  with the engine's message. The current remote transport ships dictionaries but not normalizers, so
+  with the engine's message. The change waits for the search requests in flight, searches that
+  arrive meanwhile wait for it, and a batch is matched under one vocabulary throughout (ADR-207). The current remote transport ships dictionaries but not normalizers, so
   remote shard servers support only the stock vocabulary (ADR-076). A
   **tagged** cluster is not refused (tags carry through by stored `TagId`, ADR-074), and a
   **multi-word alias activates** (P(T)-aware routing, ADR-076). At startup, `--vocab-file` on a fresh

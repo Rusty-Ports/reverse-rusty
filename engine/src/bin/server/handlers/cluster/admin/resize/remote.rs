@@ -89,8 +89,16 @@ pub(super) fn remote_resize_worker(
     let prepared = cluster.prepare_remote_resize_then(&request, move || drop(writes));
     drop(cluster);
     let result = prepared.and_then(|prepared| {
-        // The new layout is committed; the swap itself is brief and cannot be skipped.
-        let retired = state.cluster.write().install_remote_resize(prepared)?;
+        // The new layout is committed; the swap itself is brief and cannot be skipped. Like
+        // every taker of the cluster's write lock it holds write admission alone (ADR-206)
+        // and closes the search pool's gate (ADR-207). Admission was released when the write
+        // fence went up; a write that arrives now is refused by the fence and gives its
+        // share straight back.
+        let admission = state.write_admission.write();
+        let retired = state
+            .write_cluster(&admission)
+            .install_remote_resize(prepared)?;
+        drop(admission);
         let cluster = state.cluster.read();
         let report = cluster.finish_remote_resize(retired)?;
         let version = cluster.control_state()?.epoch;

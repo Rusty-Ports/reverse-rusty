@@ -645,9 +645,9 @@ async fn percolate_blocking(
                 {
                     use rayon::prelude::*;
                     let deadline = requested_deadline.filter(|_| cooperative_cancel);
-                    // Without source enrichment the read guard is taken PER TITLE: the
-                    // RwLock is fair, so a queued vocabulary writer cannot stall every
-                    // subsequent read for the whole batch. Source requests use the
+                    // Without source enrichment each title reads the cluster on the worker
+                    // that matches it. No writer comes between two titles: it waits at the
+                    // pool's gate for the whole request (ADR-207). Source requests use the
                     // core mutation-frozen view through match and source cloning.
                     let one = |t: &str| -> Result<(ScoredIds, MatchStats), ShardError> {
                         match (stable_view, rank.as_ref()) {
@@ -746,7 +746,7 @@ async fn percolate_blocking(
                 // (ADR-206).
                 state_inner.run_with_stable_view(|stable_view| run(Some(stable_view)))
             } else {
-                state_inner.pool.install(|| run(None))
+                state_inner.pool.run(|| run(None))
             }
         })
         .await

@@ -1,11 +1,12 @@
 //! A search that returns sources holds the cluster lock while it waits for a worker of the
-//! search pool. That is safe only because nothing can queue for the cluster's write lock
-//! behind it: it shares write admission, and whoever takes the write lock holds admission
-//! alone (ADR-206).
+//! search pool. Nothing can queue for the cluster's write lock behind it: it shares write
+//! admission, and whoever takes the write lock holds admission alone (ADR-206).
 //!
 //! The pool's workers take the cluster lock for each title they match, and they wait when a
 //! writer is queued for it. With a vocabulary rebuild queued behind the search, the workers
 //! would wait for the rebuild, the rebuild for the search, and the search for a worker.
+//! The pool's gate keeps a writer away from every request in the pool, this one included
+//! (ADR-207, `pool_gate.rs`); this file is about the search waiting where it should.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex as StdMutex};
@@ -20,12 +21,12 @@ struct Occupied {
 
 impl Occupied {
     fn every_worker_of(state: &Arc<ClusterAppState>) -> Self {
-        let workers = state.pool.current_num_threads();
+        let workers = state.pool.workers().current_num_threads();
         let released = Arc::new((StdMutex::new(false), Condvar::new()));
         let started = Arc::new(AtomicUsize::new(0));
         for _ in 0..workers {
             let (released, started) = (Arc::clone(&released), Arc::clone(&started));
-            state.pool.spawn(move || {
+            state.pool.workers().spawn(move || {
                 started.fetch_add(1, Ordering::SeqCst);
                 let (flag, wake) = &*released;
                 let mut done = flag.lock().expect("flag");
