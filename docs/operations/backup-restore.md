@@ -28,6 +28,11 @@ server warns that it trusts that file unverified, and the first commit records i
 from the primaries on open. Orphan segment or source-generation files left by an interrupted
 pre-commit attempt are skipped.
 
+A store's log is part of its backup. A store with a manifest and no log is refused a backup, and
+a backup directory in that state does not verify (ADR-213): it would restore to a store that
+refuses to open, and the running store is acknowledging writes into a file no restart will
+read.
+
 ## Why not just `cp -r` the data directory?
 
 A live `cp -r` is **unsafe**. A concurrent flush/compaction commits a new manifest and then deletes

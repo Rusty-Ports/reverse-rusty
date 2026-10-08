@@ -70,7 +70,7 @@ fn checkpoint_with_replicas_reopens_and_matches() {
         cluster
             .checkpoint()
             .expect("checkpoint seals primaries only");
-        assert_eq!(cluster.epoch(), 1, "checkpoint bumps the epoch");
+        assert_eq!(cluster.epoch(), 2, "checkpoint bumps the epoch");
     }
     let reopened =
         ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).expect("reopen replicated");

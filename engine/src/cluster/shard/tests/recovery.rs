@@ -152,3 +152,71 @@ fn a_restarting_shard_is_not_given_an_empty_translog() {
     drop(open().expect("restart"));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A restarting shard has a checkpoint file, written after its translog existed. A translog
+/// that is not there has been lost with every write the shard acknowledged since that
+/// checkpoint, and the shard is refused; before ADR-213 it made an empty one and served
+/// without them. The refusal changes nothing: with the translog back the shard restarts with
+/// its row.
+#[test]
+fn a_restarting_shard_whose_translog_is_gone_is_refused() {
+    let norm = Arc::new(Normalizer::default_vocab().unwrap());
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let ast = crate::dsl::parse("wireless mouse").unwrap();
+    let extracted = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tags = TagDict::new();
+    tags.mark_finalized();
+    let tags = Arc::new(tags);
+    let dir = std::env::temp_dir().join(format!("rr_shard_gone_translog_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        wal_sync_on_write: true,
+        ..EngineConfig::default()
+    };
+    let open = || {
+        LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tags),
+            config.clone(),
+        )
+    };
+    let shard = open().expect("a fresh durable shard");
+    shard
+        .insert_extracted_with_tags(&extracted, 1, 1, "wireless mouse", &[])
+        .unwrap();
+    drop(shard);
+    let path = dir.join(TRANSLOG_FILE);
+    let held = std::fs::read(&path).expect("the translog");
+    std::fs::remove_file(&path).expect("lose the translog");
+
+    for attempt in 1..=2 {
+        match open() {
+            Err(error) => {
+                let reason = error.to_string();
+                assert!(
+                    reason.contains("is missing") && reason.contains("Recover the shard"),
+                    "refused for another reason: {reason}"
+                );
+            }
+            Ok(shard) => panic!(
+                "attempt {attempt}: restarted without its translog; it holds {:?}",
+                shard.live_logical_ids().unwrap()
+            ),
+        }
+        assert!(!path.exists(), "a refused restart created a translog");
+    }
+
+    std::fs::write(&path, &held).expect("put the translog back");
+    let shard = open().expect("with its translog");
+    assert_eq!(
+        shard.live_logical_ids().unwrap(),
+        vec![1],
+        "the refusals changed something: the row in the translog did not come back"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

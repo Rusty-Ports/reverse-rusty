@@ -110,8 +110,17 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   header-only file beside the path, syncing it, renaming it into place and syncing the directory.
   A crash or a full disk leaves no file or a whole one. A file shorter than its header is
   refused, except where an older release could have left it and nothing on disk says the log
-  ever held a record: the WAL (the manifest covers what it held), a coordinator log under the manifest
-  `build` wrote (no checkpoint since), and a Raft log on a node with no other Raft state.
+  ever held a record: the WAL (the manifest covers what it held), a coordinator log under an
+  epoch-0 manifest (which only releases before ADR-213 wrote, before they created the log), and
+  a Raft log on a node with no other Raft state.
+- **A lost log is refused** ([ADR-213](../decisions/adr-213-a-lost-log-is-refused.md)). Each
+  store's commit record is written after its log exists: the single-node manifest, the cluster
+  manifest from epoch 1 on (`build` writes epoch 0, creates the log, and then writes the same
+  manifest at epoch 1), a shard's checkpoint file, a control node's vote. A store
+  that finds that record and no log does not open, because an empty log in its place would drop
+  every acknowledged write that was only in the log without a word. The refusal creates nothing
+  and changes nothing; the store is restored, or, for a control node, stays down while the
+  control plane is recovered as a whole.
 - **Segments are immutable** (Lucene/LSM): the write path is append-only; complexity is pushed to
   the merge, which is the right place for it.
 - **Updates/deletes are tombstones**, not in-place edits: update = compile new version into the

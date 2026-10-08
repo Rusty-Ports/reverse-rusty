@@ -74,6 +74,24 @@ pub(crate) fn header_was_interrupted(path: &Path, headers: &[&[u8]]) -> io::Resu
     Ok(headers.iter().any(|header| header.starts_with(&held)))
 }
 
+/// The error for a log that its owner's commit record says existed and that is not there.
+///
+/// A reopen that created an empty log in its place would drop, without a word, every
+/// acknowledged write that was only in the log (ADR-213). Which writes those are is the
+/// owner's to say, and it is not always "the writes since the commit record": a single-node
+/// manifest can be newer than writes that are still only in the log. `evidence` is what
+/// proves the log existed, and `way_out` is what the operator can do.
+pub(crate) fn lost_log(log: &Path, evidence: &str, way_out: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "{} is missing, but {evidence}. The acknowledged writes that were only in that \
+             log are lost. {way_out}",
+            log.display()
+        ),
+    )
+}
+
 /// A damaged length prefix can hide later acknowledged records. Refuse repair when a
 /// complete CRC-valid record exists behind it. Bound CRC work to keep hostile length
 /// patterns linear in suffix size; an exhausted budget is ambiguous and also refused.
@@ -221,6 +239,11 @@ impl<W: Write> LogAppender<W> {
     /// writes to a now-unlinked inode on any failure path.
     pub(crate) fn disable(&mut self) {
         self.failed = true;
+    }
+
+    /// Whether this handle refuses appends: it was disabled, or an append on it failed.
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.failed
     }
 
     fn healthy(&self) -> io::Result<()> {

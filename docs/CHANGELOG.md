@@ -9,6 +9,37 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-07 — A store whose log is gone no longer starts without it
+
+- **A lost log is refused, not recreated** ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)).
+  A reopen that found no log file created an empty one, also where the store's own commit record
+  proved a log had existed: a single-node `manifest.bin`, a cluster manifest, a shard's checkpoint
+  file, a control node's vote. Every acknowledged write that was only in the log was dropped
+  without an error, an event or a change in health, and a control node rejoined with an empty
+  log beside its vote. All four now refuse to start, and name the file and what proves it
+  existed.
+- **A refused start changes nothing.** No log is created in the lost one's place, and the
+  coordinator checks its log before it attaches a shard, so the shards' translogs are left as
+  they were. With the file put back, the directory opens with every write.
+- **`build` ends by writing its manifest again at epoch 1,** which says the cluster log exists.
+  The manifest it writes first, before it creates the log, stays at epoch 0, and a reopen that
+  finds epoch 0 (a build that stopped part-way, or a cluster from an earlier release that never
+  checkpointed) creates the log if there is none and writes the epoch-1 manifest itself. Only
+  the manifest is written. A cluster built by this release reports epoch 1 where it reported 0.
+- **A translog reset replaces the file by a rename** instead of removing it first, so a crash
+  never leaves a shard's checkpoint file without a translog.
+- **A cluster-log checkpoint that cannot write its replacement leaves the log taking writes.** It
+  disabled the log's append handle first, so every later write failed with `log append disabled`
+  until a restart, and the failure was reported as harmless. A checkpoint that fails at the
+  rename still stops appends, and the event now says so.
+- **A backup of a store whose log is gone is refused,** and a backup directory without its log
+  does not verify.
+- **Behaviour change:** a data directory whose log was deleted or lost does not start. Restore it
+  from a backup; for a shard node, recover it into an empty directory; a control node stays down
+  while the others keep their majority. Do not delete a log to get a node started. There is not
+  yet a supported way to start without the lost writes when there is no backup (roadmap:
+  "Starting without a lost log"). No format change.
+
 ## 2026-10-07 — A node whose first start was interrupted starts again
 
 - **A log is created whole** ([ADR-212](decisions/adr-212-a-log-is-created-whole.md)). The

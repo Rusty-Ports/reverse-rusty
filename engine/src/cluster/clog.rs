@@ -143,6 +143,14 @@ pub(crate) trait ClusterLog: Send + Sync {
     /// document, so this byte-log stays a pure ordered store.
     fn checkpoint(&self, up_to: LogPos) -> Result<(), ShardError>;
 
+    /// Whether this log refuses appends until it is reopened. A checkpoint that fails at or
+    /// after its rename leaves it so: the handle it had no longer addresses the log. The
+    /// log's content is whole either way; what is lost is the ability to add to it in this
+    /// process. False for a log that persists nothing.
+    fn appends_disabled(&self) -> bool {
+        false
+    }
+
     /// Whether each append is fsynced before it returns, so an acknowledged write survives a
     /// power loss and not only a process crash. False for a log that persists nothing.
     /// Read by the shard node's metrics, which exist only in the distributed build.
@@ -224,11 +232,47 @@ pub(crate) struct FileClusterLog {
     fsync_each_write: bool,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the next checkpoint made on this thread of a log with this file name fails
+    /// at its rename, which is the point from which the log's append handle is disabled.
+    /// Nothing portable makes one rename in a directory fail and leaves the others working.
+    /// It names the file because a shard's translog is the same type, and a cluster
+    /// checkpoint trims those first.
+    pub(crate) static FAIL_NEXT_CHECKPOINT_PUBLISH_OF: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// What [`FileClusterLog::open`] does when no file is at the log's path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IfMissing {
+    /// Nothing says this log exists yet (a new store, or one whose build has not finished):
+    /// create it.
+    Create,
+    /// The owner's commit record was written after the log existed. A missing file is then
+    /// a lost log, and the writes acknowledged since that record went with it. Refuse.
+    Refuse,
+}
+
 impl FileClusterLog {
     /// Open or create the log at `path`. `floor_pos` (the manifest's snapshot cursor)
     /// seeds the position counter so it stays monotonic even after a checkpoint
     /// truncated the file.
-    pub(crate) fn open(path: &Path, fsync_each_write: bool, floor_pos: LogPos) -> io::Result<Self> {
+    ///
+    /// `if_missing` is the caller's answer to "does anything say this log exists?". Every
+    /// caller has to give one, because the wrong default loses data silently (ADR-213).
+    pub(crate) fn open(
+        path: &Path,
+        fsync_each_write: bool,
+        floor_pos: LogPos,
+        if_missing: IfMissing,
+    ) -> io::Result<Self> {
+        if if_missing == IfMissing::Refuse && !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} is missing", path.display()),
+            ));
+        }
         let (file, next_seq, repaired_tail_bytes) = if path.exists() {
             let scan = Self::read_entries(path)?;
             let max_seq = scan.records.iter().map(|(p, _)| p.0).max().unwrap_or(0);
@@ -254,6 +298,25 @@ impl FileClusterLog {
                 path: path.to_path_buf(),
                 next_seq,
                 repaired_tail_bytes,
+            }),
+            fsync_each_write,
+        })
+    }
+
+    /// Put an empty log at `path`, in place of whatever is there, and open it.
+    ///
+    /// The new log is written beside the path and renamed over it, so there is no moment at
+    /// which the path holds no log: a crash leaves the old log or the new one. Removing the
+    /// old file first would leave, for that moment, an owner whose commit record says a log
+    /// exists and no log, which a restart refuses (ADR-213).
+    pub(crate) fn replace_with_empty(path: &Path, fsync_each_write: bool) -> io::Result<Self> {
+        let file = publish_empty_log(path, &Self::header(CLOG_VERSION))?;
+        Ok(FileClusterLog {
+            state: Mutex::new(FileState {
+                file: LogAppender::new(file),
+                path: path.to_path_buf(),
+                next_seq: 1,
+                repaired_tail_bytes: 0,
             }),
             fsync_each_write,
         })
@@ -452,6 +515,10 @@ impl ClusterLog for FileClusterLog {
         self.fsync_each_write
     }
 
+    fn appends_disabled(&self) -> bool {
+        self.lock().file.is_disabled()
+    }
+
     fn checkpoint(&self, up_to: LogPos) -> Result<(), ShardError> {
         let mut st = self.lock();
         // Rewrite the file keeping only records strictly after `up_to` (those not yet
@@ -465,10 +532,11 @@ impl ClusterLog for FileClusterLog {
             .filter(|(p, _)| *p > up_to)
             .collect();
 
-        st.file.disable();
-
-        let rewrite = (|| -> io::Result<()> {
-            let tmp = st.path.with_extension("clog.tmp");
+        // Build the replacement first. Until the rename the log and its handle are untouched,
+        // so a checkpoint that cannot build its replacement leaves the log as it was, still
+        // taking writes. (The write-ahead log's reset has the same rule, ADR-198.)
+        let tmp = st.path.with_extension("clog.tmp");
+        let replacement = (|| -> io::Result<()> {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&CLOG_MAGIC)?;
             f.write_all(&CLOG_VERSION.to_le_bytes())?;
@@ -476,15 +544,34 @@ impl ClusterLog for FileClusterLog {
                 let body = Self::encode_body(pos.0, m);
                 write_frame(&mut f, &body)?;
             }
-            f.sync_all()?;
-            drop(f);
+            f.sync_all()
+        })();
+        replacement.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
+
+        // From the rename on, the old handle addresses a file that is no longer the log. It
+        // is disabled first: if anything after this fails, appends are refused until a reopen
+        // instead of being acknowledged into a file no restart will read.
+        st.file.disable();
+        let publish = (|| -> io::Result<()> {
+            #[cfg(test)]
+            if FAIL_NEXT_CHECKPOINT_PUBLISH_OF.with(|named| {
+                let mut named = named.borrow_mut();
+                let this_log = st.path.file_name().and_then(|name| name.to_str());
+                let hit = named.as_deref().is_some() && named.as_deref() == this_log;
+                if hit {
+                    *named = None;
+                }
+                hit
+            }) {
+                return Err(io::Error::other("test: the rename is refused"));
+            }
             std::fs::rename(&tmp, &st.path)?;
             if let Some(parent) = st.path.parent() {
                 std::fs::File::open(parent)?.sync_all()?;
             }
             Ok(())
         })();
-        rewrite.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
+        publish.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
 
         // Re-open the appending handle on the rewritten file.
         st.file = LogAppender::new(

@@ -97,6 +97,7 @@ fn engine_backup_copies_only_manifest_selected_source_generation() {
     let mut manifest = empty_manifest(vec![]);
     manifest.source_file_name = selected.to_string();
     write_manifest(&manifest, &src.join(ENGINE_MANIFEST)).unwrap();
+    std::fs::write(src.join(ENGINE_WAL), b"wal-bytes").unwrap();
 
     let dest = root.join("dest");
     copy_engine_dir(&src, &dest).unwrap();
@@ -337,6 +338,7 @@ fn copy_verifies_before_commit_so_a_bad_source_leaves_no_dest() {
         &src.join(ENGINE_MANIFEST),
     )
     .unwrap();
+    std::fs::write(src.join(ENGINE_WAL), b"wal-bytes").unwrap();
     let dest = root.join("dest");
     match copy_engine_dir(&src, &dest) {
         Err(BackupError::CorruptSegment { .. }) => {}
@@ -350,4 +352,122 @@ fn copy_verifies_before_commit_so_a_bad_source_leaves_no_dest() {
         staging_entries(&dest).is_empty(),
         "owned staging must be cleaned up"
     );
+}
+
+/// Whether `result` is the refusal of a store whose log at `log` is gone. The path matters:
+/// the copy must refuse on the source's own log, before it copies anything, and not leave it
+/// to the verification of the staged copy, whose message would name a temporary directory.
+fn is_a_lost_log(result: Result<(), BackupError>, log: &Path) -> bool {
+    matches!(result, Err(BackupError::Io(error))
+        if error.kind() == std::io::ErrorKind::NotFound
+            && error.to_string().starts_with(&format!("{} is missing", log.display())))
+}
+
+/// A single-node directory with a manifest once had a log (ADR-213). A store whose log is
+/// gone is acknowledging writes into a file no restart will read, and a copy without the log
+/// would restore to a store that refuses to open. The backup is refused, nothing is left at
+/// the destination, and a backup directory in that state does not verify.
+#[test]
+fn an_engine_whose_log_is_gone_is_not_backed_up() {
+    let root = tmp_root("engine-lost-log");
+    let src = root.join("src");
+    std::fs::create_dir_all(src.join(SEGMENTS_DIR)).unwrap();
+    write_manifest(&empty_manifest(vec![]), &src.join(ENGINE_MANIFEST)).unwrap();
+    write_valid_sources(&src.join(SOURCES));
+    let dest = root.join("dest");
+    assert!(
+        is_a_lost_log(copy_engine_dir(&src, &dest), &src.join(ENGINE_WAL)),
+        "a store without its log was backed up"
+    );
+    assert!(!dest.exists(), "a refused backup left a destination");
+    assert!(
+        is_a_lost_log(verify_backup(&src), &src.join(ENGINE_WAL)),
+        "a directory with a manifest and no log verified"
+    );
+    // With its log it is backed up and verifies.
+    std::fs::write(src.join(ENGINE_WAL), b"wal-bytes").unwrap();
+    copy_engine_dir(&src, &dest).unwrap();
+    verify_backup(&dest).unwrap();
+}
+
+/// The same for a cluster, under a manifest that was written with its log in place. Under
+/// the manifest an older release wrote before it created the log (epoch 0), there may be no
+/// log yet, and the copy goes ahead as it did.
+#[test]
+fn a_cluster_whose_log_is_gone_is_not_backed_up() {
+    for (epoch, written_with_its_log) in [(0u64, false), (1, true), (2, true)] {
+        let root = tmp_root(&format!("cluster-lost-log-{epoch}"));
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join(shard_dir_name(0)).join(SEGMENTS_DIR)).unwrap();
+        write_valid_sources(&src.join(shard_dir_name(0)).join(SOURCES));
+        let manifest = ClusterManifest {
+            epoch,
+            snapshot_pos: 0,
+            dict_fingerprint: 0,
+            num_shards: 1,
+            vnodes: 64,
+            include_broad: true,
+            broad_replicate_all: true,
+            placement_generation: crate::ownership::PlacementGeneration::INITIAL,
+            segment_registry: vec![vec![]],
+            next_seg_ids: vec![1],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec![SOURCES.into()],
+            dict_data: Vec::new(),
+            vocab_data: Vec::new(),
+            tag_dict_data: Vec::new(),
+            feature_model_fingerprint: Some(0xFEED),
+        };
+        assert_eq!(manifest.written_with_its_log(), written_with_its_log);
+        write_cluster_manifest(&manifest, &src.join(CLUSTER_MANIFEST)).unwrap();
+        let dest = root.join("dest");
+        if written_with_its_log {
+            assert!(
+                is_a_lost_log(copy_cluster_dir(&src, &dest), &src.join(CLUSTER_LOG)),
+                "epoch {epoch}: a cluster without its log was backed up"
+            );
+            assert!(!dest.exists(), "a refused backup left a destination");
+            assert!(
+                is_a_lost_log(verify_cluster_backup(&src), &src.join(CLUSTER_LOG)),
+                "epoch {epoch}: a cluster directory without its log verified"
+            );
+            std::fs::write(src.join(CLUSTER_LOG), b"clog").unwrap();
+        }
+        copy_cluster_dir(&src, &dest).unwrap();
+        verify_cluster_backup(&dest).unwrap();
+    }
+}
+
+/// A position recorded by a checkpoint also proves the log, whatever the epoch says.
+#[test]
+fn a_manifest_says_whether_it_was_written_with_its_log() {
+    let at = |epoch, snapshot_pos| {
+        let manifest = ClusterManifest {
+            epoch,
+            snapshot_pos,
+            dict_fingerprint: 0,
+            num_shards: 1,
+            vnodes: 64,
+            include_broad: true,
+            broad_replicate_all: true,
+            placement_generation: crate::ownership::PlacementGeneration::INITIAL,
+            segment_registry: vec![vec![]],
+            next_seg_ids: vec![1],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec![SOURCES.into()],
+            dict_data: Vec::new(),
+            vocab_data: Vec::new(),
+            tag_dict_data: Vec::new(),
+            feature_model_fingerprint: None,
+        };
+        manifest.written_with_its_log()
+    };
+    assert!(
+        !at(0, 0),
+        "what an older release wrote at build, before its log"
+    );
+    assert!(at(1, 0), "what `build` writes, after its log");
+    assert!(at(2, 0), "a checkpoint before the first write");
+    assert!(at(0, 7), "a recorded position");
+    assert_eq!(ClusterManifest::FIRST_EPOCH_WITH_A_LOG, 1);
 }

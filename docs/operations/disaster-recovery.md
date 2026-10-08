@@ -65,6 +65,7 @@ your real RTO.
 | Shard **volume** lost (RF=1) | **§3.1 below** |
 | Control quorum majority lost | **§3.2 below** |
 | Everything lost (site/namespace deletion) | **§3.3 below** |
+| A node refuses to start: `… is missing, but …` (its log is gone) | **§3.4 below** |
 | Backup taking / verifying / restoring mechanics | [`backup-restore.md`](backup-restore.md) |
 
 ## 3. The flows this page owns
@@ -136,6 +137,31 @@ the [runbook §7 procedure](cluster-deployment.md) (a stateless coordinator's
 `POST /_checkpoint` seals primaries independently and `POST /_backup` returns 400; each node's volume
 is crash-consistent on its own). If you must restore from a non-quiesced set, treat the window
 between the oldest and newest snapshot as lost and replay it from upstream.
+
+### 3.4 A store refuses to start because its log is gone
+
+The start-up error reads `<file> is missing, but <what proves it existed>. The acknowledged
+writes that were only in that log are lost.` (ADR-213). The store still has everything up to
+its last flush or checkpoint. Earlier releases started in this state without the lost writes
+and said nothing; this is the same loss, reported.
+
+The refusal has changed nothing on disk. First find out why the file is gone (someone removed
+it, a restore left it out, the volume lost it), and if it can be put back, put it back: the
+store then opens with every write. **Never remove a log to get a node started,** and do not
+create an empty one by hand. Otherwise, by role:
+
+| Role | File | What to do |
+|---|---|---|
+| Single-node server | `wal.log` | Restore the data directory from a backup ([`backup-restore.md`](backup-restore.md)), then replay the window since that backup from the upstream system of record (§3.1 step 3). |
+| In-process cluster coordinator | `cluster.log` | The same. The shards' translogs are left untouched by the refusal. |
+| Shard node of a remote cluster | `translog.clog` | Treat it as a lost volume: §3.1 at RF=1, the replica-replacement row of [runbook §6](cluster-deployment.md) at RF≥2. |
+| Control node | `raft-log.bin` | **Leave it down.** A node that has voted must not come back with an empty log, and an older copy of its directory rolls its vote and log back just the same. The other control nodes keep their majority. To return to full strength, recover the control plane as a whole (§3.2). |
+
+There is not yet a supported way to start a store without its lost writes when no backup
+exists (roadmap, "Starting without a lost log").
+
+A backup taken from a store in this state is refused, and a backup directory that lacks its log
+does not verify, so a restore cannot bring the problem back.
 
 ## 4. Post-recovery verification checklist
 

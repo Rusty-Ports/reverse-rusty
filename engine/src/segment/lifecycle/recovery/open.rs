@@ -179,8 +179,21 @@ impl Engine {
             }
         }
 
-        // Open WAL and replay
+        // Open WAL and replay.
+        //
+        // A data directory with a manifest once had a log: the log is opened before the
+        // first commit, and it is only ever replaced through a rename (ADR-198). So a log
+        // that is not there has been lost, with every acknowledged write that had not been
+        // flushed to a segment, and `Wal::open` would put an empty one in its place without
+        // a word. Refuse (ADR-213).
         let wal_path = dir.join("wal.log");
+        if !wal_path.exists() {
+            return Err(crate::storage::framed_log::lost_log(
+                &wal_path,
+                "the manifest beside it was written after it existed",
+                "Restore the data directory from a backup.",
+            ));
+        }
         let mut wal_file = Wal::open(&wal_path, config.wal_sync_on_write)?;
         // ADR-066: a reset (header-only) WAL rescans to seq 1, but the manifest
         // keeps its watermark — pin the sequence past it so frames appended after

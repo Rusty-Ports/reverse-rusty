@@ -305,9 +305,19 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
     }
     // The WAL pairs with the manifest's wal_seq_watermark; both are copied at a
     // consistent point because the caller holds the write lock.
+    //
+    // A directory with a manifest once had a log (ADR-213). If it is gone the engine is
+    // acknowledging writes into a file no restart will read, and a copy without it would
+    // restore to a store that refuses to open. Say so now.
     let wal = src.join(ENGINE_WAL);
     if wal.exists() {
         copy_file_durable(&wal, &staging.join(ENGINE_WAL))?;
+    } else if has_manifest {
+        return Err(BackupError::Io(super::framed_log::lost_log(
+            &wal,
+            "the manifest beside it was written after it existed",
+            "The backup was not taken.",
+        )));
     }
     // Manifest LAST (commit-point ordering).
     if has_manifest {
@@ -359,9 +369,17 @@ fn stage_cluster_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
         fsync_dir(&staging.join(&shard))?;
     }
     // Coordinator log, then the manifest LAST (commit-point ordering).
+    // A manifest written with its log in place means a log that is gone has been lost
+    // (ADR-213): the same refusal as for a single-node directory.
     let log = src.join(CLUSTER_LOG);
     if log.exists() {
         copy_file_durable(&log, &staging.join(CLUSTER_LOG))?;
+    } else if manifest.written_with_its_log() {
+        return Err(BackupError::Io(super::framed_log::lost_log(
+            &log,
+            "the cluster manifest was written after it existed",
+            "The backup was not taken.",
+        )));
     }
     copy_file_durable(&manifest_path, &staging.join(CLUSTER_MANIFEST))?;
     fsync_dir(staging)?;
@@ -384,6 +402,16 @@ pub fn verify_backup(dir: &Path) -> Result<(), BackupError> {
     if manifest_path.exists() {
         let manifest = read_manifest(&manifest_path)?;
         verify_segments(&dir.join(SEGMENTS_DIR), &manifest.segment_files)?;
+        // A store with a manifest refuses to open without its log (ADR-213), so a backup
+        // of one is not complete without it.
+        let wal = dir.join(ENGINE_WAL);
+        if !wal.exists() {
+            return Err(BackupError::Io(super::framed_log::lost_log(
+                &wal,
+                "the manifest beside it was written after it existed",
+                "This backup would restore to a store that refuses to open.",
+            )));
+        }
         verify_sources(
             &dir.join(&manifest.source_file_name),
             manifest.source_file_name != SOURCES,
@@ -406,6 +434,14 @@ pub fn verify_cluster_backup(dir: &Path) -> Result<(), BackupError> {
         let shard = dir.join(shard_dir_name(i));
         verify_segments(&shard.join(SEGMENTS_DIR), files)?;
         verify_sources(&shard.join(&manifest.source_files[i]), false)?;
+    }
+    let log = dir.join(CLUSTER_LOG);
+    if manifest.written_with_its_log() && !log.exists() {
+        return Err(BackupError::Io(super::framed_log::lost_log(
+            &log,
+            "the cluster manifest was written after it existed",
+            "This backup would restore to a cluster that refuses to open.",
+        )));
     }
     Ok(())
 }

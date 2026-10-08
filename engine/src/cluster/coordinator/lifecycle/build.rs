@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::cluster::clog::{FileClusterLog, LogPos};
+use crate::cluster::clog::{FileClusterLog, IfMissing, LogPos};
 use crate::cluster::control::InMemoryControlPlane;
 use crate::cluster::coordinator::{
     into_shard, placement_of, replica_dir, shard_dir, ClusterConfig, ClusterDurable, ClusterEngine,
@@ -362,6 +362,7 @@ impl ClusterEngine {
         if tags.iter().any(|t| !t.is_empty()) {
             engine.tags_present.store(true, Ordering::Relaxed);
         }
+        engine.commit_the_log_into_the_manifest()?;
         Ok(engine)
     }
 
@@ -438,12 +439,21 @@ impl ClusterEngine {
             // ADR-184: the feature model the base was compiled under, checked on every reopen.
             feature_model_fingerprint: Some(norm.fingerprint()),
         };
+        // The manifest first, at epoch 0, and then the log. Epoch 0 says "the log may not exist
+        // yet": a reopen under it creates the log if this build stopped here. `build` ends by
+        // writing the manifest again at epoch 1, which says the log exists (ADR-213).
+        //
+        // The log is not created first. A build that then failed to create it would leave
+        // shard state and no manifest; the next start would build again over that state, and
+        // a shard that finds its own checkpoint file restores its rows before the corpus is
+        // ingested a second time.
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
         let log = FileClusterLog::open(
             &dir.join(CLUSTER_LOG_FILE),
             config.wal_sync_on_write,
             LogPos(0),
+            IfMissing::Create,
         )
         .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
         Ok(ClusterDurable {

@@ -70,7 +70,7 @@ impl LogStore {
         let cf: fn(std::io::Error) -> ControlError =
             |e| ControlError::Backend(format!("raft store open: {e}"));
         let paths = control_store::RaftPaths::new(dir.to_path_buf());
-        control_store::repair_interrupted_creation(&paths).map_err(cf)?;
+        control_store::check_log_against_other_state(&paths).map_err(cf)?;
         let (entries, log_format): (Vec<Entry<TypeConfig>>, _) =
             control_store::read_records(&paths.log()).map_err(cf)?;
         let mut log = BTreeMap::new();
@@ -336,6 +336,46 @@ mod tests {
             assert_eq!(std::fs::read(dir.join("raft-log.bin")).unwrap(), b"RR");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The log is created when the store is first opened, before a vote or anything else is
+    /// written. So a node that has other raft state and no log has lost its log, and is not
+    /// given an empty one: with one it could vote again in a term it voted in, or accept a
+    /// shorter history. Before ADR-213 it started. Nothing is created in the log's place.
+    #[test]
+    fn a_node_with_other_raft_state_and_no_log_is_refused() {
+        for other in [
+            "raft-vote.json",
+            "raft-committed.json",
+            "raft-purged.json",
+            "raft-snapshot.json",
+        ] {
+            let dir = scratch("gone_log");
+            std::fs::write(dir.join(other), b"{}").unwrap();
+            let refused = LogStore::open(&dir, true)
+                .err()
+                .map(|error| format!("{error:?}"));
+            assert!(
+                refused.as_ref().is_some_and(
+                    |reason| reason.contains("is missing") && reason.contains("Leave it down")
+                ),
+                "a node with {other} and no log: {refused:?}"
+            );
+            assert!(
+                !dir.join("raft-log.bin").exists(),
+                "a refused start created a log"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A node with no raft state at all is a node that has not started yet.
+    #[test]
+    fn a_node_with_no_raft_state_starts() {
+        let dir = scratch("fresh_node");
+        assert!(LogStore::open(&dir, true).is_ok());
+        assert_eq!(std::fs::read(dir.join("raft-log.bin")).unwrap().len(), 8);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A new log is written beside its path and renamed in, so a creation that fails

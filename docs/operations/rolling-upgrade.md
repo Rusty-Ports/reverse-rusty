@@ -146,6 +146,15 @@ pre-upgrade backup:
   (a first start interrupted by a crash or a full disk) starts on this release with nothing to
   delete, provided nothing on disk says the log ever held a record. A downgrade reads what this
   release writes.
+- **ADR-213 lost logs:** no durable or wire format change, and no roll-order constraint. A store
+  whose log file is missing (`wal.log`, `cluster.log`, a shard's `translog.clog`, a control
+  node's `raft-log.bin`) while its commit record is present **no longer starts**; before, it
+  started with an empty log and without the writes that were in the old one. Check before the
+  upgrade that every data directory has its log. A cluster built by this release is at
+  epoch 1 when its build returns; an older release reads that manifest as it reads any other.
+  A cluster an older release left at epoch 0 (it never checkpointed) has its manifest rewritten
+  at epoch 1 the first time this release opens it, unless that manifest is in an older format,
+  which an open never rewrites ([disaster recovery §3.4](disaster-recovery.md)).
 - **ADR-193 inbound request size:** no durable or wire format change. A coordinator sends a
   bulk bucket on the `StageIngest` stream (ADR-180), which every shard node it can connect to
   already serves: the ADR-185 capability check refuses older nodes at connect. A dictionary

@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::cluster::clog::{ClusterMutation, FileClusterLog, LogPos};
+use crate::cluster::clog::{ClusterMutation, LogPos};
 use crate::cluster::control::{ClusterStateChange, InMemoryControlPlane};
 use crate::cluster::coordinator::layout::Layout;
 use crate::cluster::coordinator::{
     into_shard, replica_dir, shard_dir, ClusterConfig, ClusterDurable, ClusterEngine,
-    CLUSTER_LOG_FILE, CLUSTER_MANIFEST_FILE,
+    CLUSTER_MANIFEST_FILE,
 };
 use crate::cluster::ring::HashRing;
 use crate::cluster::shard::{LocalShard, Shard, ShardError};
@@ -316,7 +316,9 @@ impl ClusterEngine {
         let ring = HashRing::new(num_shards, manifest.vnodes)?;
 
         let per_shard = config.map(|c| c.per_shard.clone()).unwrap_or_default();
-        let fsync = config.is_some_and(|c| c.wal_sync_on_write);
+
+        // The log is opened, or refused, BEFORE any shard is attached (see `open_cluster_log`).
+        let log = super::cluster_log::open_cluster_log(&data_dir, &manifest, config)?;
 
         // Attach each shard's committed compiled segments (mmap) against the shared dict —
         // NOT re-ingest. Fails loud on a missing / CRC-corrupt segment (a skipped segment
@@ -392,23 +394,6 @@ impl ClusterEngine {
                 ));
             }
         }
-
-        let log_path = data_dir.join(CLUSTER_LOG_FILE);
-        // `build` writes its manifest (epoch 0, position 0) and then creates the log, so that
-        // manifest is no evidence that the log was ever whole. A log shorter than its header is
-        // then one whose creation was interrupted (releases before ADR-212 created the file and
-        // then wrote the header), and it is finished here. Every later manifest is written by a
-        // checkpoint, which needs the log open and replaces it through a rename, and it bumps
-        // the epoch even when it records position 0 (a checkpoint before the first write). So
-        // under any manifest but the first, a short log has lost its content and `open`
-        // refuses it.
-        let is_the_manifest_build_wrote = manifest.epoch == 0 && manifest.snapshot_pos == 0;
-        if is_the_manifest_build_wrote {
-            FileClusterLog::finish_interrupted_creation(&log_path)
-                .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
-        }
-        let log = FileClusterLog::open(&log_path, fsync, LogPos(manifest.snapshot_pos))
-            .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
 
         let durable = ClusterDurable {
             log: Box::new(log),
@@ -604,6 +589,8 @@ impl ClusterEngine {
                 engine.replay_apply(&layout, mutation)?;
             }
         }
+        // A manifest still at epoch 0 does not say that the log exists. It does now.
+        engine.commit_the_log_into_the_manifest()?;
         Ok(engine)
     }
 }

@@ -14,6 +14,7 @@
 mod backup;
 mod build;
 mod checkpoint;
+mod cluster_log;
 mod open;
 mod open_seeded;
 mod sidecar_gc;

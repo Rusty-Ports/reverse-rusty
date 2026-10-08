@@ -109,7 +109,7 @@ ADR-198 fixed the same weakness in the single-node write-ahead log. These two we
 - **Not decided here:** a log that is missing altogether is still created empty on reopen,
   also where a checkpoint, a checkpoint file or a vote says it once existed. That is a log
   that was lost, not one that was interrupted, and it should be refused the same way. It is
-  on the [roadmap](../roadmap.md#a-lost-log-is-refused-not-recreated).
+  decided in [ADR-213](adr-213-a-lost-log-is-refused.md).
 
 ## Proven
 
@@ -173,3 +173,14 @@ this project left stuck.
 **See also:** ADR-198 (the same change for the write-ahead log), ADR-182 (validated log
 recovery), ADR-041 (the durable raft store), ADR-032 and ADR-039 (the cluster log and the
 shard translog).
+
+## Later outcome (2026-10-07, ADR-213)
+
+[ADR-213](adr-213-a-lost-log-is-refused.md) decides the case this one left open: a log that is
+missing is refused wherever its owner's commit record says it existed. It also changes two
+things described above. `build` still writes its manifest first, at epoch 0, but now ends by
+writing it again at epoch 1, and a reopen that finds epoch 0 does that itself; so the coordinator's rule in decision 3 reads "under an epoch-0 manifest", which now
+means a build that has not finished. And the case recorded under Consequences (a cluster that
+has taken writes and never checkpointed) is closed: no cluster serves at epoch 0 any more.
+The alternative "create the log before the manifest" was tried there and given up, for the
+reason ADR-213 records.

@@ -30,7 +30,7 @@ fn add(logical: u64, dsl: &str) -> ClusterMutation {
 fn append_then_replay_round_trips() {
     let path = scratch_path("roundtrip");
     {
-        let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
+        let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).unwrap();
         assert_eq!(log.append(&add(1, "1994 north star")).unwrap(), LogPos(1));
         assert_eq!(
             log.append(&ClusterMutation::Remove { logical: 1 }).unwrap(),
@@ -40,7 +40,7 @@ fn append_then_replay_round_trips() {
         assert_eq!(log.last_pos().unwrap(), LogPos(3));
     }
     // Reopen and replay from the start.
-    let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
+    let log = FileClusterLog::open(&path, false, LogPos(0), IfMissing::Create).unwrap();
     let replay = log.replay(LogPos(0)).unwrap();
     assert_eq!(replay.skipped_bytes, 0);
     assert_eq!(replay.entries.len(), 3);
@@ -72,13 +72,13 @@ fn upsert_frame_round_trips_with_and_without_tags() {
         placement: crate::ownership::QueryPlacement::standalone(),
     };
     {
-        let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
+        let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).unwrap();
         log.append(&add(7, "old version")).unwrap();
         log.append(&tagged).unwrap();
         log.append(&untagged).unwrap();
     }
     // Reopen and replay: the mixed Add/Upsert stream survives byte-exact, in order.
-    let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
+    let log = FileClusterLog::open(&path, false, LogPos(0), IfMissing::Create).unwrap();
     let replay = log.replay(LogPos(0)).unwrap();
     assert_eq!(replay.skipped_bytes, 0);
     assert_eq!(replay.entries.len(), 3);
@@ -104,7 +104,7 @@ fn v4_round_trips_ownership_and_v3_is_refused() {
         placement,
     };
     {
-        let log = FileClusterLog::open(&path, true, LogPos(0)).expect("open v4");
+        let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).expect("open v4");
         log.append(&mutation).expect("append");
         assert_eq!(
             log.replay(LogPos(0)).expect("replay").entries[0].1,
@@ -120,7 +120,7 @@ fn v4_round_trips_ownership_and_v3_is_refused() {
     let mut legacy = bytes;
     legacy[4..8].copy_from_slice(&3u32.to_le_bytes());
     std::fs::write(&path, legacy).expect("write legacy header");
-    let error = FileClusterLog::open(&path, false, LogPos(0))
+    let error = FileClusterLog::open(&path, false, LogPos(0), IfMissing::Create)
         .err()
         .expect("v3 must fail");
     assert!(
@@ -133,7 +133,7 @@ fn v4_round_trips_ownership_and_v3_is_refused() {
 #[test]
 fn replay_from_cursor_skips_captured_prefix() {
     let path = scratch_path("cursor");
-    let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
+    let log = FileClusterLog::open(&path, false, LogPos(0), IfMissing::Create).unwrap();
     for i in 1..=5 {
         log.append(&add(i, "q")).unwrap();
     }
@@ -147,7 +147,7 @@ fn replay_from_cursor_skips_captured_prefix() {
 fn torn_tail_is_dropped_not_fatal() {
     let path = scratch_path("torn");
     {
-        let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
+        let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).unwrap();
         log.append(&add(1, "alpha")).unwrap();
         log.append(&add(2, "beta")).unwrap();
     }
@@ -160,7 +160,7 @@ fn torn_tail_is_dropped_not_fatal() {
             .unwrap();
         f.write_all(&[0xFF, 0xFF, 0xFF, 0x7F, 0xAA, 0xBB]).unwrap();
     }
-    let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
+    let log = FileClusterLog::open(&path, false, LogPos(0), IfMissing::Create).unwrap();
     let replay = log.replay(LogPos(0)).unwrap();
     assert_eq!(replay.entries.len(), 2, "the two whole records survive");
     assert!(replay.skipped_bytes > 0, "torn tail counted");
@@ -170,7 +170,7 @@ fn torn_tail_is_dropped_not_fatal() {
 #[test]
 fn checkpoint_truncates_captured_records() {
     let path = scratch_path("checkpoint");
-    let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
+    let log = FileClusterLog::open(&path, false, LogPos(0), IfMissing::Create).unwrap();
     for i in 1..=5 {
         log.append(&add(i, "q")).unwrap();
     }
@@ -189,7 +189,7 @@ fn checkpoint_truncates_captured_records() {
 #[test]
 fn append_surfaces_write_errors() {
     let path = scratch_path("writefault");
-    let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
+    let log = FileClusterLog::open(&path, false, LogPos(0), IfMissing::Create).unwrap();
     assert!(log.append(&add(1, "ok")).is_ok());
     log.break_writes_for_test();
     assert!(matches!(log.append(&add(2, "no")), Err(ShardError::Log(_))));

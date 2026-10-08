@@ -250,29 +250,104 @@ rank metadata, fully sorts already-sorted shard runs, and clones request groups 
 **Completion.** Preserve exact ordering, totals, ownership, and winner-source behavior while
 `rankbench` demonstrates lower allocation and coordinator CPU at fixed K.
 
-### A lost log is refused, not recreated
+### A checkpoint that fails after a deletion
 
-**Problem.** A reopen that finds no log file creates an empty one, also where something on disk
-says the log once existed: a coordinator whose manifest records a checkpoint, a restarting shard
-with its checkpoint file, a control node with a vote. Writes acknowledged after the last
-checkpoint were in that file. If it is deleted or lost, they are gone and nothing says so, and a
-control node comes back with an empty log beside its vote.
-[ADR-212](decisions/adr-212-a-log-is-created-whole.md) refuses a log that is too short in
-those places; a log that is missing is the same loss.
+**Problem.** A cluster checkpoint rewrites every base segment that holds a deletion and removes
+the old segment file, and only afterwards writes the coordinator's manifest. If that write
+fails, or the process stops between the two, the manifest still names the files that were
+removed, and the cluster cannot reopen ("attaching shard segments: No such file or
+directory"). Reproduced: remove a build-time query, make the manifest write fail, checkpoint,
+reopen. The shard's own engine treats its manifest as the commit point for those removals, and
+a coordinator-owned shard has none, so the removal is immediate.
 
-**Direction.** Refuse a missing log wherever its owner holds evidence that it existed, with an
-error that names the evidence. For the coordinator, create the log before the manifest in
-`build`, so that a manifest always means a log. Established systems make the commit record name the log it
-expects and check it at open: RocksDB can track its write-ahead logs in the manifest
-(`track_and_verify_wals_in_manifest`, added because a missing log was otherwise recovered
-from silently), Elasticsearch ties each Lucene commit to its translog by a UUID and refuses a
-shard whose translog is missing, and PostgreSQL refuses to start without the log segment its
-control file's checkpoint points at. Each keeps going only through an explicit tool that says
-data may be lost.
+**Direction.** The coordinator's manifest is the commit point: a shard that reseals keeps the
+files it replaced until the coordinator has committed a manifest that no longer names them, and
+they are removed by the orphan sweep that already follows a commit. A failed or interrupted
+checkpoint then leaves the old manifest and the old files, which open.
 
-**Completion.** Each of the three owners refuses a missing log when its other state says one
-existed, the error names what to do, and a test deletes the log of a store that holds
-acknowledged writes and sees the refusal.
+**Completion.** A checkpoint that is failed or killed at each step after a deletion is
+followed by a reopen that serves the pre-checkpoint state, with the deletion still applied
+from the log.
+
+### An interrupted first build
+
+**Problem.** A durable cluster build that stops before it has written its first manifest (a
+crash, an out-of-memory kill during a large initial load) leaves shard directories with
+checkpoint files and segments, and no manifest. The next start sees no cluster and builds
+again in the same directory. Each shard finds its own checkpoint file, takes itself for a
+restarting node and restores its rows, and the corpus is then ingested a second time on top
+of them. The build fails ("logical-id enumeration covers 1 of 2 live queries") after it has
+written a manifest for the doubled state, and later starts open that state with inserts
+disabled. Reproduced; it does not depend on the order of the manifest and the log
+([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)).
+
+**Direction.** Make a build restartable. Mark a build in progress before the first shard is
+created and clear the mark with the commit, as an unfinished bulk load is marked on a shard
+node (ADR-196); a start that finds the mark and no manifest discards what the unfinished build
+left and builds from the beginning. A directory that holds shard state, no manifest and no
+mark may be a cluster that has lost its manifest, and is refused instead of built over.
+(PostgreSQL's `initdb` is the model: it refuses a directory that is not empty and removes what
+it created when it cannot finish.)
+
+**Completion.** A build killed at each step before its commit is followed by a start that
+serves exactly the corpus once; a directory with shard state and neither manifest nor mark is
+refused with an error that says what it may be.
+
+### Starting without a lost log
+
+**Problem.** A store whose log is gone refuses to start
+([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)), and the only supported way on is to
+restore it. An operator with no backup has a store that holds everything up to its last flush
+or checkpoint and cannot be started. An override was built with ADR-213 and taken out: the
+evidence that a loss had been accepted lived in memory and in event delivery, and review found
+a way around it each round (a shard node that reports events to nobody; an alert that never
+fires for a count that is already 1 at the first scrape; a start that accepts the loss, fails
+at a later step, and leaves an empty log for the next start to open in silence).
+
+**Direction.** Accept the loss through an explicit step that first writes durable evidence
+into the data directory (what was lost, and when), and only then puts an empty log in place.
+Every later start reports that evidence, in health and as a gauge, until an operator clears
+it. Elasticsearch's `elasticsearch-shard remove-corrupted-data` (a new history UUID, and
+`accept_data_loss` to allocate the shard) and PostgreSQL's `pg_resetwal` are the models. A
+control node gets no such step: it needs a new identity, and so a control plane that can add
+a member.
+
+**Completion.** For the single-node engine, the coordinator and a shard node: a store whose
+log is gone can be started by one documented step; the loss is on disk before the empty log
+is; a start that fails after accepting it still reports it the next time; and an alert fires
+on it without a pre-restart sample.
+
+### A log has an identity
+
+**Problem.** A store refuses to open when its commit record says a log existed and the log is
+gone ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)). It accepts any well-formed log it
+finds: one from another store, or from an older backup, put in place of the lost one, replays
+as if it were the right one. And a cluster from an earlier release that has never completed a
+checkpoint still has an epoch-0 manifest, which cannot say whether its log ever existed.
+
+**Direction.** Give each log a random identity in its header and record it in the commit
+record that goes with it (the manifest, the shard checkpoint file), as Elasticsearch ties a
+Lucene commit to its translog by UUID. Refuse a log whose identity is not the recorded one. It
+is a format change for three logs and three commit records, with the compatibility fences that
+go with them.
+
+**Completion.** A store refuses a log that belongs to another store or another point in time,
+with a test for each owner, and the upgrade path for stores without identities is documented.
+
+### A log deleted under a running store
+
+**Problem.** A log file removed while its store is running goes unnoticed. The store keeps
+appending to the unlinked file and acknowledging the writes; they are gone at the next restart,
+which now refuses to start ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)) but cannot
+bring them back. A checkpoint in that state also fails to rewrite the log and reports the
+failure as benign.
+
+**Direction.** Check that the open log is still the file at its path (link count, or device and
+inode) when it is synced and at each checkpoint, mark durability unhealthy and refuse further
+writes when it is not, and treat a checkpoint that cannot read its log as a failure.
+
+**Completion.** A test deletes the log of a running store and sees the next write refused and
+health change, for the single-node engine, the coordinator and a shard node.
 
 ### Writes during a rebuild, and what a rebuild costs
 
