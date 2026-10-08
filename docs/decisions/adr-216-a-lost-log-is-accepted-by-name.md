@@ -123,6 +123,12 @@ in the delivery of an event.
   it needs a new identity, and so a control plane that can add a member.
 - After an accepted loss the store's clients hold acknowledgements for writes it does not
   have. Nothing in the store can repair that.
+- The record can say more than happened, never less. A start that recorded the loss and
+  stopped before it replaced the log leaves a pending entry; if the original log is then
+  found and put back, the next open finds a log and marks the entry applied, although
+  nothing was lost. An open cannot tell an original log from an empty replacement.
+- The token is not part of `GET /_settings`: it is an instruction to one open, not a
+  property of the running store.
 
 ## Proven
 

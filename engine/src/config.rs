@@ -372,6 +372,10 @@ pub struct EngineConfig {
     /// when the log is present, and it does not accept a later loss.
     ///
     /// Default: `None` (a lost log is refused)
+    ///
+    /// Not part of the serialized settings: it is an instruction to one open, not a
+    /// property of the running store.
+    #[serde(skip)]
     pub accept_lost_log: Option<String>,
 
     /// Translog peer-recovery retention-lease TTL, in seconds (ADR-048). A lease pins a
