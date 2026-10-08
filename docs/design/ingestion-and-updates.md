@@ -92,6 +92,14 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   checkpoints similarly select per-shard segments in the cluster manifest, with coordinator and
   per-shard log tails for post-checkpoint recovery. Logs may be truncated after commit, so segments
   and retained source are part of the authoritative corpus.
+- **A manifest that was renamed and not synced makes the engine read-only until a restart** ([ADR-222](../decisions/adr-222-read-only-after-a-manifest-that-was-renamed-and-not-synced.md)).
+  Publishing a manifest is write, sync, rename, sync the directory. A failure before the rename
+  rolls the commit back and removes what it wrote. A failure after it leaves a commit that a
+  restart will read and a power loss may undo. From then until the process is restarted the
+  engine's data directory does not change: the WAL is closed, so every write is refused; no
+  segment, sidecar or manifest is written; no file is removed. Reads go on and the node
+  reports `red`. An open publishes the manifest it read again (the same bytes, a new rename,
+  a new directory sync) before it loads what the manifest names.
 - **Two state domains on replay.** Base segments are manifest-truth: a WAL frame at or below the
   manifest's watermark does not touch them again. The memtable is WAL-truth: it is rebuilt from the
   replayed frames alone, so every frame's memtable effect is applied whatever the watermark, because

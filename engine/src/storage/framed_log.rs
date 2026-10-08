@@ -225,14 +225,18 @@ pub(crate) fn write_frame(writer: &mut impl Write, body: &[u8]) -> io::Result<us
 /// same handle must never append a later acknowledged frame behind it.
 pub(crate) struct LogAppender<W = File> {
     writer: W,
-    failed: bool,
+    /// Why this handle refuses appends, once it does. It never accepts one again.
+    refusal: Option<&'static str>,
 }
+
+/// What a handle says after one of its own appends failed, or after it was disabled.
+const AFTER_A_FAILURE: &str = "log append disabled after I/O failure; reopen the log";
 
 impl<W: Write> LogAppender<W> {
     pub(crate) fn new(writer: W) -> Self {
         Self {
             writer,
-            failed: false,
+            refusal: None,
         }
     }
 
@@ -240,21 +244,24 @@ impl<W: Write> LogAppender<W> {
     /// Disable the old handle before replacing its file so it cannot acknowledge
     /// writes to a now-unlinked inode on any failure path.
     pub(crate) fn disable(&mut self) {
-        self.failed = true;
+        self.disable_because(AFTER_A_FAILURE);
+    }
+
+    /// [`disable`](Self::disable), for a reason the refused writer is told. The first
+    /// reason stays.
+    pub(crate) fn disable_because(&mut self, why: &'static str) {
+        self.refusal.get_or_insert(why);
     }
 
     /// Whether this handle refuses appends: it was disabled, or an append on it failed.
     pub(crate) fn is_disabled(&self) -> bool {
-        self.failed
+        self.refusal.is_some()
     }
 
     fn healthy(&self) -> io::Result<()> {
-        if self.failed {
-            Err(io::Error::other(
-                "log append disabled after I/O failure; reopen the log",
-            ))
-        } else {
-            Ok(())
+        match self.refusal {
+            Some(why) => Err(io::Error::other(why)),
+            None => Ok(()),
         }
     }
 
@@ -267,7 +274,7 @@ impl<W: Write> LogAppender<W> {
         let result = write_frame(&mut self.writer, body)
             .and_then(|len| finish(&mut self.writer).map(|()| len));
         if result.is_err() {
-            self.failed = true;
+            self.disable();
         }
         result
     }
@@ -296,7 +303,7 @@ impl LogAppender {
     pub(crate) fn append_at(&mut self, path: &Path, body: &[u8], fsync: bool) -> io::Result<usize> {
         self.healthy()?;
         if let Err(planned) = crate::fault::step("append", path) {
-            self.failed = true;
+            self.disable();
             return Err(planned);
         }
         self.append_with(body, |file| {
@@ -312,7 +319,7 @@ impl LogAppender {
         self.healthy()?;
         let result = self.writer.sync_all();
         if result.is_err() {
-            self.failed = true;
+            self.disable();
         }
         result
     }

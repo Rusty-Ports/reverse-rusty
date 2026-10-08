@@ -9,6 +9,26 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — Read-only after a manifest that was renamed and not synced
+
+- **A commit whose directory sync fails after its manifest rename no longer loses data on the
+  next restart** ([ADR-222](decisions/adr-222-read-only-after-a-manifest-that-was-renamed-and-not-synced.md)). A
+  single-node commit publishes `manifest.bin` by write, sync, rename, sync the directory. When
+  the rename succeeded and the directory sync failed, the engine treated the commit as failed
+  and deleted the new segment and source sidecar, which the manifest now on disk named. A
+  restart before the next successful commit skipped the missing segment and served without
+  its queries.
+- **After that error the node is read-only until it is restarted.** Its write-ahead log is
+  closed, so every write returns `503 persistence_unavailable`; no segment, sidecar or
+  manifest is written and no file is removed. It serves reads and reports `red`. A restart
+  reads the manifest on disk and has every acknowledged write.
+- **An open publishes the manifest again before it builds on it:** the same bytes, a new
+  file, a new rename, a new directory sync. An open that cannot do that fails. A sync alone
+  can report success over a failure the kernel has already reported once.
+- **`POST /_bulk` publishes the engine's state after a batch whatever its outcome,** so a
+  health change after a failed batch reaches readers at once.
+- Found by the single-node crash matrix (ADR-221), which fails the step `sync_dir
+  manifest.bin` of every commit and then stops the engine.
 ## 2026-10-08 — A read that loses its connection is retried however the loss is reported
 
 - **A read against a shard node that has just gone away is retried in every way the loss can

@@ -42,6 +42,8 @@ struct Planned {
     step: Step,
     /// How many equal steps pass before the one that fails.
     after: usize,
+    /// Every equal step after that one fails too.
+    from_then_on: bool,
 }
 
 /// How many scopes are open. Zero in every process that is not a test of this kind, and
@@ -82,10 +84,26 @@ impl Scope {
     /// Plan one fault: of the steps equal to `step` taken from now on, the one after `after`
     /// others fails, once. The step is not performed and its caller gets an error.
     pub fn fail(&self, step: &Step, after: usize) {
+        self.plan(step, after, false);
+    }
+
+    /// [`fail`](Self::fail), and every equal step after that one fails as well: a device
+    /// that has stopped accepting the operation, not one error.
+    pub fn fail_from(&self, step: &Step, after: usize) {
+        self.plan(step, after, true);
+    }
+
+    /// Plan no fault. Steps are still recorded.
+    pub fn heal(&self) {
+        locked(&self.0.state).planned = None;
+    }
+
+    fn plan(&self, step: &Step, after: usize, from_then_on: bool) {
         let mut state = locked(&self.0.state);
         state.planned = Some(Planned {
             step: step.clone(),
             after,
+            from_then_on,
         });
         state.failed = None;
     }
@@ -136,8 +154,14 @@ pub(super) fn on_step(name: &'static str, path: &Path) -> io::Result<bool> {
             _ => false,
         };
         if fails {
-            state.planned = None;
-            state.failed = Some(step.clone());
+            if !state
+                .planned
+                .as_ref()
+                .is_some_and(|planned| planned.from_then_on)
+            {
+                state.planned = None;
+            }
+            state.failed.get_or_insert_with(|| step.clone());
             return Err(io::Error::other(format!("planned fault at step `{step}`")));
         }
     }
@@ -186,6 +210,25 @@ mod tests {
         assert_eq!(scope.failed(), Some(sync));
         on_step("sync", &root.join("a.tmp")).expect("and only the second");
         assert_eq!(scope.taken().len(), 4, "a failed step is recorded too");
+    }
+
+    #[test]
+    fn a_fault_planned_from_a_step_on_fails_every_later_one_until_it_is_healed() {
+        let root = dir("persistent");
+        let scope = Scope::open(&root);
+        let sync = Step {
+            name: "sync_dir",
+            path: "manifest.bin".into(),
+        };
+        scope.fail_from(&sync, 1);
+        on_step("sync_dir", &root.join("manifest.bin")).expect("the first passes");
+        for _ in 0..3 {
+            on_step("sync_dir", &root.join("manifest.bin")).expect_err("and then none");
+        }
+        on_step("sync_dir", &root.join("other")).expect("another path is not it");
+        assert_eq!(scope.failed(), Some(sync));
+        scope.heal();
+        on_step("sync_dir", &root.join("manifest.bin")).expect("healed");
     }
 
     #[test]
