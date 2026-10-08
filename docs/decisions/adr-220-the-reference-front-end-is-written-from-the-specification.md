@@ -155,20 +155,21 @@ Nothing. The engine is unchanged.
   over nine significant ones (597,871), and the fold table for every Unicode scalar. The one
   difference was the widening of unquoted clauses, which the text had not stated.
 - **The clarified rules.** `tests/independent_oracle/clarified.rs` asserts hand-written
-  expectations for thirteen of them against the engine and the reference.
+  expectations for fourteen of them against the engine and the reference.
   `a_text_is_cleaned_once` is the port's defect.
-- **Mutants, and what they showed about the suites.** Forty-six single changes to the new
-  front end and the vocabulary type, each run against the reference's own tests and against
-  the engine-versus-reference suites. Two are equivalent. The reference's tests catch 42 of
-  the other 44, and the suites the remaining two. The suites alone at first caught 26: a rule
-  the reference could lose without any of them failing is a rule the engine was not being
-  held to either. `tests/independent_oracle/rules.rs` adds a hand-written case for each such
-  rule that can be seen in a match (additive phrases, a number beside `/`, which numbers are
-  years, tokens with two dots, the fall-back arc, the fixed point of forms carried in pieces,
-  overlapping occurrences and literal tokens in the positive graph and view, the marker
-  tokens, and four parsing rules), and the suites now catch 41. The engine agreed with the
-  specification on every one. The three the suites still miss cannot be seen in a match
-  through the declaration interfaces, or need a marker inside a phrase.
+- **Mutants, and what they showed about the suites.** Fifty single changes to the new front
+  end and the vocabulary type, each run against the reference's own tests and against the
+  engine-versus-reference suites. Two are equivalent. The reference's tests catch 46 of the
+  other 48, and the suites the remaining two. The suites alone at first caught little more
+  than half: a rule the reference could lose without any of them failing is a rule the
+  engine was not being held to either. `tests/independent_oracle/rules.rs` adds a
+  hand-written case for each such rule that can be seen in a match (additive phrases, a
+  number beside `/`, which numbers are years, tokens with two dots, the fall-back arc, the
+  fixed point of forms carried in pieces, overlapping occurrences and literal tokens in the
+  positive graph and view, the marker tokens, and four parsing rules), and the suites now
+  catch 45. The engine agreed with the specification on every one. The three the suites
+  still miss cannot be seen in a match through the declaration interfaces, or need a marker
+  inside a phrase.
 - **The gate.** The provenance lane passes on the tree and fails for a citation of engine
   code added to a module in a subdirectory, and for crate documentation without the
   statement.

@@ -30,7 +30,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **One defect of the port, found by running it against the re-write:** it cleaned a text
   twice on the quoted path, which changes the answer only under a vocabulary that classes the
   space as `fold`. The engine never did.
-- **Twenty-five hand-written tests hold the engine and the reference to rules no suite
+- **Twenty-six hand-written tests hold the engine and the reference to rules no suite
   exercised** (`tests/independent_oracle/clarified.rs`, `rules.rs`). Changing the reference one
   rule at a time showed which rules the engine-versus-reference suites did not exercise:
   additive phrases, a number beside `/`, five-digit numbers, tokens with two dots, an
