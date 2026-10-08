@@ -103,8 +103,9 @@ restarted once more. Nothing else changes; release builds contain none of the fa
 
 ## Later stages
 
-1. The single-node engine's operations (flush, both merges, backup, a vocabulary rebuild) in
-   the same matrix.
+1. The single-node engine's operations in the same matrix. Done for a write, a bulk load, a
+   flush with the merge it starts, a merge and a backup (see "Later outcome" below). Still to
+   do: a vocabulary rebuild and the rewrite of a segment that holds deletions.
 2. Process death at a named step: `crashwriter` built with the facility behind a cargo
    feature, a step chosen by an environment variable, `abort` there, reopen in the parent. The same markers give the
    SIGKILL lane (ADR-088) a way to know where a kill landed.
@@ -115,6 +116,42 @@ restarted once more. Nothing else changes; release builds contain none of the fa
    layer.
 5. The shard node's sequences, and the sidecar as part of the commit instead of a file
    replaced before it.
+
+## Later outcome — the single-node engine (2026-10-08)
+
+`engine/src/fault/engine_matrix.rs` runs the matrix over one durable engine: an insert, an
+upsert, a delete, a bulk load, a flush (with the merge it starts), a merge and a backup. 99
+steps, each failed three ways. The steps of the write-ahead log (its appends and syncs, its
+reset, its checkpoint marker) and of a backup are named for it. The model of what a store may
+hold after a write that failed is shared with the cluster's matrix (`fault/model.rs`).
+
+Two rules are added to the cluster's.
+
+- **A manifest that was renamed and not synced has two outcomes, and both are opened.** The
+  store as it is reopens, which is what a restart reads. A copy with the manifest that was
+  in place at the rename put back reopens too, which is what a power loss may leave
+  (ADR-222). An operation can publish two manifests (a flush, then its merge), so the
+  replaced one is taken at the rename and not before the operation.
+- **A backup's destination, whenever there is one, opens as an engine that holds what the
+  engine held.** A backup that says it failed may leave a whole destination: its last step
+  syncs the directory the destination was renamed into, and that sync can fail.
+
+What the first runs found:
+
+1. A commit whose manifest was renamed and not synced was rolled back, and the files the
+   manifest on disk named were deleted. Fixed by ADR-222.
+2. **A replaced query came back after a restart.** A flush that cannot write its segment
+   seals the memtable in memory and keeps the log. The merge that follows drops the rows
+   that had been replaced and commits with a watermark that covers the whole log, and the log
+   is not reset. Replay skipped an upsert whose row a segment held, delete half included,
+   after replaying the insert that the upsert had replaced (no segment holds a dropped row).
+   A captured upsert now applies its delete half to the memtable, as a delete by id already
+   did. Found when the seed wrote one id twice in the log tail: 39 flush cases failed.
+3. In the same state a delete by memtable position, a library call, names another row at
+   replay, and an acknowledged-live query is lost. Not fixed here. Replay decides row by row
+   what a commit captured; the commit should record how far the log has been sealed into
+   segments, which makes every position exact. That is a change of the manifest's format and
+   is on the roadmap.
 
 ## Proven
 

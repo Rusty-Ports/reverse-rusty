@@ -315,9 +315,11 @@ impl LogAppender {
         })
     }
 
-    pub(crate) fn sync_all(&mut self) -> io::Result<()> {
+    /// Sync the log at `path`: the step `sync` (ADR-221). A failure, planned or real,
+    /// leaves this handle refusing appends.
+    pub(crate) fn sync_at(&mut self, path: &Path) -> io::Result<()> {
         self.healthy()?;
-        let result = self.writer.sync_all();
+        let result = crate::fault::sync(&self.writer, path);
         if result.is_err() {
             self.disable();
         }

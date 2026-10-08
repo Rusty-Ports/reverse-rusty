@@ -152,19 +152,25 @@ fn replay_wal_tail(
                 source_generation,
                 class_d_accepted,
             } => {
-                // ADR-067: the insert half ALWAYS replays — the new memtable copy
-                // exists only in this frame (a flush would have reset the WAL and
-                // dropped it). The segment-tombstone half follows the watermark
-                // rule (baked bitmaps below it; and a same-id bulk ingest after
-                // the frame must not be erased), while prior MEMTABLE copies are
-                // always re-tombstoned — they are WAL-truth, recreated by earlier
-                // replayed frames. See `apply_upsert`. `class_d_accepted` is the
-                // frame's marker (op 6, ADR-068): a legacy op-4 frame replays
-                // under the old reject gate, so a logged-but-rejected class-D
-                // upsert can never tombstone the acknowledged-live prior version.
+                // ADR-067: the segment-tombstone half follows the watermark rule
+                // (baked bitmaps below it; and a same-id bulk ingest after the
+                // frame must not be erased), while prior MEMTABLE copies are always
+                // re-tombstoned — they are WAL-truth, recreated by earlier replayed
+                // frames. See `apply_upsert`. `class_d_accepted` is the frame's
+                // marker (op 6, ADR-068): a legacy op-4 frame replays under the old
+                // reject gate, so a logged-but-rejected class-D upsert can never
+                // tombstone the acknowledged-live prior version.
+                //
+                // The insert half replays unless a commit already holds this
+                // frame's row, as for an insert. Its delete half replays even then
+                // (ADR-221): a merge drops a row that was replaced, so the frame
+                // that wrote the row is replayed, and only this frame takes it away
+                // again.
                 let captured = seq <= watermark
                     && engine.has_materialized_source_generation(logical, source_generation);
-                if !captured {
+                if captured {
+                    engine.retire_replayed_copies(logical, source_generation);
+                } else {
                     engine.replay_upsert(
                         &text,
                         logical,
@@ -192,3 +198,5 @@ mod shared;
 
 #[cfg(test)]
 mod compiler_migration_tests;
+#[cfg(test)]
+mod replayed_upsert_tests;

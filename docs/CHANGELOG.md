@@ -9,6 +9,23 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — Every step of a single-node engine's operations is failed in turn
+
+- **A replaced query no longer comes back after a restart**
+  ([ADR-221](decisions/adr-221-every-step-of-a-durable-operation-has-a-name.md), later
+  outcome). After a flush that could not write its segment and the merge that followed it,
+  the log still held every record and the merged segment held only the rows that were live.
+  A restart replayed the insert of a row that an upsert had replaced, and skipped the upsert
+  because a segment held its row. The id then matched under both query bodies. A skipped
+  upsert now still takes away the copies that the replay recreated.
+- **The crash matrix covers a single-node engine:** an insert, an upsert, a delete, a bulk
+  load, a flush with the merge it starts, a merge and a backup, 99 steps, each failed three
+  ways. A manifest that was renamed and not synced is opened as it is and with the manifest
+  it replaced put back. The steps of the write-ahead log and of a backup have names.
+- Known and not fixed here: in the same state, a delete by memtable position (a library
+  call) can name another row at replay. See the roadmap, "The commit records how far the log
+  is sealed into segments".
+
 ## 2026-10-08 — Read-only after a manifest that was renamed and not synced
 
 - **A commit whose directory sync fails after its manifest rename no longer loses data on the

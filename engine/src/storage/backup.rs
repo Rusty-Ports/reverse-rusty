@@ -113,14 +113,15 @@ fn copy_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    crate::fault::step("copy", dst)?;
     std::fs::copy(src, dst)?;
-    std::fs::File::open(dst)?.sync_all()?;
+    crate::fault::sync(&std::fs::File::open(dst)?, dst)?;
     Ok(())
 }
 
 /// fsync a directory so prior renames/creates within it are durable.
 fn fsync_dir(dir: &Path) -> io::Result<()> {
-    std::fs::File::open(dir)?.sync_all()
+    crate::fault::sync_dir(dir)
 }
 
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -214,7 +215,8 @@ fn rename_noreplace(staging: &Path, dest: &Path) -> io::Result<()> {
 /// Atomically commit a fully-staged directory to `dest` without clobbering a
 /// competing entry, then make the new parent-directory entry durable.
 fn commit_staging(staging: &Path, dest: &Path) -> Result<(), BackupError> {
-    if let Err(error) = rename_noreplace(staging, dest) {
+    let renamed = crate::fault::step("rename", dest).and_then(|()| rename_noreplace(staging, dest));
+    if let Err(error) = renamed {
         return if error.kind() == io::ErrorKind::AlreadyExists {
             Err(BackupError::DestExists(dest.to_path_buf()))
         } else {
