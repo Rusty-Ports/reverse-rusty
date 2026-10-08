@@ -175,6 +175,9 @@ pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
             match punct.class_of(c) {
                 PunctClass::Split => push_separator(out),
                 PunctClass::Fold => {} // delete: neighbors join into one token
+                // A space is the separator whatever class a vocabulary gives it: kept or
+                // marked, it still ends a token, and is still not written twice.
+                PunctClass::Keep | PunctClass::Marker if c == ' ' => push_separator(out),
                 PunctClass::Keep => out.push(c),
                 PunctClass::Marker => {
                     push_separator(out);

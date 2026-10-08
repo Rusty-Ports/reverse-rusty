@@ -45,7 +45,8 @@ It was found by writing the analyzer's rules down in full and trying one the tex
    in a query and in a title, in every view.
 2. **A character that is kept is part of a token.** `north . star` has three tokens under the
    default punctuation classes and does not carry `north star`. A marker (`#`, `/`) is a token
-   too.
+   too. The space is the exception: it is the separator whatever class a vocabulary gives it,
+   so no configuration brings runs of separators back.
 3. **Selection is leftmost-longest over the occurrences that sit on token boundaries**, in
    every mode. The fast leftmost-longest pass runs first; the first match it reports that is
    not on token boundaries hands the text to the boundary-aware selection
@@ -110,7 +111,8 @@ It was found by writing the analyzer's rules down in full and trying one the tex
 
 - `normalize/tests.rs`: a phrase is found across two spaces, a comma and a space, a hyphen
   between spaces, tabs, and a hyphen alone; not across a kept character or another word.
-  Cleaned text has no two separators in a row and no leading one. A run inside an alias form
+  Cleaned text has no two separators in a row and no leading one, also when a vocabulary
+  classes the space itself as kept or as a marker. A run inside an alias form
   is the form on the query side and in both title views. A pattern found inside a word hides
   no phrase, and where the longer or the earlier phrase is an occurrence it still wins.
 - `tests/independent_oracle/gotcha.rs`, engine and reference against hand-written

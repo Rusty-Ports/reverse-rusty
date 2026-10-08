@@ -105,6 +105,8 @@ pub fn clean(text: &str, punct: &PunctTable) -> String {
             match punct.class_of(c) {
                 PunctClass::Split => separator(&mut out),
                 PunctClass::Fold => {} // delete: neighbours join into one token
+                // A space is the separator whatever class it is given.
+                PunctClass::Keep | PunctClass::Marker if c == ' ' => separator(&mut out),
                 PunctClass::Keep => out.push(c),
                 PunctClass::Marker => {
                     separator(&mut out);

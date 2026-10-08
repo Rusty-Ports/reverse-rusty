@@ -427,3 +427,41 @@ fn a_match_inside_a_word_hides_no_phrase() {
         ],
     );
 }
+
+/// A vocabulary may give the space itself a punctuation class. Kept, it is still the
+/// separator: a title with two spaces between a phrase's words carries the phrase, and a
+/// quoted query for a synonym of the phrase matches it (ADR-218).
+#[test]
+fn a_kept_space_is_still_a_separator() {
+    use reverse_rusty::dict::FeatureKind;
+    use reverse_rusty::normalize::PunctClass;
+    let norm = || {
+        let mut b = NormalizerBuilder::new();
+        b.set_punct_class(' ', PunctClass::Keep);
+        b.add_phrase(&["north", "star"], "brand:north_star", FeatureKind::Brand);
+        b.add_synonym("ns", "brand:north_star", FeatureKind::Brand);
+        b.build().expect("normalizer")
+    };
+    let vocab = || {
+        let mut vocab = RefVocab::default_vocab()
+            .phrase("north star", "brand:north_star", PhraseMode::Collapse)
+            .synonym("ns", "brand:north_star");
+        vocab
+            .punct
+            .set(' ', reverse_rusty_ref_matcher::clean::PunctClass::Keep);
+        vocab
+    };
+    for query in ["\"ns\"", "ns", "north star", "\"north star\""] {
+        check(
+            norm,
+            vocab,
+            query,
+            &[
+                ("north star", true),
+                ("north  star", true),
+                ("ns", true),
+                ("north", false),
+            ],
+        );
+    }
+}

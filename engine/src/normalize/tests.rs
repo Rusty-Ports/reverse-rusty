@@ -166,6 +166,35 @@ fn cleaned_text_never_has_two_separators_in_a_row() {
 }
 
 #[test]
+fn a_space_is_a_separator_whatever_class_a_vocabulary_gives_it() {
+    // A vocabulary may give any character a class, the space included. Kept or marked, a
+    // space still ends a token and is still not written twice, so no configuration brings
+    // back runs of separators. (With the space kept, `north  star` cleaned to two spaces
+    // again, and a quoted query for a synonym of the phrase stopped matching that title.)
+    for class in [PunctClass::Keep, PunctClass::Marker, PunctClass::Split] {
+        let mut punct = PunctTable::default();
+        punct.set(' ', class);
+        let mut lc = String::new();
+        for (text, cleaned) in [("north  star", "north star"), (" a   b ", "a b ")] {
+            super::core::clean_with(&punct, text, &mut lc);
+            assert_eq!(lc, cleaned, "{class:?}: {text:?}");
+        }
+
+        let mut b = NormalizerBuilder::new();
+        b.set_punct_class(' ', class);
+        b.add_phrase(&["north", "star"], "brand:north_star", FeatureKind::Brand);
+        b.add_synonym("ns", "brand:north_star", FeatureKind::Brand);
+        let n = b.build().expect("normalizer");
+        assert_eq!(
+            names(&n, "north  star"),
+            s(&["brand:north_star"]),
+            "{class:?}"
+        );
+        assert_eq!(names(&n, "ns"), s(&["brand:north_star"]), "{class:?}");
+    }
+}
+
+#[test]
 fn a_run_inside_a_phrase_is_the_phrase_on_both_sides_and_in_both_views() {
     // The query side reduced runs only while a multi-word alias was active (ADR-061), and the
     // title's canonical view never did. Now neither needs to: there are no runs.
