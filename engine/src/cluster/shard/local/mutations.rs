@@ -123,7 +123,8 @@ impl LocalShard {
                 e.to_string(),
             )
         })?;
-        translog::write_sidecar(
+        self.write_checkpoint_file(
+            eng,
             dir,
             &translog::ShardCheckpoint {
                 next_seg_id: eng.next_seg_id(),

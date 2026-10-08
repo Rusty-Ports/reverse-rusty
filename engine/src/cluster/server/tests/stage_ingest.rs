@@ -354,3 +354,55 @@ async fn a_bulk_load_reclaims_the_lease_a_restarted_node_no_longer_holds() {
     assert_eq!(lease.owner(), 77, "the lease is held again");
     assert_eq!(Shard::num_queries(&state.shard).expect("count"), 5);
 }
+
+/// A staged load seals several segments and then compacts them, and commits the result by
+/// writing the shard's checkpoint file. On a shard node that file is the commit record, so
+/// the segments the compaction replaced are named by nothing once it is written, and they are
+/// removed then (ADR-214). A remote bulk load does not seal its shards afterwards, so nothing
+/// later would do it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_staged_load_that_compacts_leaves_only_the_files_its_checkpoint_file_names() {
+    let dir = std::env::temp_dir().join(format!("rr_stage_ingest_release_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let normalizer = norm();
+    let dict = Arc::new(frozen_dict(&["stageneedle"], &normalizer));
+    let config = EngineConfig {
+        memtable_flush_threshold: 3,
+        max_segments: 1,
+        ..EngineConfig::default()
+    };
+    let server =
+        ShardServer::new_durable(normalizer, dict, config, dir.clone()).expect("a durable node");
+    let (client, state) = serve(server).await;
+
+    let (sender, reply) = open(&client);
+    sender.send(batch(0, 0..12)).await.expect("send");
+    drop(sender);
+    reply.await.expect("join").expect("the staged load");
+
+    let mut named =
+        crate::cluster::shard::Shard::segment_filenames(&state.shard).expect("segment files");
+    named.sort();
+    let mut on_disk: Vec<String> =
+        std::fs::read_dir(super::super::shard_dir(&dir, 0).join("segments"))
+            .expect("the slot's segments")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("seg"))
+            })
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+    on_disk.sort();
+    assert!(
+        named.len() < 4,
+        "precondition: twelve rows in three-row segments were compacted: {named:?}"
+    );
+    assert_eq!(
+        on_disk, named,
+        "the staged load left files that its checkpoint file does not name"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

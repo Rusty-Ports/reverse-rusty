@@ -51,10 +51,12 @@ after its commit". Compaction and the rewrite did not follow it.
    them after its own commit.
 2. **The owner releases them once its commit is durable.**
    - *In-process cluster.* After the coordinator has committed its manifest, it tells every
-     shard to release (`Shard::release_retired_segment_files`), replicas included: a
-     replica's files are in no manifest, and no sweep looks at its directory.
+     shard to release (`Shard::release_retired_segment_files`), every replica included, in
+     sync or not: a replica's files are in no manifest, and no sweep looks at its directory.
    - *Shard node.* A shard releases by itself, right after it has written a checkpoint file
-     that no longer names the files.
+     that no longer names the files. Every write of that file by a running shard goes through
+     one function (`LocalShard::write_checkpoint_file`): a seal, a recovery's commit, and a
+     bulk or staged load, which commits by that file and is not followed by a seal.
 3. **A failed commit releases nothing.** That includes a commit whose outcome is not known
    (the manifest's rename happened and the directory sync after it failed): the files stay,
    and whichever manifest is on disk can be opened.
@@ -119,14 +121,17 @@ after its commit". Compaction and the rewrite did not follow it.
   checkpoint file names, and the shard restarts with the deletion applied (it could not
   restart before); a seal that does write the checkpoint file removes the replaced file. A
   shard that does not own its record keeps the replaced file through its own seal, until it
-  is released.
+  is released. A replica that is out of sync is released with its group.
+- `cluster/server/tests/stage_ingest.rs`: a staged load that compacts leaves, on a shard
+  node, only the files its checkpoint file names.
 - `cluster/server/tests/own_commit_record.rs`: a node's shard owns its commit record, for an
   in-memory and a durable node; no slot state is built outside the constructor that tells
   the shard.
 - Mutation checks, each after an unmutated baseline: a shard removing a replaced file at
   once; the coordinator not releasing; a shard node not releasing after its checkpoint file;
   every shard taking its own checkpoint file for its commit record; a node not telling its
-  shards; a replica not released; a release that removes nothing.
+  shards; a replica not released; only in-sync replicas released; a bulk or staged load
+  writing the checkpoint file without releasing; a release that removes nothing.
 
 ## Prior art
 

@@ -380,3 +380,45 @@ fn who_owns_the_commit_record_decides_who_releases_a_replaced_file() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+/// A replica that is out of sync still holds the files it has replaced, and it is released
+/// with its group like the others. Its files are in no manifest and no sweep looks at its
+/// directory; skipping it because it is out of sync would keep them for ever.
+#[test]
+fn an_out_of_sync_replica_is_released_with_its_group() {
+    let (primary, primary_dir, _open) =
+        a_shard_with_a_deletion_in_a_sealed_segment("release_group_primary", false);
+    let (replica, replica_dir, _open) =
+        a_shard_with_a_deletion_in_a_sealed_segment("release_group_replica", false);
+    let replaced = segment_files(&replica_dir);
+    primary.seal_for_checkpoint().expect("seal the primary");
+    replica.seal_for_checkpoint().expect("seal the replica");
+    assert!(
+        replaced
+            .iter()
+            .all(|name| segment_files(&replica_dir).contains(name)),
+        "precondition: the replica keeps what it replaced"
+    );
+    let primary = Arc::try_unwrap(primary).ok().expect("the only handle");
+    let replica = Arc::try_unwrap(replica).ok().expect("the only handle");
+    let group = crate::cluster::replica::ReplicatedShard::with_proofs(
+        Box::new(primary),
+        vec![(
+            Box::new(replica) as Box<dyn Shard>,
+            Err("not proven equal to its primary".to_string()),
+        )],
+    );
+    group.release_retired_segment_files();
+    assert!(
+        !replaced
+            .iter()
+            .any(|name| segment_files(&replica_dir).contains(name)),
+        "an out-of-sync replica kept the file it had replaced: {:?}",
+        segment_files(&replica_dir)
+    );
+    assert_eq!(segment_files(&replica_dir).len(), 1);
+    assert_eq!(segment_files(&primary_dir).len(), 1);
+    drop(group);
+    let _ = std::fs::remove_dir_all(primary_dir);
+    let _ = std::fs::remove_dir_all(replica_dir);
+}

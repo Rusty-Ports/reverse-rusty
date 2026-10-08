@@ -24,7 +24,8 @@ impl LocalShard {
             let segment_files = eng.segment_filenames().map_err(|e| {
                 ShardError::Log(format!("collecting segment filenames for checkpoint: {e}"))
             })?;
-            translog::write_sidecar(
+            self.write_checkpoint_file(
+                eng,
                 dir,
                 &translog::ShardCheckpoint {
                     next_seg_id: eng.next_seg_id(),
@@ -35,22 +36,33 @@ impl LocalShard {
                     source_file_name: eng.source_file_name().to_string(),
                 },
             )?;
-            self.release_after_own_checkpoint_file(eng);
         }
         Ok(())
     }
 
-    /// This shard has just written a checkpoint file that names its current segment files.
-    /// If that file is the shard's commit record (a shard node), the files it had replaced
-    /// are no longer named by anything and are removed. A shard of an in-process cluster
-    /// keeps them: its coordinator's manifest may still name them (ADR-214).
-    fn release_after_own_checkpoint_file(&self, eng: &Engine) {
+    /// Write this shard's checkpoint file, which names its current segment files. Every write
+    /// of that file by a running shard goes through here (a seal, a recovery's commit, a bulk
+    /// or staged load), because of what follows it.
+    ///
+    /// If the file is the shard's commit record (a shard node), the segment files the shard
+    /// had replaced are now named by nothing, and are removed. A shard of an in-process
+    /// cluster keeps them: its coordinator's manifest may still name them, and the
+    /// coordinator releases them after its own commit (ADR-214). A write that fails releases
+    /// nothing.
+    pub(super) fn write_checkpoint_file(
+        &self,
+        eng: &Engine,
+        dir: &std::path::Path,
+        checkpoint: &translog::ShardCheckpoint,
+    ) -> Result<(), ShardError> {
+        translog::write_sidecar(dir, checkpoint)?;
         if self
             .owns_commit_record
             .load(std::sync::atomic::Ordering::Acquire)
         {
             eng.release_retired_segment_files();
         }
+        Ok(())
     }
 
     #[cfg(all(test, feature = "distributed"))]
