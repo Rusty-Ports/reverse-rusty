@@ -80,7 +80,8 @@ impl ClusterEngine {
     /// hold deletions, and rewrites the log; a start has no need of any of that, and each is
     /// a way for a start to fail or to change what is on disk before the manifest says so.
     /// Here the only thing written is the manifest, through its usual rename, so a failure
-    /// leaves the directory as it was and the next start tries again.
+    /// leaves the directory as it was and the next start tries again. A manifest in an older
+    /// format is not written at all.
     ///
     /// The caller owns an engine that has not been shared yet.
     pub(super) fn commit_the_log_into_the_manifest(&self) -> Result<(), ShardError> {
@@ -98,6 +99,14 @@ impl ClusterEngine {
         let Some(mut manifest) = held else {
             return Ok(());
         };
+        // A manifest in an older format is left exactly as it is. Writing always produces
+        // the current format, which records the feature model's fingerprint (ADR-184); a
+        // manifest read from before that has none, and an open is no place to upgrade a
+        // format or to pin a feature model. Such a cluster stays at epoch 0 until its first
+        // checkpoint, which does both, as it always has.
+        if manifest.feature_model_fingerprint.is_none() {
+            return Ok(());
+        }
         manifest.epoch = ClusterManifest::FIRST_EPOCH_WITH_A_LOG;
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;

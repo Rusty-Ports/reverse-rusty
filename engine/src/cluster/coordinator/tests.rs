@@ -47,6 +47,18 @@ fn downgrade_cluster_manifest_to_v6(path: &std::path::Path) {
     std::fs::write(path, bytes).expect("write v6 manifest");
 }
 
+/// Rewrite a current manifest as the v7 a release before ADR-184 wrote: the same content
+/// without the feature-model fingerprint that v8 appends.
+fn downgrade_cluster_manifest_to_v7(path: &std::path::Path) {
+    let mut bytes = std::fs::read(path).expect("read manifest bytes");
+    let content_len = bytes.len().checked_sub(4 + 8).expect("v8 suffix fits");
+    bytes.truncate(content_len);
+    bytes[4..8].copy_from_slice(&7u32.to_le_bytes());
+    let crc = crate::storage::crc32(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, bytes).expect("write v7 manifest");
+}
+
 #[derive(Default)]
 struct FirstAppendGate {
     calls: AtomicU64,

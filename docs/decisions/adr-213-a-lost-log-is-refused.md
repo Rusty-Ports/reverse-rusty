@@ -63,6 +63,10 @@ write.
    those is a way for a start to fail or to change the directory before the manifest says
    so. A failure to write the manifest leaves the directory as it was, and the next start
    tries again.
+
+   A manifest in an older format is not rewritten at all. Writing always produces the
+   current format, and an open is no place to upgrade a format or to record a feature model
+   that an older manifest did not. That cluster stays at epoch 0 until its first checkpoint.
 5. **`FileClusterLog::open` takes the caller's answer.** Its new argument, `IfMissing`, is
    `Create` or `Refuse`, and every caller has to pass one. The default that lost data cannot
    be reached by leaving something out.
@@ -157,7 +161,8 @@ write.
   - A cluster from a release before this one that has taken writes and never completed a
     checkpoint has an epoch-0 manifest. If its log is lost before its first start on this
     release, that start still recreates it; the start then moves the cluster to epoch 1 and
-    the case is closed. A graceful stop makes a checkpoint, so this is a cluster that has
+    the case is closed. If its manifest is also in an older format, it stays at epoch 0 until
+    its first checkpoint. A graceful stop makes a checkpoint, so either is a cluster that has
     only ever been killed.
   - A log that is deleted while the store is running goes unnoticed until the next start.
     The store keeps acknowledging writes into the unlinked file. The next start now refuses
@@ -183,7 +188,9 @@ write.
   the next start finishes it and holds the same rows as a build that was never disturbed;
   an epoch-0 cluster with a logged deletion, reopened while its manifest cannot be written,
   fails with no segment file changed, and then opens with the deletion intact and a manifest
-  that differs in its epoch only; a start past epoch 0 leaves the manifest alone; a
+  that differs in its epoch only; a start past epoch 0 leaves the manifest alone; an epoch-0
+  manifest in the format before ADR-184 opens, twice, and is byte for byte unchanged, and its
+  first checkpoint writes the current format at epoch 1; a
   refused open, for a log that is gone and for one cut short, leaves every shard's translog
   byte for byte as it was.
 - `cluster/shard/tests/recovery.rs`: the same for a restarting shard and its translog.

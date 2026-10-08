@@ -440,3 +440,48 @@ fn recording_that_the_log_exists_changes_nothing_but_the_manifest() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A manifest in an older format is left exactly as it is by an open. Writing always
+/// produces the current format, so recording the log there would upgrade the format (and
+/// could not: the older manifest lacks a field the current one requires, and a cluster that
+/// had always opened was refused). It stays at epoch 0 and opens as it always did; its first
+/// checkpoint writes the current format and moves the epoch.
+#[test]
+fn an_open_does_not_rewrite_a_manifest_in_an_older_format() {
+    let (dir, cfg) = durable("older_format_manifest");
+    drop(
+        ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
+            .expect("durable cluster"),
+    );
+    as_an_older_release_built_it(&dir);
+    let manifest_path = dir.join(CLUSTER_MANIFEST_FILE);
+    downgrade_cluster_manifest_to_v7(&manifest_path);
+    let older = std::fs::read(&manifest_path).expect("the v7 manifest");
+    assert!(
+        crate::storage::read_cluster_manifest(&manifest_path)
+            .expect("read v7")
+            .feature_model_fingerprint
+            .is_none(),
+        "precondition: a manifest from before the fingerprint was recorded"
+    );
+
+    for start in 1..=2 {
+        let reopened = open(&dir, &cfg, "an older-format manifest");
+        assert_eq!(matched(&reopened, "blue wireless mouse"), vec![1]);
+        assert_eq!(reopened.epoch(), 0);
+        drop(reopened);
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("manifest"),
+            older,
+            "start {start} rewrote a manifest in an older format"
+        );
+    }
+
+    let reopened = open(&dir, &cfg, "an older-format manifest");
+    reopened.checkpoint().expect("its first checkpoint");
+    drop(reopened);
+    let current = crate::storage::read_cluster_manifest(&manifest_path).expect("manifest");
+    assert_eq!(current.epoch, 1);
+    assert!(current.feature_model_fingerprint.is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
