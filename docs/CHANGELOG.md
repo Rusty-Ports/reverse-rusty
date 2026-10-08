@@ -9,6 +9,24 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — A store whose log is lost can be started without a backup
+
+- **A lost log is accepted by name, and on record first**
+  ([ADR-216](decisions/adr-216-a-lost-log-is-accepted-by-name.md)). Since ADR-213 a store
+  whose log file is gone refuses to start, and the only way on was to restore it. The refusal
+  now names a token for that loss, and a single-node server or an in-process cluster started
+  once with `--accept-lost-log <TOKEN>` opens with what it had flushed or checkpointed. The
+  writes that were only in the lost log are gone.
+- **The token names one loss.** A later loss has a different token, so a flag that is left in
+  place accepts nothing else. There is no form that accepts whatever is lost.
+- **The loss is recorded before anything is changed**, in `log_loss.accepted` in the data
+  directory, and later starts report from that file: a warning at every start, the gauges
+  `log_losses_accepted` and `log_loss_last_accepted_timestamp_seconds`, and the alert
+  `RRLogLossAccepted`, which is on a value and so needs no sample from before the restart. A
+  start that accepts the loss and then fails for another reason has still recorded it. A
+  backup carries the record.
+- **Not covered:** a shard node whose translog is gone, and a control node, are still refused.
+
 ## 2026-10-08 — A first start that was killed starts again
 
 - **A build does not build over what it finds**

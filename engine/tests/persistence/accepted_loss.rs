@@ -87,6 +87,8 @@ fn a_lost_log_is_accepted_by_the_token_its_refusal_names() {
         [DurabilityOp::LogLost],
         "the start that accepts a loss reports it"
     );
+    assert!(DurabilityOp::LogLost.is_data_at_risk());
+    assert_eq!(DurabilityOp::LogLost.as_str(), "log_lost");
     let recorded = accepted_log_losses(&dir).expect("the record");
     assert_eq!(recorded.len(), 1, "{recorded:?}");
     assert!(recorded[0].applied && recorded[0].log == "wal.log" && recorded[0].accepted_at > 0);
@@ -112,6 +114,37 @@ fn a_lost_log_is_accepted_by_the_token_its_refusal_names() {
     let recorded = accepted_log_losses(&dir).expect("the record");
     assert_eq!(recorded.len(), 2);
     assert!(recorded.iter().all(|loss| loss.applied));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The token counts the losses a directory has accepted, so a second loss has its own token
+/// even when nothing was flushed in between and the manifest says exactly what it said the
+/// first time. A token left in the start-up arguments accepts one loss, not each one.
+#[test]
+fn a_second_loss_under_the_same_manifest_needs_its_own_token() {
+    let (dir, config) = a_store_that_lost_its_log("second_loss_same_manifest");
+    let (_, first) = refusal(&config);
+    {
+        let mut engine =
+            Engine::open(make_norm(), accepting(&config, &first)).expect("the first loss");
+        // Acknowledged, and only in the new log. Nothing is flushed.
+        engine.insert_live("usb hub", 3, 1);
+    }
+    std::fs::remove_file(dir.join("wal.log")).expect("lose the log again");
+
+    let (reason, second) = refusal(&accepting(&config, &first));
+    assert!(reason.contains("names a different loss"), "{reason}");
+    assert_eq!(
+        second.rsplit_once(':').map(|(what, _)| what),
+        first.rsplit_once(':').map(|(what, _)| what),
+        "precondition: the manifest says what it said: {first} then {second}"
+    );
+    assert!(first.ends_with(":1") && second.ends_with(":2"));
+    assert!(
+        !dir.join("wal.log").exists(),
+        "the old token accepted a new loss"
+    );
+    assert_eq!(accepted_log_losses(&dir).expect("the record").len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -201,6 +234,34 @@ fn a_start_that_stopped_after_replacing_the_log_has_still_left_the_record() {
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&fresh);
+}
+
+/// A backup carries the record: a store restored from it holds no more than the one it was
+/// taken from, and says so.
+#[test]
+fn a_backup_carries_the_record_of_accepted_losses() {
+    let (dir, config) = a_store_that_lost_its_log("backup_carries_record");
+    let (_, token) = refusal(&config);
+    drop(Engine::open(make_norm(), accepting(&config, &token)).expect("accepted"));
+    let copy = test_dir("backup_carries_record_copy");
+    let _ = std::fs::remove_dir_all(&copy);
+    reverse_rusty::storage::copy_engine_dir(&dir, &copy).expect("backup");
+    assert_eq!(
+        accepted_log_losses(&copy).expect("the copy's record"),
+        accepted_log_losses(&dir).expect("the record")
+    );
+    let restored = Engine::open(
+        make_norm(),
+        EngineConfig {
+            data_dir: Some(copy.clone()),
+            ..EngineConfig::default()
+        },
+    )
+    .expect("the copy opens");
+    assert!(match_ids(&restored, FLUSHED).contains(&1));
+    drop(restored);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&copy);
 }
 
 /// The record is evidence. A store whose record cannot be read does not open as if it had

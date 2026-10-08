@@ -303,29 +303,25 @@ replicated action for the same reason: each copy has its own commit point and tr
 **Completion.** A long-running replica node's translog and segment directory stay bounded, and
 its restart replays only what arrived since the last checkpoint.
 
-### Starting without a lost log
+### Starting a shard node without a lost translog
 
-**Problem.** A store whose log is gone refuses to start
-([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)), and the only supported way on is to
-restore it. An operator with no backup has a store that holds everything up to its last flush
-or checkpoint and cannot be started. An override was built with ADR-213 and taken out: the
-evidence that a loss had been accepted lived in memory and in event delivery, and review found
-a way around it each round (a shard node that reports events to nobody; an alert that never
-fires for a count that is already 1 at the first scrape; a start that accepts the loss, fails
-at a later step, and leaves an empty log for the next start to open in silence).
+**Problem.** A single-node store or an in-process cluster whose log is gone can be started
+with the loss accepted ([ADR-216](decisions/adr-216-a-lost-log-is-accepted-by-name.md)). A
+shard node whose translog is gone cannot: it is refused
+([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)) and the way on is to recover the shard
+from a replica or to restore its volume. At RF=1 with no snapshot that leaves a shard that
+holds everything up to its last checkpoint and cannot be started.
 
-**Direction.** Accept the loss through an explicit step that first writes durable evidence
-into the data directory (what was lost, and when), and only then puts an empty log in place.
-Every later start reports that evidence, in health and as a gauge, until an operator clears
-it. Elasticsearch's `elasticsearch-shard remove-corrupted-data` (a new history UUID, and
-`accept_data_loss` to allocate the shard) and PostgreSQL's `pg_resetwal` are the models. A
-control node gets no such step: it needs a new identity, and so a control plane that can add
-a member.
+**Direction.** The same record and the same kind of token, per slot, with three things settled
+first: what the coordinator does about a primary that now holds less than it acknowledged (and
+less than its replicas, which ADR-195's comparison at connect will find unequal); where a
+shard node reports the record from, since its events reach nobody today; and whether the lost
+tail can be resent by the coordinator instead of accepted. A control node gets no such step: it
+needs a new identity, and so a control plane that can add a member.
 
-**Completion.** For the single-node engine, the coordinator and a shard node: a store whose
-log is gone can be started by one documented step; the loss is on disk before the empty log
-is; a start that fails after accepting it still reports it the next time; and an alert fires
-on it without a pre-restart sample.
+**Completion.** A shard node whose translog is gone can be started by one documented step that
+is recorded before the translog is replaced, reported by the node, and visible to the
+coordinator.
 
 ### A log has an identity
 

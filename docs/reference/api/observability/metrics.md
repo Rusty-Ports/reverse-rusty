@@ -30,6 +30,13 @@ complete writes of the stored-document sidecar (which `flush_time_seconds_total`
 include, ADR-200), a `durability_failures_total{op}` counter (ADR-021), and — when bearer-token auth is enabled — an
 `auth_failures_total{reason="missing"|"invalid"}` counter for rejected requests (ADR-062).
 
+Two gauges say whether the store was ever started without a log it had lost (ADR-216), read at
+start-up from `log_loss.accepted` in the data directory: `log_losses_accepted` (how many losses
+it has accepted; never goes down) and `log_loss_last_accepted_timestamp_seconds` (Unix time of
+the latest; 0 when there is none). Both are exported from the first scrape, at zero for a store
+that has accepted nothing. The start that accepts a loss also counts one
+`durability_failures_total{op="log_lost"}`.
+
 Standalone collection refreshes engine gauges from one lock-free snapshot. In
 cluster-coordinator mode the route shares the single stats-admission slot with `/_stats` and CAT
 stats, runs all potentially remote shard probes on a blocking worker, and derives the aggregate

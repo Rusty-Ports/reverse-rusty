@@ -319,12 +319,25 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
             "The backup was not taken.",
         )));
     }
+    copy_accepted_log_losses(src, staging)?;
     // Manifest LAST (commit-point ordering).
     if has_manifest {
         copy_file_durable(&manifest_path, &staging.join(ENGINE_MANIFEST))?;
     }
     fsync_dir(&staging.join(SEGMENTS_DIR))?;
     fsync_dir(staging)?;
+    Ok(())
+}
+
+/// The record of the log losses a store has accepted travels with the data it is about
+/// (ADR-216): a store restored from this copy holds no more than the one it was taken
+/// from, and says so. A store that has accepted none has no such file.
+fn copy_accepted_log_losses(src: &Path, staging: &Path) -> Result<(), BackupError> {
+    let name = super::log_loss::ACCEPTED_LOG_LOSSES_FILE;
+    let record = src.join(name);
+    if record.exists() {
+        copy_file_durable(&record, &staging.join(name))?;
+    }
     Ok(())
 }
 
@@ -381,6 +394,7 @@ fn stage_cluster_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
             "The backup was not taken.",
         )));
     }
+    copy_accepted_log_losses(src, staging)?;
     copy_file_durable(&manifest_path, &staging.join(CLUSTER_MANIFEST))?;
     fsync_dir(staging)?;
     Ok(())

@@ -129,6 +129,19 @@ groups:
           summary: "Durability failure recorded in the last 5m — investigate disk NOW"
           runbook: docs/operations/alerting.md#rrdurabilityfailure
 
+      - alert: RRLogLossAccepted
+        # A store was started with the loss of its log accepted (ADR-216): acknowledged writes
+        # were dropped by an operator's decision. A value, not a rate: the loss is accepted at
+        # start-up, before the first scrape. Stops firing by itself after seven days.
+        expr: >
+          reverse_rusty_log_loss_last_accepted_timestamp_seconds > 0
+          and (time() - reverse_rusty_log_loss_last_accepted_timestamp_seconds) < 7 * 86400
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.instance }} was started without its lost log in the last 7 days"
+          runbook: docs/operations/alerting.md#rrloglossaccepted
+
       - alert: RRTransportErrors
         # The coordinator's fan-out is failing loud against some shard (ADR-085) — reads are
         # returning 502 rather than silently shrinking (ADR-072). Any sustained rate matters.

@@ -117,6 +117,14 @@ fn the_loss_of_the_cluster_log_is_accepted_by_the_token_its_refusal_names() {
     let recorded = accepted_log_losses(&dir).expect("the record");
     assert_eq!(recorded.len(), 1, "{recorded:?}");
     assert!(recorded[0].applied && recorded[0].log == CLUSTER_LOG_FILE);
+    // A backup carries the record.
+    let copy = scratch_dir("accepted_cluster_loss_copy");
+    crate::storage::copy_cluster_dir(&dir, &copy).expect("backup");
+    assert_eq!(
+        accepted_log_losses(&copy).expect("the copy's record"),
+        recorded
+    );
+    let _ = std::fs::remove_dir_all(copy);
 
     // A later start needs no token, and the old one accepts nothing more.
     for cfg in [cfg.clone(), accepting(&cfg, &token)] {

@@ -96,6 +96,16 @@ primary when the coordinator connected, ADR-195). No write was lost, but that po
 redundancy until the replica is recovered ([runbook §6](cluster-deployment.md), *Replica
 replacement*); `/_health` reports `out_of_sync_replicas`.
 
+### RRLogLossAccepted
+`log_loss_last_accepted_timestamp_seconds > 0` and less than seven days old — **page.** A store
+was started with the loss of its log accepted (`--accept-lost-log`, ADR-216): it opened without
+the writes that were only in that log, and clients were told those writes were stored. The rule
+is on a value, not a rate, because the loss is accepted at start-up, before the first scrape; it
+stops firing by itself after seven days. `log_losses_accepted` counts every loss the data
+directory has accepted and never goes down. **Do:** find out who accepted it and why the log was
+gone; replay the lost window from the upstream system of record; remove the flag from the start-up
+arguments; take a fresh backup ([disaster recovery §3.4](disaster-recovery.md)).
+
 ### RRTransportErrors
 Shard-RPC errors from the coordinator sustained for 5m — the fan-out is failing **loud** against
 some shard, i.e. clients are seeing `502`s rather than silently short results (ADR-072/085).

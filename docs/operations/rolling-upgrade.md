@@ -160,6 +160,10 @@ pre-upgrade backup:
   directory that holds shard directories and no manifest (a first start that an earlier release
   did not finish) **is refused at start**; before, the start built over it and left a doubled
   corpus. Empty such a directory once.
+- **ADR-216 accepted log losses:** no format change and no roll-order constraint. A data
+  directory that has accepted a loss holds one new file (`log_loss.accepted`), which an earlier
+  release ignores and a backup carries. New server flag `--accept-lost-log <TOKEN>`, two new
+  gauges and the `RRLogLossAccepted` alert rule; load the updated rules file.
 - **ADR-193 inbound request size:** no durable or wire format change. A coordinator sends a
   bulk bucket on the `StageIngest` stream (ADR-180), which every shard node it can connect to
   already serves: the ADR-185 capability check refuses older nodes at connect. A dictionary
