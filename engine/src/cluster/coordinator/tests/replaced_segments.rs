@@ -91,10 +91,23 @@ fn open(dir: &std::path::Path, cfg: &ClusterConfig, what: &str) -> ClusterEngine
 /// the manifest names. The shard used to remove that file there and then; the manifest still
 /// named it, and the cluster could not reopen ("attaching shard segments: No such file or
 /// directory"). The file is kept, the cluster reopens, and the deletions hold from the log.
+///
+/// For a cluster that was just built and for one that was reopened: its shards are then
+/// different objects, made by a different constructor.
 #[test]
 fn a_kill_after_a_flush_that_compacted_leaves_a_cluster_that_reopens() {
-    let (dir, cfg) = durable("kept_after_compaction");
-    let cluster = ClusterEngine::build(vocab(), &cfg, &corpus()).expect("durable cluster");
+    for reopened_first in [false, true] {
+        a_kill_after_a_flush_that_compacted(reopened_first);
+    }
+}
+
+fn a_kill_after_a_flush_that_compacted(reopened_first: bool) {
+    let (dir, cfg) = durable(&format!("kept_after_compaction_{reopened_first}"));
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &corpus()).expect("durable cluster");
+    if reopened_first {
+        drop(cluster);
+        cluster = open(&dir, &cfg, "a reopen before anything is replaced");
+    }
     let committed = committed_files(&dir);
     delete_most_and_write_a_little(&cluster);
     cluster.flush().expect("flush");
