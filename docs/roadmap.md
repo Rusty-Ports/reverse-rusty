@@ -303,30 +303,6 @@ replicated action for the same reason: each copy has its own commit point and tr
 **Completion.** A long-running replica node's translog and segment directory stay bounded, and
 its restart replays only what arrived since the last checkpoint.
 
-### An interrupted first build
-
-**Problem.** A durable cluster build that stops before it has written its first manifest (a
-crash, an out-of-memory kill during a large initial load) leaves shard directories with
-checkpoint files and segments, and no manifest. The next start sees no cluster and builds
-again in the same directory. Each shard finds its own checkpoint file, takes itself for a
-restarting node and restores its rows, and the corpus is then ingested a second time on top
-of them. The build fails ("logical-id enumeration covers 1 of 2 live queries") after it has
-written a manifest for the doubled state, and later starts open that state with inserts
-disabled. Reproduced; it does not depend on the order of the manifest and the log
-([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)).
-
-**Direction.** Make a build restartable. Mark a build in progress before the first shard is
-created and clear the mark with the commit, as an unfinished bulk load is marked on a shard
-node (ADR-196); a start that finds the mark and no manifest discards what the unfinished build
-left and builds from the beginning. A directory that holds shard state, no manifest and no
-mark may be a cluster that has lost its manifest, and is refused instead of built over.
-(PostgreSQL's `initdb` is the model: it refuses a directory that is not empty and removes what
-it created when it cannot finish.)
-
-**Completion.** A build killed at each step before its commit is followed by a start that
-serves exactly the corpus once; a directory with shard state and neither manifest nor mark is
-refused with an error that says what it may be.
-
 ### Starting without a lost log
 
 **Problem.** A store whose log is gone refuses to start

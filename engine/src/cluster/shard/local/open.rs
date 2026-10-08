@@ -44,6 +44,10 @@ impl LocalShard {
     /// **Self-restart (ADR-039 §6):** if a checkpoint sidecar is already present in the dir, this
     /// is a node restarting over its own prior data — attach its committed segments and replay the
     /// translog tail instead of starting fresh. Otherwise a fresh empty durable shard.
+    ///
+    /// For a shard node, which restarts from its own files. A coordinator's build creates its
+    /// shards with [`Self::create_durable`], which never takes up what a directory holds.
+    #[cfg_attr(not(any(test, feature = "distributed")), allow(dead_code))]
     pub(crate) fn new_durable(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
@@ -59,6 +63,40 @@ impl LocalShard {
         if let Some(ckpt) = translog::read_sidecar(&dir)? {
             return Self::open_durable_self(norm, dict, tag_dict, config, &ckpt);
         }
+        Self::create_in(norm, dict, tag_dict, config, dir)
+    }
+
+    /// Create a durable shard in a directory that holds no shard, and fail if it holds one
+    /// (ADR-215). A coordinator's build makes its shards this way: whatever a shard directory
+    /// holds when a build starts is not part of the corpus being built, so it is never
+    /// restored into it.
+    pub(crate) fn create_durable(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        mut config: EngineConfig,
+    ) -> Result<Self, ShardError> {
+        config.accept_class_d = true;
+        let dir = config.data_dir.clone().ok_or_else(|| {
+            ShardError::Log("durable shard requires a data_dir for its translog".into())
+        })?;
+        if translog::read_sidecar(&dir)?.is_some() {
+            return Err(ShardError::Config(format!(
+                "{} already holds a shard; a new shard is not created over one",
+                dir.display()
+            )));
+        }
+        Self::create_in(norm, dict, tag_dict, config, dir)
+    }
+
+    /// A fresh, empty durable shard in `dir`, which holds no checkpoint file.
+    fn create_in(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        dir: std::path::PathBuf,
+    ) -> Result<Self, ShardError> {
         let retention_lease_ttl = resolve_lease_ttl(&config);
         let translog = translog::open_fresh(&dir, config.wal_sync_on_write)?;
         let engine = Engine::with_shared_segments_only(

@@ -173,9 +173,11 @@ fn durable_build_refuses_when_a_sources_write_fails() {
     else {
         panic!("a durable build whose sources.dat write failed must refuse to commit")
     };
+    // The message, not just any error: the directory's own name contains "sources", and a
+    // build refuses a directory for other reasons before it writes anything (ADR-215).
     let msg = err.to_string();
     assert!(
-        msg.contains("durability write failed") || msg.contains("sources"),
+        msg.contains("a durability write failed during the build (sources.dat)"),
         "the refusal names the failed durability write (got: {msg})"
     );
     let _ = std::fs::remove_dir_all(&dir);

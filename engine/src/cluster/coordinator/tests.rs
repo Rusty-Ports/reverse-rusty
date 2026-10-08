@@ -370,6 +370,7 @@ impl ChunkSink for RecordingExhaustiveSink {
 mod basic;
 mod directory;
 mod exhaustive;
+mod interrupted_build;
 mod layout_change;
 mod layout_discipline;
 mod log_creation;

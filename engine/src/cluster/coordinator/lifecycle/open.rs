@@ -224,6 +224,10 @@ impl ClusterEngine {
         }
         let manifest = crate::storage::read_cluster_manifest(&manifest_path)
             .map_err(|e| ShardError::Config(format!("reading cluster manifest: {e}")))?;
+        // A build that stopped between its manifest and its last step left its mark. The
+        // manifest is here, so this is a cluster, and the mark must not outlive this open: it
+        // says that the shard state beside it may be thrown away (ADR-215).
+        super::build_dir::finish(&data_dir)?;
         // ADR-080 forward fence: a pre-ADR-080 durable cluster placed the broad lane (class C +
         // B-arity-2) on shard 0 ONLY. This binary evaluates broad on a rotating per-title
         // broad-eval shard, which would silently miss those queries whenever the chosen shard is

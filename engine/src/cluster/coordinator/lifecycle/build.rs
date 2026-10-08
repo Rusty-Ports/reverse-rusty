@@ -193,6 +193,11 @@ impl ClusterEngine {
         // only makes `LocalShard`s (remote shards arrive via `from_parts`), so pass-B ingest can
         // use the infallible inherent `ingest_local` path on every copy.
         let rf = config.replication_factor;
+        // Before the first shard exists: a durable build takes a directory that holds no
+        // cluster, or the leftovers of a build that did not finish (ADR-215).
+        if let Some(dir) = &config.data_dir {
+            super::build_dir::begin(dir)?;
+        }
         let mut groups: Vec<Vec<LocalShard>> = Vec::with_capacity(config.num_shards);
         for s in 0..config.num_shards {
             let mut copies = Vec::with_capacity(rf);
@@ -204,7 +209,7 @@ impl ClusterEngine {
                     } else {
                         replica_dir(dir, s, r)
                     });
-                    LocalShard::new_durable(
+                    LocalShard::create_durable(
                         Arc::clone(&norm),
                         Arc::clone(&dict),
                         Arc::clone(&tag_dict),
@@ -363,6 +368,9 @@ impl ClusterEngine {
             engine.tags_present.store(true, Ordering::Relaxed);
         }
         engine.commit_the_log_into_the_manifest()?;
+        if let Some(dir) = &config.data_dir {
+            super::build_dir::finish(dir)?;
+        }
         Ok(engine)
     }
 

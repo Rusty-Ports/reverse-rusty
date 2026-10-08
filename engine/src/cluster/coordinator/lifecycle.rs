@@ -13,6 +13,7 @@
 
 mod backup;
 mod build;
+mod build_dir;
 mod checkpoint;
 mod cluster_log;
 mod open;
