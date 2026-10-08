@@ -1,4 +1,4 @@
-# ADR-222 — A manifest that was renamed into place is in effect
+# ADR-222 — No commit after a manifest that was renamed and not synced
 
 > [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) ·
 > [Decision hub](../DECISIONS.md) · **Status:** Accepted

@@ -92,7 +92,7 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   checkpoints similarly select per-shard segments in the cluster manifest, with coordinator and
   per-shard log tails for post-checkpoint recovery. Logs may be truncated after commit, so segments
   and retained source are part of the authoritative corpus.
-- **A manifest is in effect from its rename** ([ADR-222](../decisions/adr-222-a-renamed-manifest-is-in-effect.md)).
+- **A manifest that was renamed and not synced ends commits until a restart** ([ADR-222](../decisions/adr-222-no-commit-after-a-manifest-that-was-renamed-and-not-synced.md)).
   Publishing a manifest is write, sync, rename, sync the directory. A failure before the rename
   rolls the commit back and removes what it wrote. A failure after it leaves a commit that a
   restart will read and a power loss may undo. From then until the process is restarted the

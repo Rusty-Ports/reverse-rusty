@@ -9,10 +9,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-10-08 — A manifest that was renamed into place is in effect
+## 2026-10-08 — No commit after a manifest that was renamed and not synced
 
 - **A commit whose directory sync fails after its manifest rename no longer loses data on the
-  next restart** ([ADR-222](decisions/adr-222-a-renamed-manifest-is-in-effect.md)). A
+  next restart** ([ADR-222](decisions/adr-222-no-commit-after-a-manifest-that-was-renamed-and-not-synced.md)). A
   single-node commit publishes `manifest.bin` by write, sync, rename, sync the directory. When
   the rename succeeded and the directory sync failed, the engine treated the commit as failed
   and deleted the new segment and source sidecar, which the manifest now on disk named. A
