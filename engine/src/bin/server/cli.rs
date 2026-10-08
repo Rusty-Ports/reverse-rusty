@@ -499,6 +499,35 @@ mod tests {
         assert_eq!(asked.num_shards, 3);
     }
 
+    /// A loss is accepted only when the operator names it, and the token has to reach the
+    /// store that lost its log: the engine in single-node mode, the coordinator in a cluster.
+    #[test]
+    fn a_lost_log_is_accepted_only_by_the_token_given() {
+        let none = Cli::try_parse_from(["reverse-rusty-server"]).expect("arguments");
+        assert_eq!(none.engine_config().accept_lost_log, None);
+        assert_eq!(
+            none.cluster_config(3, none.engine_config(), true)
+                .accept_lost_log,
+            None
+        );
+        let given = Cli::try_parse_from([
+            "reverse-rusty-server",
+            "--accept-lost-log",
+            "wal.log:segment-2-seq-5:1",
+        ])
+        .expect("arguments");
+        let token = Some("wal.log:segment-2-seq-5:1".to_string());
+        assert_eq!(given.engine_config().accept_lost_log, token);
+        assert_eq!(
+            given
+                .cluster_config(3, given.engine_config(), true)
+                .accept_lost_log,
+            token
+        );
+        // The flag takes a token: there is no bare form that accepts whatever is lost.
+        assert!(Cli::try_parse_from(["reverse-rusty-server", "--accept-lost-log"]).is_err());
+    }
+
     #[test]
     fn only_an_in_process_coordinator_owns_a_data_directory() {
         let cli = Cli::try_parse_from(["reverse-rusty-server", "--data-dir", "/tmp/rr-cli-test"])

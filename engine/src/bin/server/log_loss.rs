@@ -90,3 +90,65 @@ pub(crate) fn report(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gauge(prom: &PrometheusMetrics, name: &str) -> i64 {
+        prom.registry
+            .gather()
+            .iter()
+            .find(|family| family.name() == name)
+            .unwrap_or_else(|| panic!("{name} is not exported"))
+            .get_metric()[0]
+            .get_gauge()
+            .get_value() as i64
+    }
+
+    /// Both gauges are exported from the first scrape, at zero for a store that has accepted
+    /// nothing (and for one with no data directory), so an alert on their value needs no
+    /// sample from before a restart.
+    #[test]
+    fn the_gauges_are_exported_at_zero_for_a_store_that_accepted_nothing() {
+        for data_dir in [None, Some(std::env::temp_dir())] {
+            let prom = PrometheusMetrics::new();
+            report(&prom, data_dir.as_deref(), None, 0);
+            assert_eq!(gauge(&prom, "reverse_rusty_log_losses_accepted"), 0);
+            assert_eq!(
+                gauge(
+                    &prom,
+                    "reverse_rusty_log_loss_last_accepted_timestamp_seconds"
+                ),
+                0
+            );
+        }
+    }
+
+    /// The gauges are read from the record in the data directory, so a start that did not
+    /// accept the loss itself (the one after a start that accepted it and failed) reports it.
+    #[test]
+    fn the_gauges_are_read_from_the_record_in_the_data_directory() {
+        let dir = std::env::temp_dir().join(format!("rr_log_loss_report_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("data dir");
+        std::fs::write(
+            dir.join(ACCEPTED_LOG_LOSSES_FILE),
+            "v1\t1700000000\tapplied\twal.log\tsegment-2-seq-5\n\
+             v1\t1700000500\tpending\twal.log\tsegment-4-seq-9\n",
+        )
+        .expect("a record");
+        assert_eq!(carried_out_before(Some(&dir)), 1);
+        let prom = PrometheusMetrics::new();
+        report(&prom, Some(&dir), None, 1);
+        assert_eq!(gauge(&prom, "reverse_rusty_log_losses_accepted"), 2);
+        assert_eq!(
+            gauge(
+                &prom,
+                "reverse_rusty_log_loss_last_accepted_timestamp_seconds"
+            ),
+            1_700_000_500
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

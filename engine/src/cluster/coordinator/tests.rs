@@ -367,6 +367,7 @@ impl ChunkSink for RecordingExhaustiveSink {
     }
 }
 
+mod accepted_loss;
 mod basic;
 mod directory;
 mod exhaustive;
