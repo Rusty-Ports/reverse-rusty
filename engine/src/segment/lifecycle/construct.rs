@@ -106,6 +106,8 @@ impl Engine {
             vocab_epoch: 0,
             committed_wal_watermark: 0,
             owns_manifest: true,
+            replaced_files: crate::segment::ReplacedFiles::LeftForTheOwnersSweep,
+            kept_segment_files: std::sync::Mutex::default(),
         }
     }
 
@@ -181,6 +183,8 @@ impl Engine {
             vocab_epoch: 0,
             committed_wal_watermark: 0,
             owns_manifest: false,
+            replaced_files: crate::segment::ReplacedFiles::LeftForTheOwnersSweep,
+            kept_segment_files: std::sync::Mutex::default(),
         })
     }
 

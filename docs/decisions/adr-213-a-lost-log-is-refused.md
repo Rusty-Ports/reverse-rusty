@@ -137,7 +137,7 @@ write.
   and it rewrites segments that hold deletions and removes the old files before the
   coordinator's manifest is committed, so a start that then failed to write its manifest
   left a cluster that could not reopen. (That ordering is a defect of every checkpoint, older
-  than this decision; it is on the [roadmap](../roadmap.md#a-checkpoint-that-fails-after-a-deletion).)
+  than this decision; it is fixed by [ADR-214](adr-214-a-shard-keeps-what-it-replaced.md).)
   The epoch needs only a manifest, so a manifest is all that is written.
 - **A new manifest field** that says "written with the log". The epoch already says it: only
   `build` ever wrote 0, and a checkpoint always moves past it.
@@ -251,3 +251,11 @@ way on has to be built from.
 **See also:** ADR-212 (a log is created whole; a short log), ADR-198 (the write-ahead log is
 replaced, not truncated), ADR-182 (validated log recovery), ADR-041 (the durable raft store),
 ADR-051 (fail-closed flush).
+
+## Later outcome (2026-10-08, ADR-214)
+
+The checkpoint ordering named under Alternatives (a segment that holds deletions is rewritten
+and the old file removed before the coordinator's manifest is committed) was a defect of
+every checkpoint and of every compaction on a shard.
+[ADR-214](adr-214-a-shard-keeps-what-it-replaced.md) fixes it: a shard keeps what it has
+replaced until its owner has committed.

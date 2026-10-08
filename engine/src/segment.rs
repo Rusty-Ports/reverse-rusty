@@ -55,6 +55,7 @@ mod merge;
 mod metrics;
 mod persistence;
 mod ranked_batch;
+mod replaced_files;
 mod seg;
 mod snapshot;
 mod tag_summary;
@@ -77,6 +78,7 @@ pub use outcomes::{
     HeldPlacement, IngestItemStatus, IngestReport, InsertOutcome, ReplaceOutcome, StoredRow,
     UpsertOutcome,
 };
+pub(crate) use replaced_files::ReplacedFiles;
 pub(crate) use tag_summary::TagSummary;
 
 /// One immutable (or, for the memtable, mutable) slice of the index. Owns the
@@ -609,6 +611,13 @@ pub struct Engine {
     /// copy. Such an engine is opened via [`Engine::open_shared_segments`], not
     /// [`Engine::open`].
     owns_manifest: bool,
+    /// What this engine does with a segment file it has replaced, when it owns no manifest
+    /// (ADR-214). See [`ReplacedFiles`]. Not read by an engine that owns its manifest, which
+    /// removes a replaced file right after its own commit.
+    replaced_files: ReplacedFiles,
+    /// The files kept under [`ReplacedFiles::KeptWhileItsRecordNamesThem`]: each was named
+    /// by the shard's checkpoint file when the engine replaced it.
+    kept_segment_files: std::sync::Mutex<Vec<std::path::PathBuf>>,
 }
 
 impl std::fmt::Debug for Engine {

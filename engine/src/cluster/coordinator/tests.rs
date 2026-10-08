@@ -374,6 +374,7 @@ mod layout_change;
 mod layout_discipline;
 mod log_creation;
 mod repair;
+mod replaced_segments;
 mod retry_contract;
 mod upsert;
 mod vocab_retry;

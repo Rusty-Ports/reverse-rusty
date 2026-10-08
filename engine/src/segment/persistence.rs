@@ -553,13 +553,6 @@ impl Engine {
             .collect()
     }
 
-    /// Remove old segment files after compaction replaces them.
-    pub(in crate::segment) fn cleanup_segment_files(&self, paths: &[PathBuf]) {
-        for p in paths {
-            self.best_effort_remove_segment(p);
-        }
-    }
-
     /// Best-effort removal of a segment file on a cleanup/rollback path.
     ///
     /// The caller's primary result already reflects the operation outcome, so a

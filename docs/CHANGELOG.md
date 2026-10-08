@@ -9,6 +9,31 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — A cluster killed after a flush reopens
+
+- **A shard keeps the segment files it has replaced until its owner has committed**
+  ([ADR-214](decisions/adr-214-a-shard-keeps-what-it-replaced.md)). A shard's engine owns no
+  manifest, so its own commit is a no-op, and right after it the engine removed the files it had
+  just replaced (after a compaction, and after the rewrite of a segment that holds deletions).
+  The coordinator's manifest, or a shard node's checkpoint file, still named them until the next
+  checkpoint or seal.
+- **What that broke.** Remove stored queries, flush (the server does at shutdown, and
+  `POST /_flush` does at any time), and kill the process before the next checkpoint: the durable
+  cluster could not reopen (`attaching shard segments: No such file or directory`). A checkpoint
+  whose manifest write failed after a deletion did the same, and so did a shard node killed
+  between a rewrite and its checkpoint file.
+- **Now** a shard does not remove a file that some record still names. A coordinator's
+  primary leaves it, and the coordinator removes what its committed manifest no longer names
+  after each checkpoint. A shard on a shard node reads its checkpoint file when it replaces a
+  file: one the record does not name goes at once, and one it names is kept until a `Seal` or
+  a staged load finds that the record no longer names it. A failed commit removes nothing. A
+  replica of an in-process cluster, whose files no record names, still removes a replaced
+  file at once.
+- **For a deployment:** a shard's directory can hold replaced files beside their replacement.
+  Allow disk for it: in an in-process cluster, the segments compacted since the last
+  checkpoint; on a shard node, at most the segments its checkpoint file names. No format
+  change.
+
 ## 2026-10-07 — A store whose log is gone no longer starts without it
 
 - **A lost log is refused, not recreated** ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)).

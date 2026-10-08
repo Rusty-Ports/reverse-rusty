@@ -254,11 +254,11 @@ pub(super) fn restore_durable_slots(
             LocalShard::new_durable(Arc::clone(norm), Arc::clone(dict), Arc::clone(tag_dict), sc)?;
         slots.insert(
             shard_id,
-            ShardSlot::loaded(ServerState {
-                dict: Arc::clone(dict),
-                tag_dict: Arc::clone(tag_dict),
+            ShardSlot::loaded(ServerState::new(
+                Arc::clone(dict),
+                Arc::clone(tag_dict),
                 shard,
-            }),
+            )),
         );
     }
     Ok(slots)

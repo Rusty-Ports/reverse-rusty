@@ -154,6 +154,8 @@ impl Engine {
             vocab_epoch: 0,
             committed_wal_watermark: 0,
             owns_manifest: false,
+            replaced_files: crate::segment::ReplacedFiles::LeftForTheOwnersSweep,
+            kept_segment_files: std::sync::Mutex::default(),
         };
         if !allow_legacy_compiler_semantics && engine.needs_compiler_semantics_migration() {
             return Err(std::io::Error::new(

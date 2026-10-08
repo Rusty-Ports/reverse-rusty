@@ -519,6 +519,13 @@ pub(crate) trait Shard: Send + Sync {
     /// streams the segments (`≤ P`) then replays the tail (`> P`) — no overlap, no
     /// double-apply (the zero-false-negative boundary). In-memory shards return `LogPos(0)`.
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError>;
+    /// Tell this shard that no record names its segment files: it is a replica of an
+    /// in-process cluster, which is in no manifest and is rebuilt from its primary on reopen
+    /// (ADR-035). It then removes a file it has replaced at once, because there is nothing a
+    /// removal could contradict (ADR-214). A replicated shard tells each replica it takes in.
+    /// A remote replica is a shard on a node, named by its own checkpoint file: the default
+    /// does nothing.
+    fn no_record_names_your_segment_files(&self) {}
     /// This shard's live (mmap'd) base-segment filenames — the registry the coordinator
     /// commits into `cluster_manifest.bin`. `Err` (never a silent empty list) if any
     /// segment is in-memory (a write fell back), which would otherwise lose data on reopen.

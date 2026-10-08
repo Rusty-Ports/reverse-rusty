@@ -39,6 +39,42 @@ impl LocalShard {
         Ok(())
     }
 
+    /// Make this shard's checkpoint file its commit record (ADR-214): a shard on a shard
+    /// node, which restarts from that file. Called by the node when it takes the shard into
+    /// a slot. From then on, when the shard replaces a segment file, it reads the checkpoint
+    /// file from disk: a file it does not name is removed at once, and one it names is kept
+    /// for [`Self::remove_replaced_files`].
+    #[cfg(any(test, feature = "distributed"))]
+    pub(crate) fn own_the_commit_record(&self) {
+        let dir = self.data_dir.clone();
+        self.lock()
+            .set_replaced_files(crate::segment::ReplacedFiles::KeptWhileItsRecordNamesThem(
+                Box::new(move || {
+                    let checkpoint = translog::read_sidecar(dir.as_deref()?).ok()??;
+                    Some(checkpoint.segment_files)
+                }),
+            ));
+    }
+
+    /// Remove the segment files this shard replaced and kept, now that its checkpoint file
+    /// no longer names them. The checkpoint file is read from disk here; a file it still
+    /// names stays.
+    ///
+    /// Only for a caller that holds the node's installation barrier on the slot's installed
+    /// shard (ADR-214). A kept file is removed by name, and a recovery into the slot writes
+    /// received files into the same directory, under names that can be the same. The barrier
+    /// is what keeps the two apart, and a shard that has been replaced is never reached
+    /// through it.
+    #[cfg(any(test, feature = "distributed"))]
+    pub(crate) fn remove_replaced_files(&self) {
+        self.lock().remove_kept_files_the_record_no_longer_names();
+    }
+
+    #[cfg(all(test, feature = "distributed"))]
+    pub(crate) fn owns_its_commit_record(&self) -> bool {
+        self.lock().keeps_what_its_record_names()
+    }
+
     /// Deliver a degraded-path event to the installed sink, if any (best-effort: dropped when no
     /// observer is attached — the default, byte-identical path). Library code never writes stderr
     /// (ADR-021); the observer turns this into logs + metrics.

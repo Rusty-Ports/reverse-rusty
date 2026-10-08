@@ -69,6 +69,20 @@ struct ReplicaSlot {
     in_sync: AtomicBool,
 }
 
+impl ReplicaSlot {
+    /// Take `shard` in as a replica. Every replica comes in through here, because of what a
+    /// replica is told: no record names its segment files (it is in no manifest, and is
+    /// rebuilt from its primary on reopen), so it removes a file it has replaced at once
+    /// instead of keeping it for an owner who would never release it (ADR-214).
+    fn new(shard: Box<dyn Shard>, in_sync: bool) -> Arc<Self> {
+        shard.no_record_names_your_segment_files();
+        Arc::new(ReplicaSlot {
+            shard,
+            in_sync: AtomicBool::new(in_sync),
+        })
+    }
+}
+
 /// What is known about a replica when its composite is assembled: `Ok` when it holds exactly
 /// what its primary holds, `Err` with the reason when that could not be established.
 pub(crate) type ReplicaProof = Result<(), String>;
@@ -127,10 +141,7 @@ impl ReplicatedShard {
                         error: reason.clone(),
                     });
                 }
-                Arc::new(ReplicaSlot {
-                    shard,
-                    in_sync: AtomicBool::new(proof.is_ok()),
-                })
+                ReplicaSlot::new(shard, proof.is_ok())
             })
             .collect();
         ReplicatedShard {
@@ -314,10 +325,7 @@ impl ReplicatedShard {
         self.replicas
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::new(ReplicaSlot {
-                shard: replica,
-                in_sync: AtomicBool::new(true),
-            }));
+            .push(ReplicaSlot::new(replica, true));
         self.primary.release_retention_lease(lease)?;
         Ok(())
     }
