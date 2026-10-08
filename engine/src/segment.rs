@@ -55,6 +55,7 @@ mod merge;
 mod metrics;
 mod persistence;
 mod ranked_batch;
+mod replaced_files;
 mod seg;
 mod snapshot;
 mod tag_summary;
@@ -77,6 +78,7 @@ pub use outcomes::{
     HeldPlacement, IngestItemStatus, IngestReport, InsertOutcome, ReplaceOutcome, StoredRow,
     UpsertOutcome,
 };
+pub(crate) use replaced_files::ReplacedFiles;
 pub(crate) use tag_summary::TagSummary;
 
 /// One immutable (or, for the memtable, mutable) slice of the index. Owns the
@@ -616,36 +618,6 @@ pub struct Engine {
     /// The files kept under [`ReplacedFiles::KeptWhileItsRecordNamesThem`]: each was named
     /// by the shard's checkpoint file when the engine replaced it.
     kept_segment_files: std::sync::Mutex<Vec<std::path::PathBuf>>,
-}
-
-/// Reads the segment file names that a shard's commit record names now, from disk. `None`
-/// when the record cannot be read, which is treated as naming every file.
-pub(crate) type CommitRecordNames = Box<dyn Fn() -> Option<Vec<String>> + Send + Sync>;
-
-/// What an engine that owns no manifest does with a segment file it has replaced (ADR-214).
-///
-/// Such an engine is not the one that commits which of its files are live, so it must not
-/// unlink a file that its owner's record still names: a crash before the owner's next commit
-/// would leave a committed record that names a file that is gone, and a store that cannot
-/// reopen. Who names its files decides.
-pub(crate) enum ReplacedFiles {
-    /// A coordinator's manifest names them (a primary of an in-process cluster). The file
-    /// is left where it is. After each commit the coordinator removes what its committed
-    /// manifest no longer names from the shard's directory. The default: the worst a wrong
-    /// default does is keep files.
-    LeftForTheOwnersSweep,
-    /// The shard's own checkpoint file names them (a shard on a shard node). The record is
-    /// read from disk at the moment of the decision. A replaced file it does not name is
-    /// removed at once. One it names is kept, and the node removes it later, once the record
-    /// no longer names it ([`Engine::remove_kept_files_the_record_no_longer_names`]).
-    ///
-    /// Only a shard node says this, so a build without the node never constructs it.
-    #[cfg_attr(not(any(test, feature = "distributed")), allow(dead_code))]
-    KeptWhileItsRecordNamesThem(CommitRecordNames),
-    /// Nothing names them (a replica of an in-process cluster, which is in no manifest and
-    /// is rebuilt from its primary on reopen). There is no record a removal could
-    /// contradict, so the file is removed at once.
-    RemovedAtOnce,
 }
 
 impl std::fmt::Debug for Engine {
