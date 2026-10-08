@@ -173,6 +173,7 @@ fn transport_metrics_recorded_and_downed_shard_fails_loud() {
     );
     assert!(
         percolate2.retries >= 1,
-        "the read was retried (transient connection error) before failing loud"
+        "the read was retried (transient connection error) before failing loud; it failed \
+         with {res:?}"
     );
 }

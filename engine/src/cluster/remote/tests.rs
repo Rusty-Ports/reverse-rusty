@@ -192,6 +192,95 @@ fn a_lost_connection_is_transient_and_other_local_failures_are_not() {
     )));
 }
 
+/// What the client gets when hyper, and not the socket, is what reports the lost
+/// connection: tonic's UNKNOWN "transport error" with hyper's error underneath, which
+/// holds no I/O error.
+fn ended_by_hyper(text: &'static str) -> tonic::Status {
+    #[derive(Debug)]
+    struct Hyper(&'static str);
+    impl std::fmt::Display for Hyper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for Hyper {}
+    #[derive(Debug)]
+    struct Transport(Hyper);
+    impl std::fmt::Display for Transport {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("transport error")
+        }
+    }
+    impl std::error::Error for Transport {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    tonic::Status::from_error(Box::new(Transport(Hyper(text))))
+}
+
+/// A request can be lost with its connection without any I/O error reaching the caller:
+/// hyper drops a request it had queued when the connection's task ended, or the stream is
+/// reset under it. tonic reports those as CANCELLED or as an HTTP/2 error, and keeps only
+/// their text. A read against a shard that has just gone down hits one of them or the
+/// other, depending on which side notices first, and each is retried.
+#[test]
+fn a_request_dropped_with_its_connection_is_transient_whatever_tonic_calls_it() {
+    for status in [
+        // hyper `Canceled`, which tonic turns into CANCELLED with the text and no cause.
+        tonic::Status::cancelled("operation was canceled: connection closed"),
+        tonic::Status::cancelled("operation was canceled: connection was not ready"),
+        // A stream reset under the request, and an I/O error that surfaced inside HTTP/2.
+        tonic::Status::cancelled("h2 protocol error: http2 error"),
+        tonic::Status::unknown("h2 protocol error: error reading a body from connection"),
+        // hyper's own errors under tonic's "transport error".
+        ended_by_hyper("channel closed"),
+        ended_by_hyper("connection closed before message completed"),
+        ended_by_hyper("operation was canceled: connection closed"),
+    ] {
+        assert!(is_transient(&status), "{status:?}");
+    }
+    // The server's own statuses with these codes are not retried: a timeout it enforced, an
+    // export it gave up, an error of its application.
+    for status in [
+        tonic::Status::cancelled("Timeout expired"),
+        tonic::Status::cancelled("live-source export receiver closed"),
+        tonic::Status::unknown("app boom"),
+        tonic::Status::internal("h2 protocol error: not a result of an error"),
+        tonic::Status::resource_exhausted("h2 protocol error: too many requests"),
+        ended_by_hyper("error parsing the response"),
+    ] {
+        assert!(!is_transient(&status), "{status:?}");
+    }
+}
+
+/// A read whose request hyper dropped with the connection is retried, and the retry
+/// reconnects.
+#[tokio::test]
+async fn retry_recovers_an_idempotent_read_that_was_dropped_with_its_connection() {
+    let calls = AtomicU32::new(0);
+    let (res, attempts, timed_out) = run_with_retry(
+        || {
+            let n = calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if n == 0 {
+                    Err::<u32, _>(tonic::Status::cancelled(
+                        "operation was canceled: connection closed",
+                    ))
+                } else {
+                    Ok(42u32)
+                }
+            }
+        },
+        None,
+        2,
+    )
+    .await;
+    assert_eq!(res.ok(), Some(42));
+    assert_eq!(attempts, 1);
+    assert!(!timed_out);
+}
+
 #[tokio::test]
 async fn writes_pass_zero_retries_and_fail_loud_on_transient() {
     // max_retries = 0 (the write path) → a transient error is NOT retried.

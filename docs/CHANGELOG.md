@@ -9,6 +9,18 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — A read that loses its connection is retried however the loss is reported
+
+- **A read against a shard node that has just gone away is retried in every way the loss can
+  reach the coordinator** ([ADR-085](decisions/adr-085-grpc-transport-hardening.md), later
+  outcome). A request queued on a connection whose task had just ended came back as
+  `CANCELLED` "operation was canceled: connection closed", and a stream reset under a request
+  as an "h2 protocol error". Neither was treated as a lost connection, so the read failed at
+  once where the same loss reported by the socket was retried. Only idempotent reads retry,
+  within the request's deadline, as before.
+- Found as a gate failure: `transport_metrics_recorded_and_downed_shard_fails_loud` saw no
+  retry on a Linux runner. Its assertion now prints the error it got.
+
 ## 2026-10-08 — Every step of a durable operation has a name
 
 - **A cluster killed during a checkpoint takes creates again when it restarts**

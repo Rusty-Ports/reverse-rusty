@@ -101,3 +101,17 @@ byte-identical on the in-process path.
   lost connection (broken pipe, reset, aborted, not connected, unexpected end) is now transient
   too. Only idempotent reads retry, as before; a status sent by the server has no local cause and
   is never matched.
+- **Later outcome — 2026-10-08:** that covered the lost connection the socket reports. Two more
+  ways of losing a request with its connection reach the caller with no I/O error. hyper drops a
+  request it had queued when the connection's task ended, which tonic reports as `CANCELLED`
+  "operation was canceled: connection closed" with no cause; and a stream is reset under the
+  request, or the I/O error surfaces inside HTTP/2, which tonic reports as `CANCELLED` or
+  `UNKNOWN` "h2 protocol error: ..." with no cause. Which one a read gets after a shard goes
+  down depends on which side notices first, so a read was sometimes not retried (seen as a gate
+  failure on Linux: `transport_metrics_recorded_and_downed_shard_fails_loud`, zero retries).
+  They are transient now, with hyper's "channel closed" and "connection closed before message
+  completed" under tonic's "transport error". gRPC means these to be retried: a request that
+  never reached the server's application is "always safe to retry" (gRFC A6), and grpc-go
+  reports a lost connection as `UNAVAILABLE`. tonic splits it across three codes, and the
+  classifier puts it back together. A timeout the server enforced (`CANCELLED` "Timeout
+  expired"), its `INTERNAL` and its `RESOURCE_EXHAUSTED` are not retried, as before.
