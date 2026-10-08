@@ -461,8 +461,7 @@ where
 }
 
 /// Whether a gRPC status is worth retrying: `Unavailable` (a transient connect /
-/// server-restarting / load-shed signal), or a request that was written to a connection the
-/// peer had already closed. Conservative on purpose: codes like `ResourceExhausted` or a
+/// server-restarting / load-shed signal), or a request whose connection went away under it. Conservative on purpose: codes like `ResourceExhausted` or a
 /// server's own `Internal` are not retried, to avoid amplifying overload. Only idempotent
 /// reads are ever retried; a write passes zero retries whatever this returns.
 fn is_transient(status: &tonic::Status) -> bool {
@@ -480,12 +479,31 @@ fn is_transient(status: &tonic::Status) -> bool {
 
 /// Whether the status was caused by losing the connection under the request. After a shard
 /// node restarts, the client still holds its old connection until it notices the close; a
-/// read issued in that window is written to a dead socket. tonic reports that as UNKNOWN
-/// "transport error", with the I/O error as its cause, so the cause is what is checked. A
-/// status that arrived from the server has no local cause and is never matched.
+/// read issued in that window is written to a dead socket, or queued on a connection whose
+/// task has just ended, or reset in flight.
+///
+/// gRPC means all of these to be retried: a request that never reached the server's
+/// application is "always safe to retry" (gRFC A6). tonic reports them under three codes,
+/// keeping the cause of some and only the text of others, so both are read:
+///
+/// - UNKNOWN "transport error" with the cause underneath: an I/O error of a kind that means
+///   the peer is gone, or hyper's own "channel closed" and "connection closed before message
+///   completed".
+/// - CANCELLED "operation was canceled: connection closed": hyper dropped a request it had
+///   queued when the connection ended. No cause is kept.
+/// - CANCELLED or UNKNOWN "h2 protocol error: ...": the stream was reset under the request,
+///   or the I/O error surfaced inside HTTP/2. No cause is kept.
+///
+/// A status the server's application sent has no local cause and none of these texts.
 fn connection_was_lost(status: &tonic::Status) -> bool {
     use std::error::Error;
     use std::io::ErrorKind;
+    /// What hyper says, as an error of its own, when a connection ends under a request.
+    const HYPER_CONNECTION_ENDED: [&str; 3] = [
+        "operation was canceled",
+        "channel closed",
+        "connection closed before message completed",
+    ];
     let mut cause = status.source();
     while let Some(error) = cause {
         if let Some(io) = error.downcast_ref::<std::io::Error>() {
@@ -498,9 +516,24 @@ fn connection_was_lost(status: &tonic::Status) -> bool {
                     | ErrorKind::UnexpectedEof
             );
         }
+        let text = error.to_string();
+        if HYPER_CONNECTION_ENDED
+            .iter()
+            .any(|ended| text.starts_with(ended))
+        {
+            return true;
+        }
         cause = error.source();
     }
-    false
+    let message = status.message();
+    match status.code() {
+        tonic::Code::Cancelled => {
+            message.starts_with("operation was canceled")
+                || message.starts_with("h2 protocol error:")
+        }
+        tonic::Code::Unknown => message.starts_with("h2 protocol error:"),
+        _ => false,
+    }
 }
 
 /// Exponential backoff for retry attempt `n` (1-based): 50ms, 100ms, 200ms, … capped at 1s.
