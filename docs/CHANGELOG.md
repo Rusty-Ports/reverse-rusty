@@ -21,7 +21,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   both manifests, does not checkpoint or reset the write-ahead log, and reports `red` until a
   later commit is synced or the node restarts.
 - **A bulk load in that state answers with an error and is served.** It is not in the log, so
-  it is not acknowledged as durable; its rows are in effect now and after a restart.
+  it is not acknowledged as durable; its rows are in effect now and after a restart. The
+  server now publishes its snapshot after a bulk batch whatever the outcome, so readers see
+  those rows, and see the node's health change after a batch that failed.
+- **A delete by position is refused in that state** (`Engine::tombstone`, `tombstone_in`): a
+  position is a place in one manifest's layout. A delete by id is taken.
 - Found by the single-node crash matrix (ADR-221), which fails the step `sync_dir
   manifest.bin` of every commit and then stops the engine.
 

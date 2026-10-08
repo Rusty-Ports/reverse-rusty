@@ -252,3 +252,55 @@ fn a_commit_whose_manifest_was_not_renamed_is_rolled_back() {
     drop(scope);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A position is a place in one manifest's layout. While two manifests may be the one a
+/// recovery reads, a delete by position is refused and a delete by id is taken, and the
+/// delete by id holds after a restart.
+#[test]
+fn a_delete_by_position_is_refused_while_two_manifests_may_be_read() {
+    let dir = scratch_dir("positional");
+    let scope = Scope::open(&dir);
+    let mut engine = seeded(&dir);
+    let address = engine
+        .segment_address(1, 0, 3)
+        .expect("an address before the failed sync");
+    scope.fail_from(&the_manifest_directory_sync(), 0);
+    engine.flush();
+    assert!(scope.failed().is_some(), "the directory sync was reached");
+    engine
+        .try_insert_live("copper kettle", 4, 1)
+        .expect("a write is taken");
+
+    let by_position = engine.tombstone(0).expect_err("a memtable position");
+    assert!(
+        by_position.to_string().contains("delete by logical id"),
+        "{by_position}"
+    );
+    assert!(engine.tombstone_in(&address).is_err(), "a segment address");
+    for segment in 0..engine.segments.len() {
+        assert!(
+            engine.segment_address(segment, 0, 3).is_err(),
+            "no address is given out for segment {segment}"
+        );
+    }
+    assert_eq!(
+        matches(&engine, "copper kettle"),
+        [4],
+        "nothing was deleted"
+    );
+    assert_eq!(
+        matches(&engine, "brass compass"),
+        [3],
+        "nothing was deleted"
+    );
+
+    assert!(engine.delete_by_logical_id(3).expect("a delete by id") > 0);
+    drop(engine);
+    let reopened = Engine::open(norm(), config(&dir)).expect("reopen");
+    assert_eq!(matches(&reopened, "brass compass"), [0u64; 0]);
+    assert_eq!(matches(&reopened, "copper kettle"), [4]);
+    assert_eq!(matches(&reopened, "package charger"), [1]);
+    drop(reopened);
+    drop(scope);
+    let _ = std::fs::remove_dir_all(&dir);
+}

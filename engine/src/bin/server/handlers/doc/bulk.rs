@@ -386,7 +386,11 @@ fn bulk_ingest_inner(state: &Arc<AppState>, items: Vec<ParsedBulkItem>) -> Respo
                 // after every completed ordered pass, matching PUT /_doc.
                 Ok(true)
             };
-            if matches!(result, Ok(true)) {
+            // Published whatever the outcome. A batch that failed has still changed the
+            // engine's health, and one whose manifest was renamed into place and not
+            // synced is in effect although it is an error (ADR-222): readers have to see
+            // both.
+            if !matches!(result, Ok(false)) {
                 state.publish_snapshot_from_locked_engine(&engine);
             }
             result
@@ -396,7 +400,7 @@ fn bulk_ingest_inner(state: &Arc<AppState>, items: Vec<ParsedBulkItem>) -> Respo
                 published = changed;
             }
             Err(error) => {
-                error!(error = %error, "bulk ingest persistence failed, batch rolled back");
+                error!(error = %error, "bulk ingest persistence failed");
                 return bulk_rejection(
                     &state.prom,
                     StatusCode::SERVICE_UNAVAILABLE,

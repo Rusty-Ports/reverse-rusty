@@ -37,7 +37,9 @@ What a restart without a power loss will read is known: the new one.
    done,** until a later commit is renamed and synced. While the engine is in that state no
    segment or sidecar is removed, no checkpoint marker is written to the write-ahead log, and
    the log is not reset: the older manifest needs every record in it. The four functions
-   every such path goes through hold this, not the ten callers.
+   every such path goes through hold this, not the ten callers. A delete by position
+   (`tombstone`, `tombstone_in`) is refused too: a position is a place in one manifest's
+   layout, and the log may be replayed over either. A delete by id is taken.
 4. **The state ends with the next commit that is synced, or with a restart.** The failed
    directory sync is never retried by itself. A new commit writes a new manifest, renames it
    and syncs the directory, and that sync covers the directory as it then is.
@@ -59,8 +61,8 @@ wrote is removed, as before.
   unreferenced files afterwards, and stay until they are removed by hand), and does not reset
   its write-ahead log, which therefore grows until a commit is synced. Restart the node on
   healthy storage; a restart reads the manifest on disk and starts clean.
-- A bulk load that hits it answers with an error while its rows are served. Read them back
-  before repeating it.
+- A bulk load that hits it answers with an error while its rows are served (the server
+  publishes them to readers with the error). Read them back before repeating it.
 
 ## Alternatives considered
 
@@ -92,8 +94,8 @@ wrote is removed, as before.
 - `segment/persistence/published_manifest_tests.rs`: a compaction, a flush and a bulk load
   whose manifest was renamed and not synced keep every file the manifest on disk names, keep
   the previous manifest's files and the log, serve what was acknowledged, and reopen with it;
-  the next synced commit resets the log again; a manifest that was not renamed is rolled back
-  as before. The first two fail on the code before this change ("the manifest names the
+  the next synced commit resets the log again; a delete by position is refused and a delete
+  by id holds after a restart; a manifest that was not renamed is rolled back as before. The first two fail on the code before this change ("the manifest names the
   segment seg_000003.seg, which is gone").
 - `storage::tests`: the three outcomes of a publication, and a rename judged by what is on
   disk.

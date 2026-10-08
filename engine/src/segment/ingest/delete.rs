@@ -14,11 +14,21 @@ impl Engine {
     /// tail. That tail then also holds the rows of the segment whose flush or commit failed,
     /// ahead of this memtable's, so after a restart the position would name a different row.
     /// [`delete_by_logical_id`](Self::delete_by_logical_id) is replay-safe in that state.
+    ///
+    /// And while the manifest on disk was renamed into place and not synced (ADR-222): a
+    /// restart replays the log over that manifest and a power loss may replay it over the
+    /// one before, and a position names a different row under each.
     pub fn tombstone(&mut self, local_id: u32) -> std::io::Result<()> {
         if self.wal.is_some() && self.owns_manifest && !self.base_segments_are_committed() {
             return Err(std::io::Error::other(
                 "an earlier flush is not committed, so a memtable position is not a \
                  replay-safe address; delete by logical id instead",
+            ));
+        }
+        if self.wal.is_some() && self.owns_manifest && self.manifest_awaits_sync() {
+            return Err(std::io::Error::other(
+                "the manifest on disk is not known to survive a power loss, so a memtable \
+                 position is not a replay-safe address; delete by logical id instead",
             ));
         }
         // WAL: memtable tombstones use seg_idx = u32::MAX as sentinel
@@ -79,13 +89,16 @@ impl Engine {
         // A persistent standalone engine may be serving a coherent live
         // fallback/recompile layout whose manifest commit failed. Such a
         // generation has no replay-safe positional WAL ordinal, so fail at
-        // address resolution as well as rechecking in `tombstone_in`.
+        // address resolution as well as rechecking in `tombstone_in`. Nor has any
+        // generation one while two manifests may be the one recovery reads (ADR-222):
+        // an ordinal is a position in one manifest's list.
         if self.owns_manifest
             && self.config.data_dir.is_some()
-            && !self
-                .committed_segment_generations
-                .iter()
-                .any(|committed| Arc::ptr_eq(committed, generation))
+            && (self.manifest_awaits_sync()
+                || !self
+                    .committed_segment_generations
+                    .iter()
+                    .any(|committed| Arc::ptr_eq(committed, generation)))
         {
             return Err(crate::error::TombstoneError::StaleAddress {
                 segment: seg_idx,
@@ -140,6 +153,9 @@ impl Engine {
         // standalone positional replay authority, so their current ordinal is
         // sufficient for the process-local mutation.
         let replay_seg_idx = if self.owns_manifest && self.config.data_dir.is_some() {
+            if self.manifest_awaits_sync() {
+                return Err(stale());
+            }
             self.committed_segment_generations
                 .iter()
                 .position(|generation| Arc::ptr_eq(generation, &address.generation))
