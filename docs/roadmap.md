@@ -32,6 +32,11 @@ query shapes, aliases, broad work, duplicate bodies, memory use, or throughput.
   memory, durable bytes, and reopen time;
 - publish only aggregate evidence and a reproducible harness, not private corpus data.
 
+Zero mismatches against the independent matcher validates how the engine lowers and executes
+the corpus's queries. It does not validate how the parser and the normalizer read them: the
+matcher's front end is a port of the engine's until it is written again from the specification
+([below](#test-infrastructure), ADR-219).
+
 **Completion.** Zero candidate false negatives and zero final-set mismatches on the accepted corpus;
 an explained disposition for every rejected or unsupported query; and a dated performance capture in
 [`performance/`](performance/). The same evidence decides whether the two measurement-gated
@@ -608,6 +613,13 @@ capture; microbenchmarks alone are not sufficient.
 
 ### Test infrastructure
 
+- **Write the reference's front end again, from the specification alone.** The reference
+  matcher's parser, cleaner, normalizer and phrase selection were ported from the engine
+  (ADR-219), so the differential cannot see a misreading that both carry. The rules are now
+  stated in full (`design/normalization.md` §2.1, `reference/dsl.md`). Have them implemented by
+  an author who is given those two documents and the tests and not the engine's source, in a
+  different shape from the engine's, and triage every divergence with the specification as the
+  arbiter. Done when `check.sh`'s provenance lane lists no ported module.
 - **Phrase-pattern fuzzing.** Expand the parse-union alphabet with punctuation markers, number
   context, years, and fused vocabulary forms after teaching the independent reference emitter the same
   documented surface grammar.

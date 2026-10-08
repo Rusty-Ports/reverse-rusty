@@ -1,6 +1,7 @@
 //! The normalization pipeline: cleaned text -> canonical features, and the ADR-061 two title
-//! views. An independent reimplementation of `engine/src/normalize/core.rs::emit` /
-//! `match_features` / `match_features_dual`.
+//! views. Ported from `engine/src/normalize/core.rs::emit` / `match_features` /
+//! `match_features_dual` (see the crate documentation for what "ported" means for the
+//! differential).
 //!
 //! Two phases (mirroring the engine): (1) find boundary-valid leftmost-longest phrase matches;
 //! (2) tokenize and run each non-phrase token through the number / synonym / generic pipeline.
@@ -64,11 +65,11 @@ fn parse_number(tok: &str) -> Option<String> {
     seen_digit.then(|| tok.to_string())
 }
 
-/// A 4-digit number in 1900..=2099 is a year (the engine's bound — note: 2099, not 2100).
+/// A number of exactly four digits in [`crate::tables::YEARS`] is a year.
 fn as_year(num: &str) -> Option<String> {
     if num.len() == 4 && !num.contains('.') {
         if let Ok(y) = num.parse::<u32>() {
-            if (1900..=2099).contains(&y) {
+            if crate::tables::YEARS.contains(&y) {
                 return Some(num.to_string());
             }
         }

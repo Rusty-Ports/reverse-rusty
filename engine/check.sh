@@ -102,6 +102,37 @@ assert_rkyv_inactive() {
     fi
 }
 
+# The reference matcher says where each of its modules comes from (ADR-219). A module that
+# cites engine code as the source of its logic must be one the crate documentation lists as
+# ported from the engine. Once the ported modules are re-written from the specification the
+# list below is emptied, and this lane keeps it empty.
+assert_ref_matcher_provenance() {
+    local ported="clean.rs normalize.rs parse.rs phrases.rs"
+    local marker='Transcribed|[Tt]ranslation of|[Tt]ranslated from|[Pp]orted from|[Mm]irror(s|ing) `|Reproduces|engine/src/'
+    local row f base
+    row=$(grep 'ported from the engine' ref-matcher/src/lib.rs) || true
+    for f in ref-matcher/src/*.rs; do
+        base=${f##*/}
+        # lib.rs is where the provenance is stated; tables.rs holds the specification's data.
+        [ "$base" = lib.rs ] && continue
+        if grep -Eq "$marker" "$f"; then
+            case " $ported " in
+                *" $base "*) ;;
+                *)
+                    printf '%s cites engine code as the source of its logic and is not listed as ported\n' "$f" >&2
+                    return 1
+                    ;;
+            esac
+        fi
+    done
+    for base in $ported; do
+        if ! grep -q "\[\`${base%.rs}\`\]" <<<"$row"; then
+            printf 'ref-matcher/src/lib.rs does not say that %s is ported from the engine\n' "$base" >&2
+            return 1
+        fi
+    done
+}
+
 # Advisory (non-failing): list source files over the line threshold as refactor
 # candidates. Informational only — it never touches `failures` or the exit
 # status. Scans the crate's own src/ + tests/ (.rs); bump `threshold` to retune.
@@ -154,6 +185,10 @@ if [ "$core" -eq 1 ] && [ "$fast" -eq 0 ]; then
     # trips it.
     run "ref-matcher independence" bash -c \
         '! cargo tree -q -p reverse-rusty-ref-matcher --edges normal --prefix none 2>/dev/null | grep -q "^reverse-rusty "'
+    run "ref-matcher provenance" assert_ref_matcher_provenance
+    # The reference's own unit tests. It is a path dev-dependency and not a workspace member,
+    # so the `cargo test` lanes above build it and never run its tests.
+    run "ref-matcher tests" cargo test --release --manifest-path ref-matcher/Cargo.toml
     # Crash-injection lane (ADR-088): spawn the `crashwriter` bin,
     # SIGKILL it mid durable-op (WAL append / flush / compaction / backup / churn),
     # then diff the reopened engine against the front-end-independent oracle (zero

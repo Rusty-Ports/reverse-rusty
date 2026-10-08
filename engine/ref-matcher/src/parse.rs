@@ -1,4 +1,5 @@
-//! The query DSL parser — an independent reimplementation of `engine/src/dsl.rs`.
+//! The query DSL parser. Ported from `engine/src/dsl.rs` (see the crate documentation for what
+//! "ported" means for the differential).
 //!
 //! Grammar (`docs/reference/dsl.md`):
 //!   word                     -> required term
@@ -11,11 +12,7 @@
 //! a query parses or is dropped, and what AST it yields), but a typed kind is kept for test
 //! readability.
 
-/// The byte-length / structural limits, matching the engine's compiled-in defaults
-/// (`MAX_QUERY_LENGTH` / `MAX_CLAUSES` / `MAX_ANY_OF_SIZE`).
-pub const MAX_QUERY_LENGTH: usize = 10_240;
-pub const MAX_CLAUSES: usize = 256;
-pub const MAX_ANY_OF_SIZE: usize = 64;
+pub use crate::tables::{MAX_ANY_OF_SIZE, MAX_CLAUSES, MAX_QUERY_LENGTH};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Atom {

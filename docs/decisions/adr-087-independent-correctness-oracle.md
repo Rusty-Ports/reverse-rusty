@@ -149,3 +149,25 @@
   reference honors). Code: `engine/ref-matcher/`, `engine/tests/independent_oracle/`,
   `engine/check.sh` (the `ref-matcher independence` lane). How-we-test:
   [`../testing.md`](../testing.md).
+
+## Later outcome (2026-10-08, ADR-219)
+
+Decisions 1 and 5 say the reference's front end was written from the specification and "never
+from engine code", and the status note says the two sides "independently interpreted" the prose.
+For the parser, the cleaner, the normalizer and the phrase selection that was not so: they were
+translated from the engine's `dsl.rs` and `normalize/` when this decision was built, and their
+own comments said it. They share no code with the engine and they share its algorithm.
+
+| Reference module | Written from |
+|---|---|
+| `semantic.rs`, `matcher.rs` | the specification |
+| `features.rs`, `vocab.rs` | the specification |
+| `tables.rs` | the specification's tables, copied as data (the carve-out above) |
+| `clean.rs`, `normalize.rs`, `parse.rs`, `phrases.rs` | ported from the engine |
+
+What that changes about the claim: for the front end the differential finds a change that one
+side makes and the other does not, and it does not find a reading of the language that the
+engine had when the port was made. [ADR-219](adr-219-the-reference-says-where-it-comes-from.md)
+records the provenance in the crate, states the front-end rules in full so that the ported
+modules can be written again from them, and adds a gate lane that keeps any other module from
+citing engine code as its source.

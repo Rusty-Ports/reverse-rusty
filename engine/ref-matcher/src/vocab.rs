@@ -7,7 +7,7 @@
 
 use crate::clean::{PunctClass, PunctTable};
 
-/// How a registered phrase treats its component tokens (mirrors the engine's `PhraseMode`).
+/// How a registered phrase treats its component tokens (`docs/design/normalization.md` §2.1).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PhraseMode {
     /// Consume the components — only the entity feature survives (manual multiword phrases).
@@ -114,7 +114,7 @@ impl RefVocab {
     }
 
     /// True if any phrase is registered in [`Alias`](PhraseMode::Alias) mode — the title then has a
-    /// distinct positive view `P(T)` (ADR-061). Mirrors `Normalizer::has_multiword_aliases`.
+    /// distinct positive view `P(T)` (ADR-061; `docs/design/normalization.md` §2.1).
     #[must_use]
     pub fn has_multiword_aliases(&self) -> bool {
         self.phrases.iter().any(|p| p.mode == PhraseMode::Alias)

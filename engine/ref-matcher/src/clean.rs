@@ -1,11 +1,14 @@
 //! Byte cleaning: lowercase + diacritic fold + the punctuation-class table (ADR-058).
 //!
-//! Reproduces `engine/src/normalize/core.rs::clean_with` and the diacritic table in
-//! `core/helpers.rs::fold_diacritic`. The SAME table runs over queries and titles, keeping the
+//! Ported from `engine/src/normalize/core.rs::clean_with` (see the crate documentation for
+//! what "ported" means for the differential). The tables it reads are in [`crate::tables`].
+//! The SAME table runs over queries and titles, keeping the
 //! feature spaces aligned. Whitespace runs are NOT collapsed here (the canonical view keeps the
 //! cleaned text verbatim); run handling is the query-side / overlap-scan job in `normalize`.
 
 use std::collections::HashMap;
+
+use crate::tables::fold_diacritic;
 
 /// How a non-alphanumeric character is handled during cleaning.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,36 +52,13 @@ impl PunctTable {
         if let Some(&c) = self.overrides.get(&ch) {
             return c;
         }
-        match ch {
-            '.' => PunctClass::Keep,
-            '#' | '/' => PunctClass::Marker,
-            _ => PunctClass::Split,
+        if crate::tables::KEEP.contains(&ch) {
+            PunctClass::Keep
+        } else if crate::tables::MARKERS.contains(&ch) {
+            PunctClass::Marker
+        } else {
+            PunctClass::Split
         }
-    }
-}
-
-/// Fold common Latin diacritics to ASCII so `café` -> `cafe`, `jalapeño` -> `jalapeno`.
-///
-/// Transcribed verbatim from `engine/src/normalize/core/helpers.rs::fold_diacritic`. A divergence
-/// here is a genuine finding; the table is a finite lookup, so the independence value is in the
-/// pipeline logic, not in re-deriving the mapping.
-#[must_use]
-pub fn fold_diacritic(ch: char) -> char {
-    match ch {
-        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ā' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => {
-            'a'
-        }
-        'é' | 'è' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
-        'í' | 'ì' | 'î' | 'ï' | 'ī' | 'į' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
-        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' | 'ō' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' => 'o',
-        'ú' | 'ù' | 'û' | 'ü' | 'ū' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
-        'ñ' | 'ń' | 'Ñ' => 'n',
-        'ç' | 'ć' | 'č' | 'Ç' | 'Ć' | 'Č' => 'c',
-        'š' | 'ś' | 'Š' | 'Ś' => 's',
-        'ž' | 'ź' | 'ż' | 'Ž' | 'Ź' | 'Ż' => 'z',
-        'ý' | 'ÿ' | 'Ý' => 'y',
-        'ł' | 'Ł' => 'l',
-        other => other,
     }
 }
 
