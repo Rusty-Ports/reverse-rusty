@@ -97,3 +97,11 @@ stored-class comparison, or dropping either half of the guard.
 
 **See also:** ADR-106 (dedup Stage A), ADR-056 (re-anchoring and the demote guard), ADR-105 (the
 hot tier and the two-axis rule that cost movement must never imply visibility movement).
+
+## Later outcome (2026-10-08, ADR-217)
+
+The partition is now also checked on bodies written by a grammar generator (several groups,
+two-token members, phrases and negations beside the groups), against an ungrouped twin of the
+corpus, through the memtable, flushes and both merges
+([ADR-217](adr-217-random-queries-use-the-whole-grammar.md)). The re-anchoring merge had no
+reference before: with dedup off it regroups too.

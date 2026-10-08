@@ -9,6 +9,22 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — The random tests use the whole query language
+
+- **Random test queries use the whole grammar**
+  ([ADR-217](decisions/adr-217-random-queries-use-the-whole-grammar.md)). The generator every
+  at-scale differential was built on writes bare terms with trailing negations. A second
+  generator, `gen::grammar`, writes every clause of the DSL in any order (phrases, any-of
+  groups with one- and two-token members, their negated forms, bodies of any-of groups alone)
+  and, for each query, a title built to satisfy it.
+- **Four oracles run on it in the gate:** the independent reference; a built title retrieves
+  its query; an edited query matches a subset or a superset as its edit says; and a duplicated
+  corpus reads like its ungrouped twin through the memtable, flushes and both merges, in both
+  read modes.
+- **No engine defect found.** The work did find that "dedup on equals dedup off" was not a
+  reference for what the re-anchoring merge does to default-read visibility (it regroups with
+  the switch off as well), which the twin now is. No behaviour change.
+
 ## 2026-10-08 — A store whose log is lost can be started without a backup
 
 - **A lost log is accepted by name, and on record first**

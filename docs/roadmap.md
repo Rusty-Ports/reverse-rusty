@@ -618,6 +618,14 @@ capture; microbenchmarks alone are not sufficient.
   predictable.
 - **Messy cluster oracles.** Thread deterministic messy-data generation through cluster and
   durability oracles and require equality with their clean-data reference results.
+- **The grammar corpus in more places.** `gen::grammar` (ADR-217) writes every clause of the DSL
+  as clean text under the default vocabulary. Take it through the messy surfaces, a vocabulary
+  with synonyms, phrases and aliases (with the reference given the same vocabulary), and the
+  cluster oracles, where an any-of body fans out across shards.
+- **Other seeds on a schedule.** The gate runs fixed seeds (ADR-008). Lucene and Elasticsearch
+  pick a new seed for every run and print it. Decide whether a scheduled job should run the
+  grammar tests under a random `RR_GRAMMAR_SEED`: it finds more over time, and a red run then
+  means a real defect with a seed to reproduce it, not a broken build.
 
 ### Code and error-surface cleanup
 

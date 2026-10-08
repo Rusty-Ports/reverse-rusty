@@ -9,6 +9,8 @@
 //! near-duplicate query families, alternate brand forms, and forbidden-term
 //! noise.
 
+pub mod grammar;
+
 /// Tiny deterministic PRNG (SplitMix64). No external crates.
 pub struct Rng(u64);
 impl Rng {
