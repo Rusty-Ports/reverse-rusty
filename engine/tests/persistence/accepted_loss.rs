@@ -277,19 +277,52 @@ fn a_backup_carries_the_record_of_accepted_losses() {
     let _ = std::fs::remove_dir_all(&copy);
 }
 
-/// The record is evidence. A store whose record cannot be read does not open as if it had
-/// none, with its log or without it.
+/// The record is evidence, and it is checked for being whole: it ends with a line that
+/// counts and checksums its entries. A record that was damaged, emptied or cut short does
+/// not open as a shorter history, with the store's log present or without it. If it did, the
+/// losses it had recorded would no longer be reported, and a token that had been spent
+/// would accept a second loss.
 #[test]
-fn a_record_that_cannot_be_read_is_not_ignored() {
-    let (dir, config) = a_store_that_lost_its_log("unreadable_record");
+fn a_record_that_is_not_whole_is_not_read_as_a_shorter_history() {
+    let (dir, config) = a_store_that_lost_its_log("record_not_whole");
     let (_, token) = refusal(&config);
     drop(Engine::open(make_norm(), accepting(&config, &token)).expect("accepted"));
-    std::fs::write(dir.join(ACCEPTED_LOG_LOSSES_FILE), "not a record\n").expect("damage it");
-    let reason = match Engine::open(make_norm(), config.clone()) {
-        Err(error) => error.to_string(),
-        Ok(_) => panic!("opened over a record it could not read"),
-    };
-    assert!(reason.contains("cannot be read"), "{reason}");
-    assert!(accepted_log_losses(&dir).is_err());
+    let record = dir.join(ACCEPTED_LOG_LOSSES_FILE);
+    let whole = std::fs::read_to_string(&record).expect("the record");
+    let entry_only = whole
+        .lines()
+        .next()
+        .map(|entry| format!("{entry}\n"))
+        .expect("one entry");
+    assert_ne!(entry_only, whole, "precondition: a closing line follows");
+
+    for (what, damaged) in [
+        ("damaged", "not a record\n".to_string()),
+        ("emptied", String::new()),
+        ("cut short after its entry", entry_only),
+    ] {
+        std::fs::write(&record, &damaged).expect("damage it");
+        let reason = match Engine::open(make_norm(), config.clone()) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("{what}: opened over a record that is not whole"),
+        };
+        assert!(reason.contains("cannot be read"), "{what}: {reason}");
+        assert!(accepted_log_losses(&dir).is_err(), "{what}");
+
+        // The log is lost again, under the same manifest. The spent token accepts nothing.
+        let wal = dir.join("wal.log");
+        let held = std::fs::read(&wal).expect("the log");
+        std::fs::remove_file(&wal).expect("lose the log");
+        assert!(
+            Engine::open(make_norm(), accepting(&config, &token)).is_err(),
+            "{what}: a spent token accepted a second loss"
+        );
+        assert!(!wal.exists(), "{what}: a log was created");
+        std::fs::write(&wal, held).expect("put the log back");
+    }
+
+    std::fs::write(&record, whole).expect("restore the record");
+    drop(Engine::open(make_norm(), config).expect("with its record whole"));
+    assert_eq!(accepted_log_losses(&dir).expect("the record").len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

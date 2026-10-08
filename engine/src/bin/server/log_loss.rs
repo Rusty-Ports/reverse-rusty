@@ -132,10 +132,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rr_log_loss_report_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("data dir");
+        let entries = "v1\t1700000000\tapplied\twal.log\tsegment-2-seq-5\n\
+                       v1\t1700000500\tpending\twal.log\tsegment-4-seq-9\n";
+        // The record ends with a line that counts and checksums its entries.
+        let closing = format!(
+            "end\t2\t{:08x}\n",
+            reverse_rusty::storage::crc32(entries.as_bytes())
+        );
         std::fs::write(
             dir.join(ACCEPTED_LOG_LOSSES_FILE),
-            "v1\t1700000000\tapplied\twal.log\tsegment-2-seq-5\n\
-             v1\t1700000500\tpending\twal.log\tsegment-4-seq-9\n",
+            format!("{entries}{closing}"),
         )
         .expect("a record");
         assert_eq!(carried_out_before(Some(&dir)), 1);

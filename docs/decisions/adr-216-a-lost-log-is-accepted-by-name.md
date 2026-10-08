@@ -60,7 +60,9 @@ in the delivery of an event.
    values, so an alert on them needs no sample from before the restart. It logs a warning at
    every start of a store whose record is not empty. The start that accepts a loss also
    raises a `log_lost` durability event (data at risk).
-6. **The record is evidence.** A record that cannot be read fails the open, with the log
+6. **The record is evidence.** It is text, one loss to a line, and it ends with a line that
+   counts and checksums the entries, so a record that was damaged, emptied or cut short is
+   not read as a shorter history. A record that cannot be read fails the open, with the log
    present or not; it is not treated as empty. A backup carries it: a store restored from
    the copy holds no more than the one it was taken from, and says so. A backup is not
    taken, and does not verify, with a record that no open could read. Nothing clears it.
@@ -128,6 +130,9 @@ in the delivery of an event.
   stopped before it replaced the log leaves a pending entry; if the original log is then
   found and put back, the next open finds a log and marks the entry applied, although
   nothing was lost. An open cannot tell an original log from an empty replacement.
+- Removing the record by hand starts the count again, and a token that had been spent
+  would then accept a second loss under an unchanged commit record. The record is not to be
+  removed; the error for one that cannot be read says so.
 - The token is not part of `GET /_settings`: it is an instruction to one open, not a
   property of the running store.
 
@@ -141,7 +146,8 @@ in the delivery of an event.
   no record. A start that cannot create the empty log leaves a pending entry and no log, the
   store is still refused with the same token, and the token then finishes it with one entry.
   A pending entry beside a log is marked applied by a start that is given no token. A record
-  that cannot be read fails the open. A backup carries the record; one is not taken, and
+  that is damaged, emptied or cut short fails the open, and a spent token does not accept a
+  second loss under it. A backup carries the record; one is not taken, and
   does not verify, when the record cannot be read.
 - `cluster/coordinator/tests/accepted_loss.rs`: the same for the cluster log, and a refusal,
   or a start that stops after recording, leaves every other file in the directory as it was.

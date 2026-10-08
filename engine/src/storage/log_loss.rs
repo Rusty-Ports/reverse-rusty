@@ -41,8 +41,13 @@ pub struct AcceptedLogLoss {
 }
 
 /// The log losses the store in `dir` has accepted, oldest first. A directory with no such
-/// file has accepted none. A file that cannot be read or understood is an error: it is
-/// evidence, and it is not ignored.
+/// file has accepted none. A file that cannot be read, or that is not whole, is an error: it
+/// is evidence, and it is not ignored.
+///
+/// The file is text, one loss to a line, and ends with a line that counts the entries and
+/// checksums them. A file that was cut short, emptied or edited does not match its last
+/// line, so entries cannot go missing without the store noticing: the count of losses is
+/// what makes a token good for one loss only.
 pub fn accepted_log_losses(dir: &Path) -> io::Result<Vec<AcceptedLogLoss>> {
     let path = dir.join(ACCEPTED_LOG_LOSSES_FILE);
     let text = match std::fs::read_to_string(&path) {
@@ -50,9 +55,32 @@ pub fn accepted_log_losses(dir: &Path) -> io::Result<Vec<AcceptedLogLoss>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(unreadable(&path, &e.to_string())),
     };
-    text.lines()
+    let not_whole = || {
+        unreadable(
+            &path,
+            "it does not end with a line that matches its entries",
+        )
+    };
+    let body_len = text
+        .trim_end_matches('\n')
+        .rfind('\n')
+        .map_or(0, |last_break| last_break + 1);
+    let (body, last_line) = text.split_at(body_len);
+    if last_line.trim_end_matches('\n') != closing_line(body) {
+        return Err(not_whole());
+    }
+    body.lines()
         .map(|line| parse(line).ok_or_else(|| unreadable(&path, &format!("line {line:?}"))))
         .collect()
+}
+
+/// The last line of a record whose entries are `body`: how many, and their checksum.
+fn closing_line(body: &str) -> String {
+    format!(
+        "end\t{}\t{:08x}",
+        body.lines().count(),
+        super::crc32(body.as_bytes())
+    )
 }
 
 fn unreadable(path: &Path, why: &str) -> io::Error {
@@ -60,7 +88,8 @@ fn unreadable(path: &Path, why: &str) -> io::Error {
         io::ErrorKind::InvalidData,
         format!(
             "the record of accepted log losses, {}, cannot be read ({why}). It is evidence \
-             of data loss and is not ignored: repair it or move it aside.",
+             of data loss and is not ignored: restore it, or move it aside if the losses it \
+             recorded are known.",
             path.display()
         ),
     )
@@ -91,17 +120,19 @@ fn parse(line: &str) -> Option<AcceptedLogLoss> {
 fn write(dir: &Path, losses: &[AcceptedLogLoss]) -> io::Result<()> {
     let path = dir.join(ACCEPTED_LOG_LOSSES_FILE);
     let tmp = dir.join(format!("{ACCEPTED_LOG_LOSSES_FILE}.tmp"));
-    let mut file = std::fs::File::create(&tmp)?;
-    for loss in losses {
-        writeln!(
-            file,
-            "{VERSION}\t{}\t{}\t{}\t{}",
+    let entry = |loss: &AcceptedLogLoss| {
+        format!(
+            "{VERSION}\t{}\t{}\t{}\t{}\n",
             loss.accepted_at,
             if loss.applied { "applied" } else { "pending" },
             loss.log,
             loss.commit_record
-        )?;
-    }
+        )
+    };
+    let body = losses.iter().map(entry).collect::<Vec<_>>().concat();
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(body.as_bytes())?;
+    writeln!(file, "{}", closing_line(&body))?;
     file.sync_all()?;
     drop(file);
     std::fs::rename(&tmp, &path)?;
