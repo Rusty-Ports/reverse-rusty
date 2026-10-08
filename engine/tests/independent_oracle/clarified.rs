@@ -410,3 +410,22 @@ fn a_class_widens_required_clauses_only() {
         check_pair(&eng, &reference, query, expected);
     }
 }
+
+/// An alias form of one token is no phrase, so it does not make the positive view the wide
+/// one: a word a consuming phrase holds stays hidden from a bare query.
+#[test]
+fn an_alias_form_of_one_token_is_no_phrase() {
+    let norm = || {
+        let mut b = NormalizerBuilder::new();
+        b.add_phrase(&["north", "star"], "brand:ns", FeatureKind::Brand);
+        b.add_alias_form("ny");
+        b.build().expect("normalizer")
+    };
+    let vocab = || {
+        RefVocab::default_vocab()
+            .phrase("north star", "brand:ns", PhraseMode::Collapse)
+            .alias_form("ny")
+    };
+    check(norm, vocab, "star", &[("north star", false)]);
+    check(norm, vocab, "ny", &[("ny", true), ("north star", false)]);
+}
