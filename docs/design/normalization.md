@@ -95,11 +95,14 @@ scratch buffers:
 
 1. **Byte cleaning.** ASCII is lowercased, supported diacritics fold to ASCII, and the punctuation
    table classifies each character as `split`, `fold`, `keep`, or `marker`. By default `.` is kept,
-   `#` and `/` are marker tokens, and other non-alphanumeric characters split words. Operators may,
+   `#` and `/` are marker tokens, and other non-alphanumeric characters split words. Separators
+   are merged: however many stand between two words, they are one token boundary (ADR-218). Operators may,
    for example, fold apostrophes and hyphens so `O'Brien`, `O-Brien`, and `OBrien` converge.
 2. **Tokenization.** Cleaned text becomes spans into the reusable buffer, not owned strings.
 3. **Phrase and alias scan.** A daachorse Aho-Corasick automaton emits configured multi-token
-   features. Collapse, additive, and alias modes control whether component tokens remain visible.
+   features. A phrase is its words as consecutive tokens, and where phrases overlap the earliest
+   wins, then the longest, among those that start and end on token boundaries (ADR-218).
+   Collapse, additive, and alias modes control whether component tokens remain visible.
 4. **Number typing.** Four-digit values in `1900..=2099` emit `year:N`. Other numbers remain generic.
    A caller-supplied `number_context` word makes an immediately following number generic too:
    with `["model"]`, `model 1995` emits `term:1995`, while `series 1995` emits `year:1995`.

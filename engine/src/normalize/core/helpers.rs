@@ -37,20 +37,6 @@ pub(super) fn emit_generic<F: FnMut(&str, FeatureKind, u32, u32)>(
     emit(scratch, FeatureKind::Generic, start, end);
 }
 
-/// Collapse whitespace runs in place (and strip a leading space). Phrase patterns are registered
-/// single-spaced, so a run inside the cleaned text hides a phrase from the automaton. Flat
-/// normalization applies this only to alias-enabled queries (ADR-061); ADR-120 positioned
-/// normalization applies it symmetrically to query and title graphs. Flat title-side runs remain
-/// handled by the additive overlap scan (`PhraseOverlap::collect_into`).
-pub(super) fn collapse_ws_runs_in_place(s: &mut String) {
-    let mut prev_space = true; // initial `true` also strips a leading space
-    s.retain(|c| {
-        let keep = c != ' ' || !prev_space;
-        prev_space = c == ' ';
-        keep
-    });
-}
-
 /// Parse a token into a clean numeric string (digits with optional .5), or None.
 pub(super) fn parse_number(tok: &str) -> Option<String> {
     let mut seen_digit = false;

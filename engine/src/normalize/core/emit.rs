@@ -1,6 +1,6 @@
 use super::{
-    as_year, collapse_ws_runs_in_place, emit_generic, parse_number, position_index, EmitMode,
-    FeatureKind, NormScratch, Normalizer, PhraseMode, Side,
+    as_year, emit_generic, parse_number, position_index, EmitMode, FeatureKind, NormScratch,
+    Normalizer, PhraseMode, Side,
 };
 
 impl Normalizer {
@@ -54,43 +54,39 @@ impl Normalizer {
         } = mode;
         self.clean_into(text, lc);
 
-        // Phrase patterns are registered single-spaced. ADR-061 collapses query
-        // whitespace while aliases are active; ADR-120 does the same for BOTH
-        // sides of every positioned graph so a forbidden phrase observes
-        // `"north  star"` exactly as it observes `"north star"`. Flat,
-        // alias-free analysis retains its historical byte-identical behavior.
-        if retain_positioned_starts || (side == Side::Query && self.has_multiword_aliases) {
-            collapse_ws_runs_in_place(lc);
-        }
-
-        // Phase 1: find multiword phrase matches via the automaton.
-        // We collect (byte_start, byte_end, pattern_index) for each match.
-        // The automaton operates on the cleaned string, matching space-joined
-        // token sequences. We need to ensure matches align on word boundaries.
+        // Phase 1: the phrases in the cleaned text. A phrase is registered as its words joined
+        // by single spaces, and cleaning merges separators, so a phrase occurs wherever its
+        // words are consecutive tokens (ADR-218).
+        //
+        // Selection is leftmost-longest over the occurrences that sit on token boundaries
+        // (`PhraseOverlap::select_phrases`). The leftmost-longest automaton does the same job
+        // faster whenever every match it reports is on token boundaries, which is nearly
+        // always, so it runs first. It commits to a match before the boundary is checked: a
+        // pattern found inside a word (`north star` in `xnorth star lamp`), or one that ends
+        // inside a word (`new york city` in `new york cityscape`), is taken, hides the valid
+        // phrases it overlaps (`star lamp`, `new york`), and is then of no use. The first
+        // such match hands the text to the boundary-aware selection.
         let phrase_matches = &mut sc.phrase_matches;
         phrase_matches.clear();
-        if let (true, Some(ov)) = (
-            self.has_multiword_aliases || retain_positioned_starts,
-            self.phrase_overlap.as_ref(),
-        ) {
-            // ADR-061 (codex R12): with multi-word aliases active, boundary validity must
-            // participate in match SELECTION — see `PhraseOverlap::select_phrases`. The legacy
-            // pass below commits to a boundary-invalid mid-token match and lets it suppress a
-            // valid overlapping phrase (a query-side FN). Positioned analysis
-            // also uses the corrected selection independently of alias activation;
-            // flat alias-free analysis keeps the legacy byte-identical path.
-            ov.select_phrases(lc, phrase_matches);
-        } else {
+        let mut on_boundaries = !(self.has_multiword_aliases || retain_positioned_starts);
+        if on_boundaries {
+            let bytes = lc.as_bytes();
             for m in self.automaton.leftmost_find_iter(&**lc) {
-                let start = m.start();
-                let end = m.end();
-                // Word-boundary check: match must start at beginning or after a space,
-                // and end at end-of-string or before a space.
-                let ok_start = start == 0 || lc.as_bytes()[start - 1] == b' ';
-                let ok_end = end == lc.len() || lc.as_bytes()[end] == b' ';
-                if ok_start && ok_end {
+                let (start, end) = (m.start(), m.end());
+                if (start == 0 || bytes[start - 1] == b' ')
+                    && (end == lc.len() || bytes[end] == b' ')
+                {
                     phrase_matches.push((start, end, m.value()));
+                } else {
+                    on_boundaries = false;
+                    break;
                 }
+            }
+        }
+        if !on_boundaries {
+            match self.phrase_overlap.as_ref() {
+                Some(ov) => ov.select_phrases(lc, phrase_matches),
+                None => phrase_matches.clear(),
             }
         }
 

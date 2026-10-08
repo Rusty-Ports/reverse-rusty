@@ -21,7 +21,7 @@ pub(super) use crate::dict::name_hash;
 pub(super) use alias_overlap::PhraseOverlap;
 pub(super) use alias_words::{AliasScratch, AliasWords, FormSpec, UnitSpec};
 pub use helpers::fold_diacritic;
-use helpers::{as_year, collapse_ws_runs_in_place, emit_generic, parse_number};
+use helpers::{as_year, emit_generic, parse_number};
 
 #[inline]
 fn position_index(value: usize) -> u32 {
@@ -157,10 +157,14 @@ mod phrase;
 
 /// Byte-clean `text` into `out` (reused): lowercase + fold diacritics + apply the punctuation
 /// table. Shared by [`Normalizer::clean_into`] (the hot path) and the builder's alias-phrase
-/// registration (ADR-061). **Whitespace runs are NOT collapsed** — the cleaned text is verbatim,
-/// so this is byte-identical across versions and a persisted segment's features never desync on a
-/// binary upgrade (codex R8). Matching an alias against a title with whitespace runs is instead
-/// handled, recall-safely, by the positive-view overlap scan ([`PhraseOverlap::collect_into`]).
+/// registration (ADR-061).
+///
+/// **Separators are merged** (ADR-218): the cleaned text never has two spaces in a row and
+/// never starts with one. Tokens are what they would be without the merge. What changes is
+/// what phrase selection sees, because a phrase is registered as its words joined by single
+/// spaces and is looked for in this text: `north, star` cleans to `north star`, and not to
+/// `north  star`, in which the phrase `north star` does not occur. A phrase is where its words
+/// are consecutive tokens, however many separators stand between them.
 pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
     out.clear();
     for ch in text.chars() {
@@ -169,16 +173,27 @@ pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
             out.push(c.to_ascii_lowercase());
         } else {
             match punct.class_of(c) {
-                PunctClass::Split => out.push(' '),
+                PunctClass::Split => push_separator(out),
                 PunctClass::Fold => {} // delete: neighbors join into one token
+                // A space is the separator whatever class a vocabulary gives it: kept or
+                // marked, it still ends a token, and is still not written twice.
+                PunctClass::Keep | PunctClass::Marker if c == ' ' => push_separator(out),
                 PunctClass::Keep => out.push(c),
                 PunctClass::Marker => {
-                    out.push(' ');
+                    push_separator(out);
                     out.push(c);
                     out.push(' ');
                 }
             }
         }
+    }
+}
+
+/// End the current token, unless nothing has been written or it has just been ended.
+#[inline]
+fn push_separator(out: &mut String) {
+    if !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
     }
 }
 

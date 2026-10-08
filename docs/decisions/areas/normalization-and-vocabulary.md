@@ -15,6 +15,7 @@ Shared query/title normalization, dictionaries, learned vocabulary, aliases, and
 | [205](../adr-205-a-title-with-every-word-carries-the-form.md) | A title with every word of an alias form carries the form | Puts a multi-word alias form's entity in the positive title view whenever the title holds a reading of the form's text, so activating an alias removes no match (one overlap shape excepted) and no stored row changes. | Accepted |
 | [204](../adr-204-vocabulary-change-interns-its-names.md) | A vocabulary change interns the names it introduces | Gives every feature name a single-node vocabulary change produces for stored queries its dense id before the read-only recompile, so a later insert cannot give the name a second id and strand the recompiled queries. | Accepted |
 | [202](../adr-202-the-default-learner-expands.md) | The default learner expands | Makes the vocabulary learner apply what any-of groups teach by expansion unless `anyof_mode=collapse` is asked for, because a collapse rule can remove matches stored queries had. | Accepted |
+| [218](../adr-218-a-phrase-is-consecutive-tokens.md) | A phrase is its words as consecutive tokens | Merges separators in cleaning so a vocabulary phrase is found whatever stands between its words (`north, star`), and selects phrases leftmost-longest among occurrences on token boundaries in every mode, so a match inside a word hides nothing. Fixes two false negatives; compiler semantics 8. | Accepted |
 
 ---
 

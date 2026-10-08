@@ -1,9 +1,10 @@
 //! Shared helpers for the adversarial property suite: engine construction, match-set
-//! capture, and the catalogue of **identity perturbations** — surface edits that, under
-//! the phrase-free default vocab, provably leave a title's feature set unchanged
-//! (case folds away, foldable diacritics fold away, whitespace runs and Split-class
-//! punctuation only re-shape token gaps, end-appended junk adds features no query
-//! references).
+//! capture, and the catalogue of **identity perturbations** — surface edits that leave a
+//! title's feature set unchanged (case folds away, foldable diacritics fold away,
+//! whitespace runs and Split-class punctuation only re-shape token gaps, end-appended junk
+//! adds features no query references). That holds under the default vocabulary and under
+//! one with phrases: a phrase is its words as consecutive tokens, whatever stands in the
+//! gaps (ADR-218).
 
 use reverse_rusty::gen::Rng;
 use reverse_rusty::normalize::Normalizer;
@@ -11,6 +12,24 @@ use reverse_rusty::segment::{Engine, MatchScratch};
 
 pub(crate) fn engine_from(queries: &[(u64, String)]) -> Engine {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("default vocabulary"));
+    eng.build_from_queries(queries);
+    eng
+}
+
+/// An engine whose vocabulary makes every multi-word brand of the generator a phrase that
+/// consumes its words (`north star` -> `brand:north_star`), as a caller's `phrases` do.
+pub(crate) fn engine_with_phrases_from(queries: &[(u64, String)]) -> Engine {
+    use reverse_rusty::dict::FeatureKind;
+    use reverse_rusty::normalize::NormalizerBuilder;
+    let mut builder = NormalizerBuilder::new();
+    for brand in reverse_rusty::gen::BRANDS {
+        let words: Vec<&str> = brand.split(' ').collect();
+        if words.len() > 1 {
+            let feature = format!("brand:{}", brand.replace(' ', "_"));
+            builder.add_phrase(&words, &feature, FeatureKind::Brand);
+        }
+    }
+    let mut eng = Engine::new(builder.build().expect("phrase vocabulary"));
     eng.build_from_queries(queries);
     eng
 }
@@ -112,7 +131,7 @@ fn append_junk(rng: &mut Rng, s: &str) -> String {
 pub(crate) const IDENTITY_OPS: usize = 5;
 
 /// Apply identity perturbation `op` (0..IDENTITY_OPS). Every op preserves the title's
-/// match set exactly under the phrase-free default vocab.
+/// match set exactly.
 pub(crate) fn identity_perturb(rng: &mut Rng, title: &str, op: usize) -> String {
     match op {
         0 => flip_case(rng, title),

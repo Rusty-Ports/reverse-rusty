@@ -81,3 +81,11 @@
   contracts the cross-form matrices state as data), ADR-046 (synthetic IDs — exercised by the OOV mess
   ops). Tests: `tests/adversarial/`, `tests/oracle/{messy,degenerate}.rs`, `src/index.rs`,
   `tests/persistence/wal.rs`, `tests/coverage_gaps/edge_cases.rs`.
+
+## Later outcome (2026-10-08, ADR-218)
+
+The surface-noise property ran under the default vocabulary only, where it holds trivially for
+whitespace and split punctuation. Under a vocabulary with phrases it did not hold: extra
+separators between a phrase's words hid the phrase.
+[ADR-218](adr-218-a-phrase-is-consecutive-tokens.md) fixes the analyzer and runs the property
+under a phrase vocabulary as well.

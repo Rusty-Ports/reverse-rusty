@@ -29,30 +29,11 @@ impl PhraseOverlap {
     /// name: an unknown entity hashes to a stable synthetic id (ADR-046), exactly as the
     /// leftmost-longest pass resolves.
     ///
-    /// The scan **collapses whitespace runs** so a phrase (registered single-spaced) still matches
-    /// a title with repeated spaces or adjacent split punctuation (`new  york`, `new---york`) —
-    /// codex R8. This is the flat positive-view (`P(T)`) path and only ever ADDS entities
-    /// (recall-safe); flat canonical `N(T)` remains unchanged. No allocation unless a run is
-    /// actually present.
+    /// Cleaning has merged separators (ADR-218), so a phrase is found in a title with repeated
+    /// spaces or adjacent split punctuation (`new  york`, `new---york`) as it is in `new york`.
+    /// This is the flat positive-view (`P(T)`) path and only ever ADDS entities.
     pub(in crate::normalize) fn collect_into(&self, lc: &str, add: &mut dyn FnMut(&str)) {
-        if lc.as_bytes().windows(2).any(|w| w == b"  ") {
-            let mut collapsed = String::with_capacity(lc.len());
-            let mut prev_space = true; // suppress a leading space
-            for c in lc.chars() {
-                if c == ' ' {
-                    if !prev_space {
-                        collapsed.push(' ');
-                    }
-                    prev_space = true;
-                } else {
-                    collapsed.push(c);
-                    prev_space = false;
-                }
-            }
-            self.scan_overlapping(&collapsed, add);
-        } else {
-            self.scan_overlapping(lc, add);
-        }
+        self.scan_overlapping(lc, add);
     }
 
     /// Append every boundary-aligned overlapping phrase as a positioned graph
@@ -141,12 +122,14 @@ impl PhraseOverlap {
     /// phrase is silently lost — on the query side that compiles an alias query to component
     /// terms, an FN. Selecting over valid candidates only is identical to the legacy pass whenever
     /// no mid-token occurrence exists, and strictly recovers suppressed phrases when one does.
-    /// Pushes `(byte_start, byte_end, phrase_entries index)` tuples, non-overlapping, in order.
+    /// Leaves in `out` the `(byte_start, byte_end, phrase_entries index)` tuples of the
+    /// selection, non-overlapping, in order. Whatever `out` held is discarded.
     pub(in crate::normalize) fn select_phrases(
         &self,
         lc: &str,
         out: &mut Vec<(usize, usize, usize)>,
     ) {
+        out.clear();
         let bytes = lc.as_bytes();
         for m in self.automaton.find_overlapping_iter(lc) {
             let (s, e) = (m.start(), m.end());

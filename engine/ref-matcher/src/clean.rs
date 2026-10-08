@@ -95,12 +95,21 @@ pub fn clean(text: &str, punct: &PunctTable) -> String {
         if c.is_ascii_alphanumeric() {
             out.push(c.to_ascii_lowercase());
         } else {
+            // A separator ends the current token. It is not written twice in a row or
+            // first, so a phrase is found wherever its words are consecutive tokens.
+            let separator = |out: &mut String| {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            };
             match punct.class_of(c) {
-                PunctClass::Split => out.push(' '),
+                PunctClass::Split => separator(&mut out),
                 PunctClass::Fold => {} // delete: neighbours join into one token
+                // A space is the separator whatever class it is given.
+                PunctClass::Keep | PunctClass::Marker if c == ' ' => separator(&mut out),
                 PunctClass::Keep => out.push(c),
                 PunctClass::Marker => {
-                    out.push(' ');
+                    separator(&mut out);
                     out.push(c);
                     out.push(' ');
                 }

@@ -577,10 +577,11 @@ mod tests {
             )
         );
 
-        // (3) With a collapsing phrase active, whitespace runs are
-        // phrase-significant: `north star` (phrase feature) and `north  star`
-        // (component features) must fingerprint differently — the matcher
-        // sees different feature sets even though the cleaned tokens agree.
+        // (3) With a collapsing phrase active, what stands between two words
+        // decides whether they are the phrase: `north star` (phrase feature)
+        // and `north polar star` (component features) must fingerprint
+        // differently. Separators do not: `north  star` is the same title as
+        // `north star` to the matcher (ADR-218), and shares its cursor.
         let mut vocab = reverse_rusty::vocab::Vocab::new();
         vocab.aliases_mut().add_classified(
             &["ns".into(), "north star".into()],
@@ -602,12 +603,31 @@ mod tests {
             request_fingerprint(
                 &phrased,
                 &dict,
-                "north  star",
+                "north polar star",
                 QueryScope::Standard,
                 &plain,
                 &[]
             ),
             "phrase vs component titles must not share a cursor"
+        );
+        assert_eq!(
+            request_fingerprint(
+                &phrased,
+                &dict,
+                "north star",
+                QueryScope::Standard,
+                &plain,
+                &[]
+            ),
+            request_fingerprint(
+                &phrased,
+                &dict,
+                "north,  star",
+                QueryScope::Standard,
+                &plain,
+                &[]
+            ),
+            "separators between a phrase's words change nothing the matcher sees"
         );
     }
 }

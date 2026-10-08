@@ -234,3 +234,13 @@ form's entity in its positive view. The query-side distributivity sketched above
 first and set aside; ADR-205 says why. The testing note's "FN-safety sweep vs the
 original-semantics oracle" did not exercise the case when it was written: no generated query
 contained the alias text. The sweep that does is `tests/oracle/alias_components.rs`.
+
+## Later outcome (2026-10-08, ADR-218)
+
+Two things this decision limited to vocabularies with an alias now hold for every vocabulary
+([ADR-218](adr-218-a-phrase-is-consecutive-tokens.md)): runs of separators never stand between
+a phrase's words, on either side, because cleaning merges them (it no longer keeps the cleaned
+text byte-identical across versions; stored queries are recompiled under compiler semantics 8
+instead); and phrase selection is boundary-aware in the alias-free path too. Without an alias
+the old rules lost matches: `north, star` did not carry the phrase `north star`, and
+`new york cityscape` did not carry `new york` beside a phrase `new york city`.
