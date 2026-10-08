@@ -15,7 +15,7 @@ fn quoted_queries_and_title_graphs_clean_text_exactly_once() {
     }
     assert!(matches(&vocab, "\"a-b\"", "a-b"));
     assert!(!matches(&vocab, "\"a-b\"", "ab"));
-    let alias = vocab.phrase("a-b", "pair", PhraseMode::Alias);
+    let alias = vocab.alias_form("a-b");
     let graph = quoted_clause(&alias, "a-b");
     assert_eq!(graph.positions, 2);
     assert_eq!(
@@ -23,11 +23,11 @@ fn quoted_queries_and_title_graphs_clean_text_exactly_once() {
         [RefPhraseArc {
             start: 0,
             end: 2,
-            alternatives: vec![Feature::raw("pair")]
+            alternatives: vec![Feature::raw("term:a_b")]
         }]
     );
     let views = title_views(&alias, "a-b");
-    assert!(has(&views.canonical_arcs, "pair", 0, 2));
+    assert!(has(&views.canonical_arcs, "term:a_b", 0, 2));
     assert!(has(&views.canonical_arcs, "term:a", 0, 1));
     assert!(has(&views.canonical_arcs, "term:b", 1, 2));
 }
@@ -70,7 +70,7 @@ fn equal_endpoints_form_sorted_unique_alternatives() {
 #[test]
 fn quoted_paths_can_change_span_and_choose_an_additive_path() {
     let vocab = RefVocab::default()
-        .phrase("new york", "entity:ny", PhraseMode::Alias)
+        .alias_form("new york")
         .equivalence(&["new york", "ny"]);
     assert!(matches(&vocab, "\"new york\" inventory", "ny inventory"));
     assert!(matches(

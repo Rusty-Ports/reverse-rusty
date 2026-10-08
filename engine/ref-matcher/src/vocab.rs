@@ -23,15 +23,20 @@ pub enum PhraseMode {
     Alias,
 }
 
-/// A phrase as declared: a form, the feature it emits, and a mode.
-#[derive(Clone, Debug)]
-pub struct RefPhrase {
-    /// The declared form (e.g. `"north star"`). Its tokens are this text cleaned and cut under
-    /// the vocabulary's punctuation classes as they stand when a text is analyzed.
-    pub form: String,
-    /// The canonical entity feature emitted (e.g. `term:north_star`), used verbatim.
-    pub feature: String,
-    pub mode: PhraseMode,
+/// A phrase as declared, in one of the two ways a vocabulary declares one (§2.1, "Phrases").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefPhrase {
+    /// A list of tokens, taken as given (e.g. `["north","star"]`), with the feature it emits,
+    /// used verbatim (e.g. `brand:north_star`), and a mode.
+    Tokens {
+        tokens: Vec<String>,
+        feature: String,
+        mode: PhraseMode,
+    },
+    /// An alias form: text (e.g. `"New York"`), whose tokens are that text cleaned and cut
+    /// under the vocabulary's punctuation classes as they stand when a text is analyzed. As a
+    /// phrase of its own it emits `term:` and its tokens joined with `_` (`term:new_york`).
+    AliasForm { form: String },
 }
 
 /// A phrase in force: the tokens it occurs as, the feature it emits, and its mode.
@@ -91,13 +96,32 @@ impl RefVocab {
         self
     }
 
-    /// Declare a phrase by its form.
+    /// Declare a phrase as a list of tokens, written with spaces between them
+    /// (`"north star"`). The list is taken as given, in any mode. An alias that the engine
+    /// holds as a declared phrase in alias mode is declared this way; one declared as text
+    /// is an [`alias_form`](Self::alias_form).
     #[must_use]
-    pub fn phrase(mut self, form: &str, feature: &str, mode: PhraseMode) -> Self {
-        self.phrases.push(RefPhrase {
-            form: form.to_string(),
+    pub fn phrase(self, tokens: &str, feature: &str, mode: PhraseMode) -> Self {
+        let tokens: Vec<&str> = tokens.split_whitespace().collect();
+        self.phrase_tokens(&tokens, feature, mode)
+    }
+
+    /// Declare a phrase as a list of tokens, in any mode. The list is taken as given.
+    #[must_use]
+    pub fn phrase_tokens(mut self, tokens: &[&str], feature: &str, mode: PhraseMode) -> Self {
+        self.phrases.push(RefPhrase::Tokens {
+            tokens: tokens.iter().map(|token| (*token).to_string()).collect(),
             feature: feature.to_string(),
             mode,
+        });
+        self
+    }
+
+    /// Declare an alias form: text.
+    #[must_use]
+    pub fn alias_form(mut self, form: &str) -> Self {
+        self.phrases.push(RefPhrase::AliasForm {
+            form: form.to_string(),
         });
         self
     }
@@ -124,22 +148,48 @@ impl RefVocab {
         self
     }
 
-    /// The phrases in force, in declaration order: each declared form cleaned and cut under
-    /// the punctuation classes as they stand now. A form with no tokens is ignored, and of
-    /// two forms with the same tokens the first stands (§2.1, "Phrases").
+    /// The phrases in force (§2.1, "Phrases"). The lists of tokens come first, in the order
+    /// declared: a list with no tokens is ignored, and of two lists with the same tokens the
+    /// first stands. Then each alias form, cut under the punctuation classes as they stand
+    /// now: one with fewer than two tokens is no phrase; one whose tokens are those of a
+    /// phrase already in force makes that phrase an alias and leaves it its feature; any
+    /// other is a phrase of its own in alias mode, emitting `term:` and its tokens joined
+    /// with `_`.
     #[must_use]
     pub fn phrases_in_force(&self) -> Vec<Phrase> {
         let mut in_force: Vec<Phrase> = Vec::new();
         for declared in &self.phrases {
-            let tokens = clean_tokens(&declared.form, &self.punct);
-            if tokens.is_empty() || in_force.iter().any(|phrase| phrase.tokens == tokens) {
-                continue;
-            }
-            in_force.push(Phrase {
+            if let RefPhrase::Tokens {
                 tokens,
-                feature: declared.feature.clone(),
-                mode: declared.mode,
-            });
+                feature,
+                mode,
+            } = declared
+            {
+                if !tokens.is_empty() && !in_force.iter().any(|phrase| &phrase.tokens == tokens) {
+                    in_force.push(Phrase {
+                        tokens: tokens.clone(),
+                        feature: feature.clone(),
+                        mode: *mode,
+                    });
+                }
+            }
+        }
+        for declared in &self.phrases {
+            if let RefPhrase::AliasForm { form } = declared {
+                let tokens = clean_tokens(form, &self.punct);
+                if tokens.len() < 2 {
+                    continue;
+                }
+                if let Some(phrase) = in_force.iter_mut().find(|phrase| phrase.tokens == tokens) {
+                    phrase.mode = PhraseMode::Alias;
+                } else {
+                    in_force.push(Phrase {
+                        feature: format!("term:{}", tokens.join("_")),
+                        tokens,
+                        mode: PhraseMode::Alias,
+                    });
+                }
+            }
         }
         in_force
     }
@@ -183,41 +233,86 @@ mod tests {
             .collect()
     }
 
+    fn features(vocab: &RefVocab) -> Vec<String> {
+        vocab
+            .phrases_in_force()
+            .into_iter()
+            .map(|phrase| phrase.feature)
+            .collect()
+    }
+
     #[test]
-    fn a_form_is_cut_under_the_classes_as_they_finally_stand() {
-        let before = RefVocab::default_vocab().fold_punct('-').phrase(
-            "wi-fi router",
-            "entity:wr",
-            PhraseMode::Collapse,
-        );
+    fn an_alias_form_is_cut_and_named_under_the_classes_as_they_finally_stand() {
+        let before = RefVocab::default_vocab()
+            .fold_punct('-')
+            .alias_form("Wi-Fi Router");
         let after = RefVocab::default_vocab()
-            .phrase("wi-fi router", "entity:wr", PhraseMode::Collapse)
+            .alias_form("Wi-Fi Router")
             .fold_punct('-');
         assert_eq!(tokens(&before), [["wifi", "router"]]);
+        assert_eq!(features(&before), ["term:wifi_router"]);
         assert_eq!(tokens(&after), tokens(&before));
+        assert_eq!(features(&after), features(&before));
 
         let mut later = after;
         later.punct.set('-', PunctClass::Split);
         assert_eq!(tokens(&later), [["wi", "fi", "router"]]);
+        assert_eq!(features(&later), ["term:wi_fi_router"]);
+    }
+
+    #[test]
+    fn a_list_of_tokens_is_taken_as_given() {
+        let mut vocab = RefVocab::default_vocab()
+            .phrase("north star", "brand:ns", PhraseMode::Collapse)
+            .phrase("North, STAR", "brand:loud", PhraseMode::Alias)
+            .phrase_tokens(&[], "ignored", PhraseMode::Collapse);
+        vocab.punct.set(' ', PunctClass::Fold);
+        assert_eq!(tokens(&vocab), [["north", "star"], ["North,", "STAR"]]);
+        assert_eq!(features(&vocab), ["brand:ns", "brand:loud"]);
     }
 
     #[test]
     fn the_first_of_two_declarations_stands() {
         let vocab = RefVocab::default_vocab()
             .phrase("north star", "brand:first", PhraseMode::Collapse)
-            .phrase("North, STAR", "brand:second", PhraseMode::Alias)
-            .phrase("!!!", "ignored", PhraseMode::Alias)
+            .phrase("north star", "brand:second", PhraseMode::Additive)
+            .alias_form("big apple")
+            .alias_form("Big, APPLE")
             .synonym("pkg", "term:first")
             .synonym("pkg", "term:second");
         let in_force = vocab.phrases_in_force();
-        assert_eq!(in_force.len(), 1);
+        assert_eq!(in_force.len(), 2);
         assert_eq!(in_force[0].feature, "brand:first");
         assert_eq!(in_force[0].mode, PhraseMode::Collapse);
-        assert!(
-            !vocab.has_alias(),
-            "the ignored declarations were the only aliases"
-        );
+        assert_eq!(in_force[1].feature, "term:big_apple");
         assert_eq!(vocab.synonym_for("pkg"), Some("term:first"));
+    }
+
+    #[test]
+    fn an_alias_over_a_declared_list_makes_it_an_alias_and_keeps_its_feature() {
+        for alias_first in [false, true] {
+            let mut vocab = RefVocab::default_vocab();
+            if alias_first {
+                vocab = vocab.alias_form("North Star");
+            }
+            vocab = vocab.phrase("north star", "brand:ns", PhraseMode::Collapse);
+            assert_eq!(vocab.has_alias(), alias_first);
+            if !alias_first {
+                vocab = vocab.alias_form("North Star");
+            }
+            let in_force = vocab.phrases_in_force();
+            assert_eq!(in_force.len(), 1);
+            assert_eq!(in_force[0].feature, "brand:ns");
+            assert_eq!(in_force[0].mode, PhraseMode::Alias);
+            assert!(vocab.has_alias());
+        }
+    }
+
+    #[test]
+    fn an_alias_form_of_one_token_is_no_phrase() {
+        let vocab = RefVocab::default_vocab().alias_form("ny").alias_form("!!!");
+        assert!(vocab.phrases_in_force().is_empty());
+        assert!(!vocab.has_alias());
     }
 
     #[test]

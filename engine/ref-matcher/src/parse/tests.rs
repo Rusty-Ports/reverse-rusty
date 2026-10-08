@@ -1,6 +1,7 @@
 use super::*;
 use crate::semantic::{analyze, analyze_literal, resolve_equivalences, RefTitle};
 use crate::vocab::{PhraseMode, RefVocab};
+use crate::RefMatcher;
 
 fn matches(vocab: &RefVocab, source: &str, title: &str) -> bool {
     analyze(&parse(source).unwrap(), vocab, &resolve_equivalences(vocab))
@@ -158,19 +159,13 @@ fn inclusive_byte_clause_and_retained_member_limits() {
 }
 
 #[test]
-fn error_precedence_reports_length_then_clause_syntax_then_clause_count() {
-    assert_eq!(
-        parse(&format!("({}", "x".repeat(MAX_QUERY_LENGTH))),
-        Err(ParseError::QueryTooLong)
-    );
+fn multiple_errors_are_rejected_without_specifying_the_reported_error() {
+    assert!(parse(&format!("({}", "x".repeat(MAX_QUERY_LENGTH))).is_err());
     let full = "x ".repeat(MAX_CLAUSES);
-    assert_eq!(parse(&format!("{full}-")), Err(ParseError::TrailingDash));
-    assert_eq!(parse(&format!("{full}(")), Err(ParseError::UnclosedGroup));
+    assert!(parse(&format!("{full}-")).is_err());
+    assert!(parse(&format!("{full}(")).is_err());
     let members = vec!["x"; MAX_ANY_OF_SIZE + 1].join(",");
-    assert_eq!(
-        parse(&format!("{full}({members})")),
-        Err(ParseError::AnyOfGroupTooLarge)
-    );
+    assert!(parse(&format!("{full}({members})")).is_err());
 }
 
 #[test]
@@ -270,6 +265,57 @@ fn empty_analysis_is_dropped_after_syntax_validation() {
     assert!(matches(&vocab, "item -(!!!,broken)", "item"));
     assert!(!matches(&vocab, "item -(!!!,broken)", "item broken"));
     assert_eq!(parse("(, ,)"), Err(ParseError::EmptyAnyOfGroup));
+}
+
+#[test]
+fn forbidden_only_queries_need_explicit_acceptance_after_empty_clauses_drop() {
+    for (source, forbidden_title) in [
+        ("-used", "used"),
+        ("-(red shoe,boot)", "boot"),
+        ("-\"for parts\"", "for parts"),
+        ("!!! -used", "used"),
+        ("\"\" -used", "used"),
+        ("-\"#\"", "#"),
+    ] {
+        assert!(parse(source).is_ok());
+        let queries = [(1, source.to_owned())];
+        let default = RefMatcher::build(&queries, RefVocab::default());
+        assert!(default.is_empty(), "{source}");
+        assert!(default.matches("unused").is_empty());
+        let accepting = RefMatcher::build_accepting_class_d(&queries, RefVocab::default());
+        assert_eq!(accepting.len(), 1, "{source}");
+        assert!(accepting.matches("unused").contains(&1));
+        assert!(accepting.matches(forbidden_title).is_empty());
+    }
+}
+
+#[test]
+fn semantically_empty_queries_are_never_stored_even_when_class_d_is_accepted() {
+    for source in [
+        "",
+        " \t\u{a0}\n",
+        "\"\"",
+        "!!!",
+        "(!!!,???)",
+        "-!!!",
+        "-\"\"",
+        "-(!!!)",
+        "#",
+    ] {
+        let queries = [(1, source.to_owned())];
+        for matcher in [
+            RefMatcher::build(&queries, RefVocab::default()),
+            RefMatcher::build_accepting_class_d(&queries, RefVocab::default()),
+        ] {
+            assert!(matcher.is_empty(), "{source}");
+            assert!(matcher.matches("anything").is_empty());
+        }
+    }
+    for (source, title) in [("widget -used", "widget"), ("\"#\"", "#")] {
+        let matcher = RefMatcher::build(&[(1, source.into())], RefVocab::default());
+        assert_eq!(matcher.len(), 1, "{source}");
+        assert!(matcher.matches(title).contains(&1));
+    }
 }
 
 #[test]

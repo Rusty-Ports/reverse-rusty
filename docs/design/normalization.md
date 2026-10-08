@@ -168,14 +168,23 @@ many separators stood between two tokens in the original text is not kept and ch
 `north, star`, `north - star` and `north star` are the same two tokens.
 
 **Phrases (stage 3).** A vocabulary phrase is a sequence of tokens, a feature name, and a mode.
-Its tokens are tokens in the sense of stage 2. An alias is declared as text, and its tokens are
-that text cleaned and cut by the rules above, under the vocabulary's punctuation classes as they
-finally stand, in whatever order the vocabulary was declared. A phrase declared as a list of
-tokens is taken as given, so the list has to be in that form already: a token that cleaning
-cannot produce (one with an ASCII upper-case letter, a letter the fold table changes, or a
-character that splits) makes a phrase that occurs nowhere. A phrase with no tokens is ignored. A vocabulary has one phrase for a
-sequence of tokens: of two declarations the first stands and the other is ignored, in every
-view.
+Its tokens are tokens in the sense of stage 2. A vocabulary declares a phrase in one of two
+ways.
+
+- *As a list of tokens.* The list is taken as given, so it has to be in cleaned form already:
+  a token that cleaning cannot produce (one with an ASCII upper-case letter, a letter the fold
+  table changes, or a character that splits) makes a phrase that occurs nowhere. Of two lists
+  with the same tokens the first declared stands and the other is ignored, in every view.
+- *As an alias form,* which is text. Its tokens are that text cleaned and cut by the rules
+  above, under the vocabulary's punctuation classes as they finally stand, in whatever order
+  the vocabulary was declared. A form with fewer than two tokens is not a phrase (an
+  equivalence class carries it). A form whose tokens are those of a phrase declared as a
+  list, wherever in the vocabulary that phrase is declared, makes that phrase an `alias` and
+  leaves it its feature. Any other form is a phrase of its own in `alias` mode, and its
+  feature is `term:` followed by its tokens joined with `_`. Of two forms with the same
+  tokens the first stands.
+
+A phrase with no tokens is ignored.
 
 - *An occurrence* of a phrase is a place where its tokens are consecutive tokens of the text.
   (In the cleaned text: its tokens joined by single spaces, starting at the start of the text
@@ -200,8 +209,8 @@ view.
      after it is `/`; or when the token before it is one of the vocabulary's number-context
      words (compared without regard to ASCII case). "Before" and "after" are by position,
      whether or not a phrase consumed that neighbour.
-   - Otherwise, when it is exactly four digits and between 1900 and 2099, it emits
-     `year:<token>`.
+   - Otherwise, when it is exactly four digits with no `.` and between 1900 and 2099, it
+     emits `year:<token>`. (`1999.` is a number and not a year.)
    - Otherwise it emits `term:<token>`.
 3. A token that a vocabulary synonym names emits that synonym's canonical feature name. The
    synonym's token is compared as it was declared, character for character, so it too has to
@@ -216,8 +225,8 @@ not match the title `#1999`.
 
 **The two views of a title.** The canonical view `N(T)` is the set of features the stages above
 emit for the title. Forbidden clauses are checked against it. The positive view `P(T)` is what
-required clauses and any-of groups are checked against. When the vocabulary has no phrase in
-`alias` mode, `P(T)` is `N(T)`. When it has one, whether or not that phrase occurs in the title,
+required clauses and any-of groups are checked against. When no phrase of the vocabulary is in
+`alias` mode (an ignored declaration is no phrase), `P(T)` is `N(T)`. When it has one, whether or not that phrase occurs in the title,
 `P(T)` is the union of:
 
 - `N(T)`;
@@ -239,7 +248,14 @@ required clauses and any-of groups are checked against. When the vocabulary has 
 
 **Equivalence classes.** A declared equivalence group lists forms. A form takes part only when
 it analyzes, as a query, to exactly one distinct feature (`a a` is one). Groups with fewer than
-two such features are dropped, and groups that share a feature are merged.
+two such features are dropped, and groups that share a feature are merged. A class widens what
+a required clause accepts: where a run of bare terms, a member of a required group, or an edge
+of a required quoted clause asks for a feature that has a class, any feature of the class
+meets it. A forbidden clause is never widened.
+
+**Which side.** Every piece of a query (a run of bare terms, a member of a group, a quoted
+clause) is analyzed on the query side, and so is an equivalence form. A title is analyzed on
+the title side. The sides differ only in what an `alias` phrase does with its tokens.
 
 **A quoted clause (ADR-120)** is analyzed with positions. The text is cleaned, once, and the
 stages run: on the query side for a clause, on the title side for a title. Every emitted feature

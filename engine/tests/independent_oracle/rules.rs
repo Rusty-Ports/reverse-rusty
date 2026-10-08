@@ -32,7 +32,7 @@ fn north_star(mode: PhraseMode, with_alias: bool) -> (Normalizer, RefVocab) {
         .synonym("ns", "brand:ns");
     if with_alias {
         b.add_alias_form("big apple");
-        vocab = vocab.phrase("big apple", "term:big_apple", PhraseMode::Alias);
+        vocab = vocab.alias_form("big apple");
     }
     (b.build().expect("normalizer"), vocab)
 }
@@ -84,7 +84,7 @@ fn the_wide_view_holds_what_a_consumed_token_emits() {
             RefVocab::default_vocab().phrase("sale 1999", "entity:offer", PhraseMode::Collapse);
         if with_alias {
             b.add_alias_form("big apple");
-            vocab = vocab.phrase("big apple", "term:big_apple", PhraseMode::Alias);
+            vocab = vocab.alias_form("big apple");
         }
         (b.build().expect("normalizer"), vocab)
     };
@@ -112,8 +112,7 @@ fn the_wide_view_holds_every_token_as_a_term() {
         b.add_alias_form("big apple");
         b.build().expect("normalizer")
     };
-    let wide_vocab =
-        || RefVocab::default_vocab().phrase("big apple", "term:big_apple", PhraseMode::Alias);
+    let wide_vocab = || RefVocab::default_vocab().alias_form("big apple");
     check(
         wide,
         wide_vocab,
@@ -210,6 +209,13 @@ fn which_tokens_are_numbers_and_which_numbers_are_years() {
         "01999",
         &[("#01999", true), ("01999", true), ("1999", false)],
     );
+    // Four digits and a dot are a number and not a year.
+    check(
+        plain_norm,
+        RefVocab::default_vocab,
+        "#1999.",
+        &[("1999.", true), ("1999", false)],
+    );
     let norm = || {
         let mut b = NormalizerBuilder::new();
         b.add_synonym("1.2.3", "term:release", FeatureKind::Generic);
@@ -278,8 +284,8 @@ fn forms_carried_in_pieces_reach_a_fixed_point() {
     let reference = RefMatcher::build(
         &queries,
         RefVocab::default_vocab()
-            .phrase("x c", "term:x_c", PhraseMode::Alias)
-            .phrase("a b", "term:a_b", PhraseMode::Alias)
+            .alias_form("x c")
+            .alias_form("a b")
             .equivalence(&["q", "x c"])
             .equivalence(&["x", "a b"]),
     );
@@ -297,8 +303,8 @@ fn forms_carried_in_pieces_reach_a_fixed_point() {
     );
 }
 
-/// A `"` ends a bare term; a group with no member left rejects the whole query; and a query
-/// may have exactly 256 clauses.
+/// A `"` ends a bare term; a group with no member left rejects the whole query; a query with
+/// nothing it requires is not stored; and a query may have exactly 256 clauses.
 #[test]
 fn where_a_bare_term_ends_and_what_rejects_a_query() {
     check(
@@ -312,6 +318,13 @@ fn where_a_bare_term_ends_and_what_rejects_a_query() {
         RefVocab::default_vocab,
         "x (,)",
         &[("x", false)],
+    );
+    // A query needs something it requires.
+    check(
+        plain_norm,
+        RefVocab::default_vocab,
+        "-used",
+        &[("x", false), ("used", false)],
     );
     check(
         plain_norm,

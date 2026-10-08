@@ -144,6 +144,10 @@ than one, which is reported is not specified.
   or a member made only of punctuation that splits, and a group left with no member neither
   require nor forbid anything. A string with no clause at all (empty, or whitespace only)
   breaks no rule here; it requires and forbids nothing, and a query like that is not stored.
+- **A query needs something it requires.** One whose clauses are all forbidden (or dropped)
+  would be a candidate for every title. It is not stored unless the deployment accepts such
+  queries (`--accept-class-d`, ADR-068), and one that neither requires nor forbids anything is
+  never stored.
 
 ## Normalization
 

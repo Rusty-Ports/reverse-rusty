@@ -16,7 +16,7 @@ fn feature_superset_requires_an_alias_but_graph_superset_does_not() {
     ] {
         assert!(has(&plain.positive_arcs, feature, start, start + 1));
     }
-    let aliases = vocab.phrase("unseen alias", "entity:unseen", PhraseMode::Alias);
+    let aliases = vocab.phrase_tokens(&["unseen", "alias"], "entity:unseen", PhraseMode::Alias);
     let views = title_views(&aliases, "1999 pkg");
     assert_eq!(views.canonical_features, plain.canonical_features);
     assert_eq!(
@@ -36,7 +36,7 @@ fn feature_superset_requires_an_alias_but_graph_superset_does_not() {
 fn every_overlapping_phrase_mode_contributes_to_positive_views() {
     let vocab = RefVocab::default()
         .phrase("a b c", "long", PhraseMode::Collapse)
-        .phrase("b c", "alias", PhraseMode::Alias)
+        .phrase_tokens(&["b", "c"], "alias", PhraseMode::Alias)
         .phrase("b c d", "additive", PhraseMode::Additive)
         .phrase("a b", "short", PhraseMode::Collapse);
     let views = title_views(&vocab, "a b c d");
@@ -58,7 +58,7 @@ fn every_overlapping_phrase_mode_contributes_to_positive_views() {
 #[test]
 fn alias_pieces_can_be_single_token_analysis_or_shorter_phrases() {
     let vocab = RefVocab::default()
-        .phrase("north star mouse", "entity:kit", PhraseMode::Alias)
+        .phrase_tokens(&["north", "star", "mouse"], "entity:kit", PhraseMode::Alias)
         .phrase("north star", "brand:ns", PhraseMode::Collapse)
         .synonym("ns", "brand:ns")
         .equivalence(&["ns", "polaris"]);
@@ -70,14 +70,14 @@ fn alias_pieces_can_be_single_token_analysis_or_shorter_phrases() {
     }
     assert!(!names(&title_views(&vocab, "north mouse").positive_features).contains(&"entity:kit"));
     let single = RefVocab::default()
-        .phrase("1999 pkg", "entity:kit", PhraseMode::Alias)
+        .phrase_tokens(&["1999", "pkg"], "entity:kit", PhraseMode::Alias)
         .synonym("pkg", "term:package")
         .synonym("ninety", "year:1999");
     assert!(
         names(&title_views(&single, "package ninety").positive_features).contains(&"entity:kit")
     );
     let single = RefVocab::default()
-        .phrase("ny mouse", "entity:kit", PhraseMode::Alias)
+        .phrase_tokens(&["ny", "mouse"], "entity:kit", PhraseMode::Alias)
         .phrase("ny", "brand:ns", PhraseMode::Collapse)
         .synonym("ns", "brand:ns");
     assert!(names(&title_views(&single, "ns mouse").positive_features).contains(&"entity:kit"));
@@ -86,9 +86,9 @@ fn alias_pieces_can_be_single_token_analysis_or_shorter_phrases() {
 #[test]
 fn alias_closure_reaches_a_fixed_point_without_inventing_position_arcs() {
     let vocab = RefVocab::default()
-        .phrase("b tag", "entity:c", PhraseMode::Alias)
-        .phrase("a box", "entity:b", PhraseMode::Alias)
-        .phrase("red shoe", "entity:a", PhraseMode::Alias)
+        .phrase_tokens(&["b", "tag"], "entity:c", PhraseMode::Alias)
+        .phrase_tokens(&["a", "box"], "entity:b", PhraseMode::Alias)
+        .phrase_tokens(&["red", "shoe"], "entity:a", PhraseMode::Alias)
         .synonym("a", "entity:a")
         .synonym("b", "entity:b");
     let views = title_views(&vocab, "shoe red box tag");
@@ -107,7 +107,7 @@ fn alias_closure_reaches_a_fixed_point_without_inventing_position_arcs() {
 #[test]
 fn partitions_need_every_piece_and_can_reuse_a_carried_feature() {
     let vocab = RefVocab::default()
-        .phrase("red red", "twice", PhraseMode::Alias)
+        .phrase_tokens(&["red", "red"], "twice", PhraseMode::Alias)
         .phrase("red blue", "collapse", PhraseMode::Collapse);
     assert!(names(&title_views(&vocab, "red").positive_features).contains(&"twice"));
     assert!(!names(&title_views(&vocab, "blue red").positive_features).contains(&"collapse"));
@@ -122,10 +122,10 @@ fn alias_partitions_consider_alternative_cuts_and_all_piece_modes() {
         PhraseMode::Alias,
     ] {
         let vocab = RefVocab::default()
-            .phrase("a b c d", "whole", PhraseMode::Alias)
-            .phrase("a b c", "long", mode)
-            .phrase("a b", "left", mode)
-            .phrase("c d", "right", mode)
+            .phrase_tokens(&["a", "b", "c", "d"], "whole", PhraseMode::Alias)
+            .phrase_tokens(&["a", "b", "c"], "long", mode)
+            .phrase_tokens(&["a", "b"], "left", mode)
+            .phrase_tokens(&["c", "d"], "right", mode)
             .synonym("x", "left")
             .synonym("y", "right")
             .synonym("z", "long");
@@ -136,15 +136,24 @@ fn alias_partitions_consider_alternative_cuts_and_all_piece_modes() {
 }
 
 #[test]
-fn single_token_aliases_activate_the_superset() {
-    let vocab = RefVocab::default().phrase("a", "first", PhraseMode::Alias);
-    assert_eq!(
-        names(&title_views(&vocab, "1999").positive_features),
-        ["term:1999", "year:1999"]
-    );
-    let views = title_views(&vocab, "a");
-    assert_eq!(names(&views.canonical_features), ["first", "term:a"]);
-    assert_eq!(views.positive_features, views.canonical_features);
+fn a_single_token_list_in_alias_mode_activates_the_superset() {
+    for vocab in [
+        RefVocab::default().phrase_tokens(&["a"], "first", PhraseMode::Alias),
+        RefVocab::default().phrase("a", "first", PhraseMode::Alias),
+    ] {
+        assert_eq!(query(&vocab, "a"), ["first"]);
+        assert_eq!(
+            names(&quoted_clause(&vocab, "a").arcs[0].alternatives),
+            ["first"]
+        );
+        assert_eq!(
+            names(&title_views(&vocab, "1999").positive_features),
+            ["term:1999", "year:1999"]
+        );
+        let views = title_views(&vocab, "a");
+        assert_eq!(names(&views.canonical_features), ["first", "term:a"]);
+        assert_eq!(views.positive_features, views.canonical_features);
+    }
 }
 
 #[test]
@@ -155,9 +164,9 @@ fn duplicate_phrases_are_ignored_in_every_view_and_during_piece_inference() {
         PhraseMode::Alias,
     ] {
         let vocab = RefVocab::default()
-            .phrase("north star", "first", mode)
-            .phrase("NÓRTH, STAR", "discarded", PhraseMode::Alias)
-            .phrase("unseen alias", "active", PhraseMode::Alias);
+            .phrase_tokens(&["north", "star"], "first", mode)
+            .phrase_tokens(&["north", "star"], "discarded", PhraseMode::Alias)
+            .phrase_tokens(&["unseen", "alias"], "active", PhraseMode::Alias);
         assert!(!query(&vocab, "north star").contains(&"discarded".into()));
         assert!(quoted_clause(&vocab, "north star")
             .arcs
@@ -181,26 +190,30 @@ fn duplicate_phrases_are_ignored_in_every_view_and_during_piece_inference() {
 }
 
 #[test]
-fn ignored_aliases_do_not_activate_the_superset_and_current_punctuation_can_restore_them() {
-    let vocab = RefVocab::default()
-        .phrase("a-b", "first", PhraseMode::Collapse)
-        .phrase("a b", "second", PhraseMode::Alias)
-        .phrase("!!!", "empty", PhraseMode::Alias);
-    assert!(!vocab.has_alias());
+fn only_aliases_in_force_activate_the_superset() {
+    let ignored = RefVocab::default()
+        .phrase_tokens(&["a", "b"], "first", PhraseMode::Collapse)
+        .phrase_tokens(&["a", "b"], "discarded", PhraseMode::Alias)
+        .alias_form("!!!")
+        .alias_form("ny");
+    assert!(!ignored.has_alias());
     assert_eq!(
-        names(&title_views(&vocab, "1999").positive_features),
+        names(&title_views(&ignored, "1999").positive_features),
         ["year:1999"]
     );
-    let changed = vocab.fold_punct('-');
-    assert!(changed.has_alias());
+    let active = ignored.alias_form("a-b");
+    assert!(active.has_alias());
+    assert_eq!(query(&active, "a b"), ["first"]);
     assert_eq!(
-        names(&title_views(&changed, "1999").positive_features),
+        names(&title_views(&active, "1999").positive_features),
         ["term:1999", "year:1999"]
     );
-    assert_eq!(query(&changed, "a-b"), ["first"]);
-    assert_eq!(query(&changed, "a b"), ["second"]);
-    let mut empty = RefVocab::default().phrase("@", "was_empty", PhraseMode::Alias);
-    empty.punct.set('@', PunctClass::Keep);
-    assert_eq!(query(&empty, "@"), ["was_empty"]);
-    assert!(empty.has_alias());
+    let joined = active.fold_punct('-');
+    assert!(!joined.has_alias(), "the alias form now has only one token");
+    assert_eq!(query(&joined, "a b"), ["first"]);
+    assert_eq!(query(&joined, "a-b"), ["term:ab"]);
+    assert_eq!(
+        names(&title_views(&joined, "1999").positive_features),
+        ["year:1999"]
+    );
 }

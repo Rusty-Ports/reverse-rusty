@@ -624,6 +624,19 @@ capture; microbenchmarks alone are not sufficient.
   because a `(` inside a group is an ordinary character. The reference's author, reading
   "groups do not nest", rejected it. Decide whether the parser should: it changes which stored
   queries are accepted, so count them in a real corpus first.
+- **A second declaration through the normalizer builder.** `add_phrase` and then
+  `add_phrase_alias` for the same tokens keeps both entries. The first decides what a query
+  compiles to; the second switches the wide positive view on for every title and puts its own
+  feature there. The rule is that the first stands, or, for an alias form, that the phrase
+  becomes an alias and keeps its feature (`add_alias_form` does that). Make the builder follow
+  it in the one function every declaration goes through, and add the sequence to
+  `tests/independent_oracle/clarified.rs`; the reference already follows the rule (ADR-220).
+- **The reference at real-corpus scale.** The reference asks its vocabulary for the phrases in
+  force and the equivalence classes at every analysis, and its rule for alias forms carried in
+  pieces compares every form with every phrase for every title: 320 ms a title at 8,000 alias
+  forms. Prepare both once for each vocabulary, with a table of the pieces of each form,
+  before the real-corpus audit above runs it over millions of titles. The quoted-clause match
+  is also quartic in a run of one repeated token.
 - **Keep the port-versus-re-write harness as a tool.** The scratch program that compared two
   front ends on random vocabularies (ADR-220) is the cheapest way to check a future second
   implementation, or the engine's own analyzer exposed as a library function. It is not in

@@ -2,7 +2,7 @@ use super::*;
 use crate::clean::PunctClass;
 use crate::parse::parse;
 use crate::semantic::{analyze, resolve_equivalences, RefTitle};
-use crate::vocab::{Phrase, PhraseMode, RefPhrase};
+use crate::vocab::PhraseMode;
 
 fn names(features: &[Feature]) -> Vec<&str> {
     features.iter().map(Feature::as_str).collect()
@@ -25,88 +25,9 @@ fn has(arcs: &[RefPositionArc], name: &str, start: usize, end: usize) -> bool {
 }
 
 mod aliases;
+mod declarations;
 mod graphs;
-
-#[test]
-fn phrase_forms_are_cleaned_and_match_whole_consecutive_tokens() {
-    let vocab = RefVocab::default().phrase("Nórth, - stár", "brand:ns", PhraseMode::Collapse);
-    for text in ["north, star", "north - star", "north star"] {
-        assert_eq!(query(&vocab, text), ["brand:ns"]);
-    }
-    for text in ["north starlight", "upnorth star", "north bright star"] {
-        assert!(!query(&vocab, text).contains(&"brand:ns".to_owned()));
-    }
-    let mut empty = RefVocab::default().phrase("!!!", "ignored", PhraseMode::Alias);
-    assert!(empty.phrases_in_force().is_empty());
-    empty.phrases.push(RefPhrase {
-        form: String::new(),
-        feature: "ignored".into(),
-        mode: PhraseMode::Alias,
-    });
-    assert_eq!(query(&empty, "1999"), ["year:1999"]);
-    assert_eq!(
-        names(&title_views(&empty, "1999").positive_features),
-        ["year:1999"]
-    );
-}
-
-#[test]
-fn phrase_forms_use_current_punctuation_regardless_of_declaration_order() {
-    let before =
-        RefVocab::default()
-            .fold_punct('-')
-            .phrase("a-b", "entity:ab", PhraseMode::Collapse);
-    assert_eq!(query(&before, "a-b"), ["entity:ab"]);
-    let after = RefVocab::default()
-        .phrase("a-b", "entity:ab", PhraseMode::Collapse)
-        .fold_punct('-');
-    assert_eq!(query(&after, "a-b"), query(&before, "a-b"));
-    assert_eq!(title_views(&after, "a-b"), title_views(&before, "a-b"));
-    assert_eq!(quoted_clause(&after, "a-b"), quoted_clause(&before, "a-b"));
-    let mut later = after;
-    later.punct.set('-', PunctClass::Split);
-    assert_eq!(query(&later, "a-b"), ["entity:ab"]);
-    assert_eq!(title_views(&later, "a-b").positions, 2);
-    assert_eq!(quoted_clause(&later, "a-b").arcs[0].end, 2);
-}
-
-#[test]
-fn token_lists_are_matched_as_given_without_cleaning_them_again() {
-    let tokens = clean_tokens("A b a-b", &RefVocab::default().punct);
-    for declared in [vec!["A", "b"], vec!["a-b"], vec!["a b"], vec![""]] {
-        let phrase = Phrase {
-            tokens: declared.into_iter().map(str::to_owned).collect(),
-            feature: "invalid".into(),
-            mode: PhraseMode::Collapse,
-        };
-        assert!(analysis::all_phrase_arcs(&[phrase], &tokens).is_empty());
-    }
-    let vocab = RefVocab::default().fold_punct(' ');
-    let phrase = Phrase {
-        tokens: vec!["a".into(), "b".into()],
-        feature: "pair".into(),
-        mode: PhraseMode::Collapse,
-    };
-    let tokens = clean_tokens("a-b", &vocab.punct);
-    assert_eq!(
-        analysis::all_phrase_arcs(&[phrase], &tokens),
-        [arc(Feature::raw("pair"), 0, 2)]
-    );
-}
-
-#[test]
-fn kept_non_ascii_uppercase_is_a_token_the_cleaner_can_produce() {
-    let mut vocab = RefVocab::default().phrase("Ā x", "pair", PhraseMode::Alias);
-    vocab.punct.set('Ā', PunctClass::Keep);
-    assert_eq!(clean_tokens("Ā x", &vocab.punct), ["Ā", "x"]);
-    assert_eq!(query(&vocab, "Ā x"), ["pair"]);
-    assert!(has(
-        &title_views(&vocab, "Ā x").canonical_arcs,
-        "pair",
-        0,
-        2
-    ));
-}
+mod polarity;
 
 #[test]
 fn selection_is_leftmost_then_longest_and_never_overlaps() {
@@ -133,7 +54,7 @@ fn modes_control_components_but_not_phrase_positions() {
         (PhraseMode::Additive, true, true),
         (PhraseMode::Alias, false, true),
     ] {
-        let vocab = RefVocab::default().phrase("a b", "entity:ab", mode);
+        let vocab = RefVocab::default().phrase_tokens(&["a", "b"], "entity:ab", mode);
         let expected = if query_keeps {
             vec!["entity:ab", "term:a", "term:b"]
         } else {
@@ -174,6 +95,8 @@ fn numbers_precede_synonyms_and_use_exact_ascii_grammar() {
         (".5", "term:.5"),
         ("5.", "term:5."),
         ("1999.", "term:1999."),
+        (".1999", "term:.1999"),
+        ("19.99", "term:19.99"),
         (".", "term:."),
         ("1.2.3", "not_a_number"),
         (

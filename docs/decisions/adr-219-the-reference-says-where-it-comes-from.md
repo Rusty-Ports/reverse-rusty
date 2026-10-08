@@ -127,7 +127,7 @@ their reference-free properties), ADR-218 (the defect found by writing the rules
 Decision 5 is done. The parser, the cleaner and the normalizer were written again from the
 normative text by an author who was not given the engine's source, and the phrase-selection
 module went with the port. The provenance lane has no ported list any more: no module of the
-reference may cite engine code. Sixteen questions the text did not settle were settled in it,
+reference may cite engine code. Twenty-two questions the text did not settle were settled in it,
 and the comparison of the port with the re-write found one defect in the port (it cleaned a
 text twice on the quoted path). See
 [ADR-220](adr-220-the-reference-front-end-is-written-from-the-specification.md).

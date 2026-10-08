@@ -156,7 +156,7 @@ fn twice_declared(with_alias: bool) -> (Normalizer, RefVocab) {
         .synonym("pkg", "term:second");
     if with_alias {
         b.add_alias_form("big apple");
-        vocab = vocab.phrase("big apple", "term:big_apple", PhraseMode::Alias);
+        vocab = vocab.alias_form("big apple");
     }
     (b.build().expect("normalizer"), vocab)
 }
@@ -239,7 +239,7 @@ fn an_alias_form_is_cut_under_the_final_classes() {
     };
     let vocab = || {
         RefVocab::default_vocab()
-            .phrase("wi-fi router", "term:wifi_router", PhraseMode::Alias)
+            .alias_form("wi-fi router")
             .synonym("wr", "term:wifi_router")
             .fold_punct('-')
     };
@@ -275,4 +275,138 @@ fn an_equivalence_form_counts_distinct_features() {
         "zeta",
         &[("omega", true), ("zeta", true), ("alpha", false)],
     );
+}
+
+/// A phrase declared as a list of tokens is taken as given: it is not cut again when the
+/// classes change. With the space classed `fold`, `north-star` is still the tokens `north`
+/// and `star`, and the list still names them.
+#[test]
+fn a_list_of_tokens_is_taken_as_given() {
+    let norm = || {
+        let mut b = NormalizerBuilder::new();
+        b.add_phrase(&["north", "star"], "brand:ns", FeatureKind::Brand);
+        b.add_synonym("ns", "brand:ns", FeatureKind::Brand);
+        b.set_punct_class(' ', PunctClass::Fold);
+        b.build().expect("normalizer")
+    };
+    let vocab = || {
+        let mut vocab = RefVocab::default_vocab()
+            .phrase("north star", "brand:ns", PhraseMode::Collapse)
+            .synonym("ns", "brand:ns");
+        vocab.punct.set(' ', RefPunctClass::Fold);
+        vocab
+    };
+    check(
+        norm,
+        vocab,
+        "ns",
+        &[
+            ("north-star", true),
+            ("north star", false),
+            ("northstar", false),
+        ],
+    );
+}
+
+/// An alias form whose tokens are those of a phrase declared as a list makes that phrase an
+/// alias and leaves it its feature, whichever of the two is declared first.
+#[test]
+fn an_alias_over_a_declared_phrase_makes_it_an_alias() {
+    for alias_first in [false, true] {
+        let norm = || {
+            let mut b = NormalizerBuilder::new();
+            if alias_first {
+                b.add_alias_form("North Star");
+            }
+            b.add_phrase(&["north", "star"], "brand:ns", FeatureKind::Brand);
+            if !alias_first {
+                b.add_alias_form("North Star");
+            }
+            b.add_synonym("ns", "brand:ns", FeatureKind::Brand);
+            b.build().expect("normalizer")
+        };
+        let vocab = || {
+            let mut vocab = RefVocab::default_vocab();
+            if alias_first {
+                vocab = vocab.alias_form("North Star");
+            }
+            vocab = vocab.phrase("north star", "brand:ns", PhraseMode::Collapse);
+            if !alias_first {
+                vocab = vocab.alias_form("North Star");
+            }
+            vocab.synonym("ns", "brand:ns")
+        };
+        // It keeps its feature.
+        check(norm, vocab, "ns", &[("north star", true)]);
+        // As an alias it keeps its words on the title side, in the canonical view too.
+        check(norm, vocab, "star", &[("north star", true)]);
+        check(norm, vocab, "x -star", &[("x north star", false)]);
+        // On the query side it consumes them, and a title carries the form in pieces.
+        check(
+            norm,
+            vocab,
+            "north star",
+            &[("ns", true), ("star north", true), ("north", false)],
+        );
+    }
+}
+
+/// Every piece of a query is analyzed on the query side, a member of a group included: an
+/// alias consumes its words there.
+#[test]
+fn a_member_of_a_group_is_analyzed_on_the_query_side() {
+    let norm = || {
+        let mut b = NormalizerBuilder::new();
+        b.add_alias_form("open box");
+        b.add_synonym("obx", "term:open_box", FeatureKind::Generic);
+        b.build().expect("normalizer")
+    };
+    let vocab = || {
+        RefVocab::default_vocab()
+            .alias_form("open box")
+            .synonym("obx", "term:open_box")
+    };
+    check(
+        norm,
+        vocab,
+        "x -(open box)",
+        &[("x obx", false), ("x open box", false), ("x open", true)],
+    );
+    check(
+        norm,
+        vocab,
+        "(open box,zz)",
+        &[("obx", true), ("open", false)],
+    );
+}
+
+/// An equivalence class widens what a required clause accepts, quoted or not, and never a
+/// forbidden one.
+#[test]
+fn a_class_widens_required_clauses_only() {
+    let pair = |query: &str| {
+        let mut vocab = reverse_rusty::vocab::Vocab::new();
+        vocab.add_equivalence(&["ny", "nyc"]);
+        let queries = vec![(1u64, query.to_string())];
+        let mut eng = Engine::with_vocab(vocab, EngineConfig::default()).expect("engine");
+        eng.build_from_queries(&queries);
+        let reference = RefMatcher::build(
+            &queries,
+            RefVocab::default_vocab().equivalence(&["ny", "nyc"]),
+        );
+        (eng, reference)
+    };
+    let cases: [(&str, &[(&str, bool)]); 4] = [
+        ("ny", &[("nyc", true), ("ny", true), ("la", false)]),
+        ("(ny,zz)", &[("nyc", true), ("la", false)]),
+        (
+            "\"ny office\"",
+            &[("nyc office", true), ("nyc x office", false)],
+        ),
+        ("x -ny", &[("x nyc", true), ("x ny", false)]),
+    ];
+    for (query, expected) in cases {
+        let (eng, reference) = pair(query);
+        check_pair(&eng, &reference, query, expected);
+    }
 }

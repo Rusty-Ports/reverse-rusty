@@ -24,8 +24,8 @@ This is the re-write.
    and stubs holding the signatures the evaluator calls. It was not given the engine's source,
    the ported modules, or the tests that had been written beside the port. It worked in a
    directory that held nothing else, under the instruction to read nothing outside it, and its
-   session was recorded. The record of both rounds (67 commands) holds no command that reads
-   outside that directory and none that uses the network.
+   session was recorded. The record of its four rounds (136 commands) holds no command that
+   reads outside that directory and none that uses the network.
 2. **A different author.** The port and the specification came from one author. The re-write
    was done by another: a language model from a different provider. Authors of one family
    agree on wrong answers more often than chance (see Prior art), so the second author was
@@ -43,12 +43,15 @@ This is the re-write.
    engine does, deciding whether that is the rule, and writing the rule into the specification.
    The author then brought its code in line with the clarified text. The table below is that
    list.
-5. **A vocabulary is declared, not analyzed.** `RefVocab` used to clean a phrase's form when
-   it was declared, under whatever punctuation classes had been set so far, so the order of
-   declarations changed what a phrase was. It now keeps the declared form.
-   `phrases_in_force()` cuts each form under the classes as they stand when a text is
-   analyzed, drops a form with no tokens, and lets the first of two declarations with the same
-   tokens stand; `synonym_for()` does the same for a token.
+5. **A vocabulary is declared, not analyzed.** `RefVocab` used to clean every phrase's form
+   when it was declared, under whatever punctuation classes had been set so far, so the order
+   of declarations changed what a phrase was. It now keeps what was declared, in the two ways
+   the specification gives: a list of tokens, taken as given, or an alias form, which is
+   text. `phrases_in_force()` answers what the declarations amount to when a text is
+   analyzed: the first of two lists with the same tokens stands; an alias form is cut under
+   the classes as they stand, is no phrase with fewer than two tokens, over the tokens of a
+   declared list makes that phrase an alias and leaves it its feature, and otherwise is a
+   phrase named from its tokens. `synonym_for()` gives the first synonym declared for a token.
 6. **The gate keeps it.** The `ref-matcher provenance` lane now has no list of exceptions: a
    module of the reference that cites engine code as the source of its logic fails, in any
    directory of the crate, and so does crate documentation that stops saying where the modules
@@ -70,7 +73,23 @@ This is the re-write.
 | Is `a a` one feature or two for an equivalence form? | One: distinct features are counted. |
 | Is a character classed `marker` treated like `#` and `/`? | No. The rule that a token emits nothing is about the tokens `#` and `/`. |
 | Is a bare term analyzed on the title side? | By the same rules, on the query side: an alias consumes its words. |
-| Is a phrase's form cut again when the classes change? | An alias's form is cut under the classes as they finally stand. Text is cleaned once. |
+| Is a phrase's form cut again when the classes change? | An alias's form is cut under the classes as they finally stand; a list of tokens is taken as given. Text is cleaned once. |
+
+Two reviews of the result added six more. One reviewer wrote a third implementation from the
+two passages and ran it against the re-write (300,000 query and title pairs, 600,000 query
+strings): they agreed, and what it found were things the text did not say.
+
+| Found by review | Settled as |
+|---|---|
+| The reference vocabulary cleaned every declared form, and the text says a list of tokens is taken as given. | The vocabulary type has both ways of declaring a phrase. An alias form over a declared list makes that phrase an alias and keeps its feature; a form of one token is no phrase. |
+| Nothing said an equivalence class widens an unquoted clause. | A class widens what any required clause accepts, quoted or not, and never a forbidden one. |
+| Nothing said which side a member of a group is analyzed on. | Every piece of a query is analyzed on the query side. |
+| Is `1999.` a year? | No: four digits with no `.`. |
+| Nothing said a query with only forbidden clauses is not stored. | It is not, unless the deployment accepts such queries. |
+| The author's tests pinned which of several errors is reported. | The text says that is not specified, and the tests now assert only the rejection. |
+
+The author then found one in the vocabulary type itself: the text names a standalone alias
+form from its tokens, and the type took the name from its caller. The type now derives it.
 
 ## What changes for a deployment
 
@@ -107,8 +126,15 @@ Nothing. The engine is unchanged.
   both are on the roadmap as questions. A vocabulary's declared phrase tokens and synonym
   tokens are never cleaned, so one with a capital letter or a hyphen loads and matches
   nothing. A query that tries to nest groups is stored as a different query.
-- The reference asks the vocabulary for its phrases at every analysis. It is slower than the
-  port by a constant factor nobody measures; the suites take the same time.
+- One place where the engine does not follow the rule is on the roadmap as a defect: a second
+  declaration of a phrase through `NormalizerBuilder::add_phrase_alias` is half applied (it
+  widens every title's positive view and adds its own feature there). A vocabulary document,
+  the REST API and alias import cannot produce it, and no suite builds one.
+- The reference asks the vocabulary for its phrases and its equivalence classes at every
+  analysis, and its rule for alias forms carried in pieces is quadratic in the number of alias
+  forms. The suites take the same time as before. A vocabulary of thousands of aliases would
+  not: a reviewer measured 320 ms a title at 8,000. That has to be prepared once for each
+  vocabulary before the reference is run over a real corpus, and it is on the roadmap.
 
 ## Proven
 
@@ -122,9 +148,15 @@ Nothing. The engine is unchanged.
   in the copy of the port and the second settled, two further runs found none.
 - **The engine against the re-write.** Every `tests/independent_oracle/` suite, the quoted
   phrase suite and the crash-injection oracle pass unchanged.
+- **A third reading.** A reviewer who was given the two passages and the reference, and told
+  not to read the engine, wrote its own implementation from the text and compared: 306,584
+  query and title pairs under 6,000 random vocabularies, 48,000 titles (tokens, both views,
+  both graphs, quoted graphs, equivalence classes), every query string of up to six characters
+  over nine significant ones (597,871), and the fold table for every Unicode scalar. The one
+  difference was the widening of unquoted clauses, which the text had not stated.
 - **The clarified rules.** `tests/independent_oracle/clarified.rs` asserts hand-written
-  expectations for nine of them against the engine and the reference. `a_text_is_cleaned_once`
-  is the port's defect.
+  expectations for thirteen of them against the engine and the reference.
+  `a_text_is_cleaned_once` is the port's defect.
 - **Mutants, and what they showed about the suites.** Forty-six single changes to the new
   front end and the vocabulary type, each run against the reference's own tests and against
   the engine-versus-reference suites. Two are equivalent. The reference's tests catch 42 of
