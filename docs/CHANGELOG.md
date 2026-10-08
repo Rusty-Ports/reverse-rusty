@@ -9,6 +9,22 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — A manifest that was renamed into place is in effect
+
+- **A commit whose directory sync fails after its manifest rename no longer loses data on the
+  next restart** ([ADR-222](decisions/adr-222-a-renamed-manifest-is-in-effect.md)). A
+  single-node commit publishes `manifest.bin` by write, sync, rename, sync the directory. When
+  the rename succeeded and the directory sync failed, the engine treated the commit as failed
+  and deleted the new segment and source sidecar, which the manifest now on disk named. A
+  restart before the next successful commit skipped the missing segment and served without
+  its queries. Now the commit is in effect: the engine keeps the new state and the files of
+  both manifests, does not checkpoint or reset the write-ahead log, and reports `red` until a
+  later commit is synced or the node restarts.
+- **A bulk load in that state answers with an error and is served.** It is not in the log, so
+  it is not acknowledged as durable; its rows are in effect now and after a restart.
+- Found by the single-node crash matrix (ADR-221), which fails the step `sync_dir
+  manifest.bin` of every commit and then stops the engine.
+
 ## 2026-10-08 — Every step of a durable operation has a name
 
 - **A cluster killed during a checkpoint takes creates again when it restarts**

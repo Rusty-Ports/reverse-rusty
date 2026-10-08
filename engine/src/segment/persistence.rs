@@ -226,11 +226,27 @@ impl Engine {
             rejected_class_d: report.rejected_class_d,
             base_segments_after: self.segments.len(),
         });
+        // A bulk load is not in the write-ahead log: its manifest is all that holds it. A
+        // commit that was synced clears this, so it is set here only when this batch's
+        // manifest is the one that was renamed and not synced (ADR-222). The batch is
+        // served, and a restart serves it; the caller is not told that it is on disk.
+        if self.manifest_awaits_sync() {
+            return Err(std::io::Error::other(
+                "the batch is in effect and is not known to be on disk: its manifest was \
+                 renamed into place and the directory could not be synced. It is served now \
+                 and after a restart, and a power loss may undo it",
+            ));
+        }
         Ok(report)
     }
 
     /// Write a WAL flush checkpoint (all prior WAL entries are in segments).
     pub(in crate::segment) fn checkpoint_wal(&mut self) {
+        // The manifest that says the log's records are in segments may not survive a power
+        // loss, and the one it replaced needs every record (ADR-222).
+        if self.manifest_awaits_sync() {
+            return;
+        }
         // Capture the error and release the `&mut self.wal` borrow before `emit`
         // (which needs `&self`); `.err()` drops the borrowed Result.
         let err = if let Some(ref mut wal) = self.wal {
@@ -252,6 +268,9 @@ impl Engine {
     /// Reset the WAL after a successful flush + manifest write. Only call when
     /// both the checkpoint and manifest have been persisted, so no data is lost.
     pub(in crate::segment) fn reset_wal_if_safe(&mut self) {
+        if self.manifest_awaits_sync() {
+            return;
+        }
         let err = if let Some(ref mut wal) = self.wal {
             wal.reset().err()
         } else {
@@ -424,15 +443,37 @@ impl Engine {
                 vocab_data,
             };
             let dir = dir.clone();
-            if let Err(e) = crate::storage::write_manifest(&manifest, &dir.join("manifest.bin")) {
-                self.persistence_healthy = false;
-                self.emit(crate::events::EngineEvent::DurabilityFailure {
-                    op: crate::events::DurabilityOp::ManifestWrite,
-                    detail: "manifest write failed (atomic commit point); batch rolled back"
-                        .to_string(),
-                    error: e.to_string(),
-                });
-                return false;
+            match crate::storage::write_manifest_reporting(&manifest, &dir.join("manifest.bin")) {
+                Ok(crate::storage::Published::Synced) => {
+                    self.manifest_on_disk = ManifestOnDisk::Synced;
+                }
+                // The rename is the publication: a restart reads this manifest, so the commit
+                // is in effect and the caller goes on as for any commit. What is not known is
+                // whether it survives a power loss, so the manifest it replaced has to stay
+                // usable too (ADR-222): see [`ManifestOnDisk::RenamedNotSynced`].
+                Ok(crate::storage::Published::NotSynced(e)) => {
+                    self.manifest_on_disk = ManifestOnDisk::RenamedNotSynced;
+                    self.persistence_healthy = false;
+                    self.emit(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::ManifestWrite,
+                        detail: "the manifest was renamed into place and its directory could \
+                                 not be synced: the commit is in effect and may not survive a \
+                                 power loss. Replaced files are kept and the write-ahead log \
+                                 is not reset until a later commit is synced"
+                            .to_string(),
+                        error: e.to_string(),
+                    });
+                }
+                Err(e) => {
+                    self.persistence_healthy = false;
+                    self.emit(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::ManifestWrite,
+                        detail: "manifest write failed (atomic commit point); batch rolled back"
+                            .to_string(),
+                        error: e.to_string(),
+                    });
+                    return false;
+                }
             }
             self.committed_wal_watermark = watermark;
         }
@@ -561,7 +602,12 @@ impl Engine {
     /// it through the observer as [`EngineEvent::SegmentCleanupFailed`]. A missing
     /// file is the expected, benign case and is not reported.
     pub(in crate::segment) fn best_effort_remove_segment(&self, path: &std::path::Path) {
-        match std::fs::remove_file(path) {
+        // A manifest that may be on disk may name this file (ADR-222). It stays, and is
+        // an unreferenced file once a later commit is synced.
+        if self.manifest_awaits_sync() {
+            return;
+        }
+        match crate::fault::step("remove", path).and_then(|()| std::fs::remove_file(path)) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => self.emit(crate::events::EngineEvent::SegmentCleanupFailed {
@@ -574,8 +620,12 @@ impl Engine {
 
 mod fallback;
 mod feature_model;
+mod published;
+pub(in crate::segment) use published::ManifestOnDisk;
 mod seal;
 mod sources;
 
+#[cfg(test)]
+mod published_manifest_tests;
 #[cfg(test)]
 mod source_commit_tests;

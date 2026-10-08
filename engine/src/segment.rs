@@ -603,6 +603,7 @@ pub struct Engine {
     /// so it must keep this watermark: advancing it would let recovery skip a delete whose
     /// insert still replays from the WAL.
     committed_wal_watermark: u64,
+    manifest_on_disk: persistence::ManifestOnDisk,
     /// Whether this engine writes its own `manifest.bin`. True for a standalone
     /// engine. False for a **cluster shard** (ADR-032): the coordinator's
     /// `cluster_manifest.bin` is the sole metadata authority (it records the

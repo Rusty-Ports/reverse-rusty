@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 
-use super::super::{crc32, durable_rename, write_u32};
+use super::super::{crc32, publish_by_rename, write_u32, Published};
 
 /// Publish one encoded manifest body as the sole durable commit point.
 ///
@@ -16,6 +16,19 @@ pub(super) fn publish_with_crc(
     tmp: &Path,
     encode_body: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
+    match publish_with_crc_reporting(path, tmp, encode_body)? {
+        Published::Synced => Ok(()),
+        Published::NotSynced(error) => Err(error),
+    }
+}
+
+/// [`publish_with_crc`], saying whether a failure came before the rename (`Err`: the old
+/// manifest is in place) or after it (`Ok(Published::NotSynced)`: the new one is).
+pub(super) fn publish_with_crc_reporting(
+    path: &Path,
+    tmp: &Path,
+    encode_body: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<Published> {
     crate::fault::step("create", tmp)?;
     let mut file = File::create(tmp)?;
     encode_body(&mut file)?;
@@ -29,5 +42,5 @@ pub(super) fn publish_with_crc(
     crate::fault::sync(&file, tmp)?;
     drop(file);
 
-    durable_rename(tmp, path)
+    publish_by_rename(tmp, path)
 }

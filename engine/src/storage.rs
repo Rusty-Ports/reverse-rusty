@@ -32,6 +32,7 @@ pub use backup::{
 };
 pub use dict::{deserialize_dict, serialize_dict};
 pub use log_loss::{accepted_log_losses, AcceptedLogLoss, ACCEPTED_LOG_LOSSES_FILE};
+pub(crate) use manifest::write_manifest_reporting;
 pub use manifest::{
     read_cluster_manifest, read_manifest, write_cluster_manifest, write_manifest, ClusterManifest,
     Manifest,
@@ -145,11 +146,49 @@ impl Crc32 {
     }
 }
 
-/// Atomic rename with parent-directory fsync for crash durability.
-pub(crate) fn durable_rename(from: &Path, to: &Path) -> io::Result<()> {
+/// What a rename that publishes a file achieved.
+#[derive(Debug)]
+pub(crate) enum Published {
+    /// The file is in place and the directory was synced.
+    Synced,
+    /// The file is in place, and the directory sync after the rename failed. Every reader
+    /// from now on reads the new file, a restart included. Whether it survives a power
+    /// loss is not known: the file it replaced may be the one that comes back (ADR-222).
+    NotSynced(io::Error),
+}
+
+/// Rename `from` over `to` and sync the directory, saying which of the two a failure was.
+/// `Err` is a rename that did not happen: `to` is as it was.
+pub(crate) fn publish_by_rename(from: &Path, to: &Path) -> io::Result<Published> {
     crate::fault::step("rename", to)?;
-    std::fs::rename(from, to)?;
-    crate::fault::sync_dir_of(to)
+    if let Err(error) = std::fs::rename(from, to) {
+        return if rename_took_effect(from, to) {
+            Ok(Published::NotSynced(error))
+        } else {
+            Err(error)
+        };
+    }
+    Ok(match crate::fault::sync_dir_of(to) {
+        Ok(()) => Published::Synced,
+        Err(error) => Published::NotSynced(error),
+    })
+}
+
+/// Whether a rename of `from` over `to` that reported an error happened all the same. A
+/// rename can take effect and still report an error (a network filesystem that loses the
+/// reply); the source is gone exactly when it did. Anything that cannot be told is a rename
+/// that did not happen only when the source is seen to be there.
+fn rename_took_effect(from: &Path, to: &Path) -> bool {
+    matches!(from.try_exists(), Ok(false)) && to.exists()
+}
+
+/// Atomic rename with parent-directory fsync for crash durability. An error does not say
+/// whether the rename happened; a caller that must know uses [`publish_by_rename`].
+pub(crate) fn durable_rename(from: &Path, to: &Path) -> io::Result<()> {
+    match publish_by_rename(from, to)? {
+        Published::Synced => Ok(()),
+        Published::NotSynced(error) => Err(error),
+    }
 }
 
 /// The directory whose entry names `path`. A bare file name has an empty parent, which
@@ -196,7 +235,75 @@ fn read_u64_at(data: &[u8], off: usize) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{crc32, directory_of, Crc32, Path, CRC32_POLYNOMIAL};
+    use super::{
+        crc32, directory_of, publish_by_rename, rename_took_effect, Crc32, Path, Published,
+        CRC32_POLYNOMIAL,
+    };
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rr_publish_by_rename_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the scratch directory");
+        dir
+    }
+
+    /// The three outcomes of a publication are told apart: not renamed, renamed and
+    /// synced, renamed and not synced.
+    #[test]
+    fn a_publication_says_whether_the_rename_happened() {
+        let dir = scratch("outcomes");
+        let (tmp, file) = (dir.join("manifest.tmp"), dir.join("manifest.bin"));
+        std::fs::write(&file, b"old").expect("the old file");
+        let rename = crate::fault::Step {
+            name: "rename",
+            path: "manifest.bin".into(),
+        };
+        let sync = crate::fault::Step {
+            name: "sync_dir",
+            path: "manifest.bin".into(),
+        };
+        let scope = crate::fault::Scope::open(&dir);
+
+        std::fs::write(&tmp, b"new").expect("the replacement");
+        scope.fail(&rename, 0);
+        assert!(publish_by_rename(&tmp, &file).is_err(), "not renamed");
+        assert_eq!(std::fs::read(&file).expect("read"), b"old");
+        assert!(tmp.exists(), "the replacement is still beside it");
+
+        scope.fail(&sync, 0);
+        assert!(matches!(
+            publish_by_rename(&tmp, &file),
+            Ok(Published::NotSynced(_))
+        ));
+        assert_eq!(std::fs::read(&file).expect("read"), b"new");
+
+        std::fs::write(&tmp, b"newer").expect("the next replacement");
+        assert!(matches!(
+            publish_by_rename(&tmp, &file),
+            Ok(Published::Synced)
+        ));
+        assert_eq!(std::fs::read(&file).expect("read"), b"newer");
+        drop(scope);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rename that reported an error happened when its source is gone and its target is
+    /// there, and did not when the source is still there.
+    #[test]
+    fn a_rename_that_reported_an_error_is_judged_by_what_is_on_disk() {
+        let dir = scratch("took_effect");
+        let (from, to) = (dir.join("a.tmp"), dir.join("a"));
+        std::fs::write(&from, b"x").expect("source");
+        assert!(!rename_took_effect(&from, &to), "nothing moved");
+        std::fs::write(&to, b"y").expect("target");
+        assert!(!rename_took_effect(&from, &to), "the source is still there");
+        std::fs::remove_file(&from).expect("the source is gone");
+        assert!(rename_took_effect(&from, &to));
+        std::fs::remove_file(&to).expect("and the target too");
+        assert!(!rename_took_effect(&from, &to), "neither is there");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The definition, one bit at a time: what every file on disk was checksummed with
     /// before the tables, and what the tables must reproduce exactly.

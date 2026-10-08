@@ -169,7 +169,11 @@ impl Engine {
     }
 
     pub(super) fn best_effort_remove_source(&self, path: &std::path::Path) {
-        match std::fs::remove_file(path) {
+        // As for a segment: a manifest that may be on disk may select this sidecar.
+        if self.manifest_awaits_sync() {
+            return;
+        }
+        match crate::fault::step("remove", path).and_then(|()| std::fs::remove_file(path)) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => self.emit(crate::events::EngineEvent::DurabilityFailure {

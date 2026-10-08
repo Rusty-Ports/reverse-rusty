@@ -656,6 +656,14 @@ capture; microbenchmarks alone are not sufficient.
   `sync_all` in library code; and the shard node's sequences. Durable steps not yet named:
   the write-ahead log's reset, the control store, the shard node's retirement, drop, adoption
   and recovery files, backups, and the accepted-log-loss record.
+- **Files a single-node directory no longer names.** A commit that was renamed and not synced
+  keeps the files of the manifest it replaced (ADR-222), and nothing removes them later. The
+  same is true of what a crash leaves behind. Sweep, at open and after a synced commit, the
+  segments and sidecars that the manifest on disk does not name, as the cluster coordinator
+  does for its shards.
+- **A segment the manifest names and recovery cannot load.** Recovery skips it, reports it and
+  serves without its queries. ADR-222 removed one way to get there; the open itself should
+  refuse, or the operator should have to say that serving without it is accepted.
 - **A shard's source sidecar as part of the commit.** A checkpoint replaces each shard's
   `sources.dat` in place before it commits the manifest. A crash between the two is recovered
   on reopen (ADR-221). Writing the sidecar under a generation name that the manifest selects,

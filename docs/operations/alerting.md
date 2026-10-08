@@ -90,7 +90,12 @@ member self-heals on restart from its durable log (ADR-041).
 made durable (WAL append / segment write / manifest commit failed — ADR-021/051). The engine
 fails closed, but the underlying cause (disk full, volume failure) compounds. **Do:** check disk
 space/health immediately; do not take a backup onto the same failing disk; once resolved, verify
-with a sentinel write and take a fresh backup. The `op="replica_desync"` series is different: a
+with a sentinel write and take a fresh backup. An `op="manifest_write"` failure whose detail
+says the manifest "was renamed into place and its directory could not be synced" is a commit
+that is in effect and not known to be on disk (ADR-222): the node serves it and keeps it across
+a restart, keeps the files of the manifest it replaced, and stops resetting its write-ahead
+log until a commit is synced. Fix the storage and restart the node; it then starts from the
+manifest on disk. The `op="replica_desync"` series is different: a
 replica left the in-sync set (a replicated write to it failed, or it was not proven equal to its
 primary when the coordinator connected, ADR-195). No write was lost, but that position has less
 redundancy until the replica is recovered ([runbook §6](cluster-deployment.md), *Replica

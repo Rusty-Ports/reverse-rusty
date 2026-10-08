@@ -324,6 +324,7 @@ impl Engine {
             selected_source_version: None,
             vocab_epoch: 0,
             committed_wal_watermark: manifest.wal_seq_watermark,
+            manifest_on_disk: crate::segment::persistence::ManifestOnDisk::Synced,
             owns_manifest: true,
             replaced_files: crate::segment::ReplacedFiles::LeftForTheOwnersSweep,
             kept_segment_files: std::sync::Mutex::default(),

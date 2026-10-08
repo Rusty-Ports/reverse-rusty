@@ -5,8 +5,8 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-use super::{crc32, read_u32_at, read_u64_at, write_u32, write_u64};
-use publish::publish_with_crc;
+use super::{crc32, read_u32_at, read_u64_at, write_u32, write_u64, Published};
+use publish::publish_with_crc_reporting;
 
 mod cluster;
 mod publish;
@@ -119,6 +119,16 @@ pub struct Manifest {
 }
 
 pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
+    match write_manifest_reporting(manifest, path)? {
+        Published::Synced => Ok(()),
+        Published::NotSynced(error) => Err(error),
+    }
+}
+
+/// [`write_manifest`], saying whether the manifest is in place. `Err` is a manifest that
+/// was not published: the one at `path` is as it was. `Ok(Published::NotSynced)` is a
+/// manifest that is at `path` now and whose directory sync failed (ADR-222).
+pub(crate) fn write_manifest_reporting(manifest: &Manifest, path: &Path) -> io::Result<Published> {
     super::validate_sidecar_basename(&manifest.source_file_name)?;
     if manifest.feature_model_fingerprint.is_none() && !manifest.vocab_data.is_empty() {
         return Err(io::Error::new(
@@ -128,7 +138,7 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
     }
     let feature_model = manifest.feature_model_fingerprint.is_some();
     let tmp = path.with_extension("manifest.tmp");
-    publish_with_crc(path, &tmp, |f| {
+    publish_with_crc_reporting(path, &tmp, |f| {
         f.write_all(&MANIFEST_MAGIC)?;
         write_u32(
             f,
