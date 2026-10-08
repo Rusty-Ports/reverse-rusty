@@ -30,16 +30,21 @@ real-process kill lane (ADR-088) kills at moments it does not record.
    scope a sync is recorded and not performed: a test that never loses power cannot tell, and
    the matrix below would otherwise spend minutes in `fsync`.
 3. **The steps are where durable I/O already funnels:** `durable_rename`, manifest
-   publication, the segment and source-sidecar writers, the cluster log (append, checkpoint),
-   a shard's checkpoint record, the publication of an empty log, tail repair, the
-   coordinator's removals, the build mark, and the control proposal of a layout change.
+   publication, the segment and source-sidecar writers, an append to the cluster log or the
+   write-ahead log and its sync, the cluster log's checkpoint, a shard's checkpoint record,
+   the publication of an empty log, tail repair, the coordinator's removals, the build mark,
+   and the control proposal of a layout change. A fault planned for an append or its sync
+   happens inside the appender, so it leaves the handle refusing appends, as a real failure
+   does.
 4. **A matrix enumerates.** `cluster/coordinator/tests/crash_matrix.rs` takes each operation of
    a durable in-process cluster (add, upsert, remove, checkpoint, a resize up, a resize down,
    an alias import, a build), runs it once under a scope to learn its steps, and then for
    every step runs it again with that step failing and goes three ways: crash at once; keep
    serving, write, crash; retry, crash. A crash is the engine dropped with no checkpoint.
    What reopens must hold every acknowledged write and no acknowledged remove, take a write
-   and a checkpoint, and reopen the same again. Nobody picks the windows: a step added to an
+   and a checkpoint, and reopen the same again. A write that failed may or may not have been
+   applied, so the id it named may be in its earlier state or the one asked for, and in no
+   other: a failed upsert must not lose the row. Nobody picks the windows: a step added to an
    operation is in the list the next time the test runs, and a test pins the set of step
    names so that one which disappears is noticed.
 5. **Test builds of the crate only, for now.** The facility is compiled under `cfg(test)`.
@@ -88,8 +93,8 @@ restarted once more. Nothing else changes; release builds contain none of the fa
   synced: every byte written before the fault is there on reopen. A missing `fsync` cannot be
   seen by it.
 - A durable step that does not go through the three functions is invisible. Still outside
-  them: the write-ahead log's own appends and reset, the control store, the shard node's
-  retirement, drop, adoption and recovery files, backups, and the accepted-log-loss record.
+  them: the write-ahead log's reset, the control store, the shard node's retirement, drop,
+  adoption and recovery files, backups, and the accepted-log-loss record.
 - A new durable function has to call them. Review is what holds that for now; a gate lane
   that refuses a direct `rename` or `sync_all` in library code comes with the filesystem
   layer.
@@ -113,8 +118,8 @@ restarted once more. Nothing else changes; release builds contain none of the fa
 
 ## Proven
 
-- **The matrix.** Eight operations and 437 steps: 355 on an existing cluster, each failed
-  three ways, and 82 of a build. That is 1,147 cases in 17 seconds. All pass.
+- **The matrix.** Eight operations and 440 steps: 358 on an existing cluster, each failed
+  three ways, and 82 of a build. That is 1,156 cases in about ten seconds. All pass.
 - **It fails without the fix:** with the second enumeration removed, 146 checkpoint cases
   fail.
 - **It reproduces ADR-178:** with the commit fence disabled, 189 resize and alias-import

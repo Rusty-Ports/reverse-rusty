@@ -19,12 +19,13 @@ reverse chronological and describe outcomes, not the current architecture or fut
   replayed the log's tail, when the sidecar and the segments agree again.
 - **Durable steps are named, and a test can record and fail them.** `fault::step`,
   `fault::sync` and `fault::sync_dir_of` sit where durable I/O already funnels (the atomic
-  rename, manifest publication, the segment and sidecar writers, the cluster log, a shard's
-  checkpoint record, removals, the build mark, the control proposal of a layout change). A
+  rename, manifest publication, the segment and sidecar writers, appends to the cluster log
+  and the write-ahead log, a shard's checkpoint record, removals, the build mark, the control
+  proposal of a layout change). A
   `fault::Scope` on a directory records them and fails the one a test chooses. Shipped
   builds contain none of it.
 - **A crash matrix fails every step of every in-process cluster operation**, three ways each:
-  437 steps, 1,147 cases, in seconds. It is what found the defect above on its first run,
+  440 steps, 1,156 cases, in seconds. It is what found the defect above on its first run,
   and with the ADR-178 commit fence disabled it fails 189 cases, so that window is now
   reached by enumeration and not by the tests written with its fix.
 

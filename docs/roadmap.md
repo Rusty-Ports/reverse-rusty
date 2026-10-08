@@ -654,8 +654,8 @@ capture; microbenchmarks alone are not sufficient.
   last sync, as LevelDB's and RocksDB's fault-injection filesystems keep them), which needs
   every write to go through one layer and a gate lane that refuses a direct `rename` or
   `sync_all` in library code; and the shard node's sequences. Durable steps not yet named:
-  the write-ahead log's appends and reset, the control store, the shard node's retirement,
-  drop, adoption and recovery files, backups, and the accepted-log-loss record.
+  the write-ahead log's reset, the control store, the shard node's retirement, drop, adoption
+  and recovery files, backups, and the accepted-log-loss record.
 - **A shard's source sidecar as part of the commit.** A checkpoint replaces each shard's
   `sources.dat` in place before it commits the manifest. A crash between the two is recovered
   on reopen (ADR-221). Writing the sidecar under a generation name that the manifest selects,

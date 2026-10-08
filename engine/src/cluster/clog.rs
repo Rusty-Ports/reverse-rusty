@@ -473,10 +473,9 @@ impl ClusterLog for FileClusterLog {
             .checked_add(1)
             .ok_or_else(|| ShardError::Log("cluster log position exhausted".into()))?;
         let body = Self::encode_body(seq, m);
-        crate::fault::step("append", &st.path)
-            .map_err(|e| ShardError::Log(format!("append: {e}")))?;
+        let st = &mut *st;
         st.file
-            .append(&body, self.fsync_each_write)
+            .append_at(&st.path, &body, self.fsync_each_write)
             .map_err(|e| ShardError::Log(format!("append: {e}")))?;
         Ok(LogPos(seq))
     }

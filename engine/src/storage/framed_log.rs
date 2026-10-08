@@ -274,6 +274,9 @@ impl<W: Write> LogAppender<W> {
 }
 
 impl LogAppender {
+    /// Append one frame, as steps without a name: the control store's log, which the crash
+    /// matrix does not reach yet (ADR-221).
+    #[cfg_attr(not(any(test, feature = "distributed")), allow(dead_code))]
     pub(crate) fn append(&mut self, body: &[u8], fsync: bool) -> io::Result<usize> {
         self.append_with(
             body,
@@ -285,6 +288,24 @@ impl LogAppender {
                 }
             },
         )
+    }
+
+    /// [`append`](Self::append) for a log whose path the caller knows: the step `append`
+    /// and, when `fsync`, the step `sync` (ADR-221). A fault a test plans for either is a
+    /// failed append, so it leaves this handle refusing appends, as a real failure does.
+    pub(crate) fn append_at(&mut self, path: &Path, body: &[u8], fsync: bool) -> io::Result<usize> {
+        self.healthy()?;
+        if let Err(planned) = crate::fault::step("append", path) {
+            self.failed = true;
+            return Err(planned);
+        }
+        self.append_with(body, |file| {
+            if fsync {
+                crate::fault::sync(file, path)
+            } else {
+                file.flush()
+            }
+        })
     }
 
     pub(crate) fn sync_all(&mut self) -> io::Result<()> {

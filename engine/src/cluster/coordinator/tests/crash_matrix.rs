@@ -34,18 +34,30 @@ fn holds(title: &str, query: &str) -> bool {
         .all(|word| title.split_whitespace().any(|have| have == word))
 }
 
-/// What has been acknowledged: the text an id must match, or `None` for an id whose remove
-/// was acknowledged. An id whose last write failed is absent, because either outcome is
-/// allowed for it.
+/// What a cluster may hold for each id. A state is the text the id matches, or `None` for no
+/// row. After an acknowledged write there is one state. After a write that failed there are
+/// two or more: the state before it and the state it asked for, because a failed write may
+/// or may not have been applied. Losing the row is not among them unless a remove was tried.
 #[derive(Clone, Default)]
-struct Acknowledged(BTreeMap<u64, Option<String>>);
+struct Acknowledged(BTreeMap<u64, Vec<Option<String>>>);
 
 impl Acknowledged {
-    fn note<T>(&mut self, id: u64, outcome: &Result<T, ShardError>, text: Option<&str>) {
+    fn of(corpus: &[(u64, String)]) -> Self {
+        Self(
+            corpus
+                .iter()
+                .map(|(id, text)| (*id, vec![Some(text.clone())]))
+                .collect(),
+        )
+    }
+
+    fn note<T>(&mut self, id: u64, outcome: &Result<T, ShardError>, asked: Option<&str>) {
+        let asked = asked.map(str::to_string);
+        let allowed = self.0.entry(id).or_insert_with(|| vec![None]);
         if outcome.is_ok() {
-            self.0.insert(id, text.map(str::to_string));
-        } else {
-            self.0.remove(&id);
+            *allowed = vec![asked];
+        } else if !allowed.contains(&asked) {
+            allowed.push(asked);
         }
     }
 
@@ -67,25 +79,44 @@ impl Acknowledged {
         outcome
     }
 
-    /// `cluster` answers every title as the acknowledged writes say it must.
-    fn check(&self, cluster: &ClusterEngine) -> Result<(), String> {
+    /// `cluster` holds, for every id, one of the states allowed for it. Returns those states,
+    /// one for each id: what the cluster holds, and so what it must go on holding.
+    fn settle(&self, cluster: &ClusterEngine) -> Result<Self, String> {
+        let mut matched = Vec::new();
         for title in TEXTS {
-            let matched: BTreeSet<u64> = cluster
+            let ids: BTreeSet<u64> = cluster
                 .percolate(title)
                 .map_err(|e| format!("percolate {title:?}: {e}"))?
                 .into_iter()
                 .collect();
-            for (id, text) in &self.0 {
-                let expected = text.as_deref().is_some_and(|query| holds(title, query));
-                if matched.contains(id) != expected {
-                    return Err(format!(
-                        "title {title:?}: id {id} (acknowledged as {text:?}) {}",
-                        if expected { "is missing" } else { "matches" }
-                    ));
-                }
-            }
+            matched.push(ids);
         }
-        Ok(())
+        let mut held = BTreeMap::new();
+        for (id, allowed) in &self.0 {
+            let answers = |state: &Option<String>| {
+                TEXTS.iter().zip(&matched).all(|(title, ids)| {
+                    ids.contains(id) == state.as_deref().is_some_and(|query| holds(title, query))
+                })
+            };
+            let Some(state) = allowed.iter().find(|state| answers(state)) else {
+                let titles: Vec<&str> = TEXTS
+                    .iter()
+                    .zip(&matched)
+                    .filter(|(_, ids)| ids.contains(id))
+                    .map(|(title, _)| *title)
+                    .collect();
+                return Err(format!(
+                    "id {id} matches the titles {titles:?}, which is none of its allowed \
+                     states {allowed:?}"
+                ));
+            };
+            held.insert(*id, vec![state.clone()]);
+        }
+        Ok(Self(held))
+    }
+
+    fn check(&self, cluster: &ClusterEngine) -> Result<(), String> {
+        self.settle(cluster).map(|_| ())
     }
 }
 
@@ -135,7 +166,8 @@ fn config(dir: &std::path::Path) -> ClusterConfig {
     ClusterConfig {
         num_shards: SHARDS,
         data_dir: Some(dir.to_path_buf()),
-        wal_sync_on_write: false,
+        // Every append is then two steps, the write and its sync.
+        wal_sync_on_write: true,
         ..Default::default()
     }
 }
@@ -152,10 +184,7 @@ fn fresh_dir(tag: &str) -> PathBuf {
 fn seeded(dir: &std::path::Path) -> (ClusterEngine, Acknowledged) {
     let corpus = [(1, TEXTS[0].to_string()), (2, TEXTS[1].to_string())];
     let cluster = ClusterEngine::build(vocab(), &config(dir), &corpus).expect("seed build");
-    let mut acked = Acknowledged::default();
-    for (id, text) in &corpus {
-        acked.0.insert(*id, Some(text.clone()));
-    }
+    let mut acked = Acknowledged::of(&corpus);
     acked.add(&cluster, 3, "brass compass").expect("seed add");
     acked
         .upsert(&cluster, 1, "package charger")
@@ -183,8 +212,8 @@ fn steps_of(op: Op) -> Vec<Step> {
 /// same again after one more reopen.
 fn reopens(dir: &std::path::Path, acked: &Acknowledged) -> Result<(), String> {
     let cluster = ClusterEngine::open(dir, vocab(), None).map_err(|e| format!("open: {e}"))?;
-    acked.check(&cluster)?;
-    let mut acked = acked.clone();
+    // From here on every id has one state: the one this open found.
+    let mut acked = acked.settle(&cluster)?;
     acked
         .add(&cluster, 90, "silver spoon")
         .map_err(|e| format!("a write after reopening: {e}"))?;
@@ -312,10 +341,7 @@ fn steps_of_a_build(corpus: &[(u64, String)]) -> Vec<Step> {
 #[test]
 fn a_build_failed_at_any_step_can_be_started_again() {
     let corpus = [(1, TEXTS[0].to_string()), (2, TEXTS[1].to_string())];
-    let mut acked = Acknowledged::default();
-    for (id, text) in &corpus {
-        acked.0.insert(*id, Some(text.clone()));
-    }
+    let acked = Acknowledged::of(&corpus);
     let steps = steps_of_a_build(&corpus);
     let mut failures = Vec::new();
     for (nth, step) in steps.iter().enumerate() {
