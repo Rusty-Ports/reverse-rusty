@@ -195,11 +195,12 @@ truth. The exact current/readable format matrix is owned by
 
 `ClusterEngine::checkpoint` seals/reseals local rows as needed, commits segment and source
 generations, advances the coordinator cursor, and only then permits old artifacts/tail records to be
-reclaimed. A shard never removes a segment file it has replaced, at a checkpoint or at a
-compaction between checkpoints: it lists the file, and the coordinator releases it after the
-manifest that no longer names it is committed
-([ADR-214](../decisions/adr-214-a-shard-keeps-what-it-replaced.md)). A shard node does the same
-around its own checkpoint file. `ClusterEngine::open` attaches and mmaps the committed segments, restores dictionaries and
+reclaimed. A shard does not remove a segment file that its owner's record still names, at a
+checkpoint or at a compaction between checkpoints: a coordinator's primary leaves the file, and
+the coordinator removes what its committed manifest no longer names
+([ADR-214](../decisions/adr-214-a-shard-keeps-what-it-replaced.md)). A shard on a shard node
+keeps a replaced file while its own checkpoint file names it, and the node removes it under its
+installation barrier once that file no longer does. `ClusterEngine::open` attaches and mmaps the committed segments, restores dictionaries and
 source state, then replays only the log tail. Base-segment tombstones are baked into checkpoint output
 so trimming a remove cannot resurrect a query.
 

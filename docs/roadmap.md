@@ -252,22 +252,56 @@ rank metadata, fully sorts already-sorted shard runs, and clones request groups 
 
 ### Orphan segment files on a shard node
 
-**Problem.** A shard keeps a segment file it has replaced until its owner has committed a
-record that no longer names it, and releases it then
-([ADR-214](decisions/adr-214-a-shard-keeps-what-it-replaced.md)). The list of what to release is
+**Problem.** A shard on a shard node keeps a segment file it has replaced while its checkpoint
+file names it, and the node removes it later
+([ADR-214](decisions/adr-214-a-shard-keeps-what-it-replaced.md)). Which files were kept is held
 in memory. After a crash, a shard node's directory can hold files that no checkpoint file names:
 replaced before the crash, or written and never committed. Nothing removes them. A
 coordinator's primaries are swept after each checkpoint; a shard node has no sweep. They cost
 disk and nothing else.
 
-**Direction.** Sweep at start-up, when a shard node restarts a slot from its checkpoint file
-and nothing is being written into its directory yet: remove segment files the checkpoint file
-does not name. Not while it runs: a recovery writes received files into the same directory
-before the shard that will hold them exists.
+**Direction.** Sweep under the node's installation barrier, where nothing else is writing into
+the slot's directory: at start-up when a slot is restarted from its checkpoint file, and in the
+seal worker. Remove segment files the checkpoint file does not name and the shard does not hold.
 
-**Completion.** A shard node killed after a compaction and after an uncommitted flush restarts
-with only the files its checkpoint file names, and a recovery in flight at the kill leaves
-nothing behind.
+**Completion.** A shard node killed after a compaction, and one killed during a flush, hold
+only the files their checkpoint files name after the next seal.
+
+### A recovery writes into the directory of the shard it replaces
+
+**Problem.** `RecoverFrom` writes each received file under its final name into the slot's
+directory while the slot's old shard is still installed, and swaps the new shard in at the end.
+Segment names are small per-shard counters, so a received file can have the name of a file the
+old shard is using: the rename replaces it under that shard. A recovery that then fails leaves
+the old shard installed over a directory that holds part of another copy. A request that still
+holds the old shard after the swap (a seal for a recovery source runs outside the installation
+barrier) can write into the new shard's directory the same way. ADR-214 keeps a deferred
+removal out of this; the shared directory and the shared names are still there.
+
+**Direction.** Receive into a directory of its own beside the slot's and swap directories at
+install, as the dropped-slot path already renames whole directories. The shadow slot of
+[staged replica recovery](#staged-replica-recovery-outside-the-fence-window) is the same
+structure, so the two are one piece of work. Elasticsearch receives under temporary names with
+the target's engine closed; Lucene and RocksDB never write a file name twice. Close the old
+shard to writes before the swap.
+
+**Completion.** A recovery that fails at any point leaves the slot's directory byte-identical;
+no file is written into a slot's directory by anything but its installed shard.
+
+### A replica on a shard node is never sealed
+
+**Problem.** A checkpoint seals each shard's primary only (replicas are in no manifest). A
+replica on a shard node restarts from its own checkpoint file and translog, and nothing ever
+advances the one or trims the other: the translog grows for the life of the process, a restart
+replays all of it, and the segment files the checkpoint file names stay on disk after the
+replica has compacted them away.
+
+**Direction.** Seal remote replicas at the coordinator's checkpoint, after the primary and
+without failing the checkpoint when one cannot be reached. Elasticsearch's flush is a
+replicated action for the same reason: each copy has its own commit point and translog.
+
+**Completion.** A long-running replica node's translog and segment directory stay bounded, and
+its restart replays only what arrived since the last checkpoint.
 
 ### An interrupted first build
 
