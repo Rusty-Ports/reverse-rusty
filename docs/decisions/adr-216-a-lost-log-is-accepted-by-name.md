@@ -46,6 +46,11 @@ in the delivery of an event.
    *pending*, and that file is on disk before the empty log is created. Then the log is put
    in place, and the entry is marked *applied*. For the cluster this happens before any
    shard is attached, as the refusal does.
+   A start does not act on a record it has only read: whatever decides from the record
+   (accepting, finishing an acceptance, settling) first makes the file and its directory
+   entry durable again, and fails if it cannot. A write of the record can stop after its
+   rename and before the directory is synced, and the start after it would otherwise replace
+   the log on the strength of an entry a power failure could take back.
 4. **Every open settles the record against what it finds.** An open that finds its log, or
    has just created it, marks a pending entry applied. So a start that accepted the loss,
    replaced the log and then stopped is completed by the next start, which is given no token
@@ -131,8 +136,9 @@ in the delivery of an event.
   found and put back, the next open finds a log and marks the entry applied, although
   nothing was lost. An open cannot tell an original log from an empty replacement.
 - Removing the record by hand starts the count again, and a token that had been spent
-  would then accept a second loss under an unchanged commit record. The record is not to be
-  removed; the error for one that cannot be read says so.
+  would then accept a second loss under an unchanged commit record. A record that cannot be
+  read is to be restored from a copy; the error says so, and says that if the file has to be
+  moved aside the token must come out of the start-up settings first.
 - The token is not part of `GET /_settings`: it is an instruction to one open, not a
   property of the running store.
 
@@ -147,7 +153,9 @@ in the delivery of an event.
   store is still refused with the same token, and the token then finishes it with one entry.
   A pending entry beside a log is marked applied by a start that is given no token. A record
   that is damaged, emptied or cut short fails the open, and a spent token does not accept a
-  second loss under it. A backup carries the record; one is not taken, and
+  second loss under it. With a directory that cannot be synced, five starts in a row fail
+  and the log is never replaced (acting on the entry that the first of them left visible,
+  they replaced it and then opened). A backup carries the record; one is not taken, and
   does not verify, when the record cannot be read.
 - `cluster/coordinator/tests/accepted_loss.rs`: the same for the cluster log, and a refusal,
   or a start that stops after recording, leaves every other file in the directory as it was.

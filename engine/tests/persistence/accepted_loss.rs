@@ -196,6 +196,42 @@ fn the_loss_is_recorded_before_the_log_is_replaced() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A write of the record can fail after it has renamed the file into place and before the
+/// directory is synced. The record is then visible and not yet durable. A later start must
+/// not act on it as it is: it makes the record durable first, and when it cannot, it fails.
+/// (Here the directory cannot be opened for the sync at all. Acting on the visible entry,
+/// successive starts replaced the log, marked the entry applied and then opened, with no
+/// sync of the directory having succeeded.)
+#[cfg(unix)]
+#[test]
+fn a_record_that_cannot_be_made_durable_is_not_acted_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, config) = a_store_that_lost_its_log("record_not_durable");
+    let (_, token) = refusal(&config);
+    let original = std::fs::metadata(&dir).expect("metadata").permissions();
+    // Write and search, no read: files in the directory can be created, renamed and read,
+    // and the directory itself cannot be opened to be synced.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).expect("chmod");
+    let opened: Vec<bool> = (0..5)
+        .map(|_| Engine::open(make_norm(), accepting(&config, &token)).is_ok())
+        .collect();
+    std::fs::set_permissions(&dir, original).expect("restore permissions");
+
+    assert_eq!(
+        opened, [false; 5],
+        "a start acted on a record it could not make durable"
+    );
+    assert!(
+        !dir.join("wal.log").exists(),
+        "the log was replaced on the strength of a record that was not durable"
+    );
+    drop(Engine::open(make_norm(), accepting(&config, &token)).expect("with the directory back"));
+    let recorded = accepted_log_losses(&dir).expect("the record");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(recorded[0].applied);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A start that accepted the loss, replaced the log and then stopped has left a pending
 /// entry beside a log. The next start is given no token, finds a log and opens, and the
 /// record says the loss was carried out: it is not forgotten because the start that made it
@@ -307,6 +343,10 @@ fn a_record_that_is_not_whole_is_not_read_as_a_shorter_history() {
             Ok(_) => panic!("{what}: opened over a record that is not whole"),
         };
         assert!(reason.contains("cannot be read"), "{what}: {reason}");
+        assert!(
+            reason.contains("a token that was spent would be good once more"),
+            "{what}: the refusal does not say what moving the record aside does: {reason}"
+        );
         assert!(accepted_log_losses(&dir).is_err(), "{what}");
 
         // The log is lost again, under the same manifest. The spent token accepts nothing.

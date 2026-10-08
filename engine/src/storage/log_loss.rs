@@ -88,8 +88,11 @@ fn unreadable(path: &Path, why: &str) -> io::Error {
         io::ErrorKind::InvalidData,
         format!(
             "the record of accepted log losses, {}, cannot be read ({why}). It is evidence \
-             of data loss and is not ignored: restore it, or move it aside if the losses it \
-             recorded are known.",
+             of data loss and is not ignored: restore it from a copy (a backup carries it). \
+             If there is none and the file has to be moved aside, first take every \
+             accept_lost_log / --accept-lost-log out of the start-up settings: without the \
+             record the count of accepted losses starts again, and a token that was spent \
+             would be good once more.",
             path.display()
         ),
     )
@@ -139,6 +142,25 @@ fn write(dir: &Path, losses: &[AcceptedLogLoss]) -> io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
 }
 
+/// The record as a start may act on it: read, checked for being whole, and, when there is
+/// one, made durable again before anything is decided from it.
+///
+/// A write of the record can fail after its rename and before the directory is synced. The
+/// open that made it fails, but the next one reads what that write left, and would be acting
+/// on a record that a power failure could still take back: a pending entry that lets the
+/// log be replaced, or a count that makes a token good for one loss only. So every path
+/// that decides from the record goes through here, and a record that cannot be made
+/// durable fails the open.
+fn record_to_act_on(dir: &Path) -> io::Result<Vec<AcceptedLogLoss>> {
+    let losses = accepted_log_losses(dir)?;
+    let path = dir.join(ACCEPTED_LOG_LOSSES_FILE);
+    if path.exists() {
+        std::fs::File::open(&path)?.sync_all()?;
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(losses)
+}
+
 /// What [`accept`] decided about a log that is missing.
 pub(crate) enum Decision {
     /// The loss is recorded, durably, as pending. The caller now puts the empty log in
@@ -171,7 +193,7 @@ pub(crate) fn accept(
     commit_record: &str,
     given: Option<&str>,
 ) -> io::Result<Decision> {
-    let mut losses = accepted_log_losses(dir)?;
+    let mut losses = record_to_act_on(dir)?;
     let applied = losses.iter().filter(|loss| loss.applied).count();
     let token = token(log, commit_record, applied);
     if given != Some(token.as_str()) {
@@ -203,7 +225,7 @@ pub(crate) fn accept(
 /// replaced is completed by the next start, with or without the token. Does nothing, and
 /// writes nothing, for a store that has no pending entry.
 pub(crate) fn settle(dir: &Path, log: &str) -> io::Result<()> {
-    let mut losses = accepted_log_losses(dir)?;
+    let mut losses = record_to_act_on(dir)?;
     let mut changed = false;
     for loss in losses
         .iter_mut()
