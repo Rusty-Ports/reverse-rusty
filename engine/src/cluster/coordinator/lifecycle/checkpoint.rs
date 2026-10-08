@@ -144,11 +144,18 @@ impl ClusterEngine {
         //    orphan files that are ignored on open).
         self.epoch.store(new_epoch, Ordering::Relaxed);
         if let Err(e) = self.log.checkpoint(up_to) {
+            // The manifest is committed and the log's content is whole. What differs is
+            // whether this process can still add to the log.
+            let detail = if self.log.appends_disabled() {
+                "cluster log truncation after checkpoint failed at its rename: the log \
+                 refuses appends, so writes fail until a restart (nothing is lost; the tail \
+                 is replayed on the next open)"
+            } else {
+                "cluster log truncation after checkpoint failed (benign: replayed on next open)"
+            };
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::WalReset,
-                detail: "cluster log truncation after checkpoint failed (benign: \
-                         replayed on next open)"
-                    .into(),
+                detail: detail.into(),
                 error: e.to_string(),
             });
         }

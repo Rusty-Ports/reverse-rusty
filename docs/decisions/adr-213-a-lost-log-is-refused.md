@@ -73,9 +73,14 @@ write.
    log's checkpoint disabled its append handle and then wrote the replacement, so a
    checkpoint that could not write it left a log that refused every later write until a
    restart, and reported the failure as harmless. The handle is now disabled at the rename
-   and not before, which is the rule ADR-198 gave the write-ahead log. It matters here
-   because `build` and an epoch-0 reopen now end with a checkpoint: without this they could
-   return a cluster that takes no writes.
+   and not before, which is the rule ADR-198 gave the write-ahead log. A checkpoint that
+   fails at or after the rename still leaves the handle disabled, and has to: it may address
+   a file that is no longer the log. So a log can now be asked whether it refuses appends
+   (`ClusterLog::appends_disabled`). `build` and an epoch-0 reopen end with a checkpoint, ask,
+   and fail if it does: a start does not hand out a cluster that takes no writes. What it
+   leaves is a committed manifest and a whole log, and the next start opens it. For a
+   running cluster the event that reports the failed rewrite now says that writes will fail
+   until a restart, where it said the failure was harmless.
 
 ## What changes for a deployment
 
@@ -165,8 +170,10 @@ write.
   that open, and refuses a lost log from then on; a log cut short under a manifest at epoch
   1 or 2 is refused; a build that cannot create its log fails with an epoch-0 manifest, and
   the next start finishes it and holds the same rows as a build that was never disturbed; a
-  build whose final checkpoint cannot rewrite the log still returns a cluster that takes
-  writes; a refused open, for a log that is gone and for one cut short, leaves every shard's translog
+  build whose final checkpoint cannot build the log's replacement still returns a cluster
+  that takes writes, and one whose checkpoint fails at the rename does not return a cluster
+  at all, at build and at an epoch-0 reopen, and the next start opens and takes writes; a
+  refused open, for a log that is gone and for one cut short, leaves every shard's translog
   byte for byte as it was.
 - `cluster/shard/tests/recovery.rs`: the same for a restarting shard and its translog.
 - `cluster/translog.rs`: a translog reset that cannot finish leaves the old translog as it
@@ -175,7 +182,9 @@ write.
   or a snapshot and no log is refused, and no log is created; a node with no state starts.
 - `cluster/clog/tests`: `open` with `IfMissing::Refuse` refuses a missing file and creates
   nothing; with `IfMissing::Create` it creates one. A checkpoint that cannot build its
-  replacement fails, and the log still takes writes and holds what it held.
+  replacement fails, and the log still takes writes and holds what it held; one that fails
+  at its rename leaves a log that says it refuses appends, and that takes them again once
+  reopened.
 - `storage/backup/tests.rs`: a store without its log is not backed up, with a refusal that
   names the source's own log, and a backup directory without its log does not verify; a
   cluster at epoch 0 is copied as before.

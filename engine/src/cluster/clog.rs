@@ -143,6 +143,14 @@ pub(crate) trait ClusterLog: Send + Sync {
     /// document, so this byte-log stays a pure ordered store.
     fn checkpoint(&self, up_to: LogPos) -> Result<(), ShardError>;
 
+    /// Whether this log refuses appends until it is reopened. A checkpoint that fails at or
+    /// after its rename leaves it so: the handle it had no longer addresses the log. The
+    /// log's content is whole either way; what is lost is the ability to add to it in this
+    /// process. False for a log that persists nothing.
+    fn appends_disabled(&self) -> bool {
+        false
+    }
+
     /// Whether each append is fsynced before it returns, so an acknowledged write survives a
     /// power loss and not only a process crash. False for a log that persists nothing.
     /// Read by the shard node's metrics, which exist only in the distributed build.
@@ -222,6 +230,17 @@ pub(crate) struct FileClusterLog {
     /// false, appends only reach the OS page cache (survives process crash). Mirrors
     /// the engine WAL's `fsync_each_write` policy.
     fsync_each_write: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the next checkpoint made on this thread of a log with this file name fails
+    /// at its rename, which is the point from which the log's append handle is disabled.
+    /// Nothing portable makes one rename in a directory fail and leaves the others working.
+    /// It names the file because a shard's translog is the same type, and a cluster
+    /// checkpoint trims those first.
+    pub(crate) static FAIL_NEXT_CHECKPOINT_PUBLISH_OF: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// What [`FileClusterLog::open`] does when no file is at the log's path.
@@ -496,6 +515,10 @@ impl ClusterLog for FileClusterLog {
         self.fsync_each_write
     }
 
+    fn appends_disabled(&self) -> bool {
+        self.lock().file.is_disabled()
+    }
+
     fn checkpoint(&self, up_to: LogPos) -> Result<(), ShardError> {
         let mut st = self.lock();
         // Rewrite the file keeping only records strictly after `up_to` (those not yet
@@ -530,6 +553,18 @@ impl ClusterLog for FileClusterLog {
         // instead of being acknowledged into a file no restart will read.
         st.file.disable();
         let publish = (|| -> io::Result<()> {
+            #[cfg(test)]
+            if FAIL_NEXT_CHECKPOINT_PUBLISH_OF.with(|named| {
+                let mut named = named.borrow_mut();
+                let this_log = st.path.file_name().and_then(|name| name.to_str());
+                let hit = named.as_deref().is_some() && named.as_deref() == this_log;
+                if hit {
+                    *named = None;
+                }
+                hit
+            }) {
+                return Err(io::Error::other("test: the rename is refused"));
+            }
             std::fs::rename(&tmp, &st.path)?;
             if let Some(parent) = st.path.parent() {
                 std::fs::File::open(parent)?.sync_all()?;

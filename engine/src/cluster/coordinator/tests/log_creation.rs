@@ -383,3 +383,73 @@ fn a_built_cluster_takes_writes_when_its_first_checkpoint_could_not_rewrite_the_
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A start does not hand out a cluster that takes no writes. If the checkpoint that finishes
+/// the build fails at the log's rename, the log refuses appends in this process. `build`, and
+/// a reopen that finds epoch 0, fail then; what they leave is a committed manifest and a
+/// whole log, and the next start opens it and takes writes. (Before, they returned the
+/// cluster, and every write to it failed with "log append disabled".)
+#[test]
+fn a_start_fails_when_its_checkpoint_leaves_the_log_refusing_writes() {
+    use crate::cluster::clog::FAIL_NEXT_CHECKPOINT_PUBLISH_OF;
+    let arm = || {
+        FAIL_NEXT_CHECKPOINT_PUBLISH_OF
+            .with(|named| *named.borrow_mut() = Some(CLUSTER_LOG_FILE.to_string()));
+    };
+    let armed = || FAIL_NEXT_CHECKPOINT_PUBLISH_OF.with(|named| named.borrow().is_some());
+
+    // At build.
+    let (dir, cfg) = durable("start_with_disabled_log_build");
+    arm();
+    let built = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())]);
+    assert!(
+        !armed(),
+        "precondition: the build's checkpoint reached its rename"
+    );
+    match built {
+        Err(ShardError::Log(reason)) => {
+            assert!(reason.contains("start again"), "another failure: {reason}");
+        }
+        Err(other) => panic!("another failure: {other:?}"),
+        Ok(cluster) => panic!(
+            "the build returned a cluster; a write to it: {:?}",
+            cluster.add_query(2, "mechanical keyboard").map(|_| ())
+        ),
+    }
+    assert_eq!(
+        epoch_on_disk(&dir),
+        1,
+        "the checkpoint's manifest is committed"
+    );
+    let reopened = open(&dir, &cfg, "the start after");
+    assert_eq!(matched(&reopened, "blue wireless mouse"), vec![1]);
+    reopened
+        .add_query(2, "mechanical keyboard")
+        .expect("a write after the next start");
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // At a reopen that finds epoch 0.
+    let (dir, cfg) = durable("start_with_disabled_log_reopen");
+    drop(
+        ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
+            .expect("durable cluster"),
+    );
+    as_an_older_release_built_it(&dir);
+    arm();
+    let refused = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).is_err();
+    assert!(
+        !armed(),
+        "precondition: the reopen's checkpoint reached its rename"
+    );
+    assert!(
+        refused,
+        "the reopen returned a cluster that takes no writes"
+    );
+    let reopened = open(&dir, &cfg, "the start after");
+    reopened
+        .add_query(2, "mechanical keyboard")
+        .expect("a write after the next start");
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}

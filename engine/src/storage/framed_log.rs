@@ -241,6 +241,11 @@ impl<W: Write> LogAppender<W> {
         self.failed = true;
     }
 
+    /// Whether this handle refuses appends: it was disabled, or an append on it failed.
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.failed
+    }
+
     fn healthy(&self) -> io::Result<()> {
         if self.failed {
             Err(io::Error::other(

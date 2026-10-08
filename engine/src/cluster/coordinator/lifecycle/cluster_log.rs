@@ -76,10 +76,26 @@ impl ClusterEngine {
     ///
     /// It is an ordinary checkpoint, taken through the public operation. The caller owns an
     /// engine that has not been shared yet, so nothing waits.
+    ///
+    /// A checkpoint commits its manifest and then rewrites the log, and reports a failure of
+    /// the rewrite without failing: the tail is replayed at the next open. If that failure
+    /// came at or after the rename, the log refuses appends until it is reopened. A running
+    /// cluster then fails its writes loudly; a cluster that is only now being started must
+    /// not be handed out in that state, so the start fails instead. What is on disk is a
+    /// committed manifest and a whole log, and the next start opens it.
     pub(super) fn commit_the_log_into_the_manifest(&self) -> Result<(), ShardError> {
         if self.data_dir.is_none() || self.epoch() >= ClusterManifest::FIRST_EPOCH_WITH_A_LOG {
             return Ok(());
         }
-        self.checkpoint()
+        self.checkpoint()?;
+        if self.log.appends_disabled() {
+            return Err(ShardError::Log(
+                "the checkpoint that finishes the build was committed, but the cluster log \
+                 could not be put back in place and takes no writes in this process; start \
+                 again"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 }

@@ -30,7 +30,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
   never leaves a shard's checkpoint file without a translog.
 - **A cluster-log checkpoint that cannot write its replacement leaves the log taking writes.** It
   disabled the log's append handle first, so every later write failed with `log append disabled`
-  until a restart, and the failure was reported as harmless.
+  until a restart, and the failure was reported as harmless. A checkpoint that fails at the
+  rename still stops appends, and the event now says so; a start whose checkpoint ends that way
+  fails instead of returning a cluster that takes no writes.
 - **A backup of a store whose log is gone is refused,** and a backup directory without its log
   does not verify.
 - **Behaviour change:** a data directory whose log was deleted or lost does not start. Restore it

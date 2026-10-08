@@ -310,3 +310,36 @@ fn a_checkpoint_that_cannot_build_its_replacement_leaves_the_log_taking_writes()
         .expect("append after the checkpoint");
     let _ = std::fs::remove_file(&path);
 }
+
+/// A checkpoint that fails at its rename has given up the handle it had: from the rename on
+/// that handle may address a file that is no longer the log. The log says so, refuses
+/// appends, and holds everything it held; reopened, it takes writes again.
+#[test]
+fn a_checkpoint_that_fails_at_its_rename_leaves_a_log_that_says_it_takes_no_writes() {
+    let path = scratch_path("checkpoint_rename_refused");
+    let _ = std::fs::remove_file(&path);
+    let log = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Create).expect("open");
+    log.append(&add(1, "alpha")).expect("append");
+    assert!(!ClusterLog::appends_disabled(&log));
+
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+    FAIL_NEXT_CHECKPOINT_PUBLISH_OF.with(|named| *named.borrow_mut() = Some(name));
+    assert!(ClusterLog::checkpoint(&log, LogPos(0)).is_err());
+    assert!(
+        ClusterLog::appends_disabled(&log),
+        "the log does not say that it refuses appends"
+    );
+    assert!(log.append(&add(2, "beta")).is_err(), "an append was taken");
+    drop(log);
+
+    let reopened = FileClusterLog::open(&path, true, LogPos(0), IfMissing::Refuse).expect("reopen");
+    assert!(!ClusterLog::appends_disabled(&reopened));
+    assert_eq!(
+        reopened.replay(LogPos(0)).expect("replay").entries,
+        vec![(LogPos(1), add(1, "alpha"))]
+    );
+    reopened
+        .append(&add(2, "beta"))
+        .expect("append after the reopen");
+    let _ = std::fs::remove_file(&path);
+}
