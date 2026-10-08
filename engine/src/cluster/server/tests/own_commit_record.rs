@@ -78,3 +78,30 @@ fn every_shard_state_is_built_through_the_constructor_that_tells_the_shard() {
     );
     assert!(built[0].contains("server.rs:"), "{built:?}");
 }
+
+/// A recovery tells the shard it will replace to remove nothing more from its directory, and
+/// it tells it before the first received file is written there: a received file can carry
+/// the name of a file that shard has listed for release. (The shard's side of this is tested
+/// where the shard is; here, that the recovery says it, and says it first.)
+#[test]
+fn a_recovery_tells_the_shard_it_replaces_before_it_writes_into_its_directory() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/cluster/server/service/recovery.rs"),
+    )
+    .expect("recovery.rs");
+    let handler = source
+        .find("pub(super) async fn recover_from(")
+        .expect("the RecoverFrom handler");
+    let body = &source[handler..];
+    let told = body
+        .find(".leave_the_directory_to_a_recovery();")
+        .expect("the recovery does not tell the shard it replaces");
+    let first_write = body
+        .find("drain_recovery_stream(")
+        .expect("the recovery receives its files");
+    assert!(
+        told < first_write,
+        "the recovery writes received files before it tells the shard it replaces"
+    );
+}

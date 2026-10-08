@@ -578,10 +578,24 @@ impl Engine {
     }
 
     /// Say who names this engine's segment files, which decides what it does with one it
-    /// has replaced. Said once, by whoever takes the shard in, before the shard replaces
-    /// anything.
+    /// has replaced. Said by whoever takes the shard in, before the shard replaces anything.
     pub(crate) fn set_replaced_files(&mut self, replaced_files: crate::segment::ReplacedFiles) {
         self.replaced_files = replaced_files;
+    }
+
+    /// Stop removing anything from this engine's directory, now and later, and forget what
+    /// was listed for release. A recovery is about to write received segment files into the
+    /// directory, and a received file can carry the name of a file this engine replaced: a
+    /// release would remove the new file by the old one's name (ADR-214). What this engine
+    /// had listed, and whatever it replaces from here on, stays on disk as files that no
+    /// record names.
+    #[cfg(any(test, feature = "distributed"))]
+    pub(crate) fn leave_the_directory_alone(&mut self) {
+        self.replaced_files = crate::segment::ReplacedFiles::LeftForTheOwnersSweep;
+        self.retired_segment_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     #[cfg(all(test, feature = "distributed"))]

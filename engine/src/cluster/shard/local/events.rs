@@ -69,6 +69,16 @@ impl LocalShard {
             .set_replaced_files(crate::segment::ReplacedFiles::ListedUntilReleased);
     }
 
+    /// A recovery is about to write received segment files into this shard's directory, to
+    /// replace the shard. From here on the shard removes nothing from that directory: a
+    /// received file can carry the name of a file this shard replaced and listed, and a seal
+    /// of this shard while the files arrive (it can still be asked to serve as a source)
+    /// would remove the new file by the old one's name (ADR-214).
+    #[cfg(any(test, feature = "distributed"))]
+    pub(crate) fn leave_the_directory_to_a_recovery(&self) {
+        self.lock().leave_the_directory_alone();
+    }
+
     #[cfg(all(test, feature = "distributed"))]
     pub(crate) fn owns_its_commit_record(&self) -> bool {
         self.lock().replaced_files() == crate::segment::ReplacedFiles::ListedUntilReleased

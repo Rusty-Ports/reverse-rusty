@@ -78,7 +78,14 @@ after its commit". Compaction and the rewrite did not follow it.
    - A replicated shard tells each replica it takes in that nothing names its files
      (`Shard::no_record_names_your_segment_files`), through the one constructor of a replica
      slot (`ReplicaSlot::new`). A remote replica is a shard on a node and ignores it.
-5. **Crash leftovers go the same way.** A file that was replaced, or written and never
+5. **A shard that a recovery is replacing removes nothing.** A recovery writes the segment
+   files it receives into the directory of the shard it will replace, and a received file
+   can carry the name of a file that shard has replaced and listed. That shard can still be
+   sealed while the files arrive (it may be asked to serve as a recovery source). So the
+   recovery tells it first, before it writes anything, and from then on the shard forgets
+   its list and leaves every file where it is. What it had listed stays on disk, named by
+   no record.
+6. **Crash leftovers go the same way.** A file that was replaced, or written and never
    committed, before a crash is named by no record, and the coordinator's sweep removes it
    from a primary's directory after the next checkpoint.
 
@@ -118,7 +125,8 @@ after its commit". Compaction and the rewrite did not follow it.
 - A shard that is told nothing and has no coordinator sweeping its directory keeps what it
   replaces. Today every shard is a coordinator's primary, a replica, or a node's.
 - **What this leaves:** on a shard node, files left by a crash (replaced before it, or
-  written and never committed) are not swept; they cost disk and nothing else. On the
+  written and never committed), and files a shard had listed when a recovery replaced it,
+  are not swept; they cost disk and nothing else. On the
   [roadmap](../roadmap.md#orphan-segment-files-on-a-shard-node).
 - The checkpoint contract in the clustering design ("only then permits old artifacts … to be
   reclaimed") is now what the code does.
@@ -139,18 +147,21 @@ after its commit". Compaction and the rewrite did not follow it.
   restart before); a seal that does write the checkpoint file removes the replaced file. The
   three cases side by side: named by its own checkpoint file, the replaced file is gone
   after the seal; named by a coordinator's manifest, it is still there; named by nothing, it
-  is gone.
+  is gone. A shard that has been told a recovery is replacing it is sealed after a file has
+  arrived under the name of one it had listed, and the file is untouched.
 - `cluster/server/tests/stage_ingest.rs`: a staged load that compacts leaves, on a shard
   node, only the files its checkpoint file names.
 - `cluster/server/tests/own_commit_record.rs`: a node's shard owns its commit record, for an
   in-memory and a durable node; no slot state is built outside the constructor that tells
-  the shard.
+  the shard; the recovery handler tells the shard it replaces before it receives its first
+  file.
 - Mutation checks, each after an unmutated baseline: a shard removing a replaced file at
   once whoever names it; a node's shard removing at once; a node's shard not releasing after
   its checkpoint file, and releasing before it; a node not telling its shards; a group not
   telling its replicas; a release that removes nothing; a bulk or staged load writing the
   checkpoint file without releasing; a shard removing at once by default, when opened and
-  when new.
+  when new; a shard being replaced still releasing its list; a recovery not telling the
+  shard it replaces.
 
 ## Prior art
 

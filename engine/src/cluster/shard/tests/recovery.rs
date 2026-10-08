@@ -380,3 +380,36 @@ fn who_names_a_shards_files_decides_what_it_does_with_a_replaced_one() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+/// A recovery writes received segment files into the directory of the shard it will replace,
+/// and a received file can carry the name of a file that shard has replaced and listed. The
+/// shard is told before the first file arrives, and from then on removes nothing: a seal of
+/// it while the files arrive leaves a received file alone. (Untold, the seal's release
+/// removed the received file by the old one's name, and the recovery could not attach it.)
+#[test]
+fn a_shard_being_replaced_by_a_recovery_removes_nothing_from_its_directory() {
+    let (shard, dir, _open) = a_shard_with_a_deletion_in_a_sealed_segment("recovery_target", true);
+    // A seal that rewrites the segment and cannot write its checkpoint file: the replaced
+    // file is kept, listed for release at the next checkpoint file.
+    let listed = segment_files(&dir);
+    let blocker = dir.join("shard.ckpt.tmp");
+    std::fs::create_dir_all(&blocker).expect("block the checkpoint file");
+    assert!(shard.seal_for_checkpoint().is_err());
+    std::fs::remove_dir_all(&blocker).expect("unblock");
+    assert!(listed.iter().all(|name| segment_files(&dir).contains(name)));
+
+    // The recovery begins, and a received file arrives under the listed file's name.
+    shard.leave_the_directory_to_a_recovery();
+    let received = dir.join("segments").join(&listed[0]);
+    std::fs::write(&received, b"a segment received from the recovery source").unwrap();
+
+    // The shard is still the slot's shard, and is sealed (as a source for someone else).
+    shard.seal_for_checkpoint().expect("seal");
+    assert_eq!(
+        std::fs::read(&received).ok().as_deref(),
+        Some(&b"a segment received from the recovery source"[..]),
+        "the shard being replaced removed a file the recovery had received"
+    );
+    drop(shard);
+    let _ = std::fs::remove_dir_all(dir);
+}

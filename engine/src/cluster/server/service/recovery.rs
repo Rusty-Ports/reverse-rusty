@@ -187,6 +187,10 @@ pub(super) async fn recover_from(
     let seg_dir = dir.join("segments");
     std::fs::create_dir_all(&seg_dir)
         .map_err(|e| Status::internal(format!("creating {}: {e}", seg_dir.display())))?;
+    // The files about to arrive go into the directory of the shard they will replace, and
+    // can carry the names of files that shard has replaced and listed for release. It must
+    // remove nothing from here on (ADR-214).
+    st.shard.leave_the_directory_to_a_recovery();
     let (files, next_seg_id, up_to_seqno) = drain_recovery_stream(
         &mut stream,
         &dir,
