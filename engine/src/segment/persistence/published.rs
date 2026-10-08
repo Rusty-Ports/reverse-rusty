@@ -8,11 +8,13 @@ use super::Engine;
 pub(in crate::segment) enum ManifestOnDisk {
     /// It was recovered at open, or renamed into place and its directory synced.
     Synced,
-    /// This engine renamed it into place, and the directory has not been synced since. It is
-    /// what a restart reads; the manifest it replaced is what a power loss may bring back.
-    /// While this holds, no file is removed (either manifest may name it) and the log is
-    /// neither checkpointed nor reset (the older manifest needs it). The next commit whose
-    /// directory sync succeeds ends it.
+    /// This engine renamed it into place and the directory sync after the rename failed. It
+    /// is what a restart reads; the manifest it replaced is what a power loss may bring
+    /// back. From then on, for the life of the process: no file is removed (either manifest
+    /// may name it), nothing more is committed, the log is neither checkpointed nor reset
+    /// (the older manifest needs every record), and no write names a row by its position.
+    /// Reads go on, and so do writes that name a row by its id, which the log holds. A
+    /// restart reads the disk and starts from what is there.
     RenamedNotSynced,
 }
 

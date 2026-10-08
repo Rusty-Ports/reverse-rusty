@@ -656,8 +656,9 @@ capture; microbenchmarks alone are not sufficient.
   `sync_all` in library code; and the shard node's sequences. Durable steps not yet named:
   the write-ahead log's reset, the control store, the shard node's retirement, drop, adoption
   and recovery files, backups, and the accepted-log-loss record.
-- **Files a single-node directory no longer names.** A commit that was renamed and not synced
-  keeps the files of the manifest it replaced (ADR-222), and nothing removes them later. The
+- **Files a single-node directory no longer names.** After a commit that was renamed and not
+  synced, the files of both manifests stay (ADR-222), and nothing removes the unreferenced
+  ones later. The
   same is true of what a crash leaves behind. Sweep, at open and after a synced commit, the
   segments and sidecars that the manifest on disk does not name, as the cluster coordinator
   does for its shards.

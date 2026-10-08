@@ -64,3 +64,14 @@ pub(crate) fn sync_dir_of(entry: &Path) -> io::Result<()> {
         None => Ok(()),
     }
 }
+
+/// Sync the directory `dir` itself: the step `sync_dir`, named by the directory. For a
+/// caller that has no single entry to name.
+#[inline]
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if plan::on_step("sync_dir", dir)? {
+        return Ok(());
+    }
+    std::fs::File::open(dir)?.sync_all()
+}

@@ -94,10 +94,11 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   and retained source are part of the authoritative corpus.
 - **A manifest is in effect from its rename** ([ADR-222](../decisions/adr-222-a-renamed-manifest-is-in-effect.md)).
   Publishing a manifest is write, sync, rename, sync the directory. A failure before the rename
-  rolls the commit back and removes what it wrote. A failure after it does not: a restart
-  reads the new manifest, and a power loss may bring back the old one. Until a later commit is
-  renamed and synced, the engine serves the new state, removes no segment or sidecar, writes
-  no checkpoint marker and does not reset the WAL, and reports the node `red`.
+  rolls the commit back and removes what it wrote. A failure after it leaves a commit that a
+  restart will read and a power loss may undo. From then until the process is restarted the
+  engine removes no file, commits nothing more (so it writes no checkpoint marker and resets
+  no WAL), refuses deletes by position, and reports the node `red`; reads and writes by id go
+  on. An open syncs the data and segment directories before it reads the manifest.
 - **Two state domains on replay.** Base segments are manifest-truth: a WAL frame at or below the
   manifest's watermark does not touch them again. The memtable is WAL-truth: it is rebuilt from the
   replayed frames alone, so every frame's memtable effect is applied whatever the watermark, because

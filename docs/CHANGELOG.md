@@ -17,15 +17,15 @@ reverse chronological and describe outcomes, not the current architecture or fut
   the rename succeeded and the directory sync failed, the engine treated the commit as failed
   and deleted the new segment and source sidecar, which the manifest now on disk named. A
   restart before the next successful commit skipped the missing segment and served without
-  its queries. Now the commit is in effect: the engine keeps the new state and the files of
-  both manifests, does not checkpoint or reset the write-ahead log, and reports `red` until a
-  later commit is synced or the node restarts.
-- **A bulk load in that state answers with an error and is served.** It is not in the log, so
-  it is not acknowledged as durable; its rows are in effect now and after a restart. The
-  server now publishes its snapshot after a bulk batch whatever the outcome, so readers see
-  those rows, and see the node's health change after a batch that failed.
-- **A delete by position is refused in that state** (`Engine::tombstone`, `tombstone_in`): a
-  position is a place in one manifest's layout. A delete by id is taken.
+  its queries.
+- **After that error the engine stops committing until it is restarted.** It removes no file,
+  writes no manifest, resets no log and refuses deletes by position; it serves reads and takes
+  writes by id into its log. The node reports `red`. A restart reads the manifest on disk and
+  has every acknowledged write.
+- **An open syncs the data directory and the segment directory before it reads the
+  manifest,** and fails when it cannot.
+- **`POST /_bulk` publishes the engine's state after a batch whatever its outcome,** so a
+  health change after a failed batch reaches readers at once.
 - Found by the single-node crash matrix (ADR-221), which fails the step `sync_dir
   manifest.bin` of every commit and then stops the engine.
 

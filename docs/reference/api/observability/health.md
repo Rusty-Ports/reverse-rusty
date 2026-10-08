@@ -25,7 +25,7 @@ Standalone response:
 |---|---|
 | `green` | Single-node durability is healthy, or every cluster position answers with no queued repair and every replica in sync |
 | `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync, or a replica is outside the in-sync set so reads cannot fail over to it (ADR-195) |
-| `red` | Single-node WAL/persistence failure (including a commit whose manifest was renamed into place and whose directory could not be synced, ADR-222: the data is served and kept across a restart, and is not known to survive a power loss), or a required cluster shard/control/topology check failed |
+| `red` | Single-node WAL/persistence failure (including a commit whose manifest was renamed into place and whose directory could not be synced, ADR-222: the node serves reads and logs writes by id, commits nothing more, and needs a restart), or a required cluster shard/control/topology check failed |
 
 Cluster health uses a deliberately smaller native payload:
 
