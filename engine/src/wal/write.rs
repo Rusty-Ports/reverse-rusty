@@ -42,7 +42,7 @@ impl Wal {
                 let mut header = std::fs::OpenOptions::new().write(true).open(path)?;
                 header.seek(SeekFrom::Start(4))?;
                 header.write_all(&WAL_VERSION.to_le_bytes())?;
-                header.sync_all()?;
+                crate::fault::sync(&header, path)?;
             }
             let size_bytes = scan.valid_len as u64;
             let file = std::fs::OpenOptions::new().append(true).open(path)?;
@@ -422,7 +422,7 @@ impl Wal {
 
     /// Sync the WAL to disk.
     pub fn sync(&mut self) -> io::Result<()> {
-        self.file.sync_all()
+        self.file.sync_at(&self.path)
     }
 
     /// Current on-disk WAL size in bytes (header + framed entries).
@@ -493,9 +493,10 @@ impl Wal {
     /// Write a complete, synced, header-only log beside `path` and return where it is.
     fn write_empty_log_beside(path: &Path) -> io::Result<std::path::PathBuf> {
         let replacement = Self::replacement_path(path);
+        crate::fault::step("create", &replacement)?;
         let mut file = std::fs::File::create(&replacement)?;
         file.write_all(&Self::header(WAL_VERSION))?;
-        file.sync_all()?;
+        crate::fault::sync(&file, &replacement)?;
         Ok(replacement)
     }
 

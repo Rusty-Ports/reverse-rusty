@@ -110,9 +110,8 @@ impl Engine {
         let old_files = self.collect_mmap_paths();
         self.segments.clear();
         self.segment_generations.clear();
-        let mut fresh_mem = Segment::new();
-        fresh_mem.vocab_epoch = self.vocab_epoch;
-        self.memtable = Arc::new(fresh_mem);
+        // The memtable's rows are in the recompiled segment: this is a seal (ADR-223).
+        drop(self.take_memtable());
         let persisted = self.seal_and_push(seg);
         // `vocab_epoch` is process-local (not part of the durable segment
         // format), so an mmap opened immediately after the write starts at zero.

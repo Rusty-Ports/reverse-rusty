@@ -28,6 +28,7 @@ fn empty_manifest(files: Vec<String>) -> Manifest {
         source_file_name: SOURCES.to_string(),
         feature_model_fingerprint: None,
         vocab_data: Vec::new(),
+        wal_sealed_through: None,
     }
 }
 

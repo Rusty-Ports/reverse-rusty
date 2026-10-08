@@ -599,10 +599,10 @@ pub struct Engine {
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,
     /// The WAL watermark of the last manifest this engine committed (or recovered). A
-    /// vocabulary-only commit (ADR-184) rewrites the manifest without capturing the memtable,
-    /// so it must keep this watermark: advancing it would let recovery skip a delete whose
-    /// insert still replays from the WAL.
+    /// vocabulary-only commit (ADR-184) keeps it: it does not capture the memtable.
     committed_wal_watermark: u64,
+    /// The log sequence number through which the memtable has been sealed (ADR-223).
+    sealed_through: Option<u64>,
     manifest_on_disk: persistence::ManifestOnDisk,
     /// Whether this engine writes its own `manifest.bin`. True for a standalone
     /// engine. False for a **cluster shard** (ADR-032): the coordinator's

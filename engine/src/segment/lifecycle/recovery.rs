@@ -46,6 +46,17 @@ fn seed_next_source_generation(
 /// (no-manifest-yet) path so ADR-013's contract ("every acknowledged mutation
 /// recovers") holds on both. `watermark` is the manifest's `wal_seq_watermark`
 /// (ADR-066) — 0 on the fresh path, where nothing is baked anywhere.
+///
+/// Two positions divide the log (ADR-223). Records at or below the one the manifest sealed
+/// through are in its segments, effects and all, and are skipped whole. The records above
+/// it are what the memtable held, or acted on it, and all of them are replayed in order,
+/// so the memtable comes back row for row, positions included. Among those, a record at or
+/// below `watermark` has its effect on the SEGMENTS in the commit already (the tombstone
+/// bitmaps), so only its effect on the memtable is replayed.
+///
+/// A manifest written before ADR-223 does not say how far it sealed. For that one, an
+/// insert or an upsert at or below the watermark is skipped when a segment or the memtable
+/// already holds its row, which is the rule this replaced.
 fn replay_wal_tail(
     engine: &mut Engine,
     wal_path: &std::path::Path,
@@ -63,7 +74,11 @@ fn replay_wal_tail(
                 error: format!("{skipped_bytes} bytes"),
             });
     }
+    let sealed_through = engine.sealed_through;
     for entry in recovery.entries {
+        if sealed_through.is_some_and(|sealed| entry.seq() <= sealed) {
+            continue;
+        }
         match entry {
             WalEntry::Insert {
                 seq,
@@ -83,16 +98,15 @@ fn replay_wal_tail(
                 // (pre-v5 binaries logged before classifying) and must not
                 // resurrect.
                 //
-                // A crash after the manifest rename but before the subsequent WAL
-                // checkpoint/reset leaves the same mutation in BOTH the committed
-                // segment and the recoverable WAL prefix. Do not materialize that
-                // source generation twice: a compiler-semantics migration rejects
-                // genuinely additive same-id predicates because one source document
-                // cannot reconstruct them. The generation test is deliberately
-                // selective rather than `seq <= watermark` alone. Compaction can
-                // advance the manifest watermark while an unrelated insert remains
-                // memtable-only, and that frame still must replay.
-                let captured = seq <= watermark
+                // A manifest that says how far it sealed has already had its records
+                // skipped above, and what is left is not in any segment. One that does not
+                // say (written before ADR-223) can hold this mutation in a segment and in
+                // the log both, after a crash between the manifest rename and the log
+                // reset. Then the row is not materialized twice, and the test is by row,
+                // not by `seq <= watermark` alone, because a merge moves the watermark
+                // past an insert that only the memtable holds.
+                let captured = sealed_through.is_none()
+                    && seq <= watermark
                     && engine.has_materialized_source_generation(logical, source_generation);
                 if !captured {
                     engine.replay_insert(
@@ -120,7 +134,9 @@ fn replay_wal_tail(
                 // the watermark were appended against exactly the committed list
                 // (every segments-vec mutation commits a manifest), so they replay
                 // correctly. Memtable frames (the u32::MAX sentinel) always replay:
-                // the memtable is rebuilt purely from this WAL tail.
+                // the memtable is rebuilt purely from this WAL tail. With the records
+                // the manifest sealed through skipped, the position such a frame names
+                // is the one it named when it was written (ADR-223).
                 if seg_idx == u32::MAX || seq > watermark {
                     engine.replay_tombstone(seg_idx, local_id);
                 }
@@ -152,19 +168,26 @@ fn replay_wal_tail(
                 source_generation,
                 class_d_accepted,
             } => {
-                // ADR-067: the insert half ALWAYS replays — the new memtable copy
-                // exists only in this frame (a flush would have reset the WAL and
-                // dropped it). The segment-tombstone half follows the watermark
-                // rule (baked bitmaps below it; and a same-id bulk ingest after
-                // the frame must not be erased), while prior MEMTABLE copies are
-                // always re-tombstoned — they are WAL-truth, recreated by earlier
-                // replayed frames. See `apply_upsert`. `class_d_accepted` is the
-                // frame's marker (op 6, ADR-068): a legacy op-4 frame replays
-                // under the old reject gate, so a logged-but-rejected class-D
-                // upsert can never tombstone the acknowledged-live prior version.
-                let captured = seq <= watermark
+                // ADR-067: the segment-tombstone half follows the watermark rule
+                // (baked bitmaps below it; and a same-id bulk ingest after the
+                // frame must not be erased), while prior MEMTABLE copies are always
+                // re-tombstoned — they are WAL-truth, recreated by earlier replayed
+                // frames. See `apply_upsert`. `class_d_accepted` is the frame's
+                // marker (op 6, ADR-068): a legacy op-4 frame replays under the old
+                // reject gate, so a logged-but-rejected class-D upsert can never
+                // tombstone the acknowledged-live prior version.
+                //
+                // Under a manifest written before ADR-223, the insert half replays
+                // unless a commit already holds this frame's row, as for an insert. Its
+                // delete half replays even then (ADR-221): a merge drops a row that
+                // was replaced, so the frame that wrote the row is replayed, and only
+                // this frame takes it away again.
+                let captured = sealed_through.is_none()
+                    && seq <= watermark
                     && engine.has_materialized_source_generation(logical, source_generation);
-                if !captured {
+                if captured {
+                    engine.retire_replayed_copies(logical, source_generation);
+                } else {
                     engine.replay_upsert(
                         &text,
                         logical,
@@ -192,3 +215,7 @@ mod shared;
 
 #[cfg(test)]
 mod compiler_migration_tests;
+#[cfg(test)]
+mod replayed_upsert_tests;
+#[cfg(test)]
+mod sealed_log_tests;

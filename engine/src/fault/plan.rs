@@ -39,8 +39,8 @@ struct State {
 }
 
 struct Planned {
-    step: Step,
-    /// How many equal steps pass before the one that fails.
+    is_the_step: Box<dyn Fn(&Step) -> bool + Send>,
+    /// How many such steps pass before the one that fails.
     after: usize,
     /// Every equal step after that one fails too.
     from_then_on: bool,
@@ -84,13 +84,22 @@ impl Scope {
     /// Plan one fault: of the steps equal to `step` taken from now on, the one after `after`
     /// others fails, once. The step is not performed and its caller gets an error.
     pub fn fail(&self, step: &Step, after: usize) {
-        self.plan(step, after, false);
+        let step = step.clone();
+        self.plan(move |taken| *taken == step, after, false);
     }
 
     /// [`fail`](Self::fail), and every equal step after that one fails as well: a device
     /// that has stopped accepting the operation, not one error.
     pub fn fail_from(&self, step: &Step, after: usize) {
-        self.plan(step, after, true);
+        let step = step.clone();
+        self.plan(move |taken| *taken == step, after, true);
+    }
+
+    /// [`fail`](Self::fail) for steps picked by a rule and not by equality: an operation
+    /// that writes under a name it makes up each time (a backup's staging directory) takes
+    /// the same steps twice under two different paths.
+    pub fn fail_where(&self, is_the_step: impl Fn(&Step) -> bool + Send + 'static, after: usize) {
+        self.plan(is_the_step, after, false);
     }
 
     /// Plan no fault. Steps are still recorded.
@@ -98,10 +107,15 @@ impl Scope {
         locked(&self.0.state).planned = None;
     }
 
-    fn plan(&self, step: &Step, after: usize, from_then_on: bool) {
+    fn plan(
+        &self,
+        is_the_step: impl Fn(&Step) -> bool + Send + 'static,
+        after: usize,
+        from_then_on: bool,
+    ) {
         let mut state = locked(&self.0.state);
         state.planned = Some(Planned {
-            step: step.clone(),
+            is_the_step: Box::new(is_the_step),
             after,
             from_then_on,
         });
@@ -143,7 +157,7 @@ pub(super) fn on_step(name: &'static str, path: &Path) -> io::Result<bool> {
         let mut state = locked(&scope.state);
         state.taken.push(step.clone());
         let fails = match &mut state.planned {
-            Some(planned) if planned.step == step => {
+            Some(planned) if (planned.is_the_step)(&step) => {
                 if planned.after == 0 {
                     true
                 } else {

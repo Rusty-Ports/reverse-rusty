@@ -15,6 +15,10 @@ use std::io;
 use std::path::Path;
 
 #[cfg(test)]
+mod engine_matrix;
+#[cfg(test)]
+pub(crate) mod model;
+#[cfg(test)]
 mod plan;
 #[cfg(test)]
 pub(crate) use plan::{Scope, Step};
@@ -63,4 +67,15 @@ pub(crate) fn sync_dir_of(entry: &Path) -> io::Result<()> {
         Some(directory) => std::fs::File::open(directory)?.sync_all(),
         None => Ok(()),
     }
+}
+
+/// Sync the directory `dir` itself: the step `sync_dir`, named by the directory. For a
+/// caller that made several entries durable at once and has no single one to name.
+#[inline]
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if plan::on_step("sync_dir", dir)? {
+        return Ok(());
+    }
+    std::fs::File::open(dir)?.sync_all()
 }

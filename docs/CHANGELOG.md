@@ -9,6 +9,38 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — The commit records how far the log is sealed
+
+- **A delete by memtable position names the same row after a restart**
+  ([ADR-223](decisions/adr-223-the-commit-records-how-far-the-log-is-sealed.md)). After a
+  flush that could not write its segment and the merge that followed, recovery replayed the
+  records of rows the merge had dropped ahead of the rows written since. A delete by
+  position (`Engine::tombstone`, a library call) written after the merge then deleted a live
+  query at replay and left the deleted one alive.
+- **A single-node manifest records the log position through which the memtable is sealed
+  into its segments** (manifest v9). Recovery skips every record at or below it and rebuilds
+  the memtable from the rest in order. Only a seal moves the position; a merge or a bulk
+  load commits without one. Before, recovery decided row by row what a commit had captured.
+- **An older binary refuses a directory this one has flushed** ("unsupported manifest
+  version 9"). A directory written by an older binary opens as before and gains the position
+  at its first flush.
+- A deleted query's source text no longer comes back in a directory of the earlier layout
+  (found in review of the fix below).
+
+## 2026-10-08 — Every step of a single-node engine's operations is failed in turn
+
+- **A replaced query no longer comes back after a restart**
+  ([ADR-221](decisions/adr-221-every-step-of-a-durable-operation-has-a-name.md), later
+  outcome). After a flush that could not write its segment and the merge that followed it,
+  the log still held every record and the merged segment held only the rows that were live.
+  A restart replayed the insert of a row that an upsert had replaced, and skipped the upsert
+  because a segment held its row. The id then matched under both query bodies. A skipped
+  upsert now still takes away the copies that the replay recreated.
+- **The crash matrix covers a single-node engine:** an insert, an upsert, a delete, a bulk
+  load, a flush with the merge it starts, a merge and a backup, 99 steps, each failed three
+  ways. A manifest that was renamed and not synced is opened as it is and with the manifest
+  it replaced put back. The steps of the write-ahead log and of a backup have names.
+
 ## 2026-10-08 — Read-only after a manifest that was renamed and not synced
 
 - **A commit whose directory sync fails after its manifest rename no longer loses data on the

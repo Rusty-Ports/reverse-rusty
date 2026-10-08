@@ -444,6 +444,7 @@ impl Engine {
                 source_file_name: source_file_name.to_string(),
                 feature_model_fingerprint: Some(self.norm.fingerprint()),
                 vocab_data,
+                wal_sealed_through: self.sealed_through,
             };
             let dir = dir.clone();
             match crate::storage::write_manifest_reporting(&manifest, &dir.join("manifest.bin")) {
@@ -631,6 +632,7 @@ mod feature_model;
 mod published;
 pub(in crate::segment) use published::ManifestOnDisk;
 mod seal;
+mod sealed;
 mod sources;
 
 #[cfg(test)]

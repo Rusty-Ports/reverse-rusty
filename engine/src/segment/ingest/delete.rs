@@ -185,6 +185,56 @@ impl Engine {
         Ok(self.apply_delete_by_logical(logical_id, true))
     }
 
+    /// The delete half of an upsert whose new row a commit already holds, at replay: take
+    /// away the live memtable copies of `logical_id` that earlier frames of this replay
+    /// recreated, and keep the row of generation `kept` if the memtable is what holds it.
+    ///
+    /// A commit that merged the segment the upsert was flushed into dropped the rows the
+    /// upsert had replaced. The frames that wrote those rows are then no longer held by any
+    /// segment, so replay brings them back, and this is what takes them away again.
+    ///
+    /// The source text goes with the last live copy. While the upsert's own row is live the
+    /// store keeps its text, because it never lets an older generation replace a newer one.
+    /// When that row has been deleted since, the store held nothing for the id, the replayed
+    /// frame put its old text there, and no later frame will find a row to delete with it.
+    ///
+    /// Only a manifest that does not say how far it sealed is recovered this way (ADR-223).
+    pub(in crate::segment) fn retire_replayed_copies(
+        &mut self,
+        logical_id: u64,
+        kept: Option<u64>,
+    ) -> usize {
+        let replaced: Vec<u32> = self
+            .memtable
+            .locals_for_logical(logical_id)
+            .iter()
+            .copied()
+            .filter(|&local| {
+                self.memtable
+                    .alive
+                    .get(local as usize)
+                    .copied()
+                    .unwrap_or(false)
+                    && Some(self.memtable.source_generation_of(local)) != kept
+            })
+            .collect();
+        for &local in &replaced {
+            Arc::make_mut(&mut self.memtable).tombstone(local);
+        }
+        if !replaced.is_empty() {
+            let live_in_memtable = self
+                .memtable
+                .locals_for_logical(logical_id)
+                .iter()
+                .any(|&local| self.memtable.alive.get(local as usize) == Some(&true));
+            if !live_in_memtable && !self.has_live_segment_copy(logical_id) {
+                self.query_store.remove(logical_id);
+            }
+            self.refresh_phrase_capability();
+        }
+        replaced.len()
+    }
+
     /// The shared apply funnel behind [`delete_by_logical_id`](Self::delete_by_logical_id)
     /// and its WAL replay: tombstone every live copy of `logical_id` in the base
     /// segments and the memtable, then drop the source text. No WAL involvement —

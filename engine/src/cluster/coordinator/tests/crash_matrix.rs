@@ -11,113 +11,38 @@
 //! a step added to an operation is in the list the next time the test runs.
 
 use super::*;
+use crate::fault::model::{Acknowledged, TEXTS};
 use crate::fault::{Scope, Step};
 use std::collections::{BTreeMap, BTreeSet};
 
 const SHARDS: usize = 3;
 
-/// Every text a query is given here. A query is plain words, so a title holds it when it has
-/// all of its words.
-const TEXTS: [&str; 7] = [
-    "package adapter",
-    "vintage lamp",
-    "brass compass",
-    "package charger",
-    "copper kettle",
-    "brass sextant",
-    "silver spoon",
-];
+/// The model's writes, made on a cluster.
+struct Writes<'a>(&'a ClusterEngine);
 
-fn holds(title: &str, query: &str) -> bool {
-    query
-        .split_whitespace()
-        .all(|word| title.split_whitespace().any(|have| have == word))
+impl Writes<'_> {
+    fn add(&self, acked: &mut Acknowledged, id: u64, text: &str) -> Result<(), ShardError> {
+        let outcome = self.0.add_query(id, text).map(|_| ());
+        acked.note(id, &outcome, Some(text));
+        outcome
+    }
+
+    fn upsert(&self, acked: &mut Acknowledged, id: u64, text: &str) -> Result<(), ShardError> {
+        let outcome = self.0.upsert_query(id, text, 9).map(|_| ());
+        acked.note(id, &outcome, Some(text));
+        outcome
+    }
+
+    fn remove(&self, acked: &mut Acknowledged, id: u64) -> Result<(), ShardError> {
+        let outcome = self.0.remove_query(id).map(|_| ());
+        acked.note(id, &outcome, None);
+        outcome
+    }
 }
 
-/// What a cluster may hold for each id. A state is the text the id matches, or `None` for no
-/// row. After an acknowledged write there is one state. After a write that failed there are
-/// two or more: the state before it and the state it asked for, because a failed write may
-/// or may not have been applied. Losing the row is not among them unless a remove was tried.
-#[derive(Clone, Default)]
-struct Acknowledged(BTreeMap<u64, Vec<Option<String>>>);
-
-impl Acknowledged {
-    fn of(corpus: &[(u64, String)]) -> Self {
-        Self(
-            corpus
-                .iter()
-                .map(|(id, text)| (*id, vec![Some(text.clone())]))
-                .collect(),
-        )
-    }
-
-    fn note<T>(&mut self, id: u64, outcome: &Result<T, ShardError>, asked: Option<&str>) {
-        let asked = asked.map(str::to_string);
-        let allowed = self.0.entry(id).or_insert_with(|| vec![None]);
-        if outcome.is_ok() {
-            *allowed = vec![asked];
-        } else if !allowed.contains(&asked) {
-            allowed.push(asked);
-        }
-    }
-
-    fn add(&mut self, cluster: &ClusterEngine, id: u64, text: &str) -> Result<(), ShardError> {
-        let outcome = cluster.add_query(id, text).map(|_| ());
-        self.note(id, &outcome, Some(text));
-        outcome
-    }
-
-    fn upsert(&mut self, cluster: &ClusterEngine, id: u64, text: &str) -> Result<(), ShardError> {
-        let outcome = cluster.upsert_query(id, text, 9).map(|_| ());
-        self.note(id, &outcome, Some(text));
-        outcome
-    }
-
-    fn remove(&mut self, cluster: &ClusterEngine, id: u64) -> Result<(), ShardError> {
-        let outcome = cluster.remove_query(id).map(|_| ());
-        self.note(id, &outcome, None);
-        outcome
-    }
-
-    /// `cluster` holds, for every id, one of the states allowed for it. Returns those states,
-    /// one for each id: what the cluster holds, and so what it must go on holding.
-    fn settle(&self, cluster: &ClusterEngine) -> Result<Self, String> {
-        let mut matched = Vec::new();
-        for title in TEXTS {
-            let ids: BTreeSet<u64> = cluster
-                .percolate(title)
-                .map_err(|e| format!("percolate {title:?}: {e}"))?
-                .into_iter()
-                .collect();
-            matched.push(ids);
-        }
-        let mut held = BTreeMap::new();
-        for (id, allowed) in &self.0 {
-            let answers = |state: &Option<String>| {
-                TEXTS.iter().zip(&matched).all(|(title, ids)| {
-                    ids.contains(id) == state.as_deref().is_some_and(|query| holds(title, query))
-                })
-            };
-            let Some(state) = allowed.iter().find(|state| answers(state)) else {
-                let titles: Vec<&str> = TEXTS
-                    .iter()
-                    .zip(&matched)
-                    .filter(|(_, ids)| ids.contains(id))
-                    .map(|(title, _)| *title)
-                    .collect();
-                return Err(format!(
-                    "id {id} matches the titles {titles:?}, which is none of its allowed \
-                     states {allowed:?}"
-                ));
-            };
-            held.insert(*id, vec![state.clone()]);
-        }
-        Ok(Self(held))
-    }
-
-    fn check(&self, cluster: &ClusterEngine) -> Result<(), String> {
-        self.settle(cluster).map(|_| ())
-    }
+/// `cluster` holds one of the states the model allows for every id; returns those states.
+fn settle(acked: &Acknowledged, cluster: &ClusterEngine) -> Result<Acknowledged, String> {
+    acked.settle(|title| cluster.percolate(title).map_err(|e| e.to_string()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,9 +69,9 @@ impl Op {
 
     fn run(self, cluster: &ClusterEngine, acked: &mut Acknowledged) -> Result<(), ShardError> {
         match self {
-            Op::Add => acked.add(cluster, 4, "copper kettle"),
-            Op::Upsert => acked.upsert(cluster, 3, "brass sextant"),
-            Op::Remove => acked.remove(cluster, 1),
+            Op::Add => Writes(cluster).add(acked, 4, "copper kettle"),
+            Op::Upsert => Writes(cluster).upsert(acked, 3, "brass sextant"),
+            Op::Remove => Writes(cluster).remove(acked, 1),
             Op::Checkpoint => cluster.checkpoint(),
             Op::Grow => cluster.resize(SHARDS + 2).map(|_| ()),
             Op::Shrink => cluster.resize(SHARDS - 1).map(|_| ()),
@@ -185,11 +110,14 @@ fn seeded(dir: &std::path::Path) -> (ClusterEngine, Acknowledged) {
     let corpus = [(1, TEXTS[0].to_string()), (2, TEXTS[1].to_string())];
     let cluster = ClusterEngine::build(vocab(), &config(dir), &corpus).expect("seed build");
     let mut acked = Acknowledged::of(&corpus);
-    acked.add(&cluster, 3, "brass compass").expect("seed add");
-    acked
-        .upsert(&cluster, 1, "package charger")
+    let writes = Writes(&cluster);
+    writes
+        .add(&mut acked, 3, "brass compass")
+        .expect("seed add");
+    writes
+        .upsert(&mut acked, 1, "package charger")
         .expect("seed upsert");
-    acked.remove(&cluster, 2).expect("seed remove");
+    writes.remove(&mut acked, 2).expect("seed remove");
     (cluster, acked)
 }
 
@@ -213,20 +141,18 @@ fn steps_of(op: Op) -> Vec<Step> {
 fn reopens(dir: &std::path::Path, acked: &Acknowledged) -> Result<(), String> {
     let cluster = ClusterEngine::open(dir, vocab(), None).map_err(|e| format!("open: {e}"))?;
     // From here on every id has one state: the one this open found.
-    let mut acked = acked.settle(&cluster)?;
-    acked
-        .add(&cluster, 90, "silver spoon")
+    let mut acked = settle(acked, &cluster)?;
+    Writes(&cluster)
+        .add(&mut acked, 90, "silver spoon")
         .map_err(|e| format!("a write after reopening: {e}"))?;
     cluster
         .checkpoint()
         .map_err(|e| format!("a checkpoint after reopening: {e}"))?;
-    acked
-        .check(&cluster)
-        .map_err(|e| format!("after the checkpoint: {e}"))?;
+    settle(&acked, &cluster).map_err(|e| format!("after the checkpoint: {e}"))?;
     drop(cluster);
     let again = ClusterEngine::open(dir, vocab(), None).map_err(|e| format!("second open: {e}"))?;
-    acked
-        .check(&again)
+    settle(&acked, &again)
+        .map(|_| ())
         .map_err(|e| format!("after the second open: {e}"))
 }
 
@@ -249,17 +175,15 @@ fn case(op: Op, steps: &[Step], nth: usize, then: Then) -> Result<(), String> {
         Then::Crash => {}
         Then::WriteThenCrash => {
             // Each is acknowledged or refused; what was acknowledged has to survive.
-            let _ = acked.add(&cluster, 5, "copper kettle");
-            let _ = acked.upsert(&cluster, 3, "brass sextant");
-            let _ = acked.remove(&cluster, 1);
-            acked
-                .check(&cluster)
-                .map_err(|e| format!("before the crash: {e}"))?;
+            let writes = Writes(&cluster);
+            let _ = writes.add(&mut acked, 5, "copper kettle");
+            let _ = writes.upsert(&mut acked, 3, "brass sextant");
+            let _ = writes.remove(&mut acked, 1);
+            settle(&acked, &cluster).map_err(|e| format!("before the crash: {e}"))?;
         }
         Then::RetryThenCrash => {
             let _ = op.run(&cluster, &mut acked);
-            acked
-                .check(&cluster)
+            settle(&acked, &cluster)
                 .map_err(|e| format!("before the crash, after the retry: {e}"))?;
         }
     }

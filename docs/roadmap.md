@@ -645,8 +645,9 @@ capture; microbenchmarks alone are not sufficient.
   context, years, and fused vocabulary forms after teaching the independent reference emitter the same
   documented surface grammar.
 - **The crash matrix, further.** Every step of every in-process cluster operation is failed in
-  turn (ADR-221). Still to do, in this order: the single-node engine's operations (flush, both
-  merges, backup, a vocabulary rebuild); process death at a named step, with `crashwriter`
+  turn (ADR-221), and so is every step of a single-node engine's write, bulk load, flush,
+  merge and backup. Still to do, in this order: the single-node engine's vocabulary rebuild
+  and its rewrite of a segment that holds deletions; process death at a named step, with `crashwriter`
   built with the facility behind a cargo feature, which also gives the SIGKILL lane a record
   of where a kill landed;
   a coordinator killed in the middle of a checkpoint or a resize; the loss of data that was
@@ -654,8 +655,8 @@ capture; microbenchmarks alone are not sufficient.
   last sync, as LevelDB's and RocksDB's fault-injection filesystems keep them), which needs
   every write to go through one layer and a gate lane that refuses a direct `rename` or
   `sync_all` in library code; and the shard node's sequences. Durable steps not yet named:
-  the write-ahead log's reset, the control store, the shard node's retirement, drop, adoption
-  and recovery files, backups, and the accepted-log-loss record.
+  the control store, the shard node's retirement, drop, adoption and recovery files, and the
+  accepted-log-loss record.
 - **Files a single-node directory no longer names.** After a commit that was renamed and not
   synced, the files of both manifests stay (ADR-222), and nothing removes the unreferenced
   ones later. The

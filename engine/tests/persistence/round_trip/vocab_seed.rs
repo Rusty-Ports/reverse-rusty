@@ -118,12 +118,13 @@ fn an_empty_stock_store_activates_and_records_the_seed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Strip the ADR-184 suffix (fingerprint + vocabulary blob) from a v8 manifest, leaving the
-/// exact v7 document an older binary wrote.
+/// Strip the ADR-184 suffix (fingerprint + vocabulary blob) and the ADR-223 one (how far
+/// the log is sealed) from a manifest, leaving the exact v7 document an older binary wrote.
 fn downgrade_manifest_to_v7(path: &std::path::Path) {
-    let manifest = reverse_rusty::storage::read_manifest(path).expect("read v8 manifest");
+    let manifest = reverse_rusty::storage::read_manifest(path).expect("read the manifest");
     let mut bytes = std::fs::read(path).expect("read manifest bytes");
-    let suffix = 8 + 4 + manifest.vocab_data.len();
+    let sealed = manifest.wal_sealed_through.map_or(0, |_| 8);
+    let suffix = 8 + 4 + manifest.vocab_data.len() + sealed;
     let content = bytes.len() - 4 - suffix;
     bytes.truncate(content);
     bytes[4..8].copy_from_slice(&7u32.to_le_bytes());
