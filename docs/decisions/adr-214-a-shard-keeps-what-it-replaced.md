@@ -44,31 +44,43 @@ after its commit". Compaction and the rewrite did not follow it.
 
 ## Decision
 
-1. **The writer of a new file never unlinks the old one.** An engine that owns no manifest
-   keeps the files it has replaced and lists them (`Engine::retired_segment_files`). This is
-   one function, `cleanup_segment_files`, and compaction, the rewrite and the vocabulary
-   recompile all retire through it. An engine that owns its manifest is unchanged: it removes
-   them after its own commit.
-2. **The owner releases them once its commit is durable.**
-   - *In-process cluster.* After the coordinator has committed its manifest, it tells every
-     shard to release (`Shard::release_retired_segment_files`), every replica included, in
-     sync or not: a replica's files are in no manifest, and no sweep looks at its directory.
-   - *Shard node.* A shard releases by itself, right after it has written a checkpoint file
-     that no longer names the files. Every write of that file by a running shard goes through
+1. **Who names a shard's files decides what it does with one it has replaced.** There are
+   three cases (`ReplacedFiles`), and one function tells them apart: `cleanup_segment_files`,
+   through which compaction, the rewrite and the vocabulary recompile all retire a file.
+   - *A coordinator's manifest names them* (a primary of an in-process cluster). The shard
+     leaves the file where it is. It never unlinks it.
+   - *The shard's own checkpoint file names them* (a shard on a shard node). The shard keeps
+     the file and lists it.
+   - *Nothing names them* (a replica of an in-process cluster: it is in no manifest and is
+     rebuilt from its primary on reopen). There is no record a removal could contradict, so
+     the file is removed at once, as it is by an engine that owns its manifest.
+2. **The owner of the record removes the file once its commit is durable.**
+   - *In-process cluster.* After the coordinator has committed its manifest, its orphan
+     sweep removes whatever that manifest does not name from each primary's directory. It
+     did that already, for crash leftovers; now it is also how a replaced file goes. The
+     sweep works from the directory and the committed record, so it does not depend on a
+     shard object surviving until the checkpoint (a rebuild replaces them).
+   - *Shard node.* A shard releases what it listed right after it has written a checkpoint
+     file that no longer names it. Every write of that file by a running shard goes through
      one function (`LocalShard::write_checkpoint_file`): a seal, a recovery's commit, and a
-     bulk or staged load, which commits by that file and is not followed by a seal.
-3. **A failed commit releases nothing.** That includes a commit whose outcome is not known
+     bulk or staged load, which commits by that file and is not followed by a seal. A node
+     lists instead of sweeping because a recovery writes received files into the shard's
+     directory before the shard that will hold them exists.
+3. **A failed commit removes nothing.** That includes a commit whose outcome is not known
    (the manifest's rename happened and the directory sync after it failed): the files stay,
    and whichever manifest is on disk can be opened.
-4. **A shard is told which case it is.** A shard cannot tell from its files whether its own
-   checkpoint file is its commit record: a shard of an in-process cluster writes one too, and
-   nothing reopens from it. So a shard node tells each shard it takes into a slot
-   (`LocalShard::own_the_commit_record`), through the one constructor of a slot's state
-   (`ServerState::new`), which a source test keeps the only one. The default is "does not
-   own": the worst a wrong default does is keep files longer.
-5. **Crash leftovers are the sweep's.** A file that was replaced, or written and never
-   committed, before a crash is named by no record. The coordinator's orphan sweep, which
-   already follows every checkpoint, removes those in the primaries' directories.
+4. **A shard is told which case it is.** It cannot tell from its files: a shard of an
+   in-process cluster writes a checkpoint file too, and nothing reopens from it. The default
+   is the first case, where the worst a mistake does is keep files.
+   - A shard node tells each shard it takes into a slot that its checkpoint file is its
+     commit record (`LocalShard::own_the_commit_record`), through the one constructor of a
+     slot's state (`ServerState::new`), which a source test keeps the only one.
+   - A replicated shard tells each replica it takes in that nothing names its files
+     (`Shard::no_record_names_your_segment_files`), through the one constructor of a replica
+     slot (`ReplicaSlot::new`). A remote replica is a shard on a node and ignores it.
+5. **Crash leftovers go the same way.** A file that was replaced, or written and never
+   committed, before a crash is named by no record, and the coordinator's sweep removes it
+   from a primary's directory after the next checkpoint.
 
 ## What changes for a deployment
 
@@ -84,9 +96,14 @@ after its commit". Compaction and the rewrite did not follow it.
 - **Fix the two call sites** (guard each removal on "owns a manifest", as the recompile did).
   It leaves the next caller free to get it wrong, and it leaves the replaced files with nobody
   to remove them on a shard node and on a replica.
-- **Let the coordinator's orphan sweep do all of it,** with shards simply never deleting. The
-  sweep covers primaries only, and it runs only when no retired layout is still being read.
-  A replica and a shard node would keep every replaced file for ever.
+- **Keep and list on every shard, and have the coordinator tell its shards to release after
+  its commit.** This was the first form. Review found three ways for a list to go unreleased
+  (a staged load commits through a second function; a replica that is out of sync is skipped
+  by the write fan-out; a rebuild replaces the shard objects, and their lists with them,
+  before its checkpoint), and a mutation check showed the release itself was redundant for a
+  primary, whose directory the sweep already cleans. A list in memory is only as good as
+  every path that should drain it. So a primary lists nothing and is swept, a replica has
+  nothing to wait for, and only a shard node, which cannot be swept, keeps a list.
 - **Sweep a shard node's directory after each seal** for files its checkpoint file does not
   name. A recovery writes received segment files into the same directory before the shard
   that will hold them exists; a sweep would remove them. A list of what this engine itself
@@ -98,8 +115,8 @@ after its commit". Compaction and the rewrite did not follow it.
 ## Consequences
 
 - Disk use between a compaction and the next commit is higher, as above.
-- A shard that is not told it owns its commit record, and has no coordinator to release it,
-  keeps what it replaces until it is dropped. Today every shard has one or the other.
+- A shard that is told nothing and has no coordinator sweeping its directory keeps what it
+  replaces. Today every shard is a coordinator's primary, a replica, or a node's.
 - **What this leaves:** on a shard node, files left by a crash (replaced before it, or
   written and never committed) are not swept; they cost disk and nothing else. On the
   [roadmap](../roadmap.md#orphan-segment-files-on-a-shard-node).
@@ -114,24 +131,26 @@ after its commit". Compaction and the rewrite did not follow it.
   checkpoint whose manifest cannot be written leaves every named file on disk and a cluster
   that reopens; the next checkpoint goes through and each shard's directory then holds
   exactly what the manifest names. Replaced files are on disk beside their replacements
-  until the checkpoint and gone after it. In a cluster with replicas, the replicas' replaced
-  files are released with the commit.
+  until the checkpoint and gone after it. In a cluster with replicas, a replica holds no
+  replaced file at any point, while its primary keeps one until the checkpoint.
 - `cluster/shard/tests/recovery.rs`: on a shard that owns its commit record, a seal that
   rewrites a segment and then cannot write its checkpoint file leaves the file the old
   checkpoint file names, and the shard restarts with the deletion applied (it could not
-  restart before); a seal that does write the checkpoint file removes the replaced file. A
-  shard that does not own its record keeps the replaced file through its own seal, until it
-  is released. A replica that is out of sync is released with its group.
+  restart before); a seal that does write the checkpoint file removes the replaced file. The
+  three cases side by side: named by its own checkpoint file, the replaced file is gone
+  after the seal; named by a coordinator's manifest, it is still there; named by nothing, it
+  is gone.
 - `cluster/server/tests/stage_ingest.rs`: a staged load that compacts leaves, on a shard
   node, only the files its checkpoint file names.
 - `cluster/server/tests/own_commit_record.rs`: a node's shard owns its commit record, for an
   in-memory and a durable node; no slot state is built outside the constructor that tells
   the shard.
 - Mutation checks, each after an unmutated baseline: a shard removing a replaced file at
-  once; the coordinator not releasing; a shard node not releasing after its checkpoint file;
-  every shard taking its own checkpoint file for its commit record; a node not telling its
-  shards; a replica not released; only in-sync replicas released; a bulk or staged load
-  writing the checkpoint file without releasing; a release that removes nothing.
+  once whoever names it; a node's shard removing at once; a node's shard not releasing after
+  its checkpoint file, and releasing before it; a node not telling its shards; a group not
+  telling its replicas; a release that removes nothing; a bulk or staged load writing the
+  checkpoint file without releasing; a shard removing at once by default, when opened and
+  when new.
 
 ## Prior art
 

@@ -22,9 +22,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   cluster could not reopen (`attaching shard segments: No such file or directory`). A checkpoint
   whose manifest write failed after a deletion did the same, and so did a shard node killed
   between a rewrite and its checkpoint file.
-- **Now** the shard lists what it replaced, and the owner releases it once its commit is
-  durable: the coordinator after its manifest (replicas included), a shard node after its
-  checkpoint file. A failed commit releases nothing.
+- **Now** a shard does not remove a file that some record still names. A coordinator's
+  primary leaves it, and the coordinator removes what its committed manifest no longer names
+  after each checkpoint. A shard on a shard node lists it and removes it after writing a
+  checkpoint file that no longer names it. A failed commit removes nothing. A replica of an
+  in-process cluster, whose files no record names, still removes a replaced file at once.
 - **For a deployment:** between a compaction and the next checkpoint, a shard's directory holds
   the replaced files as well as their replacement. Allow disk for it. No format change.
 

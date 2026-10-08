@@ -501,8 +501,9 @@ impl Shard for LocalShard {
         }
     }
 
-    fn release_retired_segment_files(&self) {
-        self.lock().release_retired_segment_files();
+    fn no_record_names_your_segment_files(&self) {
+        self.lock()
+            .set_replaced_files(crate::segment::ReplacedFiles::RemovedAtOnce);
     }
 
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {

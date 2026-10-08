@@ -287,6 +287,7 @@ impl Engine {
             vocab_epoch: 0,
             committed_wal_watermark: manifest.wal_seq_watermark,
             owns_manifest: true,
+            replaced_files: crate::segment::ReplacedFiles::LeftForTheOwnersSweep,
             retired_segment_files: std::sync::Mutex::default(),
         };
         // The store was just read from the selected sidecar and nothing has been replayed

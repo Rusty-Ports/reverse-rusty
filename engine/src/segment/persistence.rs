@@ -554,31 +554,45 @@ impl Engine {
     }
 
     /// Retire segment files that this engine has replaced: after a compaction, after the
-    /// rewrite of a segment that holds deletions, after a vocabulary recompile.
+    /// rewrite of a segment that holds deletions, after a vocabulary recompile. Every caller
+    /// retires through here, because what may be done with such a file depends on who names
+    /// this engine's files (ADR-214).
     ///
     /// An engine that owns its manifest has just committed a manifest that no longer names
-    /// them, and removes them. An engine that owns none has committed nothing: the record
-    /// that names its files is its owner's, and it still names these until the owner's next
-    /// commit. Removing them now would leave, for as long as that takes, a committed record
-    /// that names files that are gone, and a store that cannot reopen after a crash
-    /// (ADR-214). So they are kept and listed, for the owner to release.
+    /// them, and removes them. An engine that owns none has committed nothing: see
+    /// [`ReplacedFiles`](crate::segment::ReplacedFiles).
     pub(in crate::segment) fn cleanup_segment_files(&self, paths: &[PathBuf]) {
-        if self.owns_manifest {
+        use crate::segment::ReplacedFiles;
+        if self.owns_manifest || self.replaced_files == ReplacedFiles::RemovedAtOnce {
             for p in paths {
                 self.best_effort_remove_segment(p);
             }
             return;
         }
-        self.retired_segment_files
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(paths.iter().cloned());
+        if self.replaced_files == ReplacedFiles::ListedUntilReleased {
+            self.retired_segment_files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(paths.iter().cloned());
+        }
     }
 
-    /// Remove the segment files this engine replaced and kept (ADR-214). Called by the owner
-    /// of the record that names this engine's files, once a commit that no longer names them
-    /// is durable. A segment that was written, replaced and never committed is released like
-    /// any other.
+    /// Say who names this engine's segment files, which decides what it does with one it
+    /// has replaced. Said once, by whoever takes the shard in, before the shard replaces
+    /// anything.
+    pub(crate) fn set_replaced_files(&mut self, replaced_files: crate::segment::ReplacedFiles) {
+        self.replaced_files = replaced_files;
+    }
+
+    #[cfg(all(test, feature = "distributed"))]
+    pub(crate) fn replaced_files(&self) -> crate::segment::ReplacedFiles {
+        self.replaced_files
+    }
+
+    /// Remove the segment files this engine replaced and listed (ADR-214). Called once a
+    /// checkpoint file that no longer names them has been written, and not when that write
+    /// failed. A segment that was written, replaced and never committed is released like any
+    /// other. Does nothing for an engine that lists nothing.
     pub(crate) fn release_retired_segment_files(&self) {
         let retired = std::mem::take(
             &mut *self

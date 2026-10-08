@@ -609,14 +609,37 @@ pub struct Engine {
     /// copy. Such an engine is opened via [`Engine::open_shared_segments`], not
     /// [`Engine::open`].
     owns_manifest: bool,
-    /// Segment files this engine has replaced and may not remove yet (ADR-214). An engine
-    /// that owns no manifest is not the one that commits which files are live: its owner's
-    /// record (a coordinator's manifest, a shard node's checkpoint file) still names a
-    /// replaced file until the owner's next commit. So such an engine never unlinks what it
-    /// replaced. It lists the paths here, and the owner releases them once its commit is
-    /// durable ([`Engine::release_retired_segment_files`]). Always empty for an engine that
-    /// owns its manifest, which removes a replaced file right after its own commit.
+    /// What this engine does with a segment file it has replaced, when it owns no manifest
+    /// (ADR-214). See [`ReplacedFiles`]. Not read by an engine that owns its manifest, which
+    /// removes a replaced file right after its own commit.
+    replaced_files: ReplacedFiles,
+    /// The files kept under [`ReplacedFiles::ListedUntilReleased`].
     retired_segment_files: std::sync::Mutex<Vec<std::path::PathBuf>>,
+}
+
+/// What an engine that owns no manifest does with a segment file it has replaced (ADR-214).
+///
+/// Such an engine is not the one that commits which of its files are live, so it must not
+/// unlink a file that its owner's record still names: a crash before the owner's next commit
+/// would leave a committed record that names a file that is gone, and a store that cannot
+/// reopen. Who names its files decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplacedFiles {
+    /// A coordinator's manifest names them (a primary of an in-process cluster). The file
+    /// is left where it is. After each commit the coordinator removes what its committed
+    /// manifest no longer names from the shard's directory. The default: the worst a wrong
+    /// default does is keep files.
+    LeftForTheOwnersSweep,
+    /// The shard's own checkpoint file names them (a shard on a shard node). The file is
+    /// kept and listed, and released when the shard has written a checkpoint file that no
+    /// longer names it ([`Engine::release_retired_segment_files`]). A node does not sweep its
+    /// directory: a recovery writes received files there before the shard that will hold
+    /// them exists.
+    ListedUntilReleased,
+    /// Nothing names them (a replica of an in-process cluster, which is in no manifest and
+    /// is rebuilt from its primary on reopen). There is no record a removal could
+    /// contradict, so the file is removed at once.
+    RemovedAtOnce,
 }
 
 impl std::fmt::Debug for Engine {

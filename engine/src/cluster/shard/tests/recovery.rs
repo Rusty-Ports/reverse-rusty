@@ -347,78 +347,36 @@ fn a_shard_node_restarts_after_a_kill_between_a_rewrite_and_its_checkpoint_file(
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A shard that owns its commit record removes a replaced file once its checkpoint file no
-/// longer names it. A shard of an in-process cluster does not: its coordinator's manifest may
-/// still name the file, so the file stays until the coordinator releases it.
+/// Who names a shard's files decides what it does with one it has replaced. Its own
+/// checkpoint file (a shard node): it is removed once a checkpoint file that no longer names
+/// it is written. A coordinator's manifest (the default): it is left where it is, for the
+/// coordinator to remove after its own commit. Nothing (an in-process replica): it is removed
+/// at once.
 #[test]
-fn who_owns_the_commit_record_decides_who_releases_a_replaced_file() {
-    for owns in [true, false] {
-        let (shard, dir, _open) =
-            a_shard_with_a_deletion_in_a_sealed_segment(&format!("release_owner_{owns}"), owns);
+fn who_names_a_shards_files_decides_what_it_does_with_a_replaced_one() {
+    for named_by in [
+        "its own checkpoint file",
+        "a coordinator's manifest",
+        "nothing",
+    ] {
+        let (shard, dir, _open) = a_shard_with_a_deletion_in_a_sealed_segment(
+            &format!("named_by_{}", named_by.len()),
+            named_by == "its own checkpoint file",
+        );
+        if named_by == "nothing" {
+            shard.no_record_names_your_segment_files();
+        }
         let named = segment_files(&dir);
         shard.seal_for_checkpoint().expect("seal");
         let now = segment_files(&dir);
         let old_is_there = named.iter().all(|name| now.contains(name));
         assert_eq!(
-            old_is_there, !owns,
-            "owns its record: {owns}; before {named:?}, after the seal {now:?}"
+            old_is_there,
+            named_by == "a coordinator's manifest",
+            "named by {named_by}: before {named:?}, after the seal {now:?}"
         );
-        // The owner's release.
-        shard.release_retired_segment_files();
-        let released = segment_files(&dir);
-        assert!(
-            !named.iter().any(|name| released.contains(name)),
-            "the replaced file is still there after its release: {released:?}"
-        );
-        assert_eq!(released, {
-            let mut live = shard.segment_filenames().expect("segment files");
-            live.sort();
-            live
-        });
         assert_eq!(shard.live_logical_ids().unwrap(), vec![2]);
         drop(shard);
         let _ = std::fs::remove_dir_all(dir);
     }
-}
-
-/// A replica that is out of sync still holds the files it has replaced, and it is released
-/// with its group like the others. Its files are in no manifest and no sweep looks at its
-/// directory; skipping it because it is out of sync would keep them for ever.
-#[test]
-fn an_out_of_sync_replica_is_released_with_its_group() {
-    let (primary, primary_dir, _open) =
-        a_shard_with_a_deletion_in_a_sealed_segment("release_group_primary", false);
-    let (replica, replica_dir, _open) =
-        a_shard_with_a_deletion_in_a_sealed_segment("release_group_replica", false);
-    let replaced = segment_files(&replica_dir);
-    primary.seal_for_checkpoint().expect("seal the primary");
-    replica.seal_for_checkpoint().expect("seal the replica");
-    assert!(
-        replaced
-            .iter()
-            .all(|name| segment_files(&replica_dir).contains(name)),
-        "precondition: the replica keeps what it replaced"
-    );
-    let primary = Arc::try_unwrap(primary).ok().expect("the only handle");
-    let replica = Arc::try_unwrap(replica).ok().expect("the only handle");
-    let group = crate::cluster::replica::ReplicatedShard::with_proofs(
-        Box::new(primary),
-        vec![(
-            Box::new(replica) as Box<dyn Shard>,
-            Err("not proven equal to its primary".to_string()),
-        )],
-    );
-    group.release_retired_segment_files();
-    assert!(
-        !replaced
-            .iter()
-            .any(|name| segment_files(&replica_dir).contains(name)),
-        "an out-of-sync replica kept the file it had replaced: {:?}",
-        segment_files(&replica_dir)
-    );
-    assert_eq!(segment_files(&replica_dir).len(), 1);
-    assert_eq!(segment_files(&primary_dir).len(), 1);
-    drop(group);
-    let _ = std::fs::remove_dir_all(primary_dir);
-    let _ = std::fs::remove_dir_all(replica_dir);
 }

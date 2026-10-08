@@ -24,7 +24,7 @@ impl LocalShard {
             let segment_files = eng.segment_filenames().map_err(|e| {
                 ShardError::Log(format!("collecting segment filenames for checkpoint: {e}"))
             })?;
-            self.write_checkpoint_file(
+            Self::write_checkpoint_file(
                 eng,
                 dir,
                 &translog::ShardCheckpoint {
@@ -44,39 +44,34 @@ impl LocalShard {
     /// of that file by a running shard goes through here (a seal, a recovery's commit, a bulk
     /// or staged load), because of what follows it.
     ///
-    /// If the file is the shard's commit record (a shard node), the segment files the shard
-    /// had replaced are now named by nothing, and are removed. A shard of an in-process
-    /// cluster keeps them: its coordinator's manifest may still name them, and the
-    /// coordinator releases them after its own commit (ADR-214). A write that fails releases
-    /// nothing.
+    /// On a shard node that file is the shard's commit record, and the segment files the
+    /// shard had replaced and listed are now named by nothing: they are removed. A shard of
+    /// an in-process cluster lists nothing, so nothing is removed here; what it replaced is
+    /// the coordinator's to remove after its own commit (ADR-214). A write that fails
+    /// releases nothing.
     pub(super) fn write_checkpoint_file(
-        &self,
         eng: &Engine,
         dir: &std::path::Path,
         checkpoint: &translog::ShardCheckpoint,
     ) -> Result<(), ShardError> {
         translog::write_sidecar(dir, checkpoint)?;
-        if self
-            .owns_commit_record
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            eng.release_retired_segment_files();
-        }
+        eng.release_retired_segment_files();
         Ok(())
+    }
+
+    /// Make this shard's checkpoint file its commit record (ADR-214): a shard on a shard
+    /// node, which restarts from that file. Called by the node when it takes the shard into
+    /// a slot. From then on the shard lists what it replaces and releases it after each
+    /// checkpoint file.
+    #[cfg(any(test, feature = "distributed"))]
+    pub(crate) fn own_the_commit_record(&self) {
+        self.lock()
+            .set_replaced_files(crate::segment::ReplacedFiles::ListedUntilReleased);
     }
 
     #[cfg(all(test, feature = "distributed"))]
     pub(crate) fn owns_its_commit_record(&self) -> bool {
-        self.owns_commit_record
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// Make this shard's checkpoint file its commit record (ADR-214): a shard node's shard,
-    /// which restarts from that file. Called by the node when it takes the shard into a slot.
-    #[cfg(any(test, feature = "distributed"))]
-    pub(crate) fn own_the_commit_record(&self) {
-        self.owns_commit_record
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.lock().replaced_files() == crate::segment::ReplacedFiles::ListedUntilReleased
     }
 
     /// Deliver a degraded-path event to the installed sink, if any (best-effort: dropped when no

@@ -436,18 +436,6 @@ impl Shard for ReplicatedShard {
         self.primary.seal_for_checkpoint()
     }
 
-    /// The primary's replaced files are released with the manifest that stops naming them.
-    /// A replica's files are in no manifest (it is rebuilt from its primary on reopen), so
-    /// the same moment serves for them. Every replica, in sync or not: a replica that has
-    /// missed a write still holds files it replaced, and nothing else would ever remove them.
-    fn release_retired_segment_files(&self) {
-        let _g = self.lock();
-        self.primary.release_retired_segment_files();
-        for replica in self.replica_handles() {
-            replica.shard.release_retired_segment_files();
-        }
-    }
-
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
         self.primary.segment_filenames()
     }

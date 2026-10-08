@@ -418,10 +418,6 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().seal_for_checkpoint()
     }
 
-    fn release_retired_segment_files(&self) {
-        self.current.load().release_retired_segment_files();
-    }
-
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
         self.current.load().segment_filenames()
     }

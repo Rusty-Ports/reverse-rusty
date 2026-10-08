@@ -218,36 +218,49 @@ fn seg_count(dir: &std::path::Path) -> usize {
         .count()
 }
 
-/// A replica's files are in no manifest (it is rebuilt from its primary on reopen), and no
-/// sweep looks at its directory. It keeps what it replaced like any shard of an in-process
-/// cluster, and the coordinator's release after its commit is what removes it.
+/// A replica's files are in no manifest: it is rebuilt from its primary on reopen. Nothing
+/// names them, so there is no record a removal could contradict, and a replica removes a file
+/// it has replaced at once. It holds nothing to release later, so a rebuild that replaces the
+/// shard objects before the next checkpoint leaves nothing behind in a replica's directory.
+/// The primary, whose files the manifest names, keeps what it replaced until the checkpoint.
 #[test]
-fn a_replicas_replaced_files_are_released_with_the_commit() {
-    let (dir, mut cfg) = durable("released_on_replicas");
+fn a_replica_removes_what_it_replaces_at_once() {
+    let (dir, mut cfg) = durable("replica_removes_at_once");
     cfg.replication_factor = 2;
     let cluster = ClusterEngine::build(vocab(), &cfg, &corpus()).expect("replicated cluster");
     let replicas: Vec<PathBuf> = (0..cfg.num_shards)
         .map(|shard| replica_dir(&dir, shard, 1))
         .collect();
+    let primaries: Vec<PathBuf> = (0..cfg.num_shards)
+        .map(|shard| shard_dir(&dir, shard))
+        .collect();
     let built: Vec<usize> = replicas.iter().map(|replica| seg_count(replica)).collect();
     delete_most_and_write_a_little(&cluster);
     cluster.flush().expect("flush");
-    let kept: Vec<usize> = replicas.iter().map(|replica| seg_count(replica)).collect();
+
+    let on_primaries: Vec<usize> = primaries.iter().map(|primary| seg_count(primary)).collect();
+    let on_replicas: Vec<usize> = replicas.iter().map(|replica| seg_count(replica)).collect();
     assert!(
-        kept.iter().zip(&built).any(|(now, was)| now > was),
-        "precondition: a replica holds a replaced file and its replacement: {built:?} -> {kept:?}"
+        on_primaries.iter().zip(&built).any(|(now, was)| now > was),
+        "precondition: the flush compacted, and a primary keeps what it replaced: {on_primaries:?}"
     );
+    assert_eq!(
+        on_replicas, built,
+        "a replica kept a file it had replaced, for an owner that does not exist"
+    );
+
     cluster.checkpoint().expect("checkpoint");
-    let released: Vec<usize> = replicas.iter().map(|replica| seg_count(replica)).collect();
-    assert!(
-        released.iter().zip(&kept).all(|(now, was)| now <= was)
-            && released.iter().zip(&kept).any(|(now, was)| now < was),
-        "a replica's replaced files were not released with the commit: {kept:?} -> {released:?}"
-    );
     assert_eq!(
         segment_files(&dir, cfg.num_shards),
         committed_files(&dir),
         "the primaries hold exactly what the manifest names"
+    );
+    assert_eq!(
+        replicas
+            .iter()
+            .map(|replica| seg_count(replica))
+            .collect::<Vec<_>>(),
+        built
     );
     drop(cluster);
     let _ = std::fs::remove_dir_all(&dir);
