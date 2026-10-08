@@ -355,11 +355,13 @@ async fn a_bulk_load_reclaims_the_lease_a_restarted_node_no_longer_holds() {
     assert_eq!(Shard::num_queries(&state.shard).expect("count"), 5);
 }
 
-/// A staged load seals several segments and then compacts them, and commits the result by
-/// writing the shard's checkpoint file. On a shard node that file is the commit record, so
-/// the segments the compaction replaced are named by nothing once it is written, and they are
-/// removed then (ADR-214). A remote bulk load does not seal its shards afterwards, so nothing
-/// later would do it.
+/// A staged load seals several segments, compacts them with what the slot already held, and
+/// commits the result by writing the shard's checkpoint file. On a shard node that file is
+/// the commit record. The staged segments were never named by it and go as they are
+/// compacted; the segment the slot held before was named by it, so it is kept through the
+/// compaction and removed by the load's own worker once the record no longer names it
+/// (ADR-214). A remote bulk load does not seal its shards afterwards, so nothing later would
+/// do it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_staged_load_that_compacts_leaves_only_the_files_its_checkpoint_file_names() {
     let dir = std::env::temp_dir().join(format!("rr_stage_ingest_release_{}", std::process::id()));
@@ -371,11 +373,26 @@ async fn a_staged_load_that_compacts_leaves_only_the_files_its_checkpoint_file_n
         max_segments: 1,
         ..EngineConfig::default()
     };
-    let server =
-        ShardServer::new_durable(normalizer, dict, config, dir.clone()).expect("a durable node");
+    let server = ShardServer::new_durable(
+        Arc::clone(&normalizer),
+        Arc::clone(&dict),
+        config,
+        dir.clone(),
+    )
+    .expect("a durable node");
     let (client, state) = serve(server).await;
 
-    // Four messages of three rows: four staged segments, which the finish compacts into one.
+    // The slot holds a segment before the load, and its checkpoint file names it.
+    let held: Vec<_> = (100..103)
+        .map(|logical| placed(logical, &normalizer, &dict))
+        .collect();
+    assert_eq!(state.shard.ingest_local(&held).ingested, 3);
+    let held_before =
+        crate::cluster::shard::Shard::segment_filenames(&state.shard).expect("segment files");
+    assert_eq!(held_before.len(), 1, "one segment, named: {held_before:?}");
+
+    // Four messages of three rows: four staged segments, which the finish compacts with the
+    // one the slot held into one.
     let (sender, reply) = open(&client);
     for first in [0u64, 3, 6, 9] {
         sender.send(batch(0, first..first + 3)).await.expect("send");
@@ -400,8 +417,12 @@ async fn a_staged_load_that_compacts_leaves_only_the_files_its_checkpoint_file_n
             .collect();
     on_disk.sort();
     assert!(
-        named.len() == 1 && named[0].as_str() > "seg_000004.seg",
-        "precondition: four staged segments were compacted into a fifth file: {named:?}"
+        named.len() == 1 && named[0].as_str() > "seg_000005.seg",
+        "precondition: five segments were compacted into a later file: {named:?}"
+    );
+    assert!(
+        !named.contains(&held_before[0]),
+        "precondition: the segment the slot held was compacted away: {named:?}"
     );
     assert_eq!(
         on_disk, named,
