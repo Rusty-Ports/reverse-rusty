@@ -25,8 +25,9 @@ fn corpus() -> Vec<(u64, String)> {
 
 /// How many rows a cluster built from [`corpus`] in an empty directory stores (a short query
 /// is stored on every shard, so this is more than the number of queries).
-fn rows_of_a_clean_build(num_shards: usize) -> usize {
-    let (dir, cfg) = durable(&format!("clean_build_{num_shards}"), num_shards);
+/// `tag` names the caller: tests run in parallel, and each needs a directory of its own.
+fn rows_of_a_clean_build(tag: &str, num_shards: usize) -> usize {
+    let (dir, cfg) = durable(&format!("clean_build_for_{tag}"), num_shards);
     let cluster = ClusterEngine::build(vocab(), &cfg, &corpus()).expect("a clean build");
     let rows = cluster.num_queries().expect("count");
     drop(cluster);
@@ -107,7 +108,7 @@ fn a_build_that_stopped_before_its_manifest_is_built_again_from_the_start() {
         .expect("the build starts again over what the unfinished one left");
     assert_eq!(
         cluster.num_queries().expect("count"),
-        rows_of_a_clean_build(2),
+        rows_of_a_clean_build("interrupted_build", 2),
         "the corpus, once: what a build in an empty directory stores"
     );
     assert_eq!(matched(&cluster, "a wireless mouse"), vec![1]);
@@ -189,7 +190,7 @@ fn a_build_does_not_replace_a_cluster() {
     let reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).expect("reopen");
     assert_eq!(
         reopened.num_queries().expect("count"),
-        rows_of_a_clean_build(3)
+        rows_of_a_clean_build("build_over_cluster", 3)
     );
     assert_eq!(matched(&reopened, "standing desk"), Vec::<u64>::new());
     drop(reopened);
@@ -271,7 +272,7 @@ fn a_shard_directory_that_holds_no_file_is_not_shard_state() {
         .expect("empty shard directories do not stop a build");
     assert_eq!(
         cluster.num_queries().expect("count"),
-        rows_of_a_clean_build(2)
+        rows_of_a_clean_build("empty_shard_dirs", 2)
     );
     drop(cluster);
 
