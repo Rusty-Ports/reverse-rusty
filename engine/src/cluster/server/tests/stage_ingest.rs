@@ -375,8 +375,11 @@ async fn a_staged_load_that_compacts_leaves_only_the_files_its_checkpoint_file_n
         ShardServer::new_durable(normalizer, dict, config, dir.clone()).expect("a durable node");
     let (client, state) = serve(server).await;
 
+    // Four messages of three rows: four staged segments, which the finish compacts into one.
     let (sender, reply) = open(&client);
-    sender.send(batch(0, 0..12)).await.expect("send");
+    for first in [0u64, 3, 6, 9] {
+        sender.send(batch(0, first..first + 3)).await.expect("send");
+    }
     drop(sender);
     reply.await.expect("join").expect("the staged load");
 
@@ -397,8 +400,8 @@ async fn a_staged_load_that_compacts_leaves_only_the_files_its_checkpoint_file_n
             .collect();
     on_disk.sort();
     assert!(
-        named.len() < 4,
-        "precondition: twelve rows in three-row segments were compacted: {named:?}"
+        named.len() == 1 && named[0].as_str() > "seg_000004.seg",
+        "precondition: four staged segments were compacted into a fifth file: {named:?}"
     );
     assert_eq!(
         on_disk, named,
