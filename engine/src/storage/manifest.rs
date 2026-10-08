@@ -61,6 +61,13 @@ const MANIFEST_VERSION_SOURCE_COMMIT: u32 = 7;
 // would ignore the recorded model. The layout always carries the v5 θ and the v7 source
 // sidecar name. v1..=v7 read back with no recorded model (`feature_model_fingerprint: None`).
 const MANIFEST_VERSION_FEATURE_MODEL: u32 = 8;
+// v9 (ADR-223): appends `wal_sealed_through`, the log sequence number through which the
+// memtable has been sealed into the segments this manifest names. Recovery skips every
+// record at or below it and rebuilds the memtable from the rest, in order. It is also the
+// rollback fence: an older binary would decide row by row what the commit captured. A
+// manifest that does not record it (an engine that has not sealed since it opened one
+// written before v9) is written as v8.
+const MANIFEST_VERSION_SEALED_LOG: u32 = 9;
 
 /// Engine manifest — records the list of active segment files, dict state,
 /// and counters. Written atomically (tmp + rename) alongside segment files.
@@ -116,6 +123,13 @@ pub struct Manifest {
     /// `Vocab::to_json` of the vocabulary behind that normalizer, or empty when the engine was
     /// built from a bare normalizer (ADR-184). Requires a v8 manifest.
     pub vocab_data: Vec<u8>,
+    /// The log sequence number through which the memtable has been sealed into the segments
+    /// named here (ADR-223): every record at or below it is held by them, and every record
+    /// above it that the log holds is a row of the memtable or acts on one. Only a seal
+    /// advances it; a merge or a bulk load commits without one and leaves it where it was,
+    /// while `wal_seq_watermark` moves on. `Some` selects the v9 layout. `None` reads back
+    /// from a v1..=v8 manifest, whose recovery decides row by row.
+    pub wal_sealed_through: Option<u64>,
 }
 
 pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
@@ -137,12 +151,20 @@ pub(crate) fn write_manifest_reporting(manifest: &Manifest, path: &Path) -> io::
         ));
     }
     let feature_model = manifest.feature_model_fingerprint.is_some();
+    if manifest.wal_sealed_through.is_some() && !feature_model {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a manifest that records how far the log is sealed records its feature model too",
+        ));
+    }
     let tmp = path.with_extension("manifest.tmp");
     publish_with_crc_reporting(path, &tmp, |f| {
         f.write_all(&MANIFEST_MAGIC)?;
         write_u32(
             f,
-            if feature_model {
+            if manifest.wal_sealed_through.is_some() {
+                MANIFEST_VERSION_SEALED_LOG
+            } else if feature_model {
                 MANIFEST_VERSION_FEATURE_MODEL
             } else if manifest.source_file_name != "sources.dat" {
                 MANIFEST_VERSION_SOURCE_COMMIT
@@ -213,6 +235,10 @@ pub(crate) fn write_manifest_reporting(manifest: &Manifest, path: &Path) -> io::
             write_u32(f, len)?;
             f.write_all(&manifest.vocab_data)?;
         }
+        // v9 (ADR-223): how far the log is sealed into the segments named above.
+        if let Some(sealed_through) = manifest.wal_sealed_through {
+            write_u64(f, sealed_through)?;
+        }
         Ok(())
     })
 }
@@ -267,17 +293,17 @@ fn parse_manifest(data: &[u8]) -> io::Result<Manifest> {
         ));
     }
     let version = read_u32_at(data, 4)?;
-    // v1..=v7 are accepted; v2 appends `tag_dict_data` (ADR-049), v3 appends the WAL
+    // v1..=v9 are accepted; v2 appends `tag_dict_data` (ADR-049), v3 appends the WAL
     // watermark + per-segment dead-locals bitmaps (ADR-066), v4 is the class-D fence
     // (ADR-068), v5 appends the recorded θ under the hot fence (ADR-105), v6 is the
-    // source-generation rollback fence, and v7 appends the selected immutable source
-    // sidecar (ADR-121), and v8 appends the recorded feature model (ADR-184) — each absent in
-    // earlier versions.
-    if !(1..=MANIFEST_VERSION_FEATURE_MODEL).contains(&version) {
+    // source-generation rollback fence, v7 appends the selected immutable source sidecar
+    // (ADR-121), v8 appends the recorded feature model (ADR-184), and v9 appends how far the
+    // log is sealed (ADR-223) — each absent in earlier versions.
+    if !(1..=MANIFEST_VERSION_SEALED_LOG).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "unsupported manifest version {version} (expected 1..={MANIFEST_VERSION_FEATURE_MODEL})"
+                "unsupported manifest version {version} (expected 1..={MANIFEST_VERSION_SEALED_LOG})"
             ),
         ));
     }
@@ -402,6 +428,13 @@ fn parse_manifest(data: &[u8]) -> io::Result<Manifest> {
     } else {
         (None, Vec::new())
     };
+    let wal_sealed_through = if version >= MANIFEST_VERSION_SEALED_LOG {
+        let sealed_through = read_u64_at(content, cursor)?;
+        cursor += 8;
+        Some(sealed_through)
+    } else {
+        None
+    };
     if cursor != content.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -426,5 +459,6 @@ fn parse_manifest(data: &[u8]) -> io::Result<Manifest> {
         source_file_name,
         feature_model_fingerprint,
         vocab_data,
+        wal_sealed_through,
     })
 }

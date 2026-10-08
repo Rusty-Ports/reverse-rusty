@@ -100,11 +100,16 @@ add/update/remove ─► (1) append to the mode's durable tail (WAL or coordinat
   segment, sidecar or manifest is written; no file is removed. Reads go on and the node
   reports `red`. An open publishes the manifest it read again (the same bytes, a new rename,
   a new directory sync) before it loads what the manifest names.
-- **Two state domains on replay.** Base segments are manifest-truth: a WAL frame at or below the
-  manifest's watermark does not touch them again. The memtable is WAL-truth: it is rebuilt from the
-  replayed frames alone, so every frame's memtable effect is applied whatever the watermark, because
-  a compaction or bulk commit advances the watermark without sealing the memtable (ADR-066,
-  ADR-067).
+- **Two positions divide the log on replay**
+  ([ADR-223](../decisions/adr-223-the-commit-records-how-far-the-log-is-sealed.md)). The manifest
+  records how far the log is sealed into its segments, and only a seal of the memtable (a flush,
+  the seal before a first bulk load, a vocabulary rebuild) moves that position. A record at or
+  below it is skipped whole. Every record above it is replayed in order, so the memtable comes
+  back row for row and a position in it is the position it was. The manifest also records the
+  watermark, the last record appended when it was committed; a merge or a bulk load moves it
+  without sealing. A replayed record at or below the watermark does not touch the segments
+  again (their tombstone bitmaps are in the commit), and one above it does (ADR-066, ADR-067).
+  A manifest written before the position was recorded is recovered row by row, as before.
 - **Log reopen validates before append** ([ADR-182](../decisions/adr-182-validated-log-recovery.md)).
   WAL, coordinator/translog, and Raft readers reject complete CRC failures and incompatible payloads.
   Only an incomplete final write or zero padding is removable; open truncates that suffix and syncs

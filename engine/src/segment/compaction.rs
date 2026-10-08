@@ -37,12 +37,7 @@ impl Engine {
         }
         let entries = self.memtable.len();
         let flush_start = std::time::Instant::now();
-        let fresh = Arc::new({
-            let mut s = Segment::new();
-            s.vocab_epoch = self.vocab_epoch;
-            s
-        });
-        let sealed_arc = std::mem::replace(&mut self.memtable, fresh);
+        let sealed_arc = self.take_memtable().rows;
         // Take ownership of the sealed memtable. If a snapshot still references
         // it (the common case — we publish after every write), clone it out;
         // that snapshot keeps its pre-flush view, which is correct.

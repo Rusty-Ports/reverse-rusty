@@ -147,7 +147,7 @@ fn hot_segments_write_the_v5_rollback_fence() {
     // ---- an unknown FUTURE manifest version fails Engine::open outright ----
     let mpath = dir_hot.join("manifest.bin");
     let mut mbytes = std::fs::read(&mpath).expect("manifest");
-    mbytes[4..8].copy_from_slice(&9u32.to_le_bytes());
+    mbytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
     let body = mbytes.len() - 4;
     let crc = reverse_rusty::storage::crc32(&mbytes[..body]);
     mbytes[body..].copy_from_slice(&crc.to_le_bytes());

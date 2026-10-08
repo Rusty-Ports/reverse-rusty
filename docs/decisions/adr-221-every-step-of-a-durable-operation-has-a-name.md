@@ -145,13 +145,15 @@ What the first runs found:
    that had been replaced and commits with a watermark that covers the whole log, and the log
    is not reset. Replay skipped an upsert whose row a segment held, delete half included,
    after replaying the insert that the upsert had replaced (no segment holds a dropped row).
-   A captured upsert now applies its delete half to the memtable, as a delete by id already
-   did. Found when the seed wrote one id twice in the log tail: 39 flush cases failed.
-3. In the same state a delete by memtable position, a library call, names another row at
-   replay, and an acknowledged-live query is lost. Not fixed here. Replay decides row by row
-   what a commit captured; the commit should record how far the log has been sealed into
-   segments, which makes every position exact. That is a change of the manifest's format and
-   is on the roadmap.
+   Found when the seed wrote one id twice in the log tail: 39 flush cases failed. With the
+   position of ADR-223 both records are skipped. Under a manifest written before it, a
+   skipped upsert applies its delete half to the memtable, as a delete by id already did.
+3. In the same state a delete by memtable position, a library call, named another row at
+   replay, and an acknowledged-live query was lost. Replay decided row by row what a commit
+   had captured. The manifest now records how far the log is sealed into its segments
+   ([ADR-223](adr-223-the-commit-records-how-far-the-log-is-sealed.md)), which makes every
+   position exact and replaces the row-by-row test for every manifest that records it. The
+   matrix deletes by memtable position in its seed and after every failed step.
 
 ## Proven
 

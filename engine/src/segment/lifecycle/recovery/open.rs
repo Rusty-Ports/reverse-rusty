@@ -242,7 +242,13 @@ impl Engine {
         // keeps its watermark — pin the sequence past it so frames appended after
         // this reopen can never sort at/below the watermark and be skipped by the
         // NEXT recovery (which would resurrect an acknowledged delete).
-        wal_file.ensure_seq_after(manifest.wal_seq_watermark);
+        // The same holds for the position the manifest sealed through (ADR-223): a
+        // record numbered at or below it would be skipped whole.
+        wal_file.ensure_seq_after(
+            manifest
+                .wal_seq_watermark
+                .max(manifest.wal_sealed_through.unwrap_or(0)),
+        );
         let wal = Some(wal_file);
 
         // Load persisted query sources — resident, or lazily mmap'd per
@@ -329,6 +335,7 @@ impl Engine {
             selected_source_version: None,
             vocab_epoch: 0,
             committed_wal_watermark: manifest.wal_seq_watermark,
+            sealed_through: manifest.wal_sealed_through,
             manifest_on_disk: crate::segment::persistence::ManifestOnDisk::Synced,
             owns_manifest: true,
             replaced_files: crate::segment::ReplacedFiles::LeftForTheOwnersSweep,

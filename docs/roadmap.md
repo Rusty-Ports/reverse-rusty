@@ -657,14 +657,6 @@ capture; microbenchmarks alone are not sufficient.
   `sync_all` in library code; and the shard node's sequences. Durable steps not yet named:
   the control store, the shard node's retirement, drop, adoption and recovery files, and the
   accepted-log-loss record.
-- **The commit records how far the log is sealed into segments.** The manifest records one
-  log watermark, the last record appended when it was committed, and a merge or a bulk load
-  commits without sealing the memtable. Replay therefore decides row by row whether a commit
-  captured a record. After a flush that failed and a merge that committed, a delete by
-  memtable position (a library call) names another row at replay and an acknowledged query is
-  lost (found by the matrix, ADR-221). Record the sequence number through which the memtable
-  has been sealed: records at or below it are skipped whole and the rest rebuild the memtable
-  in order. RocksDB keeps the log number in its MANIFEST and only a flush advances it.
 - **Files a single-node directory no longer names.** After a commit that was renamed and not
   synced, the files of both manifests stay (ADR-222), and nothing removes the unreferenced
   ones later. The

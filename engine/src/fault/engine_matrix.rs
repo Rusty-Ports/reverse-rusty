@@ -71,6 +71,18 @@ fn delete(engine: &mut Engine, acked: &mut Acknowledged, id: u64) -> bool {
     outcome.is_ok()
 }
 
+/// Insert a row and then delete it by its position in the memtable. Replay has to apply
+/// that delete to the row it named, whatever was sealed, merged or committed in between
+/// (ADR-223). Either write may be refused; the model keeps what each one said.
+fn insert_and_delete_by_position(engine: &mut Engine, acked: &mut Acknowledged, id: u64) {
+    let inserted = engine.try_insert_live("vintage lamp", id, 1);
+    acked.note(id, &inserted, Some("vintage lamp"));
+    if let Ok(crate::segment::InsertOutcome::Inserted(stored)) = inserted {
+        let deleted = engine.tombstone(stored.local);
+        acked.note(id, &deleted, None);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
     Insert,
@@ -143,6 +155,7 @@ fn seeded(root: &Path) -> (Engine, Acknowledged) {
     // And one that only the log holds: a commit that does not seal the memtable (a merge, a
     // bulk load) moves the watermark past this record, and replay still owes it.
     assert!(insert(&mut engine, &mut acked, 10, "copper kettle"));
+    insert_and_delete_by_position(&mut engine, &mut acked, 11);
     (engine, acked)
 }
 
@@ -309,6 +322,9 @@ fn case(op: Op, steps: &[Step], nth: usize, then: Then) -> Result<(), String> {
             if op == Op::BulkLoad && !succeeded {
                 insert(&mut engine, &mut acked, 6, "brass compass");
             }
+            // A position in the memtable as it is now: after a flush that failed and the
+            // merge that followed, the log still holds the records of rows that are gone.
+            insert_and_delete_by_position(&mut engine, &mut acked, 12);
             settle(&acked, &engine).map_err(|e| format!("before the crash: {e}"))?;
         }
         Then::RetryThenCrash => {

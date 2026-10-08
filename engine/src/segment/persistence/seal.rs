@@ -1,6 +1,6 @@
 //! Sealing the memtable before the top-64 mask is assigned for the first time (ADR-188).
 
-use super::{fresh_segment_generation, Engine, Segment};
+use super::{fresh_segment_generation, Engine};
 use std::sync::Arc;
 
 impl Engine {
@@ -48,12 +48,7 @@ impl Engine {
         let entries = sealed.len();
         let (base, path) = self.build_durable_base(sealed)?;
 
-        let fresh = Arc::new({
-            let mut memtable = Segment::new();
-            memtable.vocab_epoch = self.vocab_epoch;
-            memtable
-        });
-        let previous = std::mem::replace(&mut self.memtable, fresh);
+        let taken = self.take_memtable();
         self.segments.push(Arc::new(base));
         self.segment_generations.push(fresh_segment_generation());
         self.refresh_phrase_capability();
@@ -62,7 +57,7 @@ impl Engine {
         if !self.commit_sources_and_manifest() {
             self.segments.pop();
             self.segment_generations.pop();
-            self.memtable = previous;
+            self.put_memtable_back(taken);
             self.refresh_phrase_capability();
             if let Some(path) = path {
                 self.best_effort_remove_segment(&path);

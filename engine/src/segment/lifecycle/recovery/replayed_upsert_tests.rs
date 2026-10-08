@@ -1,5 +1,10 @@
-//! An upsert's delete half replays even when a commit already holds the upsert's row
-//! (ADR-221). Found by the single-node crash matrix.
+//! A query that an upsert replaced stays replaced after a restart, although a merge dropped
+//! its row and the log still holds its record (ADR-221). Found by the single-node crash
+//! matrix.
+//!
+//! A manifest that says how far the log is sealed skips both records (ADR-223). One written
+//! before that replays the first and must take it away again when it reaches the second,
+//! although a segment holds the second's row.
 
 use crate::config::EngineConfig;
 use crate::fault::{Scope, Step};
@@ -82,8 +87,18 @@ fn a_replaced_query_stays_replaced_when_a_merge_dropped_its_row_and_the_log_hold
     answers(&engine, "before the restart");
     drop(engine);
 
-    let reopened = Engine::open(norm(), config).expect("reopen");
+    let reopened = Engine::open(norm(), config.clone()).expect("reopen");
     answers(&reopened, "after the restart");
+    assert_eq!(reopened.memtable.len(), 0, "both records were skipped");
+    drop(reopened);
+
+    // The same directory as a binary before ADR-223 left it.
+    let path = dir.join("manifest.bin");
+    let mut earlier = crate::storage::read_manifest(&path).expect("manifest");
+    earlier.wal_sealed_through = None;
+    crate::storage::write_manifest(&earlier, &path).expect("an earlier layout");
+    let reopened = Engine::open(norm(), config).expect("reopen");
+    answers(&reopened, "after the restart of an earlier layout");
     drop(reopened);
     drop(scope);
     let _ = std::fs::remove_dir_all(&dir);

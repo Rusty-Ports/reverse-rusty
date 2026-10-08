@@ -24,6 +24,7 @@ fn engine_manifest_v3_round_trips_watermark_and_tombstones() {
         source_file_name: "sources.dat".to_string(),
         feature_model_fingerprint: None,
         vocab_data: Vec::new(),
+        wal_sealed_through: None,
     };
     write_manifest(&manifest, &path).expect("write");
     let got = read_manifest(&path).expect("read");
@@ -59,6 +60,7 @@ fn engine_manifest_v6_fences_source_generation_segments() {
         source_file_name: "sources.dat".to_string(),
         feature_model_fingerprint: None,
         vocab_data: Vec::new(),
+        wal_sealed_through: None,
     };
     write_manifest(&manifest, &path).expect("write v6");
     let bytes = std::fs::read(&path).expect("read manifest");
@@ -94,6 +96,7 @@ fn engine_manifest_v7_selects_immutable_source_sidecar() {
         source_file_name: source_file_name.clone(),
         feature_model_fingerprint: None,
         vocab_data: Vec::new(),
+        wal_sealed_through: None,
     };
     write_manifest(&manifest, &path).expect("write v7");
     let bytes = std::fs::read(&path).expect("read manifest");
@@ -144,6 +147,7 @@ fn engine_manifest_v8_records_the_feature_model() {
         source_file_name: "sources.dat".to_string(),
         feature_model_fingerprint: Some(0x0123_4567_89AB_CDEF),
         vocab_data: br#"{"synonyms":[]}"#.to_vec(),
+        wal_sealed_through: None,
     };
     write_manifest(&manifest, &path).expect("write v8");
     let bytes = std::fs::read(&path).expect("read manifest");
@@ -177,7 +181,7 @@ fn engine_manifest_v8_records_the_feature_model() {
     );
 
     let mut future = bytes;
-    future[4..8].copy_from_slice(&(MANIFEST_VERSION_FEATURE_MODEL + 1).to_le_bytes());
+    future[4..8].copy_from_slice(&(MANIFEST_VERSION_SEALED_LOG + 1).to_le_bytes());
     let body = future.len() - 4;
     let crc = crc32(&future[..body]);
     future[body..].copy_from_slice(&crc.to_le_bytes());
@@ -188,6 +192,83 @@ fn engine_manifest_v8_records_the_feature_model() {
     assert!(
         error.to_string().contains("unsupported manifest version"),
         "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-223: v9 records how far the log is sealed into the segments, after the v8 fields. A
+/// manifest that does not record it is written as v8, byte for byte as before, and reads
+/// back without it. It is independent of the watermark: a merge moves the watermark on and
+/// leaves it, and a commit that keeps an older watermark can follow a seal.
+#[test]
+fn engine_manifest_v9_records_how_far_the_log_is_sealed() {
+    let dir = std::env::temp_dir().join(format!("rr_manifest_v9_sealed_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("manifest.bin");
+    let unsealed = Manifest {
+        segment_files: vec!["seg_000001.seg".to_string()],
+        class_d_fence: false,
+        hot_fence: false,
+        source_generation_fence: false,
+        hot_anchor_theta: 0,
+        next_seg_id: 2,
+        dict_data: vec![1, 2],
+        tag_dict_data: vec![3],
+        rejected_parse: 0,
+        rejected_class_d: 0,
+        wal_seq_watermark: 40,
+        segment_tombstones: Vec::new(),
+        source_file_name: "sources_g00000000000000000002.dat".to_string(),
+        feature_model_fingerprint: Some(7),
+        vocab_data: Vec::new(),
+        wal_sealed_through: None,
+    };
+    write_manifest(&unsealed, &path).expect("write v8");
+    let v8 = std::fs::read(&path).expect("read manifest");
+    assert_eq!(
+        read_u32_at(&v8, 4).expect("version"),
+        MANIFEST_VERSION_FEATURE_MODEL
+    );
+    assert_eq!(
+        read_manifest(&path).expect("read v8").wal_sealed_through,
+        None
+    );
+
+    for sealed_through in [0, 12, 40, 55] {
+        let mut sealed = unsealed.clone();
+        sealed.wal_sealed_through = Some(sealed_through);
+        write_manifest(&sealed, &path).expect("write v9");
+        let v9 = std::fs::read(&path).expect("read manifest");
+        assert_eq!(
+            read_u32_at(&v9, 4).expect("version"),
+            MANIFEST_VERSION_SEALED_LOG
+        );
+        assert_eq!(v9.len(), v8.len() + 8, "one position after the v8 fields");
+        let got = read_manifest(&path).expect("read v9");
+        assert_eq!(got.wal_sealed_through, Some(sealed_through));
+        assert_eq!(got.wal_seq_watermark, 40);
+        assert_eq!(got.source_file_name, unsealed.source_file_name);
+        assert_eq!(got.feature_model_fingerprint, Some(7));
+    }
+
+    // The position is the last thing in the file: a v9 manifest cut short of it is refused.
+    let mut sealed = unsealed.clone();
+    sealed.wal_sealed_through = Some(12);
+    write_manifest(&sealed, &path).expect("write v9");
+    let whole = std::fs::read(&path).expect("read manifest");
+    let mut cut = whole[..whole.len() - 12].to_vec();
+    let crc = crc32(&cut);
+    cut.extend_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, &cut).expect("forge a short v9");
+    assert!(read_manifest(&path).is_err(), "a v9 manifest without it");
+
+    let mut unstamped = sealed;
+    unstamped.feature_model_fingerprint = None;
+    assert_eq!(
+        write_manifest(&unstamped, &path)
+            .expect_err("the position without a feature model")
+            .kind(),
+        io::ErrorKind::InvalidInput
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
