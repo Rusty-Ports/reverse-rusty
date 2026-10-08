@@ -122,12 +122,14 @@ impl PhraseOverlap {
     /// phrase is silently lost — on the query side that compiles an alias query to component
     /// terms, an FN. Selecting over valid candidates only is identical to the legacy pass whenever
     /// no mid-token occurrence exists, and strictly recovers suppressed phrases when one does.
-    /// Pushes `(byte_start, byte_end, phrase_entries index)` tuples, non-overlapping, in order.
+    /// Leaves in `out` the `(byte_start, byte_end, phrase_entries index)` tuples of the
+    /// selection, non-overlapping, in order. Whatever `out` held is discarded.
     pub(in crate::normalize) fn select_phrases(
         &self,
         lc: &str,
         out: &mut Vec<(usize, usize, usize)>,
     ) {
+        out.clear();
         let bytes = lc.as_bytes();
         for m in self.automaton.find_overlapping_iter(lc) {
             let (s, e) = (m.start(), m.end());

@@ -84,9 +84,9 @@ impl Normalizer {
             }
         }
         if !on_boundaries {
-            phrase_matches.clear();
-            if let Some(ov) = self.phrase_overlap.as_ref() {
-                ov.select_phrases(lc, phrase_matches);
+            match self.phrase_overlap.as_ref() {
+                Some(ov) => ov.select_phrases(lc, phrase_matches),
+                None => phrase_matches.clear(),
             }
         }
 

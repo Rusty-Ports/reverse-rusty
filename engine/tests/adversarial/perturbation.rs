@@ -76,20 +76,38 @@ fn identity_perturbations_preserve_the_match_set_under_a_phrase_vocabulary() {
         num_entities: 2_000,
         num_collections: 800,
     };
-    let data = generate(&cfg);
+    let mut data = generate(&cfg);
+    // The generated queries are long conjunctions, and few titles satisfy one, so on their
+    // own they would hardly ever show whether a title still carries a phrase. These do: for
+    // each multi-word brand, the brand as bare terms, as an any-of member, and negated.
+    let first_phrase_query = 50_000_000u64;
+    let mut next_id = first_phrase_query;
+    for brand in reverse_rusty::gen::BRANDS
+        .iter()
+        .filter(|brand| brand.contains(' '))
+    {
+        let last_word = brand.rsplit(' ').next().expect("a word");
+        for query in [
+            (*brand).to_string(),
+            format!("({brand},zznobrand)"),
+            format!("{last_word} -zznothing"),
+        ] {
+            data.queries.push((next_id, query));
+            next_id += 1;
+        }
+    }
     let eng = engine_with_phrases_from(&data.queries);
     let mut s = MatchScratch::new();
     let mut rng = Rng::new(0x3E7A_0218);
 
-    let (mut total_matches, mut titles_with_a_phrase) = (0usize, 0usize);
+    let (mut total_matches, mut phrase_matches) = (0usize, 0usize);
     for (ti, title) in data.titles.iter().enumerate() {
         let baseline = matched(&eng, &mut s, title);
         total_matches += baseline.len();
-        titles_with_a_phrase += usize::from(
-            reverse_rusty::gen::BRANDS
-                .iter()
-                .any(|brand| brand.contains(' ') && title.contains(brand)),
-        );
+        phrase_matches += baseline
+            .iter()
+            .filter(|id| **id >= first_phrase_query)
+            .count();
         for op in [ti % IDENTITY_OPS, (ti + 2) % IDENTITY_OPS] {
             let p = identity_perturb(&mut rng, title, op);
             assert_eq!(
@@ -106,8 +124,8 @@ fn identity_perturbations_preserve_the_match_set_under_a_phrase_vocabulary() {
         );
     }
     assert!(
-        total_matches > 1_000 && titles_with_a_phrase > 100,
-        "degenerate corpus: {total_matches} baseline matches, {titles_with_a_phrase} titles \
-         with a phrase"
+        total_matches > 1_000 && phrase_matches > 500,
+        "degenerate corpus: {total_matches} baseline matches, {phrase_matches} of them on a \
+         query for a phrase"
     );
 }

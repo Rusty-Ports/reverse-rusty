@@ -9,6 +9,24 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — A phrase is found whatever separates its words
+
+- **A phrase is its words as consecutive tokens**
+  ([ADR-218](decisions/adr-218-a-phrase-is-consecutive-tokens.md)). With a vocabulary phrase
+  such as `north star`, a title written `north, star`, `north - star` or with two spaces did
+  not carry the phrase, and an unquoted query for it missed the title (the quoted query
+  matched). Cleaning wrote a space for each separator and the phrase was looked for with
+  exactly one. Cleaning now merges separators, for queries and titles alike.
+- **A match inside a word no longer hides a phrase.** Without an alias in the vocabulary,
+  `new york cityscape` did not carry the phrase `new york` when `new york city` was a phrase
+  too, and `xnorth star lamp` did not carry `star lamp` beside `north star`. Selection is now
+  made among occurrences that start and end on token boundaries, in every mode.
+- **Both were false negatives.** Neither differential could see the first: their references
+  read titles the same way. It was found by writing the analyzer's rules down in full.
+- **For a deployment:** compiler semantics 8. A store written by an earlier release is rebuilt
+  from its sources at the first open, and a remote mesh must be upgraded as a whole. Without
+  phrases in the vocabulary nothing matches differently.
+
 ## 2026-10-08 — The random tests use the whole query language
 
 - **Random test queries use the whole grammar**

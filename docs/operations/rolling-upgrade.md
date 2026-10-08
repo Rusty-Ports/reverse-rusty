@@ -80,6 +80,13 @@ pre-upgrade backup:
   appends newly exposed features but preserves existing frequencies and the frozen top-64 mask, so
   recovery cannot move an unrelated default-visible query behind `include_broad`. Unknown future
   compiler semantics are unsupported and abort open.
+- **Compiler semantics 7 and 8 (ADR-187, ADR-218):** 7 re-derives which signature cover an any-of
+  body gets. 8 changes what the analyzer takes for a vocabulary phrase: its words as consecutive
+  tokens whatever separates them, chosen among occurrences on token boundaries. The same rules
+  apply as for the versions above: a standalone or local-cluster store written under an older
+  version source-rebuilds before serving, and a remote mesh must be version-homogeneous. With
+  no phrases in the vocabulary the rebuild changes no stored row. Rolling back to semantics 7
+  is unsafe for writes whose text has two separators inside a vocabulary phrase.
 - **ADR-118/119/120/#123/162 mesh fence:** `DictFingerprint`, `AdoptDict`, `AddShard`, and recovery manifests attest
   compiler semantics. The field is protobuf-additive but semantically mandatory: an old peer sends
   zero and is rejected before adoption or recovery. This release therefore requires a
