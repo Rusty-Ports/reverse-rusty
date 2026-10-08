@@ -31,9 +31,10 @@ pub struct GrammarConfig {
     pub num_queries: usize,
     /// Random titles, in addition to the one built for each query and the near-misses.
     pub num_random_titles: usize,
-    /// Tokens that are used often. More than 64, so the frequency mask is contested.
+    /// Tokens that are used often. More than 64, so the frequency mask is contested. Raised
+    /// to [`SMALLEST_POOL`] when smaller.
     pub hot_tokens: usize,
-    /// Tokens that are used rarely.
+    /// Tokens that are used rarely. Raised to [`SMALLEST_POOL`] when smaller.
     pub rare_tokens: usize,
     /// How often a token position draws from the hot pool.
     pub hot_frac: f64,
@@ -57,6 +58,12 @@ impl Default for GrammarConfig {
         }
     }
 }
+
+/// The smallest a token pool may be. A query's clauses never share a token between a
+/// positive clause and a negated one, or between two negated ones, and a query can use up
+/// to 49 distinct tokens, so either pool alone has to hold more than that or a draw could
+/// find none left.
+pub const SMALLEST_POOL: usize = 64;
 
 /// One clause of a query.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,8 +172,12 @@ struct Pools {
 impl Pools {
     fn new(cfg: &GrammarConfig) -> Self {
         Pools {
-            hot: (0..cfg.hot_tokens.max(1)).map(|i| word("hx", i)).collect(),
-            rare: (0..cfg.rare_tokens.max(1)).map(|i| word("rq", i)).collect(),
+            hot: (0..cfg.hot_tokens.max(SMALLEST_POOL))
+                .map(|i| word("hx", i))
+                .collect(),
+            rare: (0..cfg.rare_tokens.max(SMALLEST_POOL))
+                .map(|i| word("rq", i))
+                .collect(),
             // Never in a query: what a real title has around the words that matter.
             filler: (0..200).map(|i| word("fy", i)).collect(),
         }
@@ -419,5 +430,97 @@ pub fn generate_grammar(cfg: &GrammarConfig) -> GrammarDataset {
         queries,
         near_misses,
         random_titles,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn distinct_tokens(query: &GrammarQuery) -> usize {
+        let mut tokens = HashSet::new();
+        for clause in &query.clauses {
+            match clause {
+                Clause::Terms(run) | Clause::Phrase(run) | Clause::NotPhrase(run) => {
+                    tokens.extend(run.iter().cloned());
+                }
+                Clause::AnyOf(members) | Clause::NotAnyOf(members) => {
+                    tokens.extend(members.iter().flatten().cloned());
+                }
+                Clause::NotTerm(term) => {
+                    tokens.insert(term.clone());
+                }
+            }
+        }
+        tokens.len()
+    }
+
+    /// The same configuration gives the same corpus, and another seed gives another.
+    #[test]
+    fn a_grammar_corpus_is_a_function_of_its_configuration() {
+        let cfg = GrammarConfig {
+            num_queries: 200,
+            num_random_titles: 50,
+            ..GrammarConfig::default()
+        };
+        let (a, b) = (generate_grammar(&cfg), generate_grammar(&cfg));
+        assert_eq!(a.dsl(), b.dsl());
+        assert_eq!(a.titles(), b.titles());
+        let other = generate_grammar(&GrammarConfig {
+            seed: cfg.seed + 1,
+            ..cfg
+        });
+        assert_ne!(a.dsl(), other.dsl());
+    }
+
+    /// A configuration with almost no tokens still generates: a draw for a negated clause
+    /// has to find a token that no positive clause and no other negated clause of the query
+    /// has taken, and with a pool of one it looked for ever. Pools have a floor, and no
+    /// query uses as many distinct tokens as the floor.
+    #[test]
+    fn a_configuration_with_tiny_pools_still_generates() {
+        for hot_frac in [0.0, 0.5, 1.0] {
+            let data = generate_grammar(&GrammarConfig {
+                num_queries: 400,
+                num_random_titles: 10,
+                hot_tokens: 1,
+                rare_tokens: 1,
+                hot_frac,
+                ..GrammarConfig::default()
+            });
+            assert_eq!(data.queries.len(), 400);
+            let most = data.queries.iter().map(distinct_tokens).max().unwrap_or(0);
+            assert!(
+                most < SMALLEST_POOL,
+                "a query used {most} distinct tokens, and a pool may hold {SMALLEST_POOL}"
+            );
+        }
+    }
+
+    /// A query never requires a token it forbids, and no two negated clauses share one.
+    /// The built title relies on both: it holds one token of a forbidden phrase, which must
+    /// not complete some other forbidden clause.
+    #[test]
+    fn positive_and_negated_clauses_never_share_a_token() {
+        let data = generate_grammar(&GrammarConfig::default());
+        for query in &data.queries {
+            let (mut positive, mut negative) = (HashSet::new(), Vec::new());
+            for clause in &query.clauses {
+                match clause {
+                    Clause::Terms(run) | Clause::Phrase(run) => positive.extend(run.iter()),
+                    Clause::AnyOf(members) => positive.extend(members.iter().flatten()),
+                    Clause::NotTerm(term) => negative.push(term),
+                    Clause::NotPhrase(run) => negative.extend(run.iter()),
+                    Clause::NotAnyOf(members) => negative.extend(members.iter().flatten()),
+                }
+            }
+            let distinct: HashSet<_> = negative.iter().copied().collect();
+            assert_eq!(distinct.len(), negative.len(), "{}", query.dsl);
+            assert!(
+                negative.iter().all(|token| !positive.contains(token)),
+                "{}",
+                query.dsl
+            );
+        }
     }
 }
