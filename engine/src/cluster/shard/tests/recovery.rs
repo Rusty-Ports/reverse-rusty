@@ -502,3 +502,46 @@ fn a_shard_node_keeps_a_replaced_file_when_its_checkpoint_file_cannot_be_read() 
     drop(shard);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A coordinator's build creates its shards with `create_durable`, which refuses a directory
+/// that holds a shard (ADR-215). The constructor a shard node uses restores that shard: right
+/// for a node restarting over its own data, and how the rows of an unfinished build came
+/// back into the build that followed it.
+#[test]
+fn creating_a_shard_refuses_a_directory_that_holds_one() {
+    let norm = Arc::new(Normalizer::default_vocab().unwrap());
+    let mut dict = Dict::new();
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tags = TagDict::new();
+    tags.mark_finalized();
+    let tags = Arc::new(tags);
+    let dir = std::env::temp_dir().join(format!("rr_shard_create_only_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let create = || {
+        LocalShard::create_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tags),
+            config.clone(),
+        )
+    };
+    drop(create().expect("a shard in an empty directory"));
+    match create() {
+        Err(crate::cluster::shard::ShardError::Config(message)) => {
+            assert!(message.contains("already holds a shard"), "{message}");
+        }
+        Err(other) => panic!("refused with the wrong kind of error: {other:?}"),
+        Ok(_) => panic!("a shard was created over the one the directory holds"),
+    }
+    // The node's constructor restores it.
+    drop(
+        LocalShard::new_durable(norm, dict, tags, config.clone())
+            .expect("a node restarts over its own shard"),
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
