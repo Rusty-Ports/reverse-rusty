@@ -124,6 +124,10 @@ fn the_loss_of_the_cluster_log_is_accepted_by_the_token_its_refusal_names() {
         accepted_log_losses(&copy).expect("the copy's record"),
         recorded
     );
+    // A copy whose record cannot be read would restore to a cluster that does not open.
+    crate::storage::verify_cluster_backup(&copy).expect("the copy verifies");
+    std::fs::write(copy.join(ACCEPTED_LOG_LOSSES_FILE), "not a record\n").expect("damage it");
+    assert!(crate::storage::verify_cluster_backup(&copy).is_err());
     let _ = std::fs::remove_dir_all(copy);
 
     // A later start needs no token, and the old one accepts nothing more.

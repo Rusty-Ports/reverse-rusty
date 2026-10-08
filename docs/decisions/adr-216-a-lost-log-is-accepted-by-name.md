@@ -62,7 +62,8 @@ in the delivery of an event.
    raises a `log_lost` durability event (data at risk).
 6. **The record is evidence.** A record that cannot be read fails the open, with the log
    present or not; it is not treated as empty. A backup carries it: a store restored from
-   the copy holds no more than the one it was taken from, and says so. Nothing clears it.
+   the copy holds no more than the one it was taken from, and says so. A backup is not
+   taken, and does not verify, with a record that no open could read. Nothing clears it.
    The time gauge lets an alert stop firing by itself; the count stays.
 7. **What is lost is said in words, not as a position.** Single node: "the writes that had
    not been flushed to a segment". Cluster: "the writes acknowledged since its last
@@ -140,7 +141,8 @@ in the delivery of an event.
   no record. A start that cannot create the empty log leaves a pending entry and no log, the
   store is still refused with the same token, and the token then finishes it with one entry.
   A pending entry beside a log is marked applied by a start that is given no token. A record
-  that cannot be read fails the open. A backup carries the record.
+  that cannot be read fails the open. A backup carries the record; one is not taken, and
+  does not verify, when the record cannot be read.
 - `cluster/coordinator/tests/accepted_loss.rs`: the same for the cluster log, and a refusal,
   or a start that stops after recording, leaves every other file in the directory as it was.
 - `bin/server`: the flag reaches the engine configuration and the cluster configuration and

@@ -260,6 +260,19 @@ fn a_backup_carries_the_record_of_accepted_losses() {
     .expect("the copy opens");
     assert!(match_ids(&restored, FLUSHED).contains(&1));
     drop(restored);
+
+    // A record that cannot be read would restore to a store that does not open: such a
+    // backup is not taken, and one that holds such a record does not verify.
+    std::fs::write(dir.join(ACCEPTED_LOG_LOSSES_FILE), "not a record\n").expect("damage it");
+    let refused = test_dir("backup_carries_record_refused");
+    let _ = std::fs::remove_dir_all(&refused);
+    assert!(
+        reverse_rusty::storage::copy_engine_dir(&dir, &refused).is_err(),
+        "a backup was taken with a record no open can read"
+    );
+    assert!(!refused.exists(), "a refused backup was left in place");
+    std::fs::write(copy.join(ACCEPTED_LOG_LOSSES_FILE), "not a record\n").expect("damage it");
+    assert!(reverse_rusty::storage::verify_backup(&copy).is_err());
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&copy);
 }
