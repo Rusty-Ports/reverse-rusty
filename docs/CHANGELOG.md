@@ -9,6 +9,26 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — Every step of a durable operation has a name
+
+- **A cluster killed during a checkpoint takes creates again when it restarts**
+  ([ADR-221](decisions/adr-221-every-step-of-a-durable-operation-has-a-name.md)). A
+  checkpoint replaces each shard's source sidecar before it commits the manifest. A process
+  that died between the two reopened with reads intact and every insert-only add refused,
+  until a checkpoint and a second restart. The open now seeds its id directory after it has
+  replayed the log's tail, when the sidecar and the segments agree again.
+- **Durable steps are named, and a test can record and fail them.** `fault::step`,
+  `fault::sync` and `fault::sync_dir_of` sit where durable I/O already funnels (the atomic
+  rename, manifest publication, the segment and sidecar writers, appends to the cluster log
+  and the write-ahead log, a shard's checkpoint record, removals, the build mark, the control
+  proposal of a layout change). A
+  `fault::Scope` on a directory records them and fails the one a test chooses. Shipped
+  builds contain none of it.
+- **A crash matrix fails every step of every in-process cluster operation**, three ways each:
+  440 steps, 1,156 cases, in seconds. It is what found the defect above on its first run,
+  and with the ADR-178 commit fence disabled it fails 189 cases, so that window is now
+  reached by enumeration and not by the tests written with its fix.
+
 ## 2026-10-08 — The reference matcher's front end is written from the specification
 
 - **The ported front end is gone**

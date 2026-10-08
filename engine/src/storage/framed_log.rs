@@ -46,9 +46,10 @@ pub(crate) fn replacement_path(path: &Path) -> std::path::PathBuf {
 /// later start refuses that.
 pub(crate) fn publish_empty_log(path: &Path, header: &[u8]) -> io::Result<File> {
     let replacement = replacement_path(path);
+    crate::fault::step("create", &replacement)?;
     let mut file = File::create(&replacement)?;
     file.write_all(header)?;
-    file.sync_all()?;
+    crate::fault::sync(&file, &replacement)?;
     drop(file);
     crate::storage::durable_rename(&replacement, path)?;
     std::fs::OpenOptions::new().append(true).open(path)
@@ -195,8 +196,9 @@ pub(crate) fn repair_tail(path: &Path, scanned_len: usize, valid_len: usize) -> 
     if file.metadata()?.len() != scanned_len as u64 {
         return Err(invalid("log length changed during recovery validation"));
     }
+    crate::fault::step("truncate", path)?;
     file.set_len(valid_len as u64)?;
-    file.sync_all()
+    crate::fault::sync(&file, path)
 }
 
 /// Encode the whole frame before writing; every log uses this one write_all.
@@ -272,6 +274,9 @@ impl<W: Write> LogAppender<W> {
 }
 
 impl LogAppender {
+    /// Append one frame, as steps without a name: the control store's log, which the crash
+    /// matrix does not reach yet (ADR-221).
+    #[cfg_attr(not(any(test, feature = "distributed")), allow(dead_code))]
     pub(crate) fn append(&mut self, body: &[u8], fsync: bool) -> io::Result<usize> {
         self.append_with(
             body,
@@ -283,6 +288,24 @@ impl LogAppender {
                 }
             },
         )
+    }
+
+    /// [`append`](Self::append) for a log whose path the caller knows: the step `append`
+    /// and, when `fsync`, the step `sync` (ADR-221). A fault a test plans for either is a
+    /// failed append, so it leaves this handle refusing appends, as a real failure does.
+    pub(crate) fn append_at(&mut self, path: &Path, body: &[u8], fsync: bool) -> io::Result<usize> {
+        self.healthy()?;
+        if let Err(planned) = crate::fault::step("append", path) {
+            self.failed = true;
+            return Err(planned);
+        }
+        self.append_with(body, |file| {
+            if fsync {
+                crate::fault::sync(file, path)
+            } else {
+                file.flush()
+            }
+        })
     }
 
     pub(crate) fn sync_all(&mut self) -> io::Result<()> {

@@ -75,14 +75,17 @@ pub(super) fn begin(dir: &Path) -> Result<(), ShardError> {
             )));
         }
         for entry in &shards {
-            let removed = if entry.is_dir() {
-                std::fs::remove_dir_all(entry)
-            } else {
-                std::fs::remove_file(entry)
-            };
+            let removed = crate::fault::step("remove", entry).and_then(|()| {
+                if entry.is_dir() {
+                    std::fs::remove_dir_all(entry)
+                } else {
+                    std::fs::remove_file(entry)
+                }
+            });
             removed.map_err(|e| io("removing what an unfinished build left in", e))?;
         }
-        return sync(dir).map_err(|e| io("syncing", e));
+        return crate::fault::sync_dir_of(&dir.join(BUILD_INCOMPLETE_FILE))
+            .map_err(|e| io("syncing", e));
     }
     if log || !with_data.is_empty() {
         let found = with_data
@@ -107,13 +110,15 @@ pub(super) fn begin(dir: &Path) -> Result<(), ShardError> {
         )));
     }
     let write = || -> std::io::Result<()> {
-        let mut mark = std::fs::File::create(dir.join(BUILD_INCOMPLETE_FILE))?;
+        let path = dir.join(BUILD_INCOMPLETE_FILE);
+        crate::fault::step("create", &path)?;
+        let mut mark = std::fs::File::create(&path)?;
         mark.write_all(
             b"A cluster build is in progress in this directory, or stopped before it finished.\n\
               The next start removes the shard directories beside this file and builds again.\n",
         )?;
-        mark.sync_all()?;
-        sync(dir)
+        crate::fault::sync(&mark, &path)?;
+        crate::fault::sync_dir_of(&path)
     };
     write().map_err(|e| io("marking", e))
 }
@@ -122,8 +127,10 @@ pub(super) fn begin(dir: &Path) -> Result<(), ShardError> {
 /// it. Called at the end of a build, and by an open that finds the mark of a build that
 /// stopped between its manifest and here. The removal is on disk before this returns.
 pub(super) fn finish(dir: &Path) -> Result<(), ShardError> {
-    let cleared = match std::fs::remove_file(dir.join(BUILD_INCOMPLETE_FILE)) {
-        Ok(()) => sync(dir),
+    let path = dir.join(BUILD_INCOMPLETE_FILE);
+    let removed = crate::fault::step("remove", &path).and_then(|()| std::fs::remove_file(&path));
+    let cleared = match removed {
+        Ok(()) => crate::fault::sync_dir_of(&path),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     };
@@ -159,8 +166,4 @@ fn holds_a_file(entry: &Path) -> std::io::Result<bool> {
         }
     }
     Ok(false)
-}
-
-fn sync(dir: &Path) -> std::io::Result<()> {
-    std::fs::File::open(dir)?.sync_all()
 }

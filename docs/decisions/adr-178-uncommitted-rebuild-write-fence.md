@@ -80,3 +80,11 @@ replica test fails against the earlier keep-only-the-selected-name rule. The sou
 suite now checks that the blue sidecar stays intact while authoritative.
 
 **See also:** ADR-046, ADR-078, ADR-118, ADR-167.
+
+## Later outcome (2026-10-08, ADR-221)
+
+The window this ADR closed (a control update or a checkpoint fails after the serving swap,
+a write is accepted, the process dies) is now reached by enumeration and not by the tests
+written with the fix: with the commit fence disabled, 189 cases of the crash matrix fail,
+most with `PlacementDecisionMismatch` on reopen.
+

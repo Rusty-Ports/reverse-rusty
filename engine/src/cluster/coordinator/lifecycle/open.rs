@@ -439,35 +439,12 @@ impl ClusterEngine {
         // on several shard positions, so collapse those physical copies here. Clusters
         // written by this version admitted at most one semantic row per id.
         //
-        // A shard whose enumeration is INCOMPLETE (a source-less / partial store —
-        // a supported degraded reopen shape) must not fail the open OR seed a
-        // directory that under-holds live ids (insert-only admission would re-admit
-        // a live id — codex review): leave the directory UNAUTHORITATIVE instead,
-        // so serving works while `add_query` fails closed toward `upsert_query`,
-        // and surface the degradation as a durability event.
-        let mut committed_ids = Some(Vec::new());
-        for shard in engine.layout().shards.iter() {
-            match (shard.live_logical_ids(), &mut committed_ids) {
-                (Ok(ids), Some(collected)) => collected.extend(ids),
-                (Ok(_), None) => {}
-                (Err(e), collected) => {
-                    *collected = None;
-                    engine.emit(EngineEvent::DurabilityFailure {
-                        op: DurabilityOp::SourceStoreWrite,
-                        detail: "logical-id directory not seeded (partial/source-less store); \
-                                 insert-only add_query is disabled until a checkpointed reopen — \
-                                 use upsert_query"
-                            .to_string(),
-                        error: e.to_string(),
-                    });
-                }
-            }
-        }
-        if let Some(mut committed_ids) = committed_ids {
-            committed_ids.sort_unstable();
-            committed_ids.dedup();
-            engine.replace_logical_ids(committed_ids)?;
-        }
+        // A shard whose source store does not cover its live queries cannot be
+        // enumerated. That must not fail the open, and it must not seed a directory
+        // that under-holds live ids (insert-only admission would re-admit a live id —
+        // codex review). The directory is left unseeded for now; it is tried again
+        // after the tail is replayed, below.
+        let mut unseeded = engine.seed_logical_ids_from_shards(&engine.layout())?;
 
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
         // log tail strictly after snapshot_pos, through the SAME apply funnel as live
@@ -593,6 +570,26 @@ impl ClusterEngine {
             for (_pos, mutation) in replay.entries {
                 engine.replay_apply(&layout, mutation)?;
             }
+        }
+        // A checkpoint seals each shard, which replaces the shard's source sidecar, and
+        // only then commits the manifest. One that stops between the two leaves a sidecar
+        // that already holds the writes of the log's tail beside committed segments that
+        // do not, so the two disagree until the tail has been replayed (ADR-221). It has
+        // been now. A store that is short of sources for another reason still is, and
+        // stays in the degraded shape: serving works, `add_query` fails closed toward
+        // `upsert_query`, and the degradation is reported.
+        if unseeded.is_some() && !engine.logical_ids_authoritative() {
+            unseeded = engine.seed_logical_ids_from_shards(&engine.layout())?;
+        }
+        if let Some(error) = unseeded.filter(|_| !engine.logical_ids_authoritative()) {
+            engine.emit(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::SourceStoreWrite,
+                detail: "logical-id directory not seeded (partial/source-less store); \
+                         insert-only add_query is disabled until a checkpointed reopen — \
+                         use upsert_query"
+                    .to_string(),
+                error: error.to_string(),
+            });
         }
         // A manifest still at epoch 0 does not say that the log exists. It does now.
         engine.commit_the_log_into_the_manifest()?;

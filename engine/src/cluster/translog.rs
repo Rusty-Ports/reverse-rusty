@@ -183,18 +183,15 @@ pub(crate) fn write_sidecar(dir: &Path, c: &ShardCheckpoint) -> Result<(), Shard
     let path = dir.join(CKPT_FILE);
     let tmp = dir.join(CKPT_TMP);
     let write = (|| -> std::io::Result<()> {
+        crate::fault::step("create", &tmp)?;
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(&CKPT_MAGIC)?;
         f.write_all(&CKPT_VERSION.to_le_bytes())?;
         f.write_all(&crc.to_le_bytes())?;
         f.write_all(&body)?;
-        f.sync_all()?;
+        crate::fault::sync(&f, &tmp)?;
         drop(f);
-        std::fs::rename(&tmp, &path)?;
-        if let Some(parent) = path.parent() {
-            std::fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(())
+        crate::storage::durable_rename(&tmp, &path)
     })();
     write.map_err(|e| ShardError::Log(format!("writing shard checkpoint {}: {e}", path.display())))
 }

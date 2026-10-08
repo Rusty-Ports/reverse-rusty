@@ -350,7 +350,8 @@ impl Wal {
             body.extend_from_slice(&value.to_le_bytes());
         }
 
-        self.file.append(&body, self.fsync_each_write)?;
+        self.file
+            .append_at(&self.path, &body, self.fsync_each_write)?;
         // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
         self.size_bytes += 8 + body.len() as u64;
         self.pending_entries += 1;
@@ -367,7 +368,8 @@ impl Wal {
         body.extend_from_slice(&seg_idx.to_le_bytes());
         body.extend_from_slice(&local_id.to_le_bytes());
 
-        self.file.append(&body, self.fsync_each_write)?;
+        self.file
+            .append_at(&self.path, &body, self.fsync_each_write)?;
         // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
         self.size_bytes += 8 + body.len() as u64;
         self.pending_entries += 1;
@@ -386,7 +388,8 @@ impl Wal {
         body.push(OP_DELETE_LOGICAL);
         body.extend_from_slice(&logical.to_le_bytes());
 
-        self.file.append(&body, self.fsync_each_write)?;
+        self.file
+            .append_at(&self.path, &body, self.fsync_each_write)?;
         // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
         self.size_bytes += 8 + body.len() as u64;
         self.pending_entries += 1;
@@ -411,7 +414,7 @@ impl Wal {
         body.extend_from_slice(&name_len.to_le_bytes());
         body.extend_from_slice(name_bytes);
 
-        self.file.append(&body, true)?; // fsync on checkpoint
+        self.file.append_at(&self.path, &body, true)?; // fsync on checkpoint
         self.size_bytes += 8 + body.len() as u64; // length prefix + CRC + body
         self.pending_entries = 0; // checkpoint materializes all prior mutations
         Ok(seq)

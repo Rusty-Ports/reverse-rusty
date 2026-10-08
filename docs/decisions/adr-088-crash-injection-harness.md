@@ -139,3 +139,12 @@
     a write that routed to the dead shard now returns `503 "partial"` and is not acknowledged. The
     leg's writer repeats a refused write until it is accepted, as a client must, and every accepted
     id is still required to match after the restart.
+
+## Later outcome (2026-10-08, ADR-221)
+
+"Closed across the WAL, flush, compaction and backup windows" above says more than this lane
+measures: it kills at moments it does not record, about two dozen times a run, and nothing
+shows that a kill landed in the window it was aimed at. ADR-221 names the steps of durable
+operations and fails every one of them in turn for the in-process cluster, in the process.
+Process death at a named step, phase markers for this lane, and the coordinator kill that
+this ADR deferred are its later stages.

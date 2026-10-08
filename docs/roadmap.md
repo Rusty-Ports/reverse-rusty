@@ -644,6 +644,22 @@ capture; microbenchmarks alone are not sufficient.
 - **Phrase-pattern fuzzing.** Expand the parse-union alphabet with punctuation markers, number
   context, years, and fused vocabulary forms after teaching the independent reference emitter the same
   documented surface grammar.
+- **The crash matrix, further.** Every step of every in-process cluster operation is failed in
+  turn (ADR-221). Still to do, in this order: the single-node engine's operations (flush, both
+  merges, backup, a vocabulary rebuild); process death at a named step, with `crashwriter`
+  built with the facility behind a cargo feature, which also gives the SIGKILL lane a record
+  of where a kill landed;
+  a coordinator killed in the middle of a checkpoint or a resize; the loss of data that was
+  written and not synced (a file's length at its last sync, a directory's entries since its
+  last sync, as LevelDB's and RocksDB's fault-injection filesystems keep them), which needs
+  every write to go through one layer and a gate lane that refuses a direct `rename` or
+  `sync_all` in library code; and the shard node's sequences. Durable steps not yet named:
+  the write-ahead log's reset, the control store, the shard node's retirement, drop, adoption
+  and recovery files, backups, and the accepted-log-loss record.
+- **A shard's source sidecar as part of the commit.** A checkpoint replaces each shard's
+  `sources.dat` in place before it commits the manifest. A crash between the two is recovered
+  on reopen (ADR-221). Writing the sidecar under a generation name that the manifest selects,
+  as a rebuild already does, would remove the window.
 - **Cross-seam matrix.** Combine recovery, vocabulary adoption, rebuild, and remote attach in one
   bounded matrix because point tests do not catch ordering failures between those seams.
 - **Targeted mutation testing.** Run mutation testing on normalization, compile, and exact-match

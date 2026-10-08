@@ -78,6 +78,23 @@ impl ClusterEngine {
         Ok(())
     }
 
+    /// Propose the control-plane half of a layout change (a resize or a vocabulary change),
+    /// for a caller that holds that change: `_layout` is the layout it has just published.
+    /// It is a step of the change like its file steps, between the serving swap and the
+    /// checkpoint, so it has a name a test can fail it by (ADR-221).
+    pub(in crate::cluster::coordinator) fn propose_layout_change(
+        &self,
+        _layout: &Layout,
+        change: ClusterStateChange,
+    ) -> Result<(), ShardError> {
+        if let Some(dir) = &self.data_dir {
+            crate::fault::step("propose", &dir.join("control"))
+                .map_err(|e| ShardError::ControlPlane(e.to_string()))?;
+        }
+        self.control.propose(change)?;
+        Ok(())
+    }
+
     /// Register (or replace, by id) a cluster member in the control-plane document — the membership
     /// half of the allocator's inputs (ADR-042). State-idempotent; errors fail-closed. Returns the
     /// exact committed application-state version. A subsequent [`Self::rebalance`] folds the node
