@@ -136,3 +136,12 @@ feature, so two copies can plan C and B; a visible copy that adopted a class-C l
 from default reads. [ADR-186](adr-186-visibility-partitioned-dedup.md) makes "same side of the
 opt-in boundary" a condition of every join. Adoption among A, B and H is unchanged. The "Proven"
 count above also predates the grouped-migration leg: `tests/oracle/dedup.rs` has ten.
+
+## Later outcome (2026-10-08, ADR-217)
+
+"Dedup on ≡ dedup off in both `include_broad` modes" compares two engines that both regroup
+identical bodies in the re-anchoring merge, whatever the switch says, so it is not a reference
+for what that merge does to visibility. [ADR-217](adr-217-random-queries-use-the-whole-grammar.md) adds one:
+the same corpus with a negation of its own in every query, which nothing can group, read
+beside the original after every step. The corpus there is written by a grammar generator and
+has bodies made of any-of groups alone, which the corpora above did not.

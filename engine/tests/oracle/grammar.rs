@@ -12,8 +12,8 @@
 //! forbidden phrase that is its own and is in no title. A negation takes no part in planning
 //! and is not counted toward frequency, so every copy plans as it does in the original
 //! corpus, and no two bodies are equal, so nothing can ever be grouped: not in the memtable
-//! and not by either merge. (Switching dedup off is not
-//! such a reference. The merges regroup whatever the switch says.) What a read returns from
+//! and not by either merge. (Switching dedup off is not such a reference: the re-anchoring
+//! merge regroups whatever the switch says.) What a read returns from
 //! the original corpus must be what it returns from the twin, in both read modes, at every
 //! step.
 
@@ -263,6 +263,40 @@ fn a_duplicated_grammar_corpus_is_dedup_invariant_in_both_read_modes() {
         );
         let brute = Brute::build(&all_stored(&corpus));
         assert_equals_brute(&on, &brute, &corpus.titles, "before the merge");
+
+        // A group's leader goes: by a delete for one body in five, and by an upsert to the
+        // same body (a new version of the first copy) for another one in five. Its members
+        // must stay, each on its own side.
+        let mut live = all_stored(&corpus);
+        for (at, body) in corpus.bodies.iter().enumerate() {
+            let leader = body.copies[0];
+            match at % 5 {
+                0 => {
+                    for eng in [&mut on, &mut off, &mut twin] {
+                        eng.delete_by_logical_id(leader).expect("delete a leader");
+                    }
+                    live.retain(|(id, _)| *id != leader);
+                }
+                1 => {
+                    on.try_upsert_live(&corpus.early[at].1, leader, 2)
+                        .expect("upsert a leader");
+                    off.try_upsert_live(&corpus.early[at].1, leader, 2)
+                        .expect("upsert a leader");
+                    twin.try_upsert_live(&twin_corpus.early[at].1, leader, 2)
+                        .expect("upsert a leader");
+                }
+                _ => {}
+            }
+        }
+        let brute = Brute::build(&live);
+        assert_on_equals_off(&on, &off, &corpus.titles, "leaders gone");
+        assert_reads_like_the_twin(&on, &twin, &corpus.titles, "leaders gone");
+        assert_equals_brute(&on, &brute, &corpus.titles, "leaders gone");
+        for eng in [&mut on, &mut off, &mut twin] {
+            eng.flush();
+        }
+        assert_reads_like_the_twin(&on, &twin, &corpus.titles, "leaders gone, flushed");
+
         on.compact_all().expect("compaction ran");
         off.compact_all().expect("compaction ran");
         twin.compact_all().expect("compaction ran");
@@ -322,4 +356,49 @@ fn reanchoring_a_duplicated_grammar_corpus_reads_like_its_ungrouped_twin() {
     );
     let brute = Brute::build(&all_stored(&corpus));
     assert_equals_brute(&eng, &brute, &corpus.titles, "after the re-anchoring merge");
+}
+
+/// With the hot tier on, the re-anchoring merge moves queries between the main lane and the
+/// hot tier, and never across the opt-in boundary: the counts of opt-in and of always-probed
+/// rows are what they were, and so is what each read returns. (The hot-tier oracle checks
+/// this on the product-shaped corpus, which has no any-of body.)
+#[test]
+fn the_hot_tier_merge_moves_no_grammar_query_across_the_opt_in_boundary() {
+    let corpus = duplicated(0x6AA2_0D05);
+    let mut eng = new_engine(EngineConfig {
+        hot_anchor_threshold: 8,
+        compaction_reanchor: true,
+        ..manual_cfg(true)
+    });
+    start(&mut eng, &corpus);
+    for chunk in corpus.late.chunks(corpus.late.len() / 3) {
+        for (id, dsl) in chunk {
+            eng.insert_live(dsl, *id, 1);
+        }
+        eng.flush();
+    }
+    let counts_before = eng.class_counts();
+    assert!(
+        counts_before[2] > 0 && counts_before[4] > 0,
+        "nothing opt-in, or nothing in the hot tier: {counts_before:?}"
+    );
+    let before: Vec<_> = corpus
+        .titles
+        .iter()
+        .map(|title| reads(&eng, title))
+        .collect();
+    eng.compact_all().expect("re-anchoring compaction ran");
+    let counts_after = eng.class_counts();
+    assert_eq!(counts_after[2], counts_before[2], "the opt-in count moved");
+    assert_eq!(
+        counts_after[3], counts_before[3],
+        "the always-probed count moved"
+    );
+    for (title, was) in corpus.titles.iter().zip(before) {
+        assert_eq!(
+            reads(&eng, title),
+            was,
+            "{title:?}: a read changed across the merge"
+        );
+    }
 }

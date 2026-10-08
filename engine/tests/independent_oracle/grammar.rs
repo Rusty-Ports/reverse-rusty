@@ -14,6 +14,7 @@ use reverse_rusty::config::EngineConfig;
 use reverse_rusty::gen::grammar::{
     generate_grammar, render, Clause, GrammarConfig, GrammarDataset,
 };
+use reverse_rusty::gen::{messify_title, Rng};
 use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
 
@@ -113,6 +114,23 @@ fn grammar_corpus_differential() {
     }
 }
 
+/// The same titles with surface noise: case, diacritics, runs of whitespace, punctuation and
+/// junk tokens. The noise can break a phrase or complete nothing, so what matches is for the
+/// reference to say; the queries stay as written.
+#[test]
+fn grammar_corpus_differential_on_messy_titles() {
+    let seed = seeds()[0];
+    let data = corpus(seed);
+    let mut rng = Rng::new(seed ^ 0x3E55);
+    let messy: Vec<String> = data
+        .titles()
+        .iter()
+        .map(|title| messify_title(&mut rng, title))
+        .collect();
+    let oracle = RefOracle::build_default(&data.dsl());
+    oracle.assert_matches(&messy, &format!("grammar+messy-titles/{seed:#x}"));
+}
+
 /// The same with the hot tier on (ADR-105): a cost placement, which the reference does not
 /// know about and must not be able to see.
 #[test]
@@ -159,6 +177,27 @@ fn a_title_built_to_satisfy_a_query_retrieves_it() {
             }
             engine
         };
+
+        // A default read leaves out the opt-in class and nothing else: of the queries
+        // stored in one batch, exactly as many are missing from a default read of their own
+        // title as the engine counts in that class.
+        let mut scratch = MatchScratch::new();
+        let mut out = Vec::new();
+        let hidden = data
+            .queries
+            .iter()
+            .filter(|query| {
+                one_batch.match_title(&query.satisfying_title, &mut scratch, &mut out, false);
+                !out.contains(&query.id)
+            })
+            .count() as u64;
+        let opt_in = one_batch.class_counts()[2];
+        assert!(opt_in > 0, "seed {seed:#x}: no opt-in query in the corpus");
+        assert_eq!(
+            hidden, opt_in,
+            "seed {seed:#x}: a default read of a title built to satisfy a query misses \
+             {hidden} queries, and {opt_in} are opt-in"
+        );
 
         for (how, engine) in [
             ("one batch", one_batch),
