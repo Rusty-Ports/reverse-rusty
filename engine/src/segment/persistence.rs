@@ -563,17 +563,35 @@ impl Engine {
     /// [`ReplacedFiles`](crate::segment::ReplacedFiles).
     pub(in crate::segment) fn cleanup_segment_files(&self, paths: &[PathBuf]) {
         use crate::segment::ReplacedFiles;
-        if self.owns_manifest || self.replaced_files == ReplacedFiles::RemovedAtOnce {
+        if self.owns_manifest {
             for p in paths {
                 self.best_effort_remove_segment(p);
             }
             return;
         }
-        if self.replaced_files == ReplacedFiles::ListedUntilReleased {
-            self.retired_segment_files
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend(paths.iter().cloned());
+        match &self.replaced_files {
+            ReplacedFiles::LeftForTheOwnersSweep => {}
+            ReplacedFiles::RemovedAtOnce => {
+                for p in paths {
+                    self.best_effort_remove_segment(p);
+                }
+            }
+            ReplacedFiles::KeptWhileItsRecordNamesThem(record) => {
+                // The record is read now, from disk, so the decision does not rest on
+                // anything remembered about what an earlier write of it said.
+                let named = record();
+                let mut kept = self
+                    .kept_segment_files
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for p in paths {
+                    if names(named.as_deref(), p) {
+                        kept.push(p.clone());
+                    } else {
+                        self.best_effort_remove_segment(p);
+                    }
+                }
+            }
         }
     }
 
@@ -583,46 +601,43 @@ impl Engine {
         self.replaced_files = replaced_files;
     }
 
-    /// Stop removing anything from this engine's directory, now and later, and forget what
-    /// was listed for release. A recovery is about to write received segment files into the
-    /// directory, and a received file can carry the name of a file this engine replaced: a
-    /// release would remove the new file by the old one's name (ADR-214). What this engine
-    /// had listed, and whatever it replaces from here on, stays on disk as files that no
-    /// record names.
-    #[cfg(any(test, feature = "distributed"))]
-    pub(crate) fn leave_the_directory_alone(&mut self) {
-        self.replaced_files = crate::segment::ReplacedFiles::LeftForTheOwnersSweep;
-        self.retired_segment_files
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-    }
-
     #[cfg(all(test, feature = "distributed"))]
-    pub(crate) fn replaced_files(&self) -> crate::segment::ReplacedFiles {
-        self.replaced_files
+    pub(crate) fn keeps_what_its_record_names(&self) -> bool {
+        matches!(
+            self.replaced_files,
+            crate::segment::ReplacedFiles::KeptWhileItsRecordNamesThem(_)
+        )
     }
 
-    /// Remove the segment files this engine replaced and listed (ADR-214). Called once a
-    /// checkpoint file that no longer names them has been written, and not when that write
-    /// failed. A segment that was written, replaced and never committed is released like any
-    /// other. Does nothing for an engine that lists nothing.
-    pub(crate) fn release_retired_segment_files(&self) {
-        let retired = std::mem::take(
-            &mut *self
-                .retired_segment_files
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        if retired.is_empty() {
+    /// Remove the kept files that the shard's commit record, read from disk now, no longer
+    /// names (ADR-214). One it still names stays kept.
+    ///
+    /// A kept file is removed by its name, some time after the engine replaced it. The
+    /// caller must be the only one that can be writing into this engine's directory at that
+    /// moment: on a shard node a recovery writes received files there, and one of them can
+    /// carry the name of a kept file.
+    #[cfg(any(test, feature = "distributed"))]
+    pub(crate) fn remove_kept_files_the_record_no_longer_names(&self) {
+        let crate::segment::ReplacedFiles::KeptWhileItsRecordNamesThem(record) =
+            &self.replaced_files
+        else {
+            return;
+        };
+        let mut kept = self
+            .kept_segment_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kept.is_empty() {
             return;
         }
-        // A segment file name is never used twice, so a replaced file cannot be one the
-        // engine holds now. The check costs nothing and removing a live file would be fatal.
-        let live = self.collect_mmap_paths();
-        for path in retired.iter().filter(|path| !live.contains(path)) {
-            self.best_effort_remove_segment(path);
-        }
+        let named = record();
+        kept.retain(|path| {
+            let still_named = names(named.as_deref(), path);
+            if !still_named {
+                self.best_effort_remove_segment(path);
+            }
+            still_named
+        });
     }
 
     /// Best-effort removal of a segment file on a cleanup/rollback path.
@@ -642,6 +657,18 @@ impl Engine {
             }),
         }
     }
+}
+
+/// Whether a commit record names the segment file at `path`. A record that could not be
+/// read (`None`) is taken to name every file: nothing is removed on the strength of a
+/// record nobody has seen.
+fn names(record: Option<&[String]>, path: &std::path::Path) -> bool {
+    let Some(record) = record else {
+        return true;
+    };
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_none_or(|name| record.iter().any(|named| named == name))
 }
 
 mod fallback;

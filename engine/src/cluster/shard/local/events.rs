@@ -24,8 +24,7 @@ impl LocalShard {
             let segment_files = eng.segment_filenames().map_err(|e| {
                 ShardError::Log(format!("collecting segment filenames for checkpoint: {e}"))
             })?;
-            Self::write_checkpoint_file(
-                eng,
+            translog::write_sidecar(
                 dir,
                 &translog::ShardCheckpoint {
                     next_seg_id: eng.next_seg_id(),
@@ -40,48 +39,40 @@ impl LocalShard {
         Ok(())
     }
 
-    /// Write this shard's checkpoint file, which names its current segment files. Every write
-    /// of that file by a running shard goes through here (a seal, a recovery's commit, a bulk
-    /// or staged load), because of what follows it.
-    ///
-    /// On a shard node that file is the shard's commit record, and the segment files the
-    /// shard had replaced and listed are now named by nothing: they are removed. A shard of
-    /// an in-process cluster lists nothing, so nothing is removed here; what it replaced is
-    /// the coordinator's to remove after its own commit (ADR-214). A write that fails
-    /// releases nothing.
-    pub(super) fn write_checkpoint_file(
-        eng: &Engine,
-        dir: &std::path::Path,
-        checkpoint: &translog::ShardCheckpoint,
-    ) -> Result<(), ShardError> {
-        translog::write_sidecar(dir, checkpoint)?;
-        eng.release_retired_segment_files();
-        Ok(())
-    }
-
     /// Make this shard's checkpoint file its commit record (ADR-214): a shard on a shard
     /// node, which restarts from that file. Called by the node when it takes the shard into
-    /// a slot. From then on the shard lists what it replaces and releases it after each
-    /// checkpoint file.
+    /// a slot. From then on, when the shard replaces a segment file, it reads the checkpoint
+    /// file from disk: a file it does not name is removed at once, and one it names is kept
+    /// for [`Self::remove_replaced_files`].
     #[cfg(any(test, feature = "distributed"))]
     pub(crate) fn own_the_commit_record(&self) {
+        let dir = self.data_dir.clone();
         self.lock()
-            .set_replaced_files(crate::segment::ReplacedFiles::ListedUntilReleased);
+            .set_replaced_files(crate::segment::ReplacedFiles::KeptWhileItsRecordNamesThem(
+                Box::new(move || {
+                    let checkpoint = translog::read_sidecar(dir.as_deref()?).ok()??;
+                    Some(checkpoint.segment_files)
+                }),
+            ));
     }
 
-    /// A recovery is about to write received segment files into this shard's directory, to
-    /// replace the shard. From here on the shard removes nothing from that directory: a
-    /// received file can carry the name of a file this shard replaced and listed, and a seal
-    /// of this shard while the files arrive (it can still be asked to serve as a source)
-    /// would remove the new file by the old one's name (ADR-214).
+    /// Remove the segment files this shard replaced and kept, now that its checkpoint file
+    /// no longer names them. The checkpoint file is read from disk here; a file it still
+    /// names stays.
+    ///
+    /// Only for a caller that holds the node's installation barrier on the slot's installed
+    /// shard (ADR-214). A kept file is removed by name, and a recovery into the slot writes
+    /// received files into the same directory, under names that can be the same. The barrier
+    /// is what keeps the two apart, and a shard that has been replaced is never reached
+    /// through it.
     #[cfg(any(test, feature = "distributed"))]
-    pub(crate) fn leave_the_directory_to_a_recovery(&self) {
-        self.lock().leave_the_directory_alone();
+    pub(crate) fn remove_replaced_files(&self) {
+        self.lock().remove_kept_files_the_record_no_longer_names();
     }
 
     #[cfg(all(test, feature = "distributed"))]
     pub(crate) fn owns_its_commit_record(&self) -> bool {
-        self.lock().replaced_files() == crate::segment::ReplacedFiles::ListedUntilReleased
+        self.lock().keeps_what_its_record_names()
     }
 
     /// Deliver a degraded-path event to the installed sink, if any (best-effort: dropped when no

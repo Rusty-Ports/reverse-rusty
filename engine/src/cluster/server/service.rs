@@ -465,7 +465,12 @@ impl ShardService for ShardServer {
         // let adoption, recovery, or removal race this worker's checkpoint writes.
         let up_to_seqno = tokio::task::spawn_blocking(move || {
             let _install = install;
-            state.shard.seal_for_checkpoint()
+            let sealed = state.shard.seal_for_checkpoint();
+            // This worker holds the barrier on the slot's installed shard, so nothing else
+            // is writing into its directory (ADR-214). Whatever the seal's outcome, only
+            // what the checkpoint file on disk no longer names is removed.
+            state.shard.remove_replaced_files();
+            sealed
         })
         .await
         .map_err(|e| Status::internal(format!("shard seal worker failed: {e}")))?

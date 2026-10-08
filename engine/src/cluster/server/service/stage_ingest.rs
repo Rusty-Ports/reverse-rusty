@@ -99,7 +99,11 @@ pub(in crate::cluster::server) async fn run_installed<T: Send + 'static>(
     slot.check_not_fenced()?;
     tokio::task::spawn_blocking(move || {
         let _install = install;
-        job(&current)
+        let done = job(&current);
+        // A staged load commits by the checkpoint file and is not followed by a seal, so
+        // what it replaced goes here, under the same barrier (ADR-214).
+        current.shard.remove_replaced_files();
+        done
     })
     .await
     .map_err(|error| Status::internal(format!("staged load worker failed: {error}")))
