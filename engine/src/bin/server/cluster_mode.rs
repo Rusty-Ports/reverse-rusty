@@ -148,6 +148,15 @@ pub(crate) async fn run(
         );
         std::process::exit(1);
     }
+    // --accept-lost-log accepts the loss of the coordinator's own log (ADR-216). A remote
+    // coordinator keeps none: its shards do, each on its node.
+    if cli.accept_lost_log.is_some() && !in_process {
+        error!(
+            "--accept-lost-log applies to a single-node store or an in-process cluster; a \
+             coordinator of remote shards has no log of its own"
+        );
+        std::process::exit(1);
+    }
     // --recover-divergent-replicas rebuilds REMOTE replicas at connect (ADR-195). An in-process
     // cluster rebuilds its replicas from the primary on every open, so the flag would do nothing.
     if cli.recover_divergent_replicas && in_process {
@@ -284,6 +293,8 @@ pub(crate) async fn run(
     // the dedicated RPC runtime, never the HTTP one (see `rpc_runtime`).
     let handle = cluster_rpc_handle();
     let data_dir = cluster_config.data_dir.clone();
+    let log_losses_before = crate::log_loss::carried_out_before(data_dir.as_deref());
+    let record_dir = data_dir.clone();
     let cfg = cluster_config.clone();
     let control_endpoints: Vec<String> = cli.control_endpoint.clone();
     let route_by_assignments = cli.route_by_assignments;
@@ -320,6 +331,12 @@ pub(crate) async fn run(
     // Prometheus + the observer bridge (the cluster emits Ingest/DurabilityFailure
     // events through the same EngineEvent enum).
     let prom = PrometheusMetrics::new();
+    crate::log_loss::report(
+        &prom,
+        record_dir.as_deref(),
+        cli.accept_lost_log.as_deref(),
+        log_losses_before,
+    );
     let prom_for_observer = prom.clone();
     cluster.set_observer(Arc::new(move |event: &EngineEvent| {
         prom_for_observer.observe_event(event);

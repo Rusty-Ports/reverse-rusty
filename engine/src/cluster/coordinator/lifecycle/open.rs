@@ -322,7 +322,8 @@ impl ClusterEngine {
         let per_shard = config.map(|c| c.per_shard.clone()).unwrap_or_default();
 
         // The log is opened, or refused, BEFORE any shard is attached (see `open_cluster_log`).
-        let log = super::cluster_log::open_cluster_log(&data_dir, &manifest, config)?;
+        let (log, log_loss_accepted) =
+            super::cluster_log::open_cluster_log(&data_dir, &manifest, config)?;
 
         // Attach each shard's committed compiled segments (mmap) against the shared dict —
         // NOT re-ingest. Fails loud on a missing / CRC-corrupt segment (a skipped segment
@@ -595,6 +596,24 @@ impl ClusterEngine {
         }
         // A manifest still at epoch 0 does not say that the log exists. It does now.
         engine.commit_the_log_into_the_manifest()?;
+        if log_loss_accepted {
+            engine.emit(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::LogLost,
+                detail: format!(
+                    "{} was gone and its loss was accepted: the cluster opens without the \
+                     writes acknowledged since its last checkpoint",
+                    data_dir
+                        .join(crate::cluster::coordinator::CLUSTER_LOG_FILE)
+                        .display()
+                ),
+                error: format!(
+                    "recorded in {}",
+                    data_dir
+                        .join(crate::storage::ACCEPTED_LOG_LOSSES_FILE)
+                        .display()
+                ),
+            });
+        }
         Ok(engine)
     }
 }

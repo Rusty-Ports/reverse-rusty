@@ -27,11 +27,16 @@ use crate::storage::ClusterManifest;
 /// This runs before any shard is attached: attaching resets a shard's translog, and when the
 /// cluster log is gone those translogs are the only place its writes still exist. An open
 /// that refuses must not have touched them.
+///
+/// Unless the loss is accepted (ADR-216): the store was opened with the token the refusal
+/// names. Then the loss is recorded in the data directory first, the empty log is created
+/// after that, and the second value returned is `true`. The shards' translogs are reset
+/// when they are attached, as at every open, so what was only in the lost log is gone.
 pub(super) fn open_cluster_log(
     data_dir: &Path,
     manifest: &ClusterManifest,
     config: Option<&ClusterConfig>,
-) -> Result<FileClusterLog, ShardError> {
+) -> Result<(FileClusterLog, bool), ShardError> {
     let refused = |e: std::io::Error| ShardError::Log(format!("opening cluster log: {e}"));
     let log_path = data_dir.join(CLUSTER_LOG_FILE);
     let fsync = config.is_some_and(|c| c.wal_sync_on_write);
@@ -43,30 +48,62 @@ pub(super) fn open_cluster_log(
             LogPos(manifest.snapshot_pos),
             IfMissing::Create,
         )
+        .map(|log| (log, false))
         .map_err(refused);
     }
     // The one check is in `open`: told to refuse, it creates nothing. A log that is not
     // there is reported with what this owner knows about it.
-    match FileClusterLog::open(
+    let found = FileClusterLog::open(
         &log_path,
         fsync,
         LogPos(manifest.snapshot_pos),
         IfMissing::Refuse,
-    ) {
+    );
+    let (log, loss_accepted) = match found {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(refused(crate::storage::framed_log::lost_log(
-                &log_path,
-                &format!(
-                    "the cluster manifest (epoch {}, log position {}) was written after it \
-                     existed",
-                    manifest.epoch, manifest.snapshot_pos
+            use crate::storage::log_loss;
+            let commit_record = format!("epoch-{}-pos-{}", manifest.epoch, manifest.snapshot_pos);
+            let decision = log_loss::accept(
+                data_dir,
+                CLUSTER_LOG_FILE,
+                &commit_record,
+                config.and_then(|c| c.accept_lost_log.as_deref()),
+            )
+            .map_err(refused)?;
+            match decision {
+                log_loss::Decision::Refused { token, given } => {
+                    return Err(refused(crate::storage::framed_log::lost_log(
+                        &log_path,
+                        &format!(
+                            "the cluster manifest (epoch {}, log position {}) was written \
+                             after it existed",
+                            manifest.epoch, manifest.snapshot_pos
+                        ),
+                        &format!(
+                            "Restore the data directory from a backup. The shards' translogs \
+                             have not been touched. {}",
+                            log_loss::how_to_accept(&token, given.as_deref())
+                        ),
+                    )));
+                }
+                // The loss is on record. Now, and not before, the empty log.
+                log_loss::Decision::Accepted => (
+                    FileClusterLog::open(
+                        &log_path,
+                        fsync,
+                        LogPos(manifest.snapshot_pos),
+                        IfMissing::Create,
+                    )
+                    .map_err(refused)?,
+                    true,
                 ),
-                "Restore the data directory from a backup. The shards' translogs have not \
-                 been touched.",
-            )))
+            }
         }
-        opened => opened.map_err(refused),
-    }
+        opened => (opened.map_err(refused)?, false),
+    };
+    // The log is in place: an accepted loss has been carried out.
+    crate::storage::log_loss::settle(data_dir, CLUSTER_LOG_FILE).map_err(refused)?;
+    Ok((log, loss_accepted))
 }
 
 impl ClusterEngine {

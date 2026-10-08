@@ -22,6 +22,7 @@ use std::path::{Component, Path};
 mod backup;
 mod dict;
 pub(crate) mod framed_log;
+pub(crate) mod log_loss;
 mod manifest;
 mod segment;
 mod sources;
@@ -31,6 +32,7 @@ pub use backup::{
     copy_cluster_dir, copy_engine_dir, verify_backup, verify_cluster_backup, BackupError,
 };
 pub use dict::{deserialize_dict, serialize_dict};
+pub use log_loss::{accepted_log_losses, AcceptedLogLoss, ACCEPTED_LOG_LOSSES_FILE};
 pub use manifest::{
     read_cluster_manifest, read_manifest, write_cluster_manifest, write_manifest, ClusterManifest,
     Manifest,

@@ -186,15 +186,53 @@ impl Engine {
         // that is not there has been lost, with every acknowledged write that had not been
         // flushed to a segment, and `Wal::open` would put an empty one in its place without
         // a word. Refuse (ADR-213).
+        //
+        // Unless the loss is accepted (ADR-216): then it is recorded in the data directory
+        // first, and only after that does `Wal::open` create the empty log.
         let wal_path = dir.join("wal.log");
         if !wal_path.exists() {
-            return Err(crate::storage::framed_log::lost_log(
-                &wal_path,
-                "the manifest beside it was written after it existed",
-                "Restore the data directory from a backup.",
-            ));
+            use crate::storage::log_loss;
+            // What the store is started from. Not a position: a manifest can be newer
+            // than writes that were still only in the log.
+            let commit_record = format!(
+                "segment-{}-seq-{}",
+                manifest.next_seg_id, manifest.wal_seq_watermark
+            );
+            match log_loss::accept(
+                dir,
+                "wal.log",
+                &commit_record,
+                config.accept_lost_log.as_deref(),
+            )? {
+                log_loss::Decision::Accepted => {
+                    pending_events.push(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::LogLost,
+                        detail: format!(
+                            "{} was gone and its loss was accepted: the store opens without \
+                             the writes that had not been flushed to a segment",
+                            wal_path.display()
+                        ),
+                        error: format!(
+                            "recorded in {}",
+                            dir.join(log_loss::ACCEPTED_LOG_LOSSES_FILE).display()
+                        ),
+                    });
+                }
+                log_loss::Decision::Refused { token, given } => {
+                    return Err(crate::storage::framed_log::lost_log(
+                        &wal_path,
+                        "the manifest beside it was written after it existed",
+                        &format!(
+                            "Restore the data directory from a backup. {}",
+                            log_loss::how_to_accept(&token, given.as_deref())
+                        ),
+                    ));
+                }
+            }
         }
         let mut wal_file = Wal::open(&wal_path, config.wal_sync_on_write)?;
+        // The log is in place: an accepted loss has been carried out.
+        crate::storage::log_loss::settle(dir, "wal.log")?;
         // ADR-066: a reset (header-only) WAL rescans to seq 1, but the manifest
         // keeps its watermark — pin the sequence past it so frames appended after
         // this reopen can never sort at/below the watermark and be skipped by the

@@ -95,6 +95,13 @@ pub enum DurabilityOp {
     /// Reconstructing remote create-only admission failed. No mutation or match
     /// data was lost; explicit upserts remain available while creates fail closed.
     LogicalIdDirectory,
+    /// A store whose log was gone was started with the loss accepted (ADR-216): it opened
+    /// with an empty log in place of the lost one, without the writes acknowledged since
+    /// its last flush or checkpoint. Data lost, by an operator's decision. The loss is also
+    /// recorded in the data directory
+    /// ([`ACCEPTED_LOG_LOSSES_FILE`](crate::storage::ACCEPTED_LOG_LOSSES_FILE)), which is
+    /// what a later start reports; this event is raised by the start that accepts it.
+    LogLost,
 }
 
 impl DurabilityOp {
@@ -120,6 +127,7 @@ impl DurabilityOp {
             DurabilityOp::ReplicaDesync => "replica_desync",
             DurabilityOp::ClusterPartialApply => "cluster_partial_apply",
             DurabilityOp::LogicalIdDirectory => "logical_id_directory",
+            DurabilityOp::LogLost => "log_lost",
         }
     }
 
@@ -137,7 +145,8 @@ impl DurabilityOp {
             | DurabilityOp::SegmentRecovery
             | DurabilityOp::ManifestWrite
             | DurabilityOp::IngestRollback
-            | DurabilityOp::ClusterPartialApply => true,
+            | DurabilityOp::ClusterPartialApply
+            | DurabilityOp::LogLost => true,
             DurabilityOp::WalCheckpoint
             | DurabilityOp::WalReset
             | DurabilityOp::SourceStoreWrite

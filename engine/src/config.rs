@@ -364,6 +364,16 @@ pub struct EngineConfig {
     /// Default: `false` (negation-only queries are loudly rejected)
     pub accept_class_d: bool,
 
+    /// Accept the loss of this store's log, once (ADR-216). A store whose manifest says a
+    /// log existed refuses to open when the log is not there (ADR-213), and the refusal
+    /// names a token for that loss. Opened with that token here, the store records the
+    /// loss in its data directory, puts an empty log in place, and opens without the
+    /// writes that were only in the lost one. The token names one loss: it does nothing
+    /// when the log is present, and it does not accept a later loss.
+    ///
+    /// Default: `None` (a lost log is refused)
+    pub accept_lost_log: Option<String>,
+
     /// Translog peer-recovery retention-lease TTL, in seconds (ADR-048). A lease pins a
     /// recovery source's un-sealed translog tail so a concurrent seal can't trim it
     /// (ADR-040); a recovery renews its lease every catch-up pass (the heartbeat). If a
@@ -410,6 +420,7 @@ impl Default for EngineConfig {
             alias_feedback_max_pairs: 256,
             max_percolate_batch: 10_000,
             accept_class_d: false,
+            accept_lost_log: None,
             retention_lease_ttl_secs: 1800,
         }
     }
