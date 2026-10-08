@@ -32,6 +32,7 @@ mod dedup_visibility;
 mod degenerate;
 mod equivalence;
 mod filtered;
+mod grammar;
 mod hot;
 mod learn_default;
 mod messy;

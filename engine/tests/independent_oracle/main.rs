@@ -20,3 +20,4 @@ mod aliases;
 mod core;
 mod corpus;
 mod gotcha;
+mod grammar;
