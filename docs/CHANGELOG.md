@@ -9,6 +9,26 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — A first start that was killed starts again
+
+- **A build does not build over what it finds**
+  ([ADR-215](decisions/adr-215-a-build-does-not-build-over-what-it-finds.md)). An in-process
+  cluster's first start creates the shard directories, loads the corpus, and then writes the
+  manifest. A start killed before the manifest left shard state and no manifest, and the next
+  start built again over it: each shard restored the unfinished build's rows and the corpus
+  was loaded a second time on top. That start failed, and later ones opened a doubled corpus
+  with create-only writes refused.
+- **Now** a build writes a mark (`build.incomplete`) before it creates anything, and clears
+  it when it has committed. A start that finds the mark and no manifest removes what the
+  unfinished build left and builds from the beginning.
+- **What is refused,** with nothing changed on disk: a data directory that holds shard
+  directories or a cluster log but no manifest and no mark (a cluster that has lost its
+  manifest, or what an earlier release left of an interrupted first start), and a build in a
+  directory that already holds a cluster.
+- **For a deployment:** a directory left by an interrupted first start under an earlier
+  release must be emptied once; the error at start says so. `ClusterEngine::build` called on
+  a directory that holds a cluster now returns an error.
+
 ## 2026-10-08 — A cluster killed after a flush reopens
 
 - **A shard keeps the segment files it has replaced until its owner has committed**

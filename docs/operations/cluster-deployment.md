@@ -152,6 +152,14 @@ loop is **not** the connect race and does not heal itself: part of the corpus is
 the coordinator will not serve it. Stop the stack, remove the shard volumes (`rrc down -v`, or delete
 the shard PVCs), and start again so the load runs from the beginning.
 
+**An interrupted first build (in-process cluster).** A server started with `--cluster --shards K
+--data-dir` and a seed file builds the cluster at its first start. If that start is killed during
+the load, the next start finds the build's mark (`build.incomplete`), removes what was built and
+builds again: nothing to do (ADR-215). A data directory that holds `shard_NNN` directories and no
+`cluster_manifest.bin` **without** that mark is refused at start, because it may be a cluster whose
+manifest was lost. The error says which case it is. If it is an interrupted first start under an
+earlier release, empty the directory; otherwise restore it from a backup.
+
 **Advertise URL (bootstrap control node).** The `--bootstrap` node must advertise a routable self-URL
 (`--advertise-url https://control0:50061`, ADR-082 — it fails loud on a wildcard bind). The URL is
 committed into the Raft membership at the *first* bootstrap only (`initialize` is idempotent), so an

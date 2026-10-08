@@ -155,6 +155,11 @@ pre-upgrade backup:
   A cluster an older release left at epoch 0 (it never checkpointed) has its manifest rewritten
   at epoch 1 the first time this release opens it, unless that manifest is in an older format,
   which an open never rewrites ([disaster recovery §3.4](disaster-recovery.md)).
+- **ADR-215 builds:** one new file in an in-process cluster's data directory while its first
+  build runs (`build.incomplete`); no format change, and an earlier release ignores it. A data
+  directory that holds shard directories and no manifest (a first start that an earlier release
+  did not finish) **is refused at start**; before, the start built over it and left a doubled
+  corpus. Empty such a directory once.
 - **ADR-193 inbound request size:** no durable or wire format change. A coordinator sends a
   bulk bucket on the `StageIngest` stream (ADR-180), which every shard node it can connect to
   already serves: the ADR-185 capability check refuses older nodes at connect. A dictionary

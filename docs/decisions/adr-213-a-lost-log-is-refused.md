@@ -130,7 +130,7 @@ write.
   is ingested a second time on top of them. With the manifest first, the same failure leaves
   an epoch-0 manifest and the next start opens it and finishes. (A build that stops before
   its *first* manifest has that problem in any order; it is older than this decision and is
-  on the [roadmap](../roadmap.md#an-interrupted-first-build).)
+  fixed by [ADR-215](adr-215-a-build-does-not-build-over-what-it-finds.md).)
 - **End `build`, and an epoch-0 reopen, with a checkpoint,** which moves the epoch by the
   usual route. This was the second form, and three review rounds each found something a
   checkpoint does that a start must not: its log rewrite can leave the log refusing writes;
@@ -259,3 +259,10 @@ and the old file removed before the coordinator's manifest is committed) was a d
 every checkpoint and of every compaction on a shard.
 [ADR-214](adr-214-a-shard-keeps-what-it-replaced.md) fixes it: a shard keeps what it has
 replaced until its owner has committed.
+
+## Later outcome (2026-10-08, ADR-215)
+
+A build that stops before its first manifest is no longer built over.
+[ADR-215](adr-215-a-build-does-not-build-over-what-it-finds.md): a build marks the directory
+before it creates shard state, the next build starts again over what a marked build left, and
+shard state with no manifest and no mark is refused.
