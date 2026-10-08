@@ -322,9 +322,16 @@ fn a_checkpoint_that_fails_at_its_rename_leaves_a_log_that_says_it_takes_no_writ
     log.append(&add(1, "alpha")).expect("append");
     assert!(!ClusterLog::appends_disabled(&log));
 
-    let name = path.file_name().unwrap().to_str().unwrap().to_string();
-    FAIL_NEXT_CHECKPOINT_PUBLISH_OF.with(|named| *named.borrow_mut() = Some(name));
+    // The scope is this one file, so the rename of this log fails and no other step does.
+    let scope = crate::fault::Scope::open(&path);
+    let rename = crate::fault::Step {
+        name: "rename",
+        path: String::new(),
+    };
+    scope.fail(&rename, 0);
     assert!(ClusterLog::checkpoint(&log, LogPos(0)).is_err());
+    assert_eq!(scope.failed(), Some(rename));
+    drop(scope);
     assert!(
         ClusterLog::appends_disabled(&log),
         "the log does not say that it refuses appends"

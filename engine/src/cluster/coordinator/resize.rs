@@ -143,9 +143,12 @@ impl ClusterEngine {
         // / `assignment_for` (introspection + the autoscaler) see K′ positions, not a stale K.
         // Durability rides the manifest (which `open` re-seeds the control plane from), so this
         // only needs to be live-correct.
-        self.control.propose(ClusterStateChange::SetShardCount {
-            num_shards: new_num_shards_control,
-        })?;
+        self.propose_layout_change(
+            &after,
+            ClusterStateChange::SetShardCount {
+                num_shards: new_num_shards_control,
+            },
+        )?;
         let control = self.control.cluster_state()?;
         self.attest_resize_control_state(&after, &control)?;
 
@@ -214,7 +217,9 @@ impl ClusterEngine {
                 continue;
             }
             let sd = entry.path();
-            match std::fs::remove_dir_all(&sd) {
+            let removed =
+                crate::fault::step("remove", &sd).and_then(|()| std::fs::remove_dir_all(&sd));
+            match removed {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => self.emit(EngineEvent::DurabilityFailure {

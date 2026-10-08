@@ -16,16 +16,17 @@ pub(super) fn publish_with_crc(
     tmp: &Path,
     encode_body: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
+    crate::fault::step("create", tmp)?;
     let mut file = File::create(tmp)?;
     encode_body(&mut file)?;
-    file.sync_all()?;
+    crate::fault::sync(&file, tmp)?;
     drop(file);
 
     let content = std::fs::read(tmp)?;
     let crc = crc32(&content);
     let mut file = OpenOptions::new().append(true).open(tmp)?;
     write_u32(&mut file, crc)?;
-    file.sync_all()?;
+    crate::fault::sync(&file, tmp)?;
     drop(file);
 
     durable_rename(tmp, path)

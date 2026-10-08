@@ -15,7 +15,6 @@
 //! All multi-byte values are little-endian; integrity is a trailing CRC-32 plus
 //! write-to-tmp + atomic rename (`durable_rename`).
 
-use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Component, Path};
 
@@ -148,16 +147,14 @@ impl Crc32 {
 
 /// Atomic rename with parent-directory fsync for crash durability.
 pub(crate) fn durable_rename(from: &Path, to: &Path) -> io::Result<()> {
+    crate::fault::step("rename", to)?;
     std::fs::rename(from, to)?;
-    if let Some(directory) = directory_of(to) {
-        File::open(directory)?.sync_all()?;
-    }
-    Ok(())
+    crate::fault::sync_dir_of(to)
 }
 
 /// The directory whose entry names `path`. A bare file name has an empty parent, which
 /// cannot be opened; the entry is in the working directory.
-fn directory_of(path: &Path) -> Option<&Path> {
+pub(crate) fn directory_of(path: &Path) -> Option<&Path> {
     let parent = path.parent()?;
     if parent.as_os_str().is_empty() {
         return Some(Path::new("."));

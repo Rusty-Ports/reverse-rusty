@@ -232,17 +232,6 @@ pub(crate) struct FileClusterLog {
     fsync_each_write: bool,
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Test seam: the next checkpoint made on this thread of a log with this file name fails
-    /// at its rename, which is the point from which the log's append handle is disabled.
-    /// Nothing portable makes one rename in a directory fail and leaves the others working.
-    /// It names the file because a shard's translog is the same type, and a cluster
-    /// checkpoint trims those first.
-    pub(crate) static FAIL_NEXT_CHECKPOINT_PUBLISH_OF: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// What [`FileClusterLog::open`] does when no file is at the log's path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IfMissing {
@@ -484,6 +473,8 @@ impl ClusterLog for FileClusterLog {
             .checked_add(1)
             .ok_or_else(|| ShardError::Log("cluster log position exhausted".into()))?;
         let body = Self::encode_body(seq, m);
+        crate::fault::step("append", &st.path)
+            .map_err(|e| ShardError::Log(format!("append: {e}")))?;
         st.file
             .append(&body, self.fsync_each_write)
             .map_err(|e| ShardError::Log(format!("append: {e}")))?;
@@ -537,6 +528,7 @@ impl ClusterLog for FileClusterLog {
         // taking writes. (The write-ahead log's reset has the same rule, ADR-198.)
         let tmp = st.path.with_extension("clog.tmp");
         let replacement = (|| -> io::Result<()> {
+            crate::fault::step("create", &tmp)?;
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&CLOG_MAGIC)?;
             f.write_all(&CLOG_VERSION.to_le_bytes())?;
@@ -544,7 +536,7 @@ impl ClusterLog for FileClusterLog {
                 let body = Self::encode_body(pos.0, m);
                 write_frame(&mut f, &body)?;
             }
-            f.sync_all()
+            crate::fault::sync(&f, &tmp)
         })();
         replacement.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
 
@@ -553,23 +545,9 @@ impl ClusterLog for FileClusterLog {
         // instead of being acknowledged into a file no restart will read.
         st.file.disable();
         let publish = (|| -> io::Result<()> {
-            #[cfg(test)]
-            if FAIL_NEXT_CHECKPOINT_PUBLISH_OF.with(|named| {
-                let mut named = named.borrow_mut();
-                let this_log = st.path.file_name().and_then(|name| name.to_str());
-                let hit = named.as_deref().is_some() && named.as_deref() == this_log;
-                if hit {
-                    *named = None;
-                }
-                hit
-            }) {
-                return Err(io::Error::other("test: the rename is refused"));
-            }
+            crate::fault::step("rename", &st.path)?;
             std::fs::rename(&tmp, &st.path)?;
-            if let Some(parent) = st.path.parent() {
-                std::fs::File::open(parent)?.sync_all()?;
-            }
-            Ok(())
+            crate::fault::sync_dir_of(&st.path)
         })();
         publish.map_err(|e| ShardError::Log(format!("checkpoint rewrite: {e}")))?;
 

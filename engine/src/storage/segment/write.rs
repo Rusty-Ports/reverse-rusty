@@ -162,6 +162,7 @@ impl ExactSectionLayout {
 /// Write a sealed Segment to a file. Uses atomic write (tmp + rename) for safety.
 pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     let tmp_path = path.with_extension("seg.tmp");
+    crate::fault::step("create", &tmp_path)?;
     let mut f = std::fs::File::create(&tmp_path)?;
 
     // Reserve space for header (will fill in section offsets at the end)
@@ -296,13 +297,13 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     write_u64(&mut f, hot_off)?;
 
     // Compute CRC32 of the entire file and append it as the trailing 4 bytes
-    f.sync_all()?;
+    crate::fault::sync(&f, &tmp_path)?;
     drop(f);
     let content = std::fs::read(&tmp_path)?;
     let file_crc = crc32(&content);
     let mut f = std::fs::OpenOptions::new().append(true).open(&tmp_path)?;
     write_u32(&mut f, file_crc)?;
-    f.sync_all()?;
+    crate::fault::sync(&f, &tmp_path)?;
     drop(f);
     durable_rename(&tmp_path, path)?;
     Ok(())

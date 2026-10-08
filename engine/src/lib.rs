@@ -48,6 +48,7 @@ pub mod error;
 pub mod events;
 pub mod exact;
 pub mod explain;
+mod fault;
 pub mod filter;
 pub mod gen;
 pub mod index;

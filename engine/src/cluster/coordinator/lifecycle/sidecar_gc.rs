@@ -68,7 +68,10 @@ impl ClusterEngine {
             if !superseded || !entry.file_type().is_ok_and(|t| t.is_file()) {
                 continue;
             }
-            match std::fs::remove_file(entry.path()) {
+            let path = entry.path();
+            let removed =
+                crate::fault::step("remove", &path).and_then(|()| std::fs::remove_file(&path));
+            match removed {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => self.emit(EngineEvent::DurabilityFailure {

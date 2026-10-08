@@ -136,9 +136,12 @@ impl ClusterEngine {
         let (rebuilt, after) =
             self.rebuild_from_live(change, new_norm, ring, Some(vocab), next_generation)?;
 
-        self.control.propose(ClusterStateChange::BumpModelVersion {
-            dict_fingerprint: after.dict.fingerprint(),
-        })?;
+        self.propose_layout_change(
+            &after,
+            ClusterStateChange::BumpModelVersion {
+                dict_fingerprint: after.dict.fingerprint(),
+            },
+        )?;
 
         // 4. Commit a durable cluster's rebuild via `checkpoint`: seal the green shards, write the
         //    new manifest (re-minted dict + serialized vocab + green segment registry — the atomic
@@ -281,8 +284,10 @@ impl ClusterEngine {
                     state.placement_generation, prior_generation, generation.0
                 )));
             }
-            self.control
-                .propose(ClusterStateChange::BumpModelVersion { dict_fingerprint })?;
+            self.propose_layout_change(
+                layout,
+                ClusterStateChange::BumpModelVersion { dict_fingerprint },
+            )?;
             let repaired = self.control.cluster_state()?;
             if repaired.placement_generation != generation.0
                 || repaired.dict_fingerprint != dict_fingerprint
@@ -301,13 +306,11 @@ impl ClusterEngine {
                         "alias-import retry lost its durable directory before sync".into(),
                     )
                 })?;
-                std::fs::File::open(dir)
-                    .and_then(|file| file.sync_all())
-                    .map_err(|error| {
-                        ShardError::Log(format!(
-                            "syncing the published alias-import manifest directory: {error}"
-                        ))
-                    })?;
+                crate::fault::sync_dir_of(&dir.join(CLUSTER_MANIFEST_FILE)).map_err(|error| {
+                    ShardError::Log(format!(
+                        "syncing the published alias-import manifest directory: {error}"
+                    ))
+                })?;
                 self.epoch.store(manifest.epoch, Ordering::Relaxed);
                 self.record_committed_manifest(*manifest);
             }

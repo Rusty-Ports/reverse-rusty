@@ -46,9 +46,10 @@ pub(crate) fn replacement_path(path: &Path) -> std::path::PathBuf {
 /// later start refuses that.
 pub(crate) fn publish_empty_log(path: &Path, header: &[u8]) -> io::Result<File> {
     let replacement = replacement_path(path);
+    crate::fault::step("create", &replacement)?;
     let mut file = File::create(&replacement)?;
     file.write_all(header)?;
-    file.sync_all()?;
+    crate::fault::sync(&file, &replacement)?;
     drop(file);
     crate::storage::durable_rename(&replacement, path)?;
     std::fs::OpenOptions::new().append(true).open(path)
@@ -195,8 +196,9 @@ pub(crate) fn repair_tail(path: &Path, scanned_len: usize, valid_len: usize) -> 
     if file.metadata()?.len() != scanned_len as u64 {
         return Err(invalid("log length changed during recovery validation"));
     }
+    crate::fault::step("truncate", path)?;
     file.set_len(valid_len as u64)?;
-    file.sync_all()
+    crate::fault::sync(&file, path)
 }
 
 /// Encode the whole frame before writing; every log uses this one write_all.

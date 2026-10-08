@@ -159,9 +159,10 @@ pub(super) fn write_sources_v2(entries: &[SourceEntryRef<'_>], path: &Path) -> i
     buf.extend_from_slice(&crc.to_le_bytes());
 
     let tmp = path.with_extension("sources.tmp");
+    crate::fault::step("create", &tmp)?;
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(&buf)?;
-    f.sync_all()?;
+    crate::fault::sync(&f, &tmp)?;
     drop(f);
     durable_rename(&tmp, path)?;
     Ok(())

@@ -11,6 +11,7 @@
 //! multi-million-query base. Same-id mutations use lifecycle-managed per-ID
 //! locks while different IDs remain independent.
 
+use super::layout::Layout;
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 use crate::cluster::shard::ShardError;
@@ -182,6 +183,26 @@ impl ClusterEngine {
         directory.converged = converged;
         *write_directory(&self.logical_ids) = directory;
         Ok(())
+    }
+
+    /// Seed the directory from what the shards of `layout` hold. Returns why not when a
+    /// shard's source store does not cover its live queries; the directory is then left as
+    /// it was.
+    pub(super) fn seed_logical_ids_from_shards(
+        &self,
+        layout: &Layout,
+    ) -> Result<Option<ShardError>, ShardError> {
+        let mut ids = Vec::new();
+        for shard in layout.shards.iter() {
+            match shard.live_logical_ids() {
+                Ok(held) => ids.extend(held),
+                Err(error) => return Ok(Some(error)),
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        self.replace_logical_ids(ids)?;
+        Ok(None)
     }
 
     /// Preserve every fail-closed id reservation while revoking the convergence
