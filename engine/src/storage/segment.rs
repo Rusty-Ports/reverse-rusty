@@ -90,10 +90,14 @@ const FORMAT_VERSION_PHRASE_PREDICATE: u32 = 10;
 /// a body gets, not what it matches: an any-of group with no top-64 member now
 /// anchors a query whose only required feature is top-64, and is preferred over
 /// a group that has one, so the stored cover, class and cluster placement of
-/// such rows must be re-derived (ADR-187).
+/// such rows must be re-derived (ADR-187). Version 8 changes what the analyzer takes for a
+/// vocabulary phrase: its words as consecutive tokens whatever separates them, chosen
+/// leftmost-longest among the occurrences that sit on token boundaries. A stored query whose
+/// text has two separators inside a phrase, or a phrase beside a pattern that only matches
+/// inside a word, compiled to the phrase's words and now compiles to the phrase (ADR-218).
 /// This lives in the format's old reserved header word so
 /// recovery can source-rebuild every older materialization before serving it.
-pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 7;
+pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 8;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).

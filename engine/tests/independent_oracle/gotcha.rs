@@ -324,3 +324,106 @@ fn class_d_queries_are_dropped() {
     // An empty / whitespace-only query parses to zero clauses -> dropped.
     check(def_norm, def_vocab, "   ", &[("anything at all", false)]);
 }
+
+fn phrase_norm() -> Normalizer {
+    use reverse_rusty::dict::FeatureKind;
+    let mut b = NormalizerBuilder::new();
+    b.add_phrase(&["north", "star"], "brand:north_star", FeatureKind::Brand);
+    b.add_phrase(&["star", "lamp"], "entity:star_lamp", FeatureKind::Entity);
+    b.add_phrase(&["new", "york", "city"], "entity:nyc", FeatureKind::Entity);
+    b.add_phrase(&["new", "york"], "entity:ny", FeatureKind::Entity);
+    b.build().expect("phrase normalizer")
+}
+fn phrase_vocab() -> RefVocab {
+    RefVocab::default_vocab()
+        .phrase("north star", "brand:north_star", PhraseMode::Collapse)
+        .phrase("star lamp", "entity:star_lamp", PhraseMode::Collapse)
+        .phrase("new york city", "entity:nyc", PhraseMode::Collapse)
+        .phrase("new york", "entity:ny", PhraseMode::Collapse)
+}
+
+/// A vocabulary phrase is its words as consecutive tokens. How many separators stand between
+/// them does not matter: a comma and a space, a hyphen between spaces, two spaces and a tab
+/// all end one token and start the next (ADR-218). The phrase was looked for in the cleaned
+/// text with exactly one space between its words, and each separator had become a space of
+/// its own, so `north, star` did not carry `north star` and an unquoted query for the phrase
+/// missed the title. The quoted query always matched: it is here as the control.
+#[test]
+fn a_phrase_is_found_across_any_separators() {
+    let carries = [
+        ("north star", true),
+        ("North-Star", true),
+        ("north\tstar", true),
+        ("north  star", true),
+        ("north, star", true),
+        ("north - star", true),
+        ("the north   star lamp", true),
+        ("  north ... star!", false), // `.` is kept: `...` is a token between the words
+        ("north polar star", false),
+        ("star north", false),
+    ];
+    for query in ["north star", "(north star,zzother)", "\"north star\""] {
+        check(phrase_norm, phrase_vocab, query, &carries);
+    }
+    // The same on the query side: a member typed with two spaces is the phrase.
+    check(
+        phrase_norm,
+        phrase_vocab,
+        "(north  star,zzother)",
+        &[
+            ("north star", true),
+            ("north, star", true),
+            ("north", false),
+        ],
+    );
+    // A forbidden term reads the title the same way: the phrase consumes its words wherever
+    // it is found, so `-north` rejects neither spelling of a title that carries the phrase.
+    check(
+        phrase_norm,
+        phrase_vocab,
+        "star -north",
+        &[("north star", false), ("north, star", false)],
+    );
+    check(
+        phrase_norm,
+        phrase_vocab,
+        "lamp -north",
+        &[
+            ("north star lamp", true),
+            ("north, star lamp", true),
+            ("north lamp", false),
+        ],
+    );
+}
+
+/// Phrase selection is leftmost-longest over the occurrences that sit on token boundaries. A
+/// pattern found inside a word, or one that ends inside a word, is not an occurrence and
+/// hides nothing (ADR-218). The engine took such a match first and dropped it afterwards, by
+/// which time it had hidden the valid phrase it overlapped: `new york cityscape` did not
+/// carry `new york`.
+#[test]
+fn a_match_inside_a_word_hides_no_phrase() {
+    check(
+        phrase_norm,
+        phrase_vocab,
+        "new york",
+        &[
+            ("new york", true),
+            ("new york cityscape", true),
+            ("renew york", false),
+            // The longer phrase is an occurrence here and wins: this title is the city.
+            ("new york city", false),
+        ],
+    );
+    check(
+        phrase_norm,
+        phrase_vocab,
+        "star lamp",
+        &[
+            ("star lamp", true),
+            ("xnorth star lamp", true),
+            // `north star` starts first and takes `star`.
+            ("north star lamp", false),
+        ],
+    );
+}

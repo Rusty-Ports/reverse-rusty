@@ -116,36 +116,59 @@ fn multiword_phrases_collapse_to_one_feature() {
 }
 
 #[test]
-fn whitespace_runs_are_not_collapsed_in_canonical_features() {
-    // ADR-061 (codex R8): `clean_with` does NOT collapse whitespace runs — the canonical / compile
-    // feature output is byte-identical across versions, so a persisted segment never desyncs on a
-    // binary upgrade. A double-spaced phrase therefore tokenizes to its COMPONENTS here. Matching a
-    // whitespace-run TITLE against an alias is handled recall-safely by the positive-view overlap
-    // scan (`tests/oracle/alias.rs::multiword_alias_matches_a_double_space_title`), which never
-    // touches these canonical features.
+fn separators_between_a_phrases_words_do_not_hide_it() {
+    // ADR-218: a phrase is its words as consecutive tokens. Cleaning merges separators, so two
+    // spaces, a comma and a space, or a hyphen between spaces are one token boundary, and the
+    // phrase is found as it is across a single space. (Cleaning used to write a space for each
+    // separator, and the phrase was looked for with exactly one: `wireless, mouse` gave the
+    // two words and not the entity, on a title and in a query alike.)
     let n = sample_vocab();
+    for text in [
+        "wireless mouse",
+        "wireless  mouse",
+        "wireless, mouse",
+        "wireless - mouse",
+        "  wireless\t \tmouse  ",
+        "Wireless-Mouse!",
+    ] {
+        assert_eq!(names(&n, text), s(&["entity:wireless_mouse"]), "{text:?}");
+    }
+    // A kept character is part of a token, and a token between the words is not a separator.
     assert_eq!(
-        names(&n, "wireless  mouse"),
-        s(&["term:mouse", "term:wireless"]),
-        "double space → components (not collapsed)"
+        names(&n, "wireless . mouse"),
+        s(&["term:.", "term:mouse", "term:wireless"])
     );
     assert_eq!(
-        names(&n, "wireless mouse"),
-        s(&["entity:wireless_mouse"]),
-        "single space → the phrase entity (unchanged)"
+        names(&n, "wireless optical mouse"),
+        s(&["term:mouse", "term:optical", "term:wireless"])
     );
 }
 
 #[test]
-fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
-    // ADR-061 (codex R11): alias patterns are registered single-spaced, and the DSL hands a
-    // quoted phrase's inner text to `compile_features` verbatim — so a whitespace run inside a
-    // query phrase (`"new  york"`) would hide the alias from the query-side collapse: the query
-    // compiles to component terms, equivalence expansion never reaches the group, and
-    // `"new  york" catalog` misses a `ny catalog` title (a false negative). With an alias active, the
-    // QUERY side therefore collapses runs before the phrase scan. The title canonical view stays
-    // verbatim (codex R8: persisted normalization never changes), and without an alias the query
-    // side is byte-identical (`whitespace_runs_are_not_collapsed_in_canonical_features` above).
+fn cleaned_text_never_has_two_separators_in_a_row() {
+    let punct = PunctTable::default();
+    let mut lc = String::new();
+    for (text, cleaned) in [
+        ("a  b", "a b"),
+        ("  a, b -- c  ", "a b c "),
+        ("a #2 /3", "a # 2 / 3"),
+        ("a#/b", "a # / b"),
+        ("...", "..."),
+        (", ,", ""),
+    ] {
+        super::core::clean_with(&punct, text, &mut lc);
+        assert_eq!(lc, cleaned, "{text:?}");
+        assert!(
+            !lc.contains("  ") && !lc.starts_with(' '),
+            "{text:?} -> {lc:?}"
+        );
+    }
+}
+
+#[test]
+fn a_run_inside_a_phrase_is_the_phrase_on_both_sides_and_in_both_views() {
+    // The query side reduced runs only while a multi-word alias was active (ADR-061), and the
+    // title's canonical view never did. Now neither needs to: there are no runs.
     let mut b = NormalizerBuilder::new();
     b.add_alias_form("new york");
     let n = b.build().expect("alias normalizer");
@@ -153,11 +176,9 @@ fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
     assert_eq!(
         names(&n, "new  york catalog"),
         s(&["term:catalog", "term:new_york"]),
-        "query side: a run inside the alias span still collapses to the entity"
+        "query side"
     );
 
-    // Title side under the same normalizer: canonical N(T) keeps the run verbatim (components,
-    // no entity); the P(T) overlap scan — which collapses runs itself — recovers the entity.
     let mut dict = Dict::new();
     let mut lc = String::new();
     let _ = n.compile_features("new york", &mut dict, &mut lc); // intern the entity dense
@@ -165,20 +186,41 @@ fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
     let mut sc = super::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
     n.match_features_dual(
-        "new  york catalog",
+        "new,  york catalog",
         &dict,
         &mut lc,
         &mut sc,
         &mut neg,
         &mut pos,
     );
-    assert!(
-        !neg.contains(&entity),
-        "title canonical N(T) keeps whitespace runs verbatim (codex R8)"
+    assert!(neg.contains(&entity), "the title's canonical view");
+    assert!(pos.contains(&entity), "the title's positive view");
+}
+
+#[test]
+fn a_pattern_found_inside_a_word_hides_no_phrase() {
+    // ADR-218: selection is leftmost-longest over the occurrences on token boundaries. The
+    // leftmost-longest automaton takes a pattern that starts or ends inside a word, which is
+    // no occurrence, and with it the valid phrase that pattern overlaps.
+    let mut b = NormalizerBuilder::new();
+    b.add_phrase(&["north", "star"], "brand:north_star", FeatureKind::Brand);
+    b.add_phrase(&["star", "lamp"], "entity:star_lamp", FeatureKind::Entity);
+    b.add_phrase(&["new", "york", "city"], "entity:nyc", FeatureKind::Entity);
+    b.add_phrase(&["new", "york"], "entity:ny", FeatureKind::Entity);
+    let n = b.build().expect("normalizer");
+    assert_eq!(
+        names(&n, "xnorth star lamp"),
+        s(&["entity:star_lamp", "term:xnorth"])
     );
-    assert!(
-        pos.contains(&entity),
-        "the P(T) overlap scan recovers the entity across the run"
+    assert_eq!(
+        names(&n, "new york cityscape"),
+        s(&["entity:ny", "term:cityscape"])
+    );
+    // Where the longer or the earlier phrase is an occurrence, it still wins.
+    assert_eq!(names(&n, "new york city"), s(&["entity:nyc"]));
+    assert_eq!(
+        names(&n, "north star lamp"),
+        s(&["brand:north_star", "term:lamp"])
     );
 }
 

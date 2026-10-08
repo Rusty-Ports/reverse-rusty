@@ -10,8 +10,8 @@ use crate::features::Feature;
 use crate::phrases;
 use crate::vocab::{PhraseMode, RefVocab};
 
-/// Which side is being normalized (the flat query/compile side collapses whitespace runs before
-/// the phrase scan when aliases are active; positioned analysis normalizes both sides).
+/// Which side is being normalized. A phrase in `alias` mode consumes its words on the query
+/// side and keeps them on the title side.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
     Query,
@@ -131,12 +131,7 @@ pub fn emit_positioned(
     force_additive: bool,
 ) -> (u32, Vec<RefPositionArc>) {
     let mut out = Vec::new();
-    let mut lc = clean(text, &vocab.punct);
-    let has_aliases = vocab.has_multiword_aliases();
-    // Query side, aliases active: collapse runs so a single-spaced alias pattern still aligns.
-    if side == Side::Query && has_aliases {
-        lc = phrases::collapse_ws_runs(&lc);
-    }
+    let lc = clean(text, &vocab.punct);
 
     // Phase 1: boundary-aware leftmost-longest phrase matches (empty without phrases).
     let phrase_matches = if vocab.phrases.is_empty() {
@@ -275,10 +270,7 @@ fn filled_position_arcs(
     side: Side,
     force_additive: bool,
 ) -> (u32, Vec<RefPositionArc>) {
-    // Quoted phrases are whitespace-insensitive on both sides independently of
-    // alias activation. Keep flat `emit` unchanged; this normalization belongs
-    // only to the positioned reference path.
-    let normalized = phrases::collapse_ws_runs(&clean(text, &vocab.punct));
+    let normalized = clean(text, &vocab.punct);
     let analysis_text = normalized.as_str();
     let (positions, mut arcs) = emit_positioned(vocab, analysis_text, side, force_additive);
     arcs.sort();
@@ -430,7 +422,6 @@ pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<F
     let mut pos = neg.clone();
     pos.extend(emit(vocab, text, Side::Title, true));
 
-    // The title side keeps cleaned text verbatim (no whitespace-run collapse).
     let lc = clean(text, &vocab.punct);
     for tok in lc.split_whitespace() {
         if tok == "#" || tok == "/" {

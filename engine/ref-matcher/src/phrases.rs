@@ -38,29 +38,6 @@ fn joined(p: &RefPhrase) -> String {
     p.tokens.join(" ")
 }
 
-/// Collapse whitespace runs (and strip a leading space), as `PhraseOverlap::collect_into` does
-/// before its overlapping scan. Returns the input unchanged when there is no run.
-#[must_use]
-pub fn collapse_ws_runs(s: &str) -> String {
-    if !s.as_bytes().windows(2).any(|w| w == b"  ") {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut prev_space = true; // also strips a leading space
-    for c in s.chars() {
-        if c == ' ' {
-            if !prev_space {
-                out.push(' ');
-            }
-            prev_space = true;
-        } else {
-            out.push(c);
-            prev_space = false;
-        }
-    }
-    out
-}
-
 /// Boundary-aware leftmost-longest non-overlapping phrase selection over `phrases`, returning
 /// `(byte_start, byte_end, phrase_index)` in start order. Mirrors `PhraseOverlap::select_phrases`
 /// (and the legacy leftmost-longest pass in the non-pathological case): collect every
@@ -112,7 +89,7 @@ pub fn scan_overlapping(lc: &str, phrases: &[RefPhrase]) -> Vec<usize> {
 /// spans for the independent ADR-120 title graph.
 #[must_use]
 pub fn scan_overlapping_spans(lc: &str, phrases: &[RefPhrase]) -> Vec<(u32, u32, usize)> {
-    let collapsed = collapse_ws_runs(lc);
+    let collapsed = lc;
     let bytes = collapsed.as_bytes();
     let mut out = Vec::new();
     for (idx, p) in phrases.iter().enumerate() {
@@ -120,7 +97,7 @@ pub fn scan_overlapping_spans(lc: &str, phrases: &[RefPhrase]) -> Vec<(u32, u32,
         if j.is_empty() {
             continue;
         }
-        for s in find_all(&collapsed, &j) {
+        for s in find_all(collapsed, &j) {
             let e = s + j.len();
             if boundary_ok(bytes, s, e) {
                 let start =
