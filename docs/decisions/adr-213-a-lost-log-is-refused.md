@@ -102,7 +102,7 @@ write.
 - **Do not delete a log to get a node started.** It was never safe; now it also does not
   work.
 - **There is not yet a supported way to start without the lost writes** when there is no
-  backup. One is on the [roadmap](../roadmap.md#starting-without-a-lost-log); see
+  backup. One came later, in [ADR-216](adr-216-a-lost-log-is-accepted-by-name.md); see
   Alternatives for why it is not part of this decision.
 - A cluster built by this release is at epoch 1 when `build` returns (it was 0), and its
   next checkpoint is epoch 2. A cluster from an earlier release that is still at epoch 0
@@ -266,3 +266,11 @@ A build that stops before its first manifest is no longer built over.
 [ADR-215](adr-215-a-build-does-not-build-over-what-it-finds.md): a build marks the directory
 before it creates shard state, the next build starts again over what a marked build left, and
 shard state with no manifest and no mark is refused.
+
+## Later outcome (2026-10-08, ADR-216)
+
+The single-node engine and the in-process cluster now have a way on without a backup.
+[ADR-216](adr-216-a-lost-log-is-accepted-by-name.md): the refusal names a token for the loss,
+a start with that token records the loss in the data directory before it puts an empty log in
+place, and the record is what later starts report. A shard node and a control node are still
+refused with no such step.

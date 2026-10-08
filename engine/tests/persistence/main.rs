@@ -8,6 +8,7 @@
 
 mod harness;
 
+mod accepted_loss;
 mod backup;
 mod compaction;
 mod durability;

@@ -152,13 +152,28 @@ create an empty one by hand. Otherwise, by role:
 
 | Role | File | What to do |
 |---|---|---|
-| Single-node server | `wal.log` | Restore the data directory from a backup ([`backup-restore.md`](backup-restore.md)), then replay the window since that backup from the upstream system of record (§3.1 step 3). |
+| Single-node server | `wal.log` | Restore the data directory from a backup ([`backup-restore.md`](backup-restore.md)), then replay the window since that backup from the upstream system of record (§3.1 step 3). With no backup: accept the loss, below. |
 | In-process cluster coordinator | `cluster.log` | The same. The shards' translogs are left untouched by the refusal. |
 | Shard node of a remote cluster | `translog.clog` | Treat it as a lost volume: §3.1 at RF=1, the replica-replacement row of [runbook §6](cluster-deployment.md) at RF≥2. |
 | Control node | `raft-log.bin` | **Leave it down.** A node that has voted must not come back with an empty log, and an older copy of its directory rolls its vote and log back just the same. The other control nodes keep their majority. To return to full strength, recover the control plane as a whole (§3.2). |
 
-There is not yet a supported way to start a store without its lost writes when no backup
-exists (roadmap, "Starting without a lost log").
+**Accepting the loss (single-node server, in-process cluster; ADR-216).** When the file cannot
+be put back and there is no backup, the store can be started with what it still holds:
+
+1. The refusal ends with a token for this loss, for example
+   `accept_lost_log set to "wal.log:segment-7-seq-42:1"`.
+2. Start the server **once** with `--accept-lost-log 'wal.log:segment-7-seq-42:1'`. It records
+   the loss in `log_loss.accepted` in the data directory, puts an empty log in place and
+   starts. The writes that were only in the lost log are gone.
+3. Remove the flag. Left in place it accepts nothing else (a later loss has a different
+   token) and logs a warning at each start.
+4. Replay the window since the last flush or checkpoint from the upstream system of record,
+   if there is one, and take a backup.
+
+The loss stays on record: the server warns at every start, `log_losses_accepted` counts it,
+and [`RRLogLossAccepted`](alerting.md#rrloglossaccepted) fires for seven days. A start that
+accepts the loss and then fails for another reason has still recorded it. A shard node and a
+control node have no such step.
 
 A backup taken from a store in this state is refused, and a backup directory that lacks its log
 does not verify, so a restore cannot bring the problem back.

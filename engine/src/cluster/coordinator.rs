@@ -193,6 +193,13 @@ pub struct ClusterConfig {
     /// authoritative copies; when a primary is the copy that lost data, recovery would erase the
     /// surviving one. Ignored by every other builder.
     pub recover_divergent_replicas: bool,
+    /// Accept the loss of the cluster log, once (ADR-216). A durable cluster whose
+    /// manifest says its log existed refuses to open when the log is not there (ADR-213),
+    /// and the refusal names a token for that loss. Opened with that token here, the
+    /// cluster records the loss in its data directory, puts an empty log in place, and
+    /// opens without the writes acknowledged since its last checkpoint. The token names one
+    /// loss: it does nothing when the log is present, and it does not accept a later loss.
+    pub accept_lost_log: Option<String>,
 }
 
 impl ClusterConfig {
@@ -216,6 +223,7 @@ impl Default for ClusterConfig {
             handoff_final_drain_cap: Self::DEFAULT_HANDOFF_FINAL_DRAIN_CAP,
             remote_placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
             recover_divergent_replicas: false,
+            accept_lost_log: None,
         }
     }
 }

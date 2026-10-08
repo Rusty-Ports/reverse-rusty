@@ -190,6 +190,15 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = false)]
     pub(crate) accept_class_d: bool,
 
+    /// Accept the loss of this store's log, once (ADR-216). A store whose log file is gone
+    /// refuses to start, and the refusal names a token for that loss. Started with that
+    /// token here, the store records the loss in its data directory (`log_loss.accepted`),
+    /// puts an empty log in place and starts without the writes that were only in the lost
+    /// one. The token names one loss: left in place it accepts no later one. Single-node and
+    /// in-process cluster stores.
+    #[arg(long, value_name = "TOKEN")]
+    pub(crate) accept_lost_log: Option<String>,
+
     /// Keep every query's source text resident in RAM (default true — instant
     /// `_source`/explain, historical behavior). Set false to store source text on
     /// disk (`sources.dat`, mmap'd) and fetch it lazily — a large resident-memory
@@ -431,6 +440,7 @@ impl Cli {
             },
             wal_sync_on_write: self.wal_sync_on_write,
             recover_divergent_replicas: self.recover_divergent_replicas,
+            accept_lost_log: self.accept_lost_log.clone(),
             ..reverse_rusty::cluster::ClusterConfig::default()
         }
     }
@@ -456,6 +466,7 @@ impl Cli {
             broad_materialize: self.broad_materialize,
             max_percolate_batch: self.max_percolate_batch,
             accept_class_d: self.accept_class_d,
+            accept_lost_log: self.accept_lost_log.clone(),
             ..reverse_rusty::config::EngineConfig::default()
         }
     }
@@ -486,6 +497,35 @@ mod tests {
         let asked = config(&["reverse-rusty-server", "--recover-divergent-replicas"]);
         assert!(asked.recover_divergent_replicas);
         assert_eq!(asked.num_shards, 3);
+    }
+
+    /// A loss is accepted only when the operator names it, and the token has to reach the
+    /// store that lost its log: the engine in single-node mode, the coordinator in a cluster.
+    #[test]
+    fn a_lost_log_is_accepted_only_by_the_token_given() {
+        let none = Cli::try_parse_from(["reverse-rusty-server"]).expect("arguments");
+        assert_eq!(none.engine_config().accept_lost_log, None);
+        assert_eq!(
+            none.cluster_config(3, none.engine_config(), true)
+                .accept_lost_log,
+            None
+        );
+        let given = Cli::try_parse_from([
+            "reverse-rusty-server",
+            "--accept-lost-log",
+            "wal.log:segment-2-seq-5:1",
+        ])
+        .expect("arguments");
+        let token = Some("wal.log:segment-2-seq-5:1".to_string());
+        assert_eq!(given.engine_config().accept_lost_log, token);
+        assert_eq!(
+            given
+                .cluster_config(3, given.engine_config(), true)
+                .accept_lost_log,
+            token
+        );
+        // The flag takes a token: there is no bare form that accepts whatever is lost.
+        assert!(Cli::try_parse_from(["reverse-rusty-server", "--accept-lost-log"]).is_err());
     }
 
     #[test]

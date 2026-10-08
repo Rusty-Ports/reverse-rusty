@@ -319,6 +319,7 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
             "The backup was not taken.",
         )));
     }
+    copy_accepted_log_losses(src, staging)?;
     // Manifest LAST (commit-point ordering).
     if has_manifest {
         copy_file_durable(&manifest_path, &staging.join(ENGINE_MANIFEST))?;
@@ -326,6 +327,27 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
     fsync_dir(&staging.join(SEGMENTS_DIR))?;
     fsync_dir(staging)?;
     Ok(())
+}
+
+/// The record of the log losses a store has accepted travels with the data it is about
+/// (ADR-216): a store restored from this copy holds no more than the one it was taken
+/// from, and says so. A store that has accepted none has no such file.
+fn copy_accepted_log_losses(src: &Path, staging: &Path) -> Result<(), BackupError> {
+    let name = super::log_loss::ACCEPTED_LOG_LOSSES_FILE;
+    let record = src.join(name);
+    if record.exists() {
+        copy_file_durable(&record, &staging.join(name))?;
+    }
+    Ok(())
+}
+
+/// An open reads the record of accepted log losses and refuses one it cannot understand
+/// (ADR-216), so a backup that holds such a record would restore to a store that does not
+/// open. A backup with no record has nothing to check.
+fn verify_accepted_log_losses(dir: &Path) -> Result<(), BackupError> {
+    super::log_loss::accepted_log_losses(dir)
+        .map(drop)
+        .map_err(BackupError::Io)
 }
 
 /// Back up a cluster coordinator `data_dir` into `dest`.
@@ -381,6 +403,7 @@ fn stage_cluster_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
             "The backup was not taken.",
         )));
     }
+    copy_accepted_log_losses(src, staging)?;
     copy_file_durable(&manifest_path, &staging.join(CLUSTER_MANIFEST))?;
     fsync_dir(staging)?;
     Ok(())
@@ -398,6 +421,7 @@ fn shard_dir_name(shard: usize) -> String {
 /// structurally valid; the WAL itself is validated by `Engine::backup_to` before the
 /// copy (kept out of `storage` to avoid a `storage`→`wal` dependency).
 pub fn verify_backup(dir: &Path) -> Result<(), BackupError> {
+    verify_accepted_log_losses(dir)?;
     let manifest_path = dir.join(ENGINE_MANIFEST);
     if manifest_path.exists() {
         let manifest = read_manifest(&manifest_path)?;
@@ -429,6 +453,7 @@ pub fn verify_cluster_backup(dir: &Path) -> Result<(), BackupError> {
     if !manifest_path.exists() {
         return Err(BackupError::MissingManifest(manifest_path));
     }
+    verify_accepted_log_losses(dir)?;
     let manifest = read_cluster_manifest(&manifest_path)?;
     for (i, files) in manifest.segment_registry.iter().enumerate() {
         let shard = dir.join(shard_dir_name(i));

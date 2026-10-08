@@ -49,6 +49,7 @@ mod cluster_mode;
 mod dto;
 mod handlers;
 mod jobs;
+mod log_loss;
 mod metrics;
 mod pit;
 mod preload;
@@ -225,6 +226,7 @@ async fn main() {
         None
     };
 
+    let log_losses_before = log_loss::carried_out_before(cli.data_dir.as_deref());
     let mut engine = if let Some(data_dir) = cli.data_dir.as_ref() {
         // ADR-184: the manifest records the feature model, so --vocab-file only seeds a store.
         // A committed vocabulary is authoritative; `open_seeded` restores it (installing its
@@ -259,6 +261,12 @@ async fn main() {
 
     // Create Prometheus metrics and wire the engine observer.
     let prom = PrometheusMetrics::new();
+    log_loss::report(
+        &prom,
+        cli.data_dir.as_deref(),
+        cli.accept_lost_log.as_deref(),
+        log_losses_before,
+    );
     let prom_for_observer = prom.clone();
     engine.set_observer(move |event: &EngineEvent| {
         // Increment Prometheus counters.
