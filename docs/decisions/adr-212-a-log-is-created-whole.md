@@ -178,9 +178,8 @@ shard translog).
 
 [ADR-213](adr-213-a-lost-log-is-refused.md) decides the case this one left open: a log that is
 missing is refused wherever its owner's commit record says it existed. It also changes two
-things described above. `build` still writes its manifest first, at epoch 0, but now ends with
-a checkpoint that writes epoch 1, and a reopen that finds epoch 0 makes that checkpoint
-itself; so the coordinator's rule in decision 3 reads "under an epoch-0 manifest", which now
+things described above. `build` still writes its manifest first, at epoch 0, but now ends by
+writing it again at epoch 1, and a reopen that finds epoch 0 does that itself; so the coordinator's rule in decision 3 reads "under an epoch-0 manifest", which now
 means a build that has not finished. And the case recorded under Consequences (a cluster that
 has taken writes and never checkpointed) is closed: no cluster serves at epoch 0 any more.
 The alternative "create the log before the manifest" was tried there and given up, for the

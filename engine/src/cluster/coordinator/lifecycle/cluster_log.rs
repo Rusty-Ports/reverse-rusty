@@ -4,7 +4,9 @@
 use std::path::Path;
 
 use crate::cluster::clog::{FileClusterLog, IfMissing, LogPos};
-use crate::cluster::coordinator::{ClusterConfig, ClusterEngine, CLUSTER_LOG_FILE};
+use crate::cluster::coordinator::{
+    ClusterConfig, ClusterEngine, CLUSTER_LOG_FILE, CLUSTER_MANIFEST_FILE,
+};
 use crate::cluster::shard::ShardError;
 use crate::storage::ClusterManifest;
 
@@ -19,7 +21,7 @@ use crate::storage::ClusterManifest;
 /// checkpoint, so a cluster that is still at epoch 0 is one whose build stopped part-way, or
 /// one from a release before ADR-213 that has never checkpointed. Under it a missing log is
 /// created, and a log shorter than its header (which releases before ADR-212 could leave) is
-/// finished. The open then makes the checkpoint the build did not
+/// finished. The open then writes the epoch-1 manifest the build did not
 /// ([`ClusterEngine::commit_the_log_into_the_manifest`]).
 ///
 /// This runs before any shard is attached: attaching resets a shard's translog, and when the
@@ -68,34 +70,40 @@ pub(super) fn open_cluster_log(
 }
 
 impl ClusterEngine {
-    /// Make the checkpoint that takes a durable cluster from epoch 0 to epoch 1: the manifest
-    /// that says its log exists. `build` ends with this, and so does a reopen that found a
-    /// manifest still at epoch 0. From then on a reopen that finds no log refuses, instead of
-    /// creating one. A no-op for a cluster without a data directory and for one already past
-    /// epoch 0.
+    /// Record in the manifest that the cluster log exists: the manifest this engine was
+    /// built or opened with, written again at epoch 1, and nothing else. `build` ends with
+    /// this, and so does a reopen that found a manifest still at epoch 0. From then on a
+    /// reopen that finds no log refuses, instead of creating one. A no-op for a cluster
+    /// without a data directory and for one already past epoch 0.
     ///
-    /// It is an ordinary checkpoint, taken through the public operation. The caller owns an
-    /// engine that has not been shared yet, so nothing waits.
+    /// It is not a checkpoint. A checkpoint also seals the shards, rewrites segments that
+    /// hold deletions, and rewrites the log; a start has no need of any of that, and each is
+    /// a way for a start to fail or to change what is on disk before the manifest says so.
+    /// Here the only thing written is the manifest, through its usual rename, so a failure
+    /// leaves the directory as it was and the next start tries again.
     ///
-    /// A checkpoint commits its manifest and then rewrites the log, and reports a failure of
-    /// the rewrite without failing: the tail is replayed at the next open. If that failure
-    /// came at or after the rename, the log refuses appends until it is reopened. A running
-    /// cluster then fails its writes loudly; a cluster that is only now being started must
-    /// not be handed out in that state, so the start fails instead. What is on disk is a
-    /// committed manifest and a whole log, and the next start opens it.
+    /// The caller owns an engine that has not been shared yet.
     pub(super) fn commit_the_log_into_the_manifest(&self) -> Result<(), ShardError> {
-        if self.data_dir.is_none() || self.epoch() >= ClusterManifest::FIRST_EPOCH_WITH_A_LOG {
+        let Some(dir) = &self.data_dir else {
+            return Ok(());
+        };
+        if self.epoch() >= ClusterManifest::FIRST_EPOCH_WITH_A_LOG {
             return Ok(());
         }
-        self.checkpoint()?;
-        if self.log.appends_disabled() {
-            return Err(ShardError::Log(
-                "the checkpoint that finishes the build was committed, but the cluster log \
-                 could not be put back in place and takes no writes in this process; start \
-                 again"
-                    .to_string(),
-            ));
-        }
+        let held = self
+            .committed_manifest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(mut manifest) = held else {
+            return Ok(());
+        };
+        manifest.epoch = ClusterManifest::FIRST_EPOCH_WITH_A_LOG;
+        crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
+            .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
+        self.epoch
+            .store(manifest.epoch, std::sync::atomic::Ordering::Relaxed);
+        self.record_committed_manifest(manifest);
         Ok(())
     }
 }

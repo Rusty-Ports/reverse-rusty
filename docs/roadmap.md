@@ -250,6 +250,25 @@ rank metadata, fully sorts already-sorted shard runs, and clones request groups 
 **Completion.** Preserve exact ordering, totals, ownership, and winner-source behavior while
 `rankbench` demonstrates lower allocation and coordinator CPU at fixed K.
 
+### A checkpoint that fails after a deletion
+
+**Problem.** A cluster checkpoint rewrites every base segment that holds a deletion and removes
+the old segment file, and only afterwards writes the coordinator's manifest. If that write
+fails, or the process stops between the two, the manifest still names the files that were
+removed, and the cluster cannot reopen ("attaching shard segments: No such file or
+directory"). Reproduced: remove a build-time query, make the manifest write fail, checkpoint,
+reopen. The shard's own engine treats its manifest as the commit point for those removals, and
+a coordinator-owned shard has none, so the removal is immediate.
+
+**Direction.** The coordinator's manifest is the commit point: a shard that reseals keeps the
+files it replaced until the coordinator has committed a manifest that no longer names them, and
+they are removed by the orphan sweep that already follows a commit. A failed or interrupted
+checkpoint then leaves the old manifest and the old files, which open.
+
+**Completion.** A checkpoint that is failed or killed at each step after a deletion is
+followed by a reopen that serves the pre-checkpoint state, with the deletion still applied
+from the log.
+
 ### An interrupted first build
 
 **Problem.** A durable cluster build that stops before it has written its first manifest (a

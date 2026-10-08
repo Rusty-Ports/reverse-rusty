@@ -41,10 +41,10 @@ write.
    - *Control node:* a vote, committed index, purge point or snapshot was written after the
      log was created, always.
    - *Cluster:* `build` writes its manifest at epoch 0, creates the cluster log, and now ends
-     with a checkpoint, which writes the manifest again at epoch 1. A checkpoint has always
-     needed the log open and bumped the epoch. So a manifest at epoch 1 or later was written
-     with its log in place (`ClusterManifest::written_with_its_log`), and epoch 0 means only
-     "the build has not finished".
+     by writing the same manifest again at epoch 1. A checkpoint has always needed the log
+     open and bumped the epoch. So a manifest at epoch 1 or later was written with its log
+     in place (`ClusterManifest::written_with_its_log`), and epoch 0 means only "the build
+     has not finished".
 2. **A store whose commit record says the log exists refuses to open without it.** The error
    names the file, says what proves it existed, says that the acknowledged writes that were
    only in it are lost, and says what to do.
@@ -55,8 +55,14 @@ write.
 4. **A reopen that finds epoch 0 finishes the build.** It is looking at a build that stopped
    part-way, or at a cluster from a release before this one that never checkpointed. It
    creates the log if there is none, finishes one that is shorter than its header (ADR-212),
-   and then makes the checkpoint the build did not. Such a cluster is lenient about its log
-   for that one start and not after it.
+   and then writes the epoch-1 manifest the build did not. Such a cluster is lenient about
+   its log for that one start and not after it.
+
+   Writing that manifest is all it does. It is not a checkpoint: a checkpoint also seals the
+   shards, rewrites every segment that holds a deletion, and rewrites the log, and each of
+   those is a way for a start to fail or to change the directory before the manifest says
+   so. A failure to write the manifest leaves the directory as it was, and the next start
+   tries again.
 5. **`FileClusterLog::open` takes the caller's answer.** Its new argument, `IfMissing`, is
    `Create` or `Refuse`, and every caller has to pass one. The default that lost data cannot
    be reached by leaving something out.
@@ -75,12 +81,9 @@ write.
    restart, and reported the failure as harmless. The handle is now disabled at the rename
    and not before, which is the rule ADR-198 gave the write-ahead log. A checkpoint that
    fails at or after the rename still leaves the handle disabled, and has to: it may address
-   a file that is no longer the log. So a log can now be asked whether it refuses appends
-   (`ClusterLog::appends_disabled`). `build` and an epoch-0 reopen end with a checkpoint, ask,
-   and fail if it does: a start does not hand out a cluster that takes no writes. What it
-   leaves is a committed manifest and a whole log, and the next start opens it. For a
-   running cluster the event that reports the failed rewrite now says that writes will fail
-   until a restart, where it said the failure was harmless.
+   a file that is no longer the log. A log can be asked whether it refuses appends
+   (`ClusterLog::appends_disabled`), and the event that reports the failed rewrite now says
+   that writes will fail until a restart, where it said the failure was harmless.
 
 ## What changes for a deployment
 
@@ -99,7 +102,7 @@ write.
   Alternatives for why it is not part of this decision.
 - A cluster built by this release is at epoch 1 when `build` returns (it was 0), and its
   next checkpoint is epoch 2. A cluster from an earlier release that is still at epoch 0
-  takes one checkpoint the first time this release opens it. The epoch is reported by
+  has its manifest rewritten at epoch 1 the first time this release opens it. The epoch is reported by
   `ClusterEngine::epoch` and in the shutdown log line; nothing reads it as a count.
 - No format change. An older release reads an epoch-1 manifest as it reads any other.
 
@@ -124,6 +127,14 @@ write.
   an epoch-0 manifest and the next start opens it and finishes. (A build that stops before
   its *first* manifest has that problem in any order; it is older than this decision and is
   on the [roadmap](../roadmap.md#an-interrupted-first-build).)
+- **End `build`, and an epoch-0 reopen, with a checkpoint,** which moves the epoch by the
+  usual route. This was the second form, and three review rounds each found something a
+  checkpoint does that a start must not: its log rewrite can leave the log refusing writes;
+  and it rewrites segments that hold deletions and removes the old files before the
+  coordinator's manifest is committed, so a start that then failed to write its manifest
+  left a cluster that could not reopen. (That ordering is a defect of every checkpoint, older
+  than this decision; it is on the [roadmap](../roadmap.md#a-checkpoint-that-fails-after-a-deletion).)
+  The epoch needs only a manifest, so a manifest is all that is written.
 - **A new manifest field** that says "written with the log". The epoch already says it: only
   `build` ever wrote 0, and a checkpoint always moves past it.
 - **Refuse an epoch-0 manifest with no log as well.** It cannot be told from a build that
@@ -165,14 +176,14 @@ write.
   in the log, and the log removed is refused, twice, and no log is created; with the log put
   back it opens with both writes. A directory with no manifest and no log starts.
 - `cluster/coordinator/tests/log_creation.rs`: the same for a durable cluster, built only and
-  after a checkpoint; a built cluster is at epoch 1 and a reopen makes no further checkpoint;
+  after a checkpoint; a built cluster is at epoch 1;
   a manifest at epoch 0 with no log, or with a log cut short, opens, is moved to epoch 1 by
   that open, and refuses a lost log from then on; a log cut short under a manifest at epoch
   1 or 2 is refused; a build that cannot create its log fails with an epoch-0 manifest, and
-  the next start finishes it and holds the same rows as a build that was never disturbed; a
-  build whose final checkpoint cannot build the log's replacement still returns a cluster
-  that takes writes, and one whose checkpoint fails at the rename does not return a cluster
-  at all, at build and at an epoch-0 reopen, and the next start opens and takes writes; a
+  the next start finishes it and holds the same rows as a build that was never disturbed;
+  an epoch-0 cluster with a logged deletion, reopened while its manifest cannot be written,
+  fails with no segment file changed, and then opens with the deletion intact and a manifest
+  that differs in its epoch only; a start past epoch 0 leaves the manifest alone; a
   refused open, for a log that is gone and for one cut short, leaves every shard's translog
   byte for byte as it was.
 - `cluster/shard/tests/recovery.rs`: the same for a restarting shard and its translog.

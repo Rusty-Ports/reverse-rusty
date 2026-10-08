@@ -440,8 +440,8 @@ impl ClusterEngine {
             feature_model_fingerprint: Some(norm.fingerprint()),
         };
         // The manifest first, at epoch 0, and then the log. Epoch 0 says "the log may not exist
-        // yet": a reopen under it creates the log if this build stopped here. `build` ends
-        // with a checkpoint, which writes the manifest that says the log exists (ADR-213).
+        // yet": a reopen under it creates the log if this build stopped here. `build` ends by
+        // writing the manifest again at epoch 1, which says the log exists (ADR-213).
         //
         // The log is not created first. A build that then failed to create it would leave
         // shard state and no manifest; the next start would build again over that state, and

@@ -226,7 +226,7 @@ fn a_reopen_finishes_a_build_that_stopped_before_its_log() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `build` ends with a checkpoint, so a built cluster is at epoch 1: its manifest says its log
+/// `build` ends by writing its manifest at epoch 1: a built cluster's manifest says its log
 /// exists.
 #[test]
 fn a_built_cluster_has_a_manifest_that_says_its_log_exists() {
@@ -237,12 +237,21 @@ fn a_built_cluster_has_a_manifest_that_says_its_log_exists() {
     assert_eq!(epoch_on_disk(&dir), 1);
     assert_eq!(std::fs::read(dir.join(CLUSTER_LOG_FILE)).unwrap().len(), 8);
     drop(built);
-    // That checkpoint is made once. A reopen of a cluster that is past epoch 0 makes none.
+    // That is written once. A reopen of a cluster that is past epoch 0 leaves the manifest
+    // alone, at whatever epoch a checkpoint has taken it to.
     for start in 1..=2 {
         let reopened = open(&dir, &cfg, "reopen");
-        assert_eq!(reopened.epoch(), 1, "start {start} made a checkpoint");
-        assert_eq!(epoch_on_disk(&dir), 1, "start {start} made a checkpoint");
+        assert_eq!(reopened.epoch(), 1, "start {start} wrote the manifest");
+        assert_eq!(epoch_on_disk(&dir), 1, "start {start} wrote the manifest");
     }
+    let reopened = open(&dir, &cfg, "reopen");
+    reopened.checkpoint().expect("a checkpoint");
+    drop(reopened);
+    assert_eq!(epoch_on_disk(&dir), 2);
+    let reopened = open(&dir, &cfg, "reopen after a checkpoint");
+    assert_eq!(reopened.epoch(), 2, "a start took the epoch back");
+    assert_eq!(epoch_on_disk(&dir), 2, "a start took the epoch back");
+    drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -358,98 +367,76 @@ fn a_refused_open_leaves_the_shard_translogs_as_they_were() {
     }
 }
 
-/// `build` ends with a checkpoint, and a checkpoint rewrites the log. If that rewrite cannot
-/// be made, the build still returns a cluster that takes writes: the checkpoint's manifest is
-/// committed, and the log is left as it was. (A checkpoint that disabled the log's append
-/// handle before it had a replacement returned a cluster on which every write failed.)
-#[test]
-fn a_built_cluster_takes_writes_when_its_first_checkpoint_could_not_rewrite_the_log() {
-    let (dir, cfg) = durable("first_checkpoint_blocked");
-    let blocker = dir.join(CLUSTER_LOG_FILE).with_extension("clog.tmp");
-    std::fs::create_dir_all(&blocker).expect("block the checkpoint's replacement log");
-    let built =
-        ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())]).expect("the build");
-    let wrote = built.add_query(2, "mechanical keyboard");
-    std::fs::remove_dir_all(&blocker).expect("unblock");
-    wrote.expect("a write to the built cluster");
-    assert_eq!(
-        epoch_on_disk(&dir),
-        1,
-        "the checkpoint's manifest is committed"
-    );
-    drop(built);
-    let reopened = open(&dir, &cfg, "reopen");
-    assert_eq!(matched(&reopened, "a mechanical keyboard"), vec![2]);
-    drop(reopened);
-    let _ = std::fs::remove_dir_all(&dir);
+fn segment_files(dir: &std::path::Path, shards: usize) -> Vec<Vec<String>> {
+    (0..shards)
+        .map(|shard| {
+            let mut names: Vec<String> = std::fs::read_dir(shard_dir(dir, shard).join("segments"))
+                .expect("a shard's segments")
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        })
+        .collect()
 }
 
-/// A start does not hand out a cluster that takes no writes. If the checkpoint that finishes
-/// the build fails at the log's rename, the log refuses appends in this process. `build`, and
-/// a reopen that finds epoch 0, fail then; what they leave is a committed manifest and a
-/// whole log, and the next start opens it and takes writes. (Before, they returned the
-/// cluster, and every write to it failed with "log append disabled".)
+/// Recording that the log exists writes the manifest and nothing else. It is not a
+/// checkpoint: a checkpoint rewrites every segment that holds a deletion and removes the old
+/// file, and when a start did that and then could not write its manifest, the old manifest
+/// named files that were gone and the cluster never opened again.
+///
+/// Here an epoch-0 cluster with a logged deletion is reopened while the manifest cannot be
+/// written. The open fails, no segment file has changed, and once the manifest can be
+/// written the cluster opens, the deletion holds, and the manifest differs from the old one
+/// in its epoch only.
 #[test]
-fn a_start_fails_when_its_checkpoint_leaves_the_log_refusing_writes() {
-    use crate::cluster::clog::FAIL_NEXT_CHECKPOINT_PUBLISH_OF;
-    let arm = || {
-        FAIL_NEXT_CHECKPOINT_PUBLISH_OF
-            .with(|named| *named.borrow_mut() = Some(CLUSTER_LOG_FILE.to_string()));
-    };
-    let armed = || FAIL_NEXT_CHECKPOINT_PUBLISH_OF.with(|named| named.borrow().is_some());
-
-    // At build.
-    let (dir, cfg) = durable("start_with_disabled_log_build");
-    arm();
-    let built = ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())]);
-    assert!(
-        !armed(),
-        "precondition: the build's checkpoint reached its rename"
-    );
-    match built {
-        Err(ShardError::Log(reason)) => {
-            assert!(reason.contains("start again"), "another failure: {reason}");
-        }
-        Err(other) => panic!("another failure: {other:?}"),
-        Ok(cluster) => panic!(
-            "the build returned a cluster; a write to it: {:?}",
-            cluster.add_query(2, "mechanical keyboard").map(|_| ())
-        ),
-    }
-    assert_eq!(
-        epoch_on_disk(&dir),
-        1,
-        "the checkpoint's manifest is committed"
-    );
-    let reopened = open(&dir, &cfg, "the start after");
-    assert_eq!(matched(&reopened, "blue wireless mouse"), vec![1]);
-    reopened
-        .add_query(2, "mechanical keyboard")
-        .expect("a write after the next start");
-    drop(reopened);
-    let _ = std::fs::remove_dir_all(&dir);
-
-    // At a reopen that finds epoch 0.
-    let (dir, cfg) = durable("start_with_disabled_log_reopen");
-    drop(
-        ClusterEngine::build(vocab(), &cfg, &[(1, "wireless mouse".into())])
-            .expect("durable cluster"),
-    );
+fn recording_that_the_log_exists_changes_nothing_but_the_manifest() {
+    let (dir, cfg) = durable("promotion_touches_nothing");
+    let corpus: Vec<(u64, String)> = (1..=40u64)
+        .map(|id| (id, format!("uniqueterm{id} widget{}", id % 7)))
+        .collect();
+    let cluster = ClusterEngine::build(vocab(), &cfg, &corpus).expect("durable cluster");
+    cluster.remove_query(3).expect("a deletion, in the log");
+    drop(cluster);
     as_an_older_release_built_it(&dir);
-    arm();
+    let manifest_path = dir.join(CLUSTER_MANIFEST_FILE);
+    let before = crate::storage::read_cluster_manifest(&manifest_path).expect("manifest");
+    let files_before = segment_files(&dir, cfg.num_shards);
+
+    let blocker = manifest_path.with_extension("cmanifest.tmp");
+    std::fs::create_dir_all(&blocker).expect("block the manifest write");
     let refused = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).is_err();
-    assert!(
-        !armed(),
-        "precondition: the reopen's checkpoint reached its rename"
+    std::fs::remove_dir_all(&blocker).expect("unblock");
+    assert!(refused, "the open went ahead without recording the log");
+    assert_eq!(
+        segment_files(&dir, cfg.num_shards),
+        files_before,
+        "a start that could not write its manifest changed the segments"
     );
+    assert_eq!(epoch_on_disk(&dir), 0);
+
+    let reopened = open(&dir, &cfg, "once the manifest can be written");
     assert!(
-        refused,
-        "the reopen returned a cluster that takes no writes"
+        matched(&reopened, "uniqueterm3 widget3").is_empty(),
+        "the deletion did not hold"
     );
-    let reopened = open(&dir, &cfg, "the start after");
-    reopened
-        .add_query(2, "mechanical keyboard")
-        .expect("a write after the next start");
+    assert_eq!(matched(&reopened, "uniqueterm4 widget4"), vec![4]);
     drop(reopened);
+    assert_eq!(
+        segment_files(&dir, cfg.num_shards),
+        files_before,
+        "recording the log rewrote segments"
+    );
+    let after = crate::storage::read_cluster_manifest(&manifest_path).expect("manifest");
+    assert_eq!(after.epoch, 1);
+    assert!(
+        before
+            == crate::storage::ClusterManifest {
+                epoch: before.epoch,
+                ..after
+            },
+        "the manifest changed in more than its epoch"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

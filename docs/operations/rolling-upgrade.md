@@ -152,8 +152,8 @@ pre-upgrade backup:
   started with an empty log and without the writes that were in the old one. Check before the
   upgrade that every data directory has its log. A cluster built by this release is at
   epoch 1 when its build returns; an older release reads that manifest as it reads any other.
-  A cluster an older release left at epoch 0 (it never checkpointed) takes one checkpoint the
-  first time this release opens it ([disaster recovery §3.4](disaster-recovery.md)).
+  A cluster an older release left at epoch 0 (it never checkpointed) has its manifest rewritten
+  at epoch 1 the first time this release opens it ([disaster recovery §3.4](disaster-recovery.md)).
 - **ADR-193 inbound request size:** no durable or wire format change. A coordinator sends a
   bulk bucket on the `StageIngest` stream (ADR-180), which every shard node it can connect to
   already serves: the ADR-185 capability check refuses older nodes at connect. A dictionary

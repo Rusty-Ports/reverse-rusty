@@ -21,18 +21,17 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **A refused start changes nothing.** No log is created in the lost one's place, and the
   coordinator checks its log before it attaches a shard, so the shards' translogs are left as
   they were. With the file put back, the directory opens with every write.
-- **`build` ends with a checkpoint,** which writes the manifest that says the cluster log exists
-  (epoch 1). The manifest `build` writes first, before it creates the log, stays at epoch 0, and
-  a reopen that finds epoch 0 (a build that stopped part-way, or a cluster from an earlier
-  release that never checkpointed) creates the log if there is none and makes that checkpoint
-  itself. A cluster built by this release reports epoch 1 where it reported 0.
+- **`build` ends by writing its manifest again at epoch 1,** which says the cluster log exists.
+  The manifest it writes first, before it creates the log, stays at epoch 0, and a reopen that
+  finds epoch 0 (a build that stopped part-way, or a cluster from an earlier release that never
+  checkpointed) creates the log if there is none and writes the epoch-1 manifest itself. Only
+  the manifest is written. A cluster built by this release reports epoch 1 where it reported 0.
 - **A translog reset replaces the file by a rename** instead of removing it first, so a crash
   never leaves a shard's checkpoint file without a translog.
 - **A cluster-log checkpoint that cannot write its replacement leaves the log taking writes.** It
   disabled the log's append handle first, so every later write failed with `log append disabled`
   until a restart, and the failure was reported as harmless. A checkpoint that fails at the
-  rename still stops appends, and the event now says so; a start whose checkpoint ends that way
-  fails instead of returning a cluster that takes no writes.
+  rename still stops appends, and the event now says so.
 - **A backup of a store whose log is gone is refused,** and a backup directory without its log
   does not verify.
 - **Behaviour change:** a data directory whose log was deleted or lost does not start. Restore it
