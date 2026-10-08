@@ -14,6 +14,10 @@
 //! it and starts again. Shard state with no manifest and no mark is something else (a
 //! cluster that has lost its manifest, or the leftovers of a release that left no mark) and
 //! is refused.
+//!
+//! "Shard state" is a file under an entry named like a shard directory. A shard directory
+//! that holds only directories holds no data: there is nothing in it to restore and nothing
+//! to lose, and a build takes it as it takes an empty data directory.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -34,7 +38,7 @@ const SHARD_DIR_PREFIX: &str = "shard_";
 ///   removed and the mark stays for this one. If a cluster log is there as well, the
 ///   unfinished build got as far as its manifest and the manifest has since been lost:
 ///   refused.
-/// - It holds shard directories or a cluster log, and no mark: refused.
+/// - It holds a file under a shard directory, or a cluster log, and no mark: refused.
 /// - Otherwise the mark is written, and is on disk before this returns.
 ///
 /// A refusal changes nothing in the directory.
@@ -54,6 +58,12 @@ pub(super) fn begin(dir: &Path) -> Result<(), ShardError> {
     let marked = has(BUILD_INCOMPLETE_FILE)?;
     let log = has(CLUSTER_LOG_FILE)?;
     let shards = shard_entries(dir).map_err(|e| io("reading", e))?;
+    let mut with_data = Vec::new();
+    for entry in &shards {
+        if holds_a_file(entry).map_err(|e| io("reading", e))? {
+            with_data.push(entry);
+        }
+    }
     if marked {
         if log {
             return Err(ShardError::Config(format!(
@@ -74,8 +84,8 @@ pub(super) fn begin(dir: &Path) -> Result<(), ShardError> {
         }
         return sync(dir).map_err(|e| io("syncing", e));
     }
-    if log || !shards.is_empty() {
-        let found = shards
+    if log || !with_data.is_empty() {
+        let found = with_data
             .iter()
             .filter_map(|entry| entry.file_name())
             .map(|name| name.to_string_lossy().into_owned())
@@ -136,6 +146,19 @@ fn shard_entries(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     }
     found.sort();
     Ok(found)
+}
+
+/// Whether `entry` is a file, or a directory with a file anywhere under it.
+fn holds_a_file(entry: &Path) -> std::io::Result<bool> {
+    if !entry.is_dir() {
+        return Ok(true);
+    }
+    for child in std::fs::read_dir(entry)? {
+        if holds_a_file(&child?.path())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn sync(dir: &Path) -> std::io::Result<()> {

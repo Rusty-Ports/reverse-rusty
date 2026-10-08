@@ -259,6 +259,40 @@ fn the_mark_is_written_before_any_shard_state() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A shard directory that holds only directories holds no data, and a build takes it as it
+/// takes an empty data directory: there is nothing in it to restore or to lose. (A file
+/// anywhere under it is shard state, as the other tests show.)
+#[test]
+fn a_shard_directory_that_holds_no_file_is_not_shard_state() {
+    let (dir, cfg) = durable("empty_shard_dirs", 2);
+    std::fs::create_dir_all(dir.join("shard_000").join("segments")).expect("an empty tree");
+    std::fs::create_dir_all(dir.join("shard_007")).expect("an empty directory");
+    let cluster = ClusterEngine::build(vocab(), &cfg, &corpus())
+        .expect("empty shard directories do not stop a build");
+    assert_eq!(
+        cluster.num_queries().expect("count"),
+        rows_of_a_clean_build(2)
+    );
+    drop(cluster);
+
+    // One file under such a directory is shard state.
+    let (dir, cfg) = durable("one_file_under_a_shard_dir", 2);
+    std::fs::create_dir_all(dir.join("shard_000").join("segments")).expect("a tree");
+    std::fs::write(
+        dir.join("shard_000")
+            .join("segments")
+            .join("seg_000001.seg"),
+        b"a segment",
+    )
+    .expect("a file");
+    let message = refused(
+        ClusterEngine::build(vocab(), &cfg, &corpus()),
+        "a file under a shard directory",
+    );
+    assert!(message.contains("shard_000"), "{message}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A build creates its shards with the constructor that refuses a directory holding a
 /// shard. The one a shard node uses restores what it finds, which is how an unfinished
 /// build's rows came back.

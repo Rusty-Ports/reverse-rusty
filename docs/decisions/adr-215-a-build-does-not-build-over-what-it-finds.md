@@ -37,8 +37,10 @@ corpus").
    mark, `build.incomplete`, in the data directory, and the mark is on disk before anything
    else is. The mark is cleared once the build has committed.
 2. **The mark is written only into a directory that holds nothing of a cluster**: no
-   manifest, no cluster log, no entry named like a shard directory. So shard state beside a
-   mark was made by a build that did not finish, and nothing was ever served from it.
+   manifest, no cluster log, no file under an entry named like a shard directory. So shard
+   state beside a mark was made by a build that did not finish, and nothing was ever served
+   from it. (A shard directory that holds only directories holds no data. There is nothing
+   in it to restore or to lose, and a build takes it as it takes an empty data directory.)
 3. **A build that finds the mark and no manifest starts again.** It removes every shard
    directory (the earlier attempt may have had more shards than this one) and builds from the
    beginning. The corpus comes from the same place it came from the first time.
@@ -118,8 +120,15 @@ corpus").
   and without the cluster log, and the directory is unchanged. A build in a directory that
   holds a cluster is refused and the cluster is unchanged. An open clears the mark of a build
   that stopped after its manifest. A mark beside a cluster log is refused. A build that is
-  refused leaves no mark, and one that is taken and then fails has left it. `build` does not
-  call the constructor that restores a shard.
+  refused leaves no mark, and one that is taken and then fails has left it. Shard directories
+  that hold no file do not stop a build, and one file under one does. `build` does not call
+  the constructor that restores a shard.
+- `tests/cluster_durability_oracle/vocab_stale_sources.rs`: the existing test of a build
+  whose source store cannot be written still reaches that write. Its fixture is a directory
+  where each shard's `sources.dat` should go, which holds no file, and it now asserts the
+  durability error itself. (Review found that the first form of this change refused the
+  fixture as shard state, and that the test went on passing because its directory's name
+  contained the word it looked for.)
 - `cluster/shard/tests/recovery.rs`: creating a shard in a directory that holds one is
   refused; the node's constructor restores it.
 - Mutation checks, each after an unmutated baseline: listed in the pull request.
