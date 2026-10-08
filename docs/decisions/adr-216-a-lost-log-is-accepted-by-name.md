@@ -153,7 +153,8 @@ in the delivery of an event.
   store is still refused with the same token, and the token then finishes it with one entry.
   A pending entry beside a log is marked applied by a start that is given no token. A record
   that is damaged, emptied or cut short fails the open, and a spent token does not accept a
-  second loss under it. With a directory that cannot be synced, five starts in a row fail
+  second loss under it. An entry this release does not understand, under a closing line that
+  matches, fails the open and is not skipped. With a directory that cannot be synced, five starts in a row fail
   and the log is never replaced (acting on the entry that the first of them left visible,
   they replaced it and then opened). A backup carries the record; one is not taken, and
   does not verify, when the record cannot be read.

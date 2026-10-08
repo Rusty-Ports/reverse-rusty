@@ -366,3 +366,33 @@ fn a_record_that_is_not_whole_is_not_read_as_a_shorter_history() {
     assert_eq!(accepted_log_losses(&dir).expect("the record").len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A record can be whole and still hold an entry this release does not understand (one
+/// written by a later release, say). Such an entry is not skipped: skipping it would read
+/// the record as a shorter history, and the count of losses is what a token is checked
+/// against.
+#[test]
+fn an_entry_this_release_does_not_understand_is_not_skipped() {
+    let (dir, config) = a_store_that_lost_its_log("entry_not_understood");
+    let (_, token) = refusal(&config);
+    drop(Engine::open(make_norm(), accepting(&config, &token)).expect("accepted"));
+    let record = dir.join(ACCEPTED_LOG_LOSSES_FILE);
+    let whole = std::fs::read_to_string(&record).expect("the record");
+    let known = whole.lines().next().expect("one entry");
+    // The entry it has, and one in a format of the future, under a closing line that
+    // matches both.
+    let entries = format!("{known}\nv2\t1700000000\tapplied\twal.log\tsomething\tnew\n");
+    let closing = format!(
+        "end\t2\t{:08x}\n",
+        reverse_rusty::storage::crc32(entries.as_bytes())
+    );
+    std::fs::write(&record, format!("{entries}{closing}")).expect("a record from the future");
+
+    let reason = match Engine::open(make_norm(), config) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("opened over an entry it does not understand"),
+    };
+    assert!(reason.contains("cannot be read"), "{reason}");
+    assert!(accepted_log_losses(&dir).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
