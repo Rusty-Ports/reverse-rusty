@@ -121,11 +121,11 @@ pub(super) async fn add_shard(
         super::dict_adopt::build_slot_shard(server, shard_id, &node.dict, &node.tag_dict, fp)?;
     server.insert_slot(
         shard_id,
-        ShardSlot::loaded(ServerState {
-            dict: Arc::clone(&node.dict),
-            tag_dict: Arc::clone(&node.tag_dict),
+        ShardSlot::loaded(ServerState::new(
+            Arc::clone(&node.dict),
+            Arc::clone(&node.tag_dict),
             shard,
-        }),
+        )),
     )?;
 
     Ok(add_shard_reply(

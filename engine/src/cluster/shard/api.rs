@@ -519,6 +519,17 @@ pub(crate) trait Shard: Send + Sync {
     /// streams the segments (`≤ P`) then replays the tail (`> P`) — no overlap, no
     /// double-apply (the zero-false-negative boundary). In-memory shards return `LogPos(0)`.
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError>;
+    /// Remove the segment files this shard has replaced and kept (ADR-214).
+    ///
+    /// A shard that does not own the record of which of its files are live never unlinks a
+    /// file it has replaced: after a compaction or the rewrite of a segment that holds
+    /// deletions, the owner's record still names the old file until the owner's next commit.
+    /// The owner calls this once such a commit is durable, and not when the commit failed or
+    /// its outcome is unknown. For a shard of an in-process cluster the owner is the
+    /// coordinator, after its manifest. A shard node releases by itself, after its own
+    /// checkpoint file, and a remote shard has nothing for a coordinator to release: the
+    /// default does nothing.
+    fn release_retired_segment_files(&self) {}
     /// This shard's live (mmap'd) base-segment filenames — the registry the coordinator
     /// commits into `cluster_manifest.bin`. `Err` (never a silent empty list) if any
     /// segment is in-memory (a write fell back), which would otherwise lose data on reopen.

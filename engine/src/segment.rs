@@ -609,6 +609,14 @@ pub struct Engine {
     /// copy. Such an engine is opened via [`Engine::open_shared_segments`], not
     /// [`Engine::open`].
     owns_manifest: bool,
+    /// Segment files this engine has replaced and may not remove yet (ADR-214). An engine
+    /// that owns no manifest is not the one that commits which files are live: its owner's
+    /// record (a coordinator's manifest, a shard node's checkpoint file) still names a
+    /// replaced file until the owner's next commit. So such an engine never unlinks what it
+    /// replaced. It lists the paths here, and the owner releases them once its commit is
+    /// durable ([`Engine::release_retired_segment_files`]). Always empty for an engine that
+    /// owns its manifest, which removes a replaced file right after its own commit.
+    retired_segment_files: std::sync::Mutex<Vec<std::path::PathBuf>>,
 }
 
 impl std::fmt::Debug for Engine {

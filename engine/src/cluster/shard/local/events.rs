@@ -35,8 +35,36 @@ impl LocalShard {
                     source_file_name: eng.source_file_name().to_string(),
                 },
             )?;
+            self.release_after_own_checkpoint_file(eng);
         }
         Ok(())
+    }
+
+    /// This shard has just written a checkpoint file that names its current segment files.
+    /// If that file is the shard's commit record (a shard node), the files it had replaced
+    /// are no longer named by anything and are removed. A shard of an in-process cluster
+    /// keeps them: its coordinator's manifest may still name them (ADR-214).
+    fn release_after_own_checkpoint_file(&self, eng: &Engine) {
+        if self
+            .owns_commit_record
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            eng.release_retired_segment_files();
+        }
+    }
+
+    #[cfg(all(test, feature = "distributed"))]
+    pub(crate) fn owns_its_commit_record(&self) -> bool {
+        self.owns_commit_record
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Make this shard's checkpoint file its commit record (ADR-214): a shard node's shard,
+    /// which restarts from that file. Called by the node when it takes the shard into a slot.
+    #[cfg(any(test, feature = "distributed"))]
+    pub(crate) fn own_the_commit_record(&self) {
+        self.owns_commit_record
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Deliver a degraded-path event to the installed sink, if any (best-effort: dropped when no

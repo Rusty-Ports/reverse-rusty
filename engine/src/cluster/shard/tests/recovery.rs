@@ -220,3 +220,163 @@ fn a_restarting_shard_whose_translog_is_gone_is_refused() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The `.seg` files in a shard's directory.
+fn segment_files(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("segments"))
+        .expect("the shard's segments")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            std::path::Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("seg"))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Two rows in a sealed segment, then one of them deleted: the next seal rewrites that
+/// segment, which replaces the file the shard's checkpoint file names.
+fn a_shard_with_a_deletion_in_a_sealed_segment(
+    tag: &str,
+    owns_its_commit_record: bool,
+) -> (
+    Arc<LocalShard>,
+    std::path::PathBuf,
+    impl Fn() -> Result<LocalShard, crate::cluster::shard::ShardError>,
+) {
+    let norm = Arc::new(Normalizer::default_vocab().unwrap());
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let rows: Vec<_> = ["wireless mouse", "mechanical keyboard"]
+        .into_iter()
+        .map(|dsl| {
+            let ast = crate::dsl::parse(dsl).unwrap();
+            (
+                dsl,
+                crate::compile::extract(&ast, &norm, &mut dict, &mut lc),
+            )
+        })
+        .collect();
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tags = TagDict::new();
+    tags.mark_finalized();
+    let tags = Arc::new(tags);
+    let dir = std::env::temp_dir().join(format!("rr_shard_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        wal_sync_on_write: true,
+        ..EngineConfig::default()
+    };
+    let open = move || {
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tags),
+            config.clone(),
+        )?;
+        if owns_its_commit_record {
+            shard.own_the_commit_record();
+        }
+        Ok(shard)
+    };
+    let shard = Arc::new(open().expect("a fresh durable shard"));
+    for (id, (dsl, extracted)) in rows.iter().enumerate() {
+        shard
+            .insert_extracted_with_tags(extracted, id as u64 + 1, 1, dsl, &[])
+            .unwrap();
+    }
+    shard.seal_for_checkpoint().expect("seal");
+    assert_eq!(segment_files(&dir).len(), 1, "one sealed segment");
+    shard.delete_by_logical_id(1).expect("delete a sealed row");
+    (shard, dir, open)
+}
+
+/// A shard node's shard restarts from its own checkpoint file. A seal rewrites the segment
+/// that holds the deletion and then writes the checkpoint file; a kill in between left a
+/// checkpoint file that named a segment the rewrite had already removed, and the node could
+/// not restart. The old file is kept until a checkpoint file that no longer names it is
+/// written, and removed then.
+#[test]
+fn a_shard_node_restarts_after_a_kill_between_a_rewrite_and_its_checkpoint_file() {
+    let (shard, dir, open) = a_shard_with_a_deletion_in_a_sealed_segment("node_kill_window", true);
+    let named = segment_files(&dir);
+    // The seal rewrites the segment and then cannot write its checkpoint file.
+    let blocker = dir.join("shard.ckpt.tmp");
+    std::fs::create_dir_all(&blocker).expect("block the checkpoint file");
+    let failed = shard.seal_for_checkpoint().is_err();
+    std::fs::remove_dir_all(&blocker).expect("unblock");
+    assert!(
+        failed,
+        "precondition: the checkpoint file could not be written"
+    );
+    let now = segment_files(&dir);
+    assert!(
+        now.len() > named.len(),
+        "precondition: the segment was rewritten: {now:?}"
+    );
+    assert!(
+        named.iter().all(|name| now.contains(name)),
+        "the shard removed a segment its checkpoint file still names"
+    );
+    drop(shard); // the kill
+
+    let restarted = open().expect("the node restarts from its checkpoint file");
+    assert_eq!(
+        restarted.live_logical_ids().unwrap(),
+        vec![2],
+        "the deletion holds"
+    );
+    // A seal that does write its checkpoint file releases what was replaced.
+    restarted.seal_for_checkpoint().expect("seal");
+    let named_now = restarted.segment_filenames().expect("segment files");
+    drop(restarted);
+    let mut on_disk = segment_files(&dir);
+    on_disk.retain(|name| named_now.contains(name));
+    assert_eq!(
+        on_disk.len(),
+        named_now.len(),
+        "the files the checkpoint file names are there"
+    );
+    let again = open().expect("restart");
+    assert_eq!(again.live_logical_ids().unwrap(), vec![2]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A shard that owns its commit record removes a replaced file once its checkpoint file no
+/// longer names it. A shard of an in-process cluster does not: its coordinator's manifest may
+/// still name the file, so the file stays until the coordinator releases it.
+#[test]
+fn who_owns_the_commit_record_decides_who_releases_a_replaced_file() {
+    for owns in [true, false] {
+        let (shard, dir, _open) =
+            a_shard_with_a_deletion_in_a_sealed_segment(&format!("release_owner_{owns}"), owns);
+        let named = segment_files(&dir);
+        shard.seal_for_checkpoint().expect("seal");
+        let now = segment_files(&dir);
+        let old_is_there = named.iter().all(|name| now.contains(name));
+        assert_eq!(
+            old_is_there, !owns,
+            "owns its record: {owns}; before {named:?}, after the seal {now:?}"
+        );
+        // The owner's release.
+        shard.release_retired_segment_files();
+        let released = segment_files(&dir);
+        assert!(
+            !named.iter().any(|name| released.contains(name)),
+            "the replaced file is still there after its release: {released:?}"
+        );
+        assert_eq!(released, {
+            let mut live = shard.segment_filenames().expect("segment files");
+            live.sort();
+            live
+        });
+        assert_eq!(shard.live_logical_ids().unwrap(), vec![2]);
+        drop(shard);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

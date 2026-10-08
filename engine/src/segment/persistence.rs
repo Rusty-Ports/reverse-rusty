@@ -553,10 +553,47 @@ impl Engine {
             .collect()
     }
 
-    /// Remove old segment files after compaction replaces them.
+    /// Retire segment files that this engine has replaced: after a compaction, after the
+    /// rewrite of a segment that holds deletions, after a vocabulary recompile.
+    ///
+    /// An engine that owns its manifest has just committed a manifest that no longer names
+    /// them, and removes them. An engine that owns none has committed nothing: the record
+    /// that names its files is its owner's, and it still names these until the owner's next
+    /// commit. Removing them now would leave, for as long as that takes, a committed record
+    /// that names files that are gone, and a store that cannot reopen after a crash
+    /// (ADR-214). So they are kept and listed, for the owner to release.
     pub(in crate::segment) fn cleanup_segment_files(&self, paths: &[PathBuf]) {
-        for p in paths {
-            self.best_effort_remove_segment(p);
+        if self.owns_manifest {
+            for p in paths {
+                self.best_effort_remove_segment(p);
+            }
+            return;
+        }
+        self.retired_segment_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(paths.iter().cloned());
+    }
+
+    /// Remove the segment files this engine replaced and kept (ADR-214). Called by the owner
+    /// of the record that names this engine's files, once a commit that no longer names them
+    /// is durable. A segment that was written, replaced and never committed is released like
+    /// any other.
+    pub(crate) fn release_retired_segment_files(&self) {
+        let retired = std::mem::take(
+            &mut *self
+                .retired_segment_files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if retired.is_empty() {
+            return;
+        }
+        // A segment file name is never used twice, so a replaced file cannot be one the
+        // engine holds now. The check costs nothing and removing a live file would be fatal.
+        let live = self.collect_mmap_paths();
+        for path in retired.iter().filter(|path| !live.contains(path)) {
+            self.best_effort_remove_segment(path);
         }
     }
 

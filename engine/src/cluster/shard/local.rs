@@ -68,6 +68,17 @@ pub(crate) struct LocalShard {
     /// with the shard — a resize/set_vocab rebuild releases every pin, and the
     /// coordinator's generation gate 409s the cursor before it ever gets here.
     pits: Mutex<crate::util::FastMap<u64, Arc<EngineSnapshot>>>,
+    /// Whether this shard's own checkpoint file is the record that says which of its segment
+    /// files are live (ADR-214). True on a shard node, which restarts from that file. False
+    /// for a shard of an in-process cluster, whose coordinator's manifest is that record: the
+    /// shard writes a checkpoint file too, and nothing reopens from it.
+    ///
+    /// It decides who releases the segment files the shard has replaced. A shard that owns
+    /// its record releases them itself, as soon as it has written a checkpoint file that no
+    /// longer names them. Otherwise it keeps them until its owner says so
+    /// ([`Shard::release_retired_segment_files`]). The default, `false`, is the safe side:
+    /// the worst a wrong `false` does is keep files longer.
+    owns_commit_record: std::sync::atomic::AtomicBool,
 }
 
 mod events;

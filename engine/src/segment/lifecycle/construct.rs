@@ -106,6 +106,7 @@ impl Engine {
             vocab_epoch: 0,
             committed_wal_watermark: 0,
             owns_manifest: true,
+            retired_segment_files: std::sync::Mutex::default(),
         }
     }
 
@@ -181,6 +182,7 @@ impl Engine {
             vocab_epoch: 0,
             committed_wal_watermark: 0,
             owns_manifest: false,
+            retired_segment_files: std::sync::Mutex::default(),
         })
     }
 

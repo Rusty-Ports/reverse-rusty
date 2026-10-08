@@ -23,11 +23,7 @@ impl ShardServer {
             config.clone(),
         );
         let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
-        let shards = single_slot(ShardSlot::loaded(ServerState {
-            dict,
-            tag_dict,
-            shard,
-        }));
+        let shards = single_slot(ShardSlot::loaded(ServerState::new(dict, tag_dict, shard)));
         ShardServer {
             norm,
             config,
@@ -222,11 +218,7 @@ impl ShardServer {
             sc,
         )?;
         let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
-        let slot = ShardSlot::loaded(ServerState {
-            dict,
-            tag_dict,
-            shard,
-        });
+        let slot = ShardSlot::loaded(ServerState::new(dict, tag_dict, shard));
         // The pre-built node remembers its drops too (ADR-189): reopening a directory whose
         // slot 0 was dropped must not serve a fresh empty slot 0.
         let dropped = match node_dict.load_full() {

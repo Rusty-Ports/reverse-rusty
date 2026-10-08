@@ -287,6 +287,7 @@ impl Engine {
             vocab_epoch: 0,
             committed_wal_watermark: manifest.wal_seq_watermark,
             owns_manifest: true,
+            retired_segment_files: std::sync::Mutex::default(),
         };
         // The store was just read from the selected sidecar and nothing has been replayed
         // into it yet: this is the moment the two are known equal (ADR-200). A recovery

@@ -36,6 +36,7 @@ impl LocalShard {
             dict,
             data_dir: None,
             pits: Mutex::new(crate::util::fast_map()),
+            owns_commit_record: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -98,6 +99,7 @@ impl LocalShard {
             dict,
             data_dir: Some(dir),
             pits: Mutex::new(crate::util::fast_map()),
+            owns_commit_record: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -255,6 +257,7 @@ impl LocalShard {
             dict,
             data_dir: dir,
             pits: Mutex::new(crate::util::fast_map()),
+            owns_commit_record: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -326,6 +329,7 @@ impl LocalShard {
             dict,
             data_dir: Some(dir),
             pits: Mutex::new(crate::util::fast_map()),
+            owns_commit_record: std::sync::atomic::AtomicBool::new(false),
         };
         // Replay the un-sealed tail (ops > P) into the engine ONLY — the ops are already on disk
         // in the translog, so re-appending would duplicate them. Position-filtered, so it never

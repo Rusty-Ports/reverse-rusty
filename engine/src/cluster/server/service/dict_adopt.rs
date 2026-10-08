@@ -192,11 +192,7 @@ pub(super) async fn adopt_dict(
     }
     server.insert_slot(
         shard_id,
-        ShardSlot::loaded(ServerState {
-            dict: space_dict,
-            tag_dict: space_tag,
-            shard,
-        }),
+        ShardSlot::loaded(ServerState::new(space_dict, space_tag, shard)),
     )?;
 
     Ok(adopt_reply(

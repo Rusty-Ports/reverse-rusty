@@ -143,6 +143,13 @@ impl ClusterEngine {
         //    best-effort: a crash here just replays an already-captured tail / leaves
         //    orphan files that are ignored on open).
         self.epoch.store(new_epoch, Ordering::Relaxed);
+        // The manifest that is now committed names each shard's current segment files, so
+        // the files the shards replaced since the last one are named by nothing. A shard
+        // keeps them until this point and never removes them itself (ADR-214): until this
+        // commit the previous manifest named them, and a reopen needed them.
+        for shard in layout.shards.iter() {
+            shard.release_retired_segment_files();
+        }
         if let Err(e) = self.log.checkpoint(up_to) {
             // The manifest is committed and the log's content is whole. What differs is
             // whether this process can still add to the log.

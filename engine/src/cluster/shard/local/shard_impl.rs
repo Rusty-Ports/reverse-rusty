@@ -501,6 +501,10 @@ impl Shard for LocalShard {
         }
     }
 
+    fn release_retired_segment_files(&self) {
+        self.lock().release_retired_segment_files();
+    }
+
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
         self.ensure_storage_writable()?;
         // Delegate to the clock-injectable core with the real wall clock. The split keeps the

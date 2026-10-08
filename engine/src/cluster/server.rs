@@ -75,6 +75,22 @@ struct ServerState {
     shard: LocalShard,
 }
 
+impl ServerState {
+    /// The state of one hosted shard. A shard node restarts each shard from that shard's own
+    /// checkpoint file, so here that file is the record of which segment files are live, and
+    /// the shard is told so: it then removes a file it has replaced once it has written a
+    /// checkpoint file that no longer names it, and not before (ADR-214). This is the only
+    /// way to build a state, so no slot holds a shard that was not told.
+    fn new(dict: Arc<Dict>, tag_dict: Arc<TagDict>, shard: LocalShard) -> Self {
+        shard.own_the_commit_record();
+        ServerState {
+            dict,
+            tag_dict,
+            shard,
+        }
+    }
+}
+
 /// One hosted shard on a multi-shard node (ADR-093): its swappable engine state + its OWN fence
 /// generation. Keying the fence PER SLOT is the codex-P1 fix — fencing one shard for a handoff no
 /// longer write-quiesces a co-located shard on the same node (a shared `AtomicU64` could not do this).
