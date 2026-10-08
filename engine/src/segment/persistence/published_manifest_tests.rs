@@ -261,6 +261,13 @@ fn a_delete_by_position_is_refused_while_two_manifests_may_be_read() {
     let dir = scratch_dir("positional");
     let scope = Scope::open(&dir);
     let mut engine = seeded(&dir);
+    // No merge after the flush: the segment that holds id 3 is the same segment before
+    // and after, so an address minted now is refused for the manifest's sake and not
+    // because its segment was replaced.
+    engine.set_config(EngineConfig {
+        auto_compact_on_flush: false,
+        ..config(&dir)
+    });
     let address = engine
         .segment_address(1, 0, 3)
         .expect("an address before the failed sync");
@@ -275,6 +282,13 @@ fn a_delete_by_position_is_refused_while_two_manifests_may_be_read() {
     assert!(
         by_position.to_string().contains("delete by logical id"),
         "{by_position}"
+    );
+    assert!(
+        engine
+            .segment_generations
+            .iter()
+            .any(|live| std::sync::Arc::ptr_eq(live, &address.generation)),
+        "the address's segment is still there"
     );
     assert!(engine.tombstone_in(&address).is_err(), "a segment address");
     for segment in 0..engine.segments.len() {
