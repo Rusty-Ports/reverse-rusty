@@ -58,6 +58,10 @@ impl Engine {
         let Some(dir) = self.config.data_dir.clone() else {
             return Ok(None);
         };
+        // The next sidecar's name counts from the selected one, which a commit that was
+        // rolled back in memory did not advance: written now, it would replace the file the
+        // manifest on disk selects (ADR-222).
+        self.refuse_a_commit_awaiting_restart()?;
         if self.source_commit_state == SourceCommitState::IncompleteRecovery {
             let error = std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

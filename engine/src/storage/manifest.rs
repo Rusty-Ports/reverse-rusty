@@ -218,7 +218,29 @@ pub(crate) fn write_manifest_reporting(manifest: &Manifest, path: &Path) -> io::
 }
 
 pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
+    parse_manifest(&std::fs::read(path)?)
+}
+
+/// [`read_manifest`] for an open, which builds on what it reads: the manifest is published
+/// again with the bytes it has before it is returned (ADR-222), so the one a power loss
+/// leaves is the one that was read. A manifest that does not parse is refused as by
+/// [`read_manifest`] and is not written.
+pub(crate) fn read_manifest_publishing_again(path: &Path) -> io::Result<Manifest> {
     let data = std::fs::read(path)?;
+    let manifest = parse_manifest(&data)?;
+    publish::publish_again(path, &path.with_extension("manifest.tmp"), &data).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "publishing {} again before opening what it names: {e}",
+                path.display()
+            ),
+        )
+    })?;
+    Ok(manifest)
+}
+
+fn parse_manifest(data: &[u8]) -> io::Result<Manifest> {
     if data.len() < 12 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -230,7 +252,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "no CRC"));
     }
     let content = &data[..data.len() - 4];
-    let stored_crc = read_u32_at(&data, data.len() - 4)?;
+    let stored_crc = read_u32_at(data, data.len() - 4)?;
     if crc32(content) != stored_crc {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -244,7 +266,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
             "bad manifest magic",
         ));
     }
-    let version = read_u32_at(&data, 4)?;
+    let version = read_u32_at(data, 4)?;
     // v1..=v7 are accepted; v2 appends `tag_dict_data` (ADR-049), v3 appends the WAL
     // watermark + per-segment dead-locals bitmaps (ADR-066), v4 is the class-D fence
     // (ADR-068), v5 appends the recorded θ under the hot fence (ADR-105), v6 is the
@@ -260,18 +282,18 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         ));
     }
     let mut cursor = 8usize;
-    let next_seg_id = read_u64_at(&data, cursor)?;
+    let next_seg_id = read_u64_at(data, cursor)?;
     cursor += 8;
-    let rejected_parse = read_u64_at(&data, cursor)?;
+    let rejected_parse = read_u64_at(data, cursor)?;
     cursor += 8;
-    let rejected_class_d = read_u64_at(&data, cursor)?;
+    let rejected_class_d = read_u64_at(data, cursor)?;
     cursor += 8;
 
-    let num_files = read_u32_at(&data, cursor)? as usize;
+    let num_files = read_u32_at(data, cursor)? as usize;
     cursor += 4;
     let mut segment_files = Vec::with_capacity(num_files);
     for _ in 0..num_files {
-        let len = read_u32_at(&data, cursor)? as usize;
+        let len = read_u32_at(data, cursor)? as usize;
         cursor += 4;
         // Route through `data.get(..)` like the dict/tag-dict/tombstone reads below,
         // so a crafted (CRC-recomputed) `len` that overruns the buffer fails loud with
@@ -285,7 +307,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         segment_files.push(name);
     }
 
-    let dict_len = read_u32_at(&data, cursor)? as usize;
+    let dict_len = read_u32_at(data, cursor)? as usize;
     cursor += 4;
     let dict_data = data
         .get(cursor..cursor + dict_len)
@@ -294,7 +316,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     cursor += dict_len;
     // v2 appends the tag-dict blob; v1 has none (read back as empty).
     let tag_dict_data = if version >= 2 {
-        let tlen = read_u32_at(&data, cursor)? as usize;
+        let tlen = read_u32_at(data, cursor)? as usize;
         cursor += 4;
         let t = data
             .get(cursor..cursor + tlen)
@@ -309,13 +331,13 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     // read back with watermark 0 and no bitmaps (their era had no durable record of
     // base-segment tombstones to restore).
     let (wal_seq_watermark, segment_tombstones) = if version >= 3 {
-        let watermark = read_u64_at(&data, cursor)?;
+        let watermark = read_u64_at(data, cursor)?;
         cursor += 8;
-        let n = read_u32_at(&data, cursor)? as usize;
+        let n = read_u32_at(data, cursor)? as usize;
         cursor += 4;
         let mut tombs = Vec::with_capacity(n);
         for _ in 0..n {
-            let nlen = read_u32_at(&data, cursor)? as usize;
+            let nlen = read_u32_at(data, cursor)? as usize;
             cursor += 4;
             let name = std::str::from_utf8(data.get(cursor..cursor + nlen).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "truncated tombstone filename")
@@ -323,7 +345,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
             .to_string();
             cursor += nlen;
-            let blen = read_u32_at(&data, cursor)? as usize;
+            let blen = read_u32_at(data, cursor)? as usize;
             cursor += 4;
             let bitmap = data
                 .get(cursor..cursor + blen)
@@ -340,14 +362,14 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     };
     // v5 appends the recorded θ (ADR-105); absent in earlier versions.
     let hot_anchor_theta = if version >= MANIFEST_VERSION_HOT {
-        let t = read_u32_at(&data, cursor)?;
+        let t = read_u32_at(data, cursor)?;
         cursor += 4;
         t
     } else {
         0
     };
     let source_file_name = if version >= MANIFEST_VERSION_SOURCE_COMMIT {
-        let len = read_u32_at(&data, cursor)? as usize;
+        let len = read_u32_at(data, cursor)? as usize;
         cursor += 4;
         let end = cursor.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "invalid source filename length")

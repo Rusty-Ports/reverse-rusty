@@ -32,11 +32,11 @@ pub use backup::{
 };
 pub use dict::{deserialize_dict, serialize_dict};
 pub use log_loss::{accepted_log_losses, AcceptedLogLoss, ACCEPTED_LOG_LOSSES_FILE};
-pub(crate) use manifest::write_manifest_reporting;
 pub use manifest::{
     read_cluster_manifest, read_manifest, write_cluster_manifest, write_manifest, ClusterManifest,
     Manifest,
 };
+pub(crate) use manifest::{read_manifest_publishing_again, write_manifest_reporting};
 pub(crate) use segment::CURRENT_COMPILER_SEMANTICS_VERSION;
 pub use segment::{write_segment, MmapSegment};
 pub use sources::{load_query_sources, LazyBase, SourceStore, StoredSource};

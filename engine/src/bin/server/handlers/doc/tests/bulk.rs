@@ -371,3 +371,31 @@ async fn items_report_the_class_each_query_was_stored_under() {
     assert_eq!(response["items"][3]["create"]["class"], "c", "{response}");
     assert_eq!(response["items"][3]["create"]["default_visible"], false);
 }
+
+/// A batch whose commit failed has changed the node's health, and readers see that at once:
+/// the engine's state is published after a failed batch too (ADR-222).
+#[tokio::test]
+async fn a_batch_whose_commit_failed_is_seen_in_the_nodes_health() {
+    let dir = std::env::temp_dir().join(format!("rr-bulk-failed-commit-{}", uuid::Uuid::new_v4()));
+    let config = reverse_rusty::config::EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..reverse_rusty::config::EngineConfig::default()
+    };
+    let engine = Engine::with_config(Normalizer::default_vocab().expect("vocab"), config);
+    let state = state_with_engine(engine);
+    assert!(state.snapshot.load().persistence_healthy());
+    // The manifest's temporary file cannot be created, so the commit fails before its rename.
+    std::fs::create_dir_all(dir.join("manifest.manifest.tmp")).expect("block the manifest");
+
+    let body = concat!(
+        "{\"create\":{\"_id\":1}}\n",
+        "{\"query\":\"brass compass\",\"version\":1}\n",
+    );
+    let (status, response) = send_bulk(&state, "/_bulk", Some("application/x-ndjson"), body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert!(
+        !state.snapshot.load().persistence_healthy(),
+        "the state readers see says the node is unhealthy"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

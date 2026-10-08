@@ -92,10 +92,9 @@ fails closed, but the underlying cause (disk full, volume failure) compounds. **
 space/health immediately; do not take a backup onto the same failing disk; once resolved, verify
 with a sentinel write and take a fresh backup. An `op="manifest_write"` failure whose detail
 says the manifest "was renamed into place and its directory could not be synced" is a commit
-whose outcome is not known (ADR-222): the node keeps every file, serves reads, takes writes by
-id into its log, and commits nothing more (no flush, compaction, bulk load or vocabulary
-change) until it is restarted. Fix the storage and restart the node; it starts from the
-manifest on disk with every acknowledged write. The `op="replica_desync"` series is different: a
+whose outcome is not known (ADR-222): the node keeps every file, serves reads, and refuses
+every write (`503 persistence_unavailable`) until it is restarted. Fix the storage and
+restart the node; it starts from the manifest on disk with every acknowledged write. The `op="replica_desync"` series is different: a
 replica left the in-sync set (a replicated write to it failed, or it was not proven equal to its
 primary when the coordinator connected, ADR-195). No write was lost, but that position has less
 redundancy until the replica is recovered ([runbook §6](cluster-deployment.md), *Replica

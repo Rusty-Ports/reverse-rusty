@@ -107,20 +107,10 @@ impl Engine {
 
         // The manifest here may have been renamed into place by a process whose directory sync
         // failed, or that stopped before it (ADR-222): it is what this open reads, and it is
-        // not yet known to be what a power loss leaves. The directories are synced before
-        // anything is built on what they hold. One that cannot be synced is a store that
-        // cannot say what it holds, and the open fails.
-        for held in [dir.clone(), dir.join("segments")] {
-            if held.is_dir() {
-                crate::fault::sync_dir(&held).map_err(|e| {
-                    std::io::Error::new(
-                        e.kind(),
-                        format!("syncing {} before opening it: {e}", held.display()),
-                    )
-                })?;
-            }
-        }
-        let manifest = crate::storage::read_manifest(&manifest_path)?;
+        // not yet known to be what a power loss leaves. It is published again, with the bytes
+        // it has, before anything is built on what it names. An open that cannot do that
+        // fails.
+        let manifest = crate::storage::read_manifest_publishing_again(&manifest_path)?;
         // ADR-184: decide the feature model before anything is compiled from this directory.
         let (norm, vocab, model) = feature_model::resolve(&manifest, norm, vocab)?;
         let dict = crate::storage::deserialize_dict(&manifest.dict_data)?;

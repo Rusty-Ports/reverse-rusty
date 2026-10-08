@@ -1,7 +1,7 @@
 //! CRC sealing and atomic publication shared by both manifest codecs.
 
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 use super::super::{crc32, publish_by_rename, write_u32, Published};
@@ -43,4 +43,21 @@ pub(super) fn publish_with_crc_reporting(
     drop(file);
 
     publish_by_rename(tmp, path)
+}
+
+/// Publish `bytes`, which are the manifest at `path`, again: a new file, a new rename, a new
+/// directory sync (ADR-222).
+///
+/// The publication that put the manifest there may have ended at a directory sync that
+/// failed, in this process or in the one before it. A restart does not clear what the
+/// kernel holds about that failure, and a sync issued now over the same state can report
+/// success without having written it. A publication issued again does not depend on it:
+/// when this returns `Ok`, the manifest a power loss leaves has these bytes.
+pub(super) fn publish_again(path: &Path, tmp: &Path, bytes: &[u8]) -> io::Result<()> {
+    crate::fault::step("create", tmp)?;
+    let mut file = File::create(tmp)?;
+    file.write_all(bytes)?;
+    crate::fault::sync(&file, tmp)?;
+    drop(file);
+    crate::storage::durable_rename(tmp, path)
 }

@@ -388,7 +388,7 @@ fn bulk_ingest_inner(state: &Arc<AppState>, items: Vec<ParsedBulkItem>) -> Respo
             };
             // Published whatever the outcome. A batch whose commit failed has still
             // changed the engine's health, and after a manifest that was renamed and not
-            // synced the node commits nothing more (ADR-222): readers have to see that.
+            // synced the node is read-only (ADR-222): readers have to see that.
             if !matches!(result, Ok(false)) {
                 state.publish_snapshot_from_locked_engine(&engine);
             }

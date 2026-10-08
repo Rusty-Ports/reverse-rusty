@@ -477,6 +477,14 @@ impl Wal {
         Ok(())
     }
 
+    /// Refuse every append from now until the log is opened again, and say `why` to each
+    /// writer that is refused. For a state in which no record may be added: every mutation
+    /// of the engine appends here before it is applied, so closing the log is what stops
+    /// them all.
+    pub(crate) fn close_until_reopen(&mut self, why: &'static str) {
+        self.file.disable_because(why);
+    }
+
     /// Where an empty replacement is built before it is renamed over the log.
     pub(super) fn replacement_path(path: &Path) -> std::path::PathBuf {
         crate::storage::framed_log::replacement_path(path)

@@ -60,6 +60,12 @@ impl Engine {
     /// `true` for a disk-backed `Mmap` (or for in-memory mode), `false` for a
     /// persistent-mode write/mmap failure that fell back to `Memory`.
     pub(in crate::segment) fn make_base_segment(&mut self, seg: Segment) -> (BaseSegment, bool) {
+        // No file is written while a manifest's outcome is not known (ADR-222): a memtable
+        // that held rows then is sealed into memory, as after a failed write, and its rows
+        // stay in the log.
+        if self.manifest_awaits_sync() {
+            return (BaseSegment::Memory(seg), false);
+        }
         let data_dir = self.config.data_dir.clone();
         if let Some(ref dir) = data_dir {
             let name = self.next_segment_filename();
@@ -122,6 +128,7 @@ impl Engine {
         let Some(dir) = self.config.data_dir.clone() else {
             return Ok((BaseSegment::Memory(seg), None));
         };
+        self.refuse_a_commit_awaiting_restart()?;
         let path = dir.join("segments").join(self.next_segment_filename());
         if let Err(e) = crate::storage::write_segment(&seg, &path) {
             self.persistence_healthy = false;
@@ -201,11 +208,12 @@ impl Engine {
                 self.best_effort_remove_segment(&p);
             }
             // After a manifest that was renamed and not synced, "rolled back" is true of
-            // this process and not of the disk (ADR-222).
+            // this process and not of the disk (ADR-222). It was this batch's manifest: a
+            // batch that came later was refused before its segment was written.
             return Err(std::io::Error::other(if self.manifest_awaits_sync() {
-                "the batch is not served: a manifest was renamed into place and could not be \
-                 synced, and nothing more is committed until a restart. If it was this \
-                 batch's manifest, a restart serves the batch"
+                "the batch is not served: its manifest was renamed into place and could not \
+                 be synced. The node is read-only until a restart, and a restart serves \
+                 the batch"
             } else {
                 "manifest write failed during ingest; batch rolled back"
             }));
@@ -309,7 +317,7 @@ impl Engine {
         // An earlier publication was renamed into place and not synced. Which manifest a
         // power loss leaves is not known, and a commit on top of either would have to be
         // right for both, so there is none until a restart has read the disk (ADR-222).
-        if self.manifest_awaits_sync() {
+        if self.refuse_a_commit_awaiting_restart().is_err() {
             return false;
         }
         // ADR-184: a manifest records ONE feature model for the whole corpus. While a
@@ -443,18 +451,22 @@ impl Engine {
                 // The rename is the publication: a restart reads this manifest. Whether it
                 // survives a power loss is not known, so the one it replaced may be read
                 // instead. The caller is told the commit failed and puts its state back.
-                // From here on nothing either manifest may name is removed and nothing more
-                // is committed (ADR-222): see [`ManifestOnDisk::RenamedNotSynced`].
+                // From here on the data directory does not change (ADR-222): the log is
+                // closed, no file of a commit is written and none is removed. See
+                // [`ManifestOnDisk::RenamedNotSynced`].
                 Ok(crate::storage::Published::NotSynced(e)) => {
                     self.manifest_on_disk = ManifestOnDisk::RenamedNotSynced;
+                    if let Some(wal) = self.wal.as_mut() {
+                        wal.close_until_reopen(published::NOTHING_UNTIL_A_RESTART);
+                    }
                     self.persistence_healthy = false;
                     self.emit(crate::events::EngineEvent::DurabilityFailure {
                         op: crate::events::DurabilityOp::ManifestWrite,
                         detail: "the manifest was renamed into place and its directory could \
                                  not be synced, so it is not known which manifest a power loss \
-                                 leaves. No file is removed and nothing more is committed \
-                                 until the process is restarted; a restart reads the new \
-                                 manifest and the write-ahead log, which is kept whole"
+                                 leaves. The node serves reads and refuses every write until \
+                                 it is restarted; nothing in its data directory changes. A \
+                                 restart reads the new manifest and the write-ahead log"
                             .to_string(),
                         error: e.to_string(),
                     });
