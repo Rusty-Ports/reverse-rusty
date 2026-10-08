@@ -17,8 +17,8 @@
 
 use crate::features::Feature;
 use crate::normalize::{
-    compile_phrase, emit, match_phrase_views, phrase_graph_matches, RefPhraseGraph, RefPositionArc,
-    Side,
+    phrase_graph_matches, query_features, quoted_clause, title_views, RefPhraseGraph,
+    RefPositionArc,
 };
 use crate::parse::{Ast, Atom};
 use crate::vocab::RefVocab;
@@ -36,7 +36,7 @@ pub struct RefTermPredicate {
 
 impl RefTermPredicate {
     fn from_text(vocab: &RefVocab, text: &str) -> Option<Self> {
-        let mut features = emit(vocab, text, Side::Query, false);
+        let mut features = query_features(vocab, text);
         features.sort();
         features.dedup();
         if features.is_empty() {
@@ -198,14 +198,13 @@ pub struct RefTitle {
 impl RefTitle {
     #[must_use]
     pub fn analyze(vocab: &RefVocab, text: &str) -> Self {
-        let (canonical_features, positive_features, positions, canonical_arcs, positive_arcs) =
-            match_phrase_views(vocab, text);
+        let views = title_views(vocab, text);
         Self {
-            canonical_features,
-            positive_features,
-            positions,
-            canonical_arcs,
-            positive_arcs,
+            canonical_features: views.canonical_features,
+            positive_features: views.positive_features,
+            positions: views.positions,
+            canonical_arcs: views.canonical_arcs,
+            positive_arcs: views.positive_arcs,
         }
     }
 }
@@ -245,13 +244,13 @@ pub fn analyze_literal(ast: &Ast, vocab: &RefVocab) -> RefSemanticQuery {
                 }
             }
             (Atom::Phrase(text), false) => {
-                let phrase = compile_phrase(vocab, text);
+                let phrase = quoted_clause(vocab, text);
                 if !phrase.arcs.is_empty() {
                     clauses.push(RefSemanticClause::RequiredPhrase(phrase));
                 }
             }
             (Atom::Phrase(text), true) => {
-                let phrase = compile_phrase(vocab, text);
+                let phrase = quoted_clause(vocab, text);
                 if !phrase.arcs.is_empty() {
                     clauses.push(RefSemanticClause::ForbiddenPhrase(phrase));
                 }
@@ -303,7 +302,7 @@ pub fn resolve_equivalences(vocab: &RefVocab) -> RefEquivMap {
     for group in &vocab.equivalences {
         let mut features = BTreeSet::new();
         for form in group {
-            let mut resolved = emit(vocab, form, Side::Query, false);
+            let mut resolved = query_features(vocab, form);
             resolved.sort();
             resolved.dedup();
             if resolved.len() == 1 {

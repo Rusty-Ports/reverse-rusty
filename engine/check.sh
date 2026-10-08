@@ -102,35 +102,23 @@ assert_rkyv_inactive() {
     fi
 }
 
-# The reference matcher says where each of its modules comes from (ADR-219). A module that
-# cites engine code as the source of its logic must be one the crate documentation lists as
-# ported from the engine. Once the ported modules are re-written from the specification the
-# list below is emptied, and this lane keeps it empty.
+# No module of the reference matcher is derived from engine code (ADR-219, ADR-220): each is
+# written from the specification, and the crate documentation says so. A module that cites
+# engine code as the source of its logic fails here.
 assert_ref_matcher_provenance() {
-    local ported="clean.rs normalize.rs parse.rs phrases.rs"
     local marker='Transcribed|[Tt]ranslation of|[Tt]ranslated from|[Pp]orted from|[Mm]irror(s|ing) `|Reproduces|engine/src/'
-    local row f base
-    row=$(grep 'ported from the engine' ref-matcher/src/lib.rs) || true
-    for f in ref-matcher/src/*.rs; do
-        base=${f##*/}
-        # lib.rs is where the provenance is stated; tables.rs holds the specification's data.
-        [ "$base" = lib.rs ] && continue
+    local f
+    while IFS= read -r f; do
         if grep -Eq "$marker" "$f"; then
-            case " $ported " in
-                *" $base "*) ;;
-                *)
-                    printf '%s cites engine code as the source of its logic and is not listed as ported\n' "$f" >&2
-                    return 1
-                    ;;
-            esac
-        fi
-    done
-    for base in $ported; do
-        if ! grep -q "\[\`${base%.rs}\`\]" <<<"$row"; then
-            printf 'ref-matcher/src/lib.rs does not say that %s is ported from the engine\n' "$base" >&2
+            printf '%s cites engine code as the source of its logic; the reference is written from the specification (ADR-220)\n' "$f" >&2
             return 1
         fi
-    done
+    # lib.rs is where the provenance is stated, and may say what the modules are not.
+    done < <(find ref-matcher/src -name '*.rs' ! -path ref-matcher/src/lib.rs | sort)
+    if ! grep -q 'Every module is written from the specification' ref-matcher/src/lib.rs; then
+        printf 'ref-matcher/src/lib.rs no longer says where its modules come from\n' >&2
+        return 1
+    fi
 }
 
 # Advisory (non-failing): list source files over the line threshold as refactor

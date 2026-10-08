@@ -111,31 +111,43 @@ This last query matches titles that contain: `vintage`, either `leather` or `sue
 ## Parsing rules
 
 These are the rules a query string is read by, stated completely. A string that breaks one is
-rejected when it is stored; it is never stored as something else.
+rejected when it is stored; it is never stored as something else. When a string breaks more
+than one, which is reported is not specified.
 
 - **Limits.** A query is at most 10,240 bytes and 256 clauses, and an any-of group has at most 64
-  members. (The limits are settings; these are the defaults.)
-- **Clauses** are separated by whitespace.
+  members. (The limits are settings; these are the defaults.) Clauses are counted as written,
+  including one that analysis later drops; members are counted after empty ones are dropped.
+- **Clauses** are separated by whitespace, which here and below means any Unicode white-space
+  character. A `(` or a `"` also ends a bare term, and the `)` or `"` that closes a group or a
+  quoted clause ends it, so `a(b,c)"d"e` is four clauses.
 - **A negation** is a `-` at the start of a clause. It must be followed at once by what it
-  negates: `-used` negates, while `- used`, `used -` and a `-` at the end are rejected.
+  negates: `-used` negates, while `- used`, `used -` and a `-` at the end are rejected. Only
+  that one `-` negates: `--used` is the negated bare term `-used`.
 - **A group** starts at `(` and ends at the next `)`. Its members are separated by `,`. Inside a
-  member, any whitespace is a space; a member is trimmed, and an empty member is dropped. A
-  group with no member left, or with no `)`, is rejected. Groups do not nest, and a `"` inside a
-  group is an ordinary character.
+  member, each whitespace character is one space; a member is trimmed, and an empty member is
+  dropped. A group with no member left, or with no `)`, is rejected. Groups do not nest: inside
+  a group a `(` is an ordinary character, as a `"` is, so `(a,(b,c))` is the group of `a`, `(b`
+  and `c`, followed by the bare term `)`.
 - **A quoted clause** starts at `"` and ends at the next `"`; its content is trimmed. One with
   no closing `"` is rejected.
 - **A bare term** is anything else. It runs to the next whitespace, `(` or `"`, and may contain
   `-`, `,` and `)`. So `wi-fi` is one bare term, and `a(b,c)` is the bare term `a` followed by
   a group.
-- **What a clause means is decided after analysis.** A bare term is analyzed like a title, so
-  `wi-fi` requires the two tokens `wi` and `fi` under the default punctuation. Consecutive
+- **What a clause means is decided after analysis.** A bare term is analyzed by the rules a
+  title is, on the query side (so an alias consumes its words), and `wi-fi` requires the two
+  tokens `wi` and `fi` under the default punctuation. Consecutive
   positive bare terms are analyzed together, joined by spaces, as one run; a group, a quoted
   clause or a negated clause ends the run. A negated bare term forbids all of its tokens
   together: `-wi-fi` rejects a title that has both `wi` and `fi`, and not one that has only
   `wi`.
 - **A clause with nothing in it is dropped.** A quoted clause with no token (`""`), a bare term
   or a member made only of punctuation that splits, and a group left with no member neither
-  require nor forbid anything.
+  require nor forbid anything. A string with no clause at all (empty, or whitespace only)
+  breaks no rule here; it requires and forbids nothing, and a query like that is not stored.
+- **A query needs something it requires.** One whose clauses are all forbidden (or dropped)
+  would be a candidate for every title. It is not stored unless the deployment accepts such
+  queries (`--accept-class-d`, ADR-068), and one that neither requires nor forbids anything is
+  never stored.
 
 ## Normalization
 

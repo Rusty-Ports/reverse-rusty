@@ -1,23 +1,17 @@
-//! The query DSL parser. Ported from `engine/src/dsl.rs` (see the crate documentation for what
-//! "ported" means for the differential).
+//! Reading a query string into clauses: "Parsing rules" in `docs/reference/dsl.md`.
 //!
-//! Grammar (`docs/reference/dsl.md`):
-//!   word                     -> required term
-//!   "a b c"                  -> required phrase (content trimmed)
-//!   (a,b,c)                  -> required any-of group (>=1 must match)
-//!   -word / -"a b" / -(a,b)  -> the MUST_NOT forms
-//! All top-level clauses are ANDed. A `-` must be IMMEDIATELY followed by its atom: `foo - bar`,
-//! `foo -`, and `- bar` are parse errors (rejecting the silent intent-inversion), while `-bar`
-//! negates. The error *kind* and *position* are not reproduced (the differential only cares whether
-//! a query parses or is dropped, and what AST it yields), but a typed kind is kept for test
-//! readability.
+//! Written from that text alone (ADR-220).
 
 pub use crate::tables::{MAX_ANY_OF_SIZE, MAX_CLAUSES, MAX_QUERY_LENGTH};
 
+/// What one clause holds, as text. Nothing here is analyzed yet.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Atom {
+    /// A bare term, as written.
     Term(String),
+    /// The content of a quoted clause, trimmed.
     Phrase(String),
+    /// The members of a group: each trimmed, none empty.
     AnyOf(Vec<String>),
 }
 
@@ -27,126 +21,90 @@ pub struct Clause {
     pub atom: Atom,
 }
 
+/// A query's clauses, in the order they were written.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Ast {
     pub clauses: Vec<Clause>,
 }
 
-/// Why a query failed to parse. The engine drops such queries at ingest, so the reference drops
-/// them too — only success-vs-drop and the resulting AST matter for the diff.
+/// Why a query string is rejected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParseError {
+    /// Longer than [`MAX_QUERY_LENGTH`] bytes.
     QueryTooLong,
+    /// A `-` that is not followed at once by what it negates.
     TrailingDash,
+    /// A group with no `)`.
     UnclosedGroup,
+    /// A group with no member left.
     EmptyAnyOfGroup,
+    /// A group with more than [`MAX_ANY_OF_SIZE`] members.
     AnyOfGroupTooLarge,
+    /// A quoted clause with no closing `"`.
     UnclosedQuote,
+    /// More than [`MAX_CLAUSES`] clauses.
     TooManyClauses,
 }
 
-/// Parse a query DSL string. Mirrors `dsl::parse` (default limits).
+/// Read a query string.
 pub fn parse(input: &str) -> Result<Ast, ParseError> {
     if input.len() > MAX_QUERY_LENGTH {
         return Err(ParseError::QueryTooLong);
     }
-    let chars: Vec<char> = input.chars().collect();
-    let n = chars.len();
-    let mut i = 0;
+    let mut rest = input;
     let mut clauses = Vec::new();
-
-    while i < n {
-        while i < n && chars[i].is_whitespace() {
-            i += 1;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return Ok(Ast { clauses });
         }
-        if i >= n {
-            break;
-        }
-
-        let mut negated = false;
-        if chars[i] == '-' {
-            negated = true;
-            i += 1;
-            // A '-' must be immediately followed by its atom — reject EOF and a following space.
-            if i >= n || chars[i].is_whitespace() {
+        let negated = rest.starts_with('-');
+        if negated {
+            rest = &rest[1..];
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
                 return Err(ParseError::TrailingDash);
             }
         }
-
-        match chars[i] {
-            '(' => {
-                i += 1;
-                let mut members = Vec::new();
-                let mut cur = String::new();
-                while i < n && chars[i] != ')' {
-                    let c = chars[i];
-                    if c == ',' {
-                        push_member(&mut members, &mut cur);
-                    } else if c.is_whitespace() {
-                        cur.push(' '); // allow (single) spaces inside a member
-                    } else {
-                        cur.push(c);
-                    }
-                    i += 1;
-                }
-                if i >= n {
-                    return Err(ParseError::UnclosedGroup);
-                }
-                i += 1; // consume ')'
-                push_member(&mut members, &mut cur);
-                if members.is_empty() {
-                    return Err(ParseError::EmptyAnyOfGroup);
-                }
-                if members.len() > MAX_ANY_OF_SIZE {
-                    return Err(ParseError::AnyOfGroupTooLarge);
-                }
-                clauses.push(Clause {
-                    negated,
-                    atom: Atom::AnyOf(members),
-                });
+        let atom = if let Some(content) = rest.strip_prefix('(') {
+            let end = content.find(')').ok_or(ParseError::UnclosedGroup)?;
+            let body = &content[..end];
+            let members: Vec<_> = body
+                .split(',')
+                .map(str::trim)
+                .filter(|member| !member.is_empty())
+                .map(|member| {
+                    member
+                        .chars()
+                        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
+                        .collect()
+                })
+                .collect();
+            if members.is_empty() {
+                return Err(ParseError::EmptyAnyOfGroup);
             }
-            '"' => {
-                i += 1;
-                let mut phrase = String::new();
-                while i < n && chars[i] != '"' {
-                    phrase.push(chars[i]);
-                    i += 1;
-                }
-                if i >= n {
-                    return Err(ParseError::UnclosedQuote);
-                }
-                i += 1; // consume closing quote
-                clauses.push(Clause {
-                    negated,
-                    atom: Atom::Phrase(phrase.trim().to_string()),
-                });
+            if members.len() > MAX_ANY_OF_SIZE {
+                return Err(ParseError::AnyOfGroupTooLarge);
             }
-            _ => {
-                // A bare term runs until whitespace, '(' or '"'. It MAY contain '-', ',', ')'.
-                let mut word = String::new();
-                while i < n && !chars[i].is_whitespace() && chars[i] != '(' && chars[i] != '"' {
-                    word.push(chars[i]);
-                    i += 1;
-                }
-                clauses.push(Clause {
-                    negated,
-                    atom: Atom::Term(word),
-                });
-            }
+            rest = &content[end + 1..];
+            Atom::AnyOf(members)
+        } else if let Some(content) = rest.strip_prefix('"') {
+            let end = content.find('"').ok_or(ParseError::UnclosedQuote)?;
+            rest = &content[end + 1..];
+            Atom::Phrase(content[..end].trim().to_owned())
+        } else {
+            let end = rest
+                .find(|ch: char| ch.is_whitespace() || ch == '(' || ch == '"')
+                .unwrap_or(rest.len());
+            let word = rest[..end].to_owned();
+            rest = &rest[end..];
+            Atom::Term(word)
+        };
+        clauses.push(Clause { negated, atom });
+        if clauses.len() > MAX_CLAUSES {
+            return Err(ParseError::TooManyClauses);
         }
     }
-
-    if clauses.len() > MAX_CLAUSES {
-        return Err(ParseError::TooManyClauses);
-    }
-    Ok(Ast { clauses })
 }
 
-/// Trim a pending any-of member and push it unless empty (mirrors `dsl::push_member`).
-fn push_member(members: &mut Vec<String>, cur: &mut String) {
-    let t = cur.trim();
-    if !t.is_empty() {
-        members.push(t.to_string());
-    }
-    cur.clear();
-}
+#[cfg(test)]
+mod tests;

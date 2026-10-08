@@ -30,7 +30,7 @@ fn context_vocab() -> RefVocab {
 
 /// Build a single-query engine + reference under the given vocab, and assert BOTH agree with the
 /// hand-authored expectation for every `(title, expect_match)` case.
-fn check(
+pub(super) fn check(
     make_norm: impl Fn() -> Normalizer,
     make_vocab: impl Fn() -> RefVocab,
     query: &str,
@@ -43,7 +43,12 @@ fn check(
     check_pair(&eng, &reference, query, cases);
 }
 
-fn check_pair(eng: &Engine, reference: &RefMatcher, query: &str, cases: &[(&str, bool)]) {
+pub(super) fn check_pair(
+    eng: &Engine,
+    reference: &RefMatcher,
+    query: &str,
+    cases: &[(&str, bool)],
+) {
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
     for &(title, expect) in cases {
