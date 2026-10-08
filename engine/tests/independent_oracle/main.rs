@@ -17,7 +17,9 @@ mod harness;
 
 mod alias_forms;
 mod aliases;
+mod clarified;
 mod core;
 mod corpus;
 mod gotcha;
 mod grammar;
+mod rules;

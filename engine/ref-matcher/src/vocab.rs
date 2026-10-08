@@ -4,8 +4,13 @@
 //! depend on the engine. The differential harness builds BOTH a `Vocab` (for the engine) and a
 //! `RefVocab` (for the reference) from one neutral description, so the same phrases / synonyms /
 //! aliases / equivalences drive both sides while only the normalization *logic* differs.
+//!
+//! A vocabulary is a description, and declaring it does no analysis. What its declarations
+//! amount to under its punctuation classes is asked for when a text is analyzed
+//! ([`RefVocab::phrases_in_force`], [`RefVocab::synonym_for`]), so the order in which a
+//! vocabulary is declared changes nothing (`docs/design/normalization.md` §2.1, "Phrases").
 
-use crate::clean::{PunctClass, PunctTable};
+use crate::clean::{clean_tokens, PunctClass, PunctTable};
 
 /// How a registered phrase treats its component tokens (`docs/design/normalization.md` §2.1).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -18,12 +23,22 @@ pub enum PhraseMode {
     Alias,
 }
 
-/// A multi-word phrase: its cleaned token sequence -> a canonical entity feature.
+/// A phrase as declared: a form, the feature it emits, and a mode.
 #[derive(Clone, Debug)]
 pub struct RefPhrase {
-    /// The cleaned tokens the phrase matches (e.g. `["north","star"]`).
-    pub tokens: Vec<String>,
+    /// The declared form (e.g. `"north star"`). Its tokens are this text cleaned and cut under
+    /// the vocabulary's punctuation classes as they stand when a text is analyzed.
+    pub form: String,
     /// The canonical entity feature emitted (e.g. `term:north_star`), used verbatim.
+    pub feature: String,
+    pub mode: PhraseMode,
+}
+
+/// A phrase in force: the tokens it occurs as, the feature it emits, and its mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Phrase {
+    /// One or more tokens (e.g. `["north","star"]`).
+    pub tokens: Vec<String>,
     pub feature: String,
     pub mode: PhraseMode,
 }
@@ -54,8 +69,7 @@ pub struct RefVocab {
 
 impl RefVocab {
     /// The empty default vocabulary: no phrases, synonyms, number contexts, or equivalences,
-    /// plus the default punctuation table. This is the exact shape of the engine's
-    /// `Normalizer::default_vocab()` (an empty `NormalizerBuilder`).
+    /// plus the default punctuation table.
     #[must_use]
     pub fn default_vocab() -> Self {
         RefVocab {
@@ -67,27 +81,24 @@ impl RefVocab {
         }
     }
 
-    /// Register a single-token synonym `token` -> `canonical`.
+    /// Declare a single-token synonym `token` -> `canonical`. The token is kept as declared.
     #[must_use]
     pub fn synonym(mut self, token: &str, canonical: &str) -> Self {
         self.synonyms.push(RefSynonym {
-            token: token.to_ascii_lowercase(),
+            token: token.to_string(),
             canonical: canonical.to_string(),
         });
         self
     }
 
-    /// Register a phrase from a raw form (cleaned into tokens under this vocab's punct table).
+    /// Declare a phrase by its form.
     #[must_use]
     pub fn phrase(mut self, form: &str, feature: &str, mode: PhraseMode) -> Self {
-        let tokens = crate::clean::clean_tokens(form, &self.punct);
-        if !tokens.is_empty() {
-            self.phrases.push(RefPhrase {
-                tokens,
-                feature: feature.to_string(),
-                mode,
-            });
-        }
+        self.phrases.push(RefPhrase {
+            form: form.to_string(),
+            feature: feature.to_string(),
+            mode,
+        });
         self
     }
 
@@ -113,16 +124,106 @@ impl RefVocab {
         self
     }
 
-    /// True if any phrase is registered in [`Alias`](PhraseMode::Alias) mode — the title then has a
-    /// distinct positive view `P(T)` (ADR-061; `docs/design/normalization.md` §2.1).
+    /// The phrases in force, in declaration order: each declared form cleaned and cut under
+    /// the punctuation classes as they stand now. A form with no tokens is ignored, and of
+    /// two forms with the same tokens the first stands (§2.1, "Phrases").
     #[must_use]
-    pub fn has_multiword_aliases(&self) -> bool {
-        self.phrases.iter().any(|p| p.mode == PhraseMode::Alias)
+    pub fn phrases_in_force(&self) -> Vec<Phrase> {
+        let mut in_force: Vec<Phrase> = Vec::new();
+        for declared in &self.phrases {
+            let tokens = clean_tokens(&declared.form, &self.punct);
+            if tokens.is_empty() || in_force.iter().any(|phrase| phrase.tokens == tokens) {
+                continue;
+            }
+            in_force.push(Phrase {
+                tokens,
+                feature: declared.feature.clone(),
+                mode: declared.mode,
+            });
+        }
+        in_force
+    }
+
+    /// The canonical feature name of the synonym for `token`, compared as declared. Of two
+    /// synonyms for one token the first stands (§2.1, rule 3 of "Each remaining token").
+    #[must_use]
+    pub fn synonym_for(&self, token: &str) -> Option<&str> {
+        self.synonyms
+            .iter()
+            .find(|synonym| synonym.token == token)
+            .map(|synonym| synonym.canonical.as_str())
+    }
+
+    /// True if a phrase in force is in [`Alias`](PhraseMode::Alias) mode — a title then has a
+    /// positive view `P(T)` wider than its canonical one (ADR-061; §2.1, "The two views of a
+    /// title").
+    #[must_use]
+    pub fn has_alias(&self) -> bool {
+        self.phrases_in_force()
+            .iter()
+            .any(|phrase| phrase.mode == PhraseMode::Alias)
     }
 }
 
 impl Default for RefVocab {
     fn default() -> Self {
         Self::default_vocab()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens(vocab: &RefVocab) -> Vec<Vec<String>> {
+        vocab
+            .phrases_in_force()
+            .into_iter()
+            .map(|phrase| phrase.tokens)
+            .collect()
+    }
+
+    #[test]
+    fn a_form_is_cut_under_the_classes_as_they_finally_stand() {
+        let before = RefVocab::default_vocab().fold_punct('-').phrase(
+            "wi-fi router",
+            "entity:wr",
+            PhraseMode::Collapse,
+        );
+        let after = RefVocab::default_vocab()
+            .phrase("wi-fi router", "entity:wr", PhraseMode::Collapse)
+            .fold_punct('-');
+        assert_eq!(tokens(&before), [["wifi", "router"]]);
+        assert_eq!(tokens(&after), tokens(&before));
+
+        let mut later = after;
+        later.punct.set('-', PunctClass::Split);
+        assert_eq!(tokens(&later), [["wi", "fi", "router"]]);
+    }
+
+    #[test]
+    fn the_first_of_two_declarations_stands() {
+        let vocab = RefVocab::default_vocab()
+            .phrase("north star", "brand:first", PhraseMode::Collapse)
+            .phrase("North, STAR", "brand:second", PhraseMode::Alias)
+            .phrase("!!!", "ignored", PhraseMode::Alias)
+            .synonym("pkg", "term:first")
+            .synonym("pkg", "term:second");
+        let in_force = vocab.phrases_in_force();
+        assert_eq!(in_force.len(), 1);
+        assert_eq!(in_force[0].feature, "brand:first");
+        assert_eq!(in_force[0].mode, PhraseMode::Collapse);
+        assert!(
+            !vocab.has_alias(),
+            "the ignored declarations were the only aliases"
+        );
+        assert_eq!(vocab.synonym_for("pkg"), Some("term:first"));
+    }
+
+    #[test]
+    fn a_synonym_token_is_compared_as_declared() {
+        let vocab = RefVocab::default_vocab().synonym("PKG", "term:package");
+        assert_eq!(vocab.synonym_for("pkg"), None);
+        assert_eq!(vocab.synonym_for("PKG"), Some("term:package"));
     }
 }

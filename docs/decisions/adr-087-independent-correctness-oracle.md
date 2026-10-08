@@ -171,3 +171,11 @@ engine had when the port was made. [ADR-219](adr-219-the-reference-says-where-it
 records the provenance in the crate, states the front-end rules in full so that the ported
 modules can be written again from them, and adds a gate lane that keeps any other module from
 citing engine code as its source.
+
+## Later outcome (2026-10-08, ADR-220)
+
+The last row of that table no longer holds. `clean.rs`, `normalize.rs` and `parse.rs` were
+written again from the specification by an author who did not see the engine's source, and
+`phrases.rs` is gone. Every module of the reference is now written from the specification, so
+the "never written from engine code" claim above is true of the whole crate.
+[ADR-220](adr-220-the-reference-front-end-is-written-from-the-specification.md) records how.

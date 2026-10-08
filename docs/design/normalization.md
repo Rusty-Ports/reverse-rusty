@@ -167,9 +167,15 @@ characters that are not spaces; there are no empty tokens. Positions count token
 many separators stood between two tokens in the original text is not kept and changes nothing:
 `north, star`, `north - star` and `north star` are the same two tokens.
 
-**Phrases (stage 3).** A vocabulary phrase is a sequence of tokens (its declared form, cleaned
-and cut by the rules above under the same punctuation classes), a feature name, and a mode. A
-phrase with no tokens is ignored.
+**Phrases (stage 3).** A vocabulary phrase is a sequence of tokens, a feature name, and a mode.
+Its tokens are tokens in the sense of stage 2. An alias is declared as text, and its tokens are
+that text cleaned and cut by the rules above, under the vocabulary's punctuation classes as they
+finally stand, in whatever order the vocabulary was declared. A phrase declared as a list of
+tokens is taken as given, so the list has to be in that form already: a token that cleaning
+cannot produce (one with an ASCII upper-case letter, a letter the fold table changes, or a
+character that splits) makes a phrase that occurs nowhere. A phrase with no tokens is ignored. A vocabulary has one phrase for a
+sequence of tokens: of two declarations the first stands and the other is ignored, in every
+view.
 
 - *An occurrence* of a phrase is a place where its tokens are consecutive tokens of the text.
   (In the cleaned text: its tokens joined by single spaces, starting at the start of the text
@@ -185,7 +191,10 @@ phrase with no tokens is ignored.
 
 **Each remaining token (stages 4 and 5),** by the first rule that applies:
 
-1. A token that is exactly `#` or `/` emits nothing. It still has a position.
+1. A token that is exactly `#` or `/` emits nothing. It still has a position. The rule is about
+   those two tokens and not about the `marker` class: a character that a vocabulary classes as
+   `marker` becomes a token of its own and is then a token like any other (`@` classed so emits
+   `term:@`, and does nothing to a number beside it).
 2. A *number* is a token of ASCII digits with at most one `.` and at least one digit.
    - It emits `term:<token>` when the token before it is `#`; when the token before it or
      after it is `/`; or when the token before it is one of the vocabulary's number-context
@@ -194,16 +203,22 @@ phrase with no tokens is ignored.
    - Otherwise, when it is exactly four digits and between 1900 and 2099, it emits
      `year:<token>`.
    - Otherwise it emits `term:<token>`.
-3. A token that a vocabulary synonym names emits that synonym's canonical feature name.
+3. A token that a vocabulary synonym names emits that synonym's canonical feature name. The
+   synonym's token is compared as it was declared, character for character, so it too has to
+   be in cleaned form. A vocabulary has one synonym for a token: of two, the first stands.
 4. Any other token emits `term:<token>`.
 
 One consequence of rule 2: `#1999` and `/1999` are the term `1999`, and a bare `1999` is the
-year `1999`. They are different features and do not match each other.
+year `1999`. They are different features. Under the canonical view neither matches the other.
+Under the wide positive view (below: a vocabulary with an alias) a title's bare `1999` is
+carried as `term:1999` as well, so the query `#1999` matches it; the query `1999` still does
+not match the title `#1999`.
 
 **The two views of a title.** The canonical view `N(T)` is the set of features the stages above
 emit for the title. Forbidden clauses are checked against it. The positive view `P(T)` is what
-required clauses and any-of groups are checked against. Without a phrase in `alias` mode, `P(T)`
-is `N(T)`. With one, `P(T)` is the union of:
+required clauses and any-of groups are checked against. When the vocabulary has no phrase in
+`alias` mode, `P(T)` is `N(T)`. When it has one, whether or not that phrase occurs in the title,
+`P(T)` is the union of:
 
 - `N(T)`;
 - what the stages emit when no phrase consumes its tokens, whatever its mode;
@@ -216,14 +231,19 @@ is `N(T)`. With one, `P(T)` is the union of:
   itself as a title; or it is a vocabulary phrase of two or more tokens, shorter than the form,
   carried as its feature. A feature is also carried when the title holds another feature of the
   same equivalence class. A form found this way is itself carried and can be a piece of another
-  form, so the rule is applied until it adds nothing.
+  form, so the rule is applied until it adds nothing. Carrying is a question about the set of
+  features gathered so far, not about positions: the pieces need not stand in the title in the
+  form's order, and one feature can carry more than one piece. "Analyzed by itself as a
+  title" means the canonical view of a title that is that one token. The rule adds features
+  only; it adds no arc to either graph.
 
 **Equivalence classes.** A declared equivalence group lists forms. A form takes part only when
-it analyzes, as a query, to exactly one feature. Groups with fewer than two such features are
-dropped, and groups that share a feature are merged.
+it analyzes, as a query, to exactly one distinct feature (`a a` is one). Groups with fewer than
+two such features are dropped, and groups that share a feature are merged.
 
-**A quoted clause (ADR-120)** is analyzed with positions. The text is cleaned and the stages
-run. Every emitted feature is an arc from the position of its first token to the position after
+**A quoted clause (ADR-120)** is analyzed with positions. The text is cleaned, once, and the
+stages run: on the query side for a clause, on the title side for a title. Every emitted feature
+is an arc from the position of its first token to the position after
 its last; a phrase's arc spans its tokens. A position that no arc starts at and no arc passes
 over gets an arc `term:<token>` for the token there, markers included.
 

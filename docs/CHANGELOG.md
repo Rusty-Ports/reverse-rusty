@@ -9,6 +9,37 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — The reference matcher's front end is written from the specification
+
+- **The ported front end is gone**
+  ([ADR-220](decisions/adr-220-the-reference-front-end-is-written-from-the-specification.md)).
+  The reference's parser, cleaner and normalizer were written again by an author who was given
+  the specification and not the engine's source, in a different shape (token sequences, no
+  byte offsets, no automaton). Every module of the reference now comes from the specification,
+  and the provenance lane has no exceptions.
+- **Sixteen questions the specification did not answer are answered in it**
+  (`design/normalization.md` §2.1, "Parsing rules" in `reference/dsl.md`): what ends a clause,
+  a `(` inside a group, repeated dashes, Unicode whitespace, how limits count, which of two
+  declarations stands, that declared tokens are used as given, when the positive view is wide,
+  how the pieces of an alias form are carried, the two marker tokens, and that text is cleaned
+  once.
+- **One defect of the port, found by running it against the re-write:** it cleaned a text
+  twice on the quoted path, which changes the answer only under a vocabulary that classes the
+  space as `fold`. The engine never did.
+- **Twenty-one hand-written tests hold the engine and the reference to rules no suite
+  exercised** (`tests/independent_oracle/clarified.rs`, `rules.rs`). Changing the reference one
+  rule at a time showed which rules the engine-versus-reference suites did not exercise:
+  additive phrases, a number beside `/`, five-digit numbers, tokens with two dots, an
+  overlapping phrase in a quoted clause, the order alias forms are declared in, and a bare
+  term that ends at a `"`, among others. The engine agreed with the specification on all of
+  them.
+- **The reference vocabulary no longer depends on declaration order.** A phrase keeps its
+  declared form and is cut under the punctuation classes as they stand when a text is
+  analyzed.
+- No behaviour change in the engine. Two things it does were written down as rules and put on
+  the roadmap as questions: declared phrase and synonym tokens are never cleaned, and a query
+  that tries to nest groups is stored as a different query.
+
 ## 2026-10-08 — The reference matcher says where it comes from
 
 - **The reference's provenance is stated, and checked**

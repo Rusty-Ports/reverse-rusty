@@ -32,10 +32,9 @@ query shapes, aliases, broad work, duplicate bodies, memory use, or throughput.
   memory, durable bytes, and reopen time;
 - publish only aggregate evidence and a reproducible harness, not private corpus data.
 
-Zero mismatches against the independent matcher validates how the engine lowers and executes
-the corpus's queries. It does not validate how the parser and the normalizer read them: the
-matcher's front end is a port of the engine's until it is written again from the specification
-([below](#test-infrastructure), ADR-219).
+Zero mismatches against the independent matcher validates how the engine reads, lowers and
+executes the corpus's queries against the specification as a second author read it (ADR-220).
+It does not validate a rule the specification itself has wrong.
 
 **Completion.** Zero candidate false negatives and zero final-set mismatches on the accepted corpus;
 an explained disposition for every rejected or unsupported query; and a dated performance capture in
@@ -613,13 +612,22 @@ capture; microbenchmarks alone are not sufficient.
 
 ### Test infrastructure
 
-- **Write the reference's front end again, from the specification alone.** The reference
-  matcher's parser, cleaner, normalizer and phrase selection were ported from the engine
-  (ADR-219), so the differential cannot see a misreading that both carry. The rules are now
-  stated in full (`design/normalization.md` §2.1, `reference/dsl.md`). Have them implemented by
-  an author who is given those two documents and the tests and not the engine's source, in a
-  different shape from the engine's, and triage every divergence with the specification as the
-  arbiter. Done when `check.sh`'s provenance lane lists no ported module.
+- **Declared tokens that cleaning cannot produce.** A vocabulary's phrase tokens and synonym
+  tokens are used as declared (ADR-220): `["North","Star"]`, `T-Shirt` or `["wi-fi","router"]`
+  load and match nothing, on queries and titles alike, and nothing says so. Alias forms and
+  equivalence forms are cleaned when the analyzer is built. Either clean declared tokens the
+  same way (stored queries then compile differently under such a vocabulary, so the
+  feature-model fingerprint and the compiler semantics move) or reject them where a vocabulary
+  is accepted, naming the entry. Elasticsearch analyzes synonym rules with the analyzer in
+  front of the synonym filter and rejects a rule that analyzes to nothing unless `lenient`.
+- **An attempt to nest groups.** `(a,(b c,d) e)` is stored as `(a OR (b AND c) OR d) AND e`,
+  because a `(` inside a group is an ordinary character. The reference's author, reading
+  "groups do not nest", rejected it. Decide whether the parser should: it changes which stored
+  queries are accepted, so count them in a real corpus first.
+- **Keep the port-versus-re-write harness as a tool.** The scratch program that compared two
+  front ends on random vocabularies (ADR-220) is the cheapest way to check a future second
+  implementation, or the engine's own analyzer exposed as a library function. It is not in
+  the tree.
 - **Phrase-pattern fuzzing.** Expand the parse-union alphabet with punctuation markers, number
   context, years, and fused vocabulary forms after teaching the independent reference emitter the same
   documented surface grammar.

@@ -1,60 +1,49 @@
-//! Byte cleaning: lowercase + diacritic fold + the punctuation-class table (ADR-058).
+//! Cleaning and tokens: stages 1 and 2 of `docs/design/normalization.md` §2.1.
 //!
-//! Ported from `engine/src/normalize/core.rs::clean_with` (see the crate documentation for
-//! what "ported" means for the differential). The tables it reads are in [`crate::tables`].
-//! The SAME table runs over queries and titles, keeping the
-//! feature spaces aligned. Whitespace runs are NOT collapsed here (the canonical view keeps the
-//! cleaned text verbatim); run handling is the query-side / overlap-scan job in `normalize`.
+//! Written from that text alone (ADR-220).
 
-use std::collections::HashMap;
+use crate::tables::{fold_diacritic, KEEP, MARKERS};
 
-use crate::tables::fold_diacritic;
-
-/// How a non-alphanumeric character is handled during cleaning.
+/// What cleaning does with a character that is not an ASCII letter or digit after folding.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PunctClass {
-    /// Word boundary — becomes a single space (the default for most punctuation).
     Split,
-    /// Deleted, so its neighbours join into one token (`O'Brien` -> `obrien`).
     Fold,
-    /// Left literally in place inside the token (`.` so `9.5` survives).
     Keep,
-    /// Emitted as its own standalone token (` <c> `), so the number logic can tell `#2` / `/199`
-    /// from decimal values.
     Marker,
 }
 
-/// The punctuation classification table: the historical default plus optional per-char overrides
-/// (ADR-058). Default: `.` = [`Keep`](PunctClass::Keep), `#`/`/` = [`Marker`](PunctClass::Marker),
-/// every other non-alphanumeric = [`Split`](PunctClass::Split).
+/// The punctuation classes of one vocabulary: the specification's defaults, and the single
+/// characters the vocabulary classes otherwise.
 #[derive(Clone, Debug, Default)]
 pub struct PunctTable {
-    overrides: HashMap<char, PunctClass>,
+    overrides: Vec<(char, PunctClass)>,
 }
 
 impl PunctTable {
-    /// The historical default table (no overrides).
+    /// The default classes.
     #[must_use]
     pub fn new() -> Self {
-        PunctTable {
-            overrides: HashMap::new(),
+        Self::default()
+    }
+
+    /// Give one character a class.
+    pub fn set(&mut self, ch: char, class: PunctClass) {
+        if let Some(entry) = self.overrides.iter_mut().find(|entry| entry.0 == ch) {
+            entry.1 = class;
+        } else {
+            self.overrides.push((ch, class));
         }
     }
 
-    /// Override the class of a single character (e.g. declare `'` and `-` as `Fold`).
-    pub fn set(&mut self, ch: char, class: PunctClass) {
-        self.overrides.insert(ch, class);
-    }
-
-    /// The class of `ch`: an override if present, else the historical default.
+    /// The class of a character.
     #[must_use]
     pub fn class_of(&self, ch: char) -> PunctClass {
-        if let Some(&c) = self.overrides.get(&ch) {
-            return c;
-        }
-        if crate::tables::KEEP.contains(&ch) {
+        if let Some((_, class)) = self.overrides.iter().find(|entry| entry.0 == ch) {
+            *class
+        } else if KEEP.contains(&ch) {
             PunctClass::Keep
-        } else if crate::tables::MARKERS.contains(&ch) {
+        } else if MARKERS.contains(&ch) {
             PunctClass::Marker
         } else {
             PunctClass::Split
@@ -62,50 +51,158 @@ impl PunctTable {
     }
 }
 
-/// Lowercase + fold diacritics + apply the punctuation table, returning the cleaned string.
-///
-/// Order matters: `fold_diacritic` runs first, so a folded char (`ć` -> `c`) is then treated as the
-/// ASCII alphanumeric it became. Non-alphanumerics are dispatched by their [`PunctClass`]. Verbatim
-/// translation of `clean_with`.
+/// The tokens of `text`, cleaned under `punct`.
 #[must_use]
-pub fn clean(text: &str, punct: &PunctTable) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        let c = fold_diacritic(ch);
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-        } else {
-            // A separator ends the current token. It is not written twice in a row or
-            // first, so a phrase is found wherever its words are consecutive tokens.
-            let separator = |out: &mut String| {
-                if !out.is_empty() && !out.ends_with(' ') {
-                    out.push(' ');
-                }
-            };
-            match punct.class_of(c) {
-                PunctClass::Split => separator(&mut out),
-                PunctClass::Fold => {} // delete: neighbours join into one token
-                // A space is the separator whatever class it is given.
-                PunctClass::Keep | PunctClass::Marker if c == ' ' => separator(&mut out),
-                PunctClass::Keep => out.push(c),
-                PunctClass::Marker => {
-                    separator(&mut out);
-                    out.push(c);
-                    out.push(' ');
+pub fn clean_tokens(text: &str, punct: &PunctTable) -> Vec<String> {
+    cleaned_text(text, punct)
+        .split(' ')
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn cleaned_text(text: &str, punct: &PunctTable) -> String {
+    let mut cleaned = String::new();
+    for ch in text.chars().map(fold_diacritic) {
+        if ch.is_ascii_alphanumeric() {
+            cleaned.push(ch.to_ascii_lowercase());
+            continue;
+        }
+        match punct.class_of(ch) {
+            PunctClass::Fold => {}
+            PunctClass::Keep if ch != ' ' => cleaned.push(ch),
+            PunctClass::Split | PunctClass::Keep => separator(&mut cleaned),
+            PunctClass::Marker => {
+                separator(&mut cleaned);
+                if ch != ' ' {
+                    cleaned.push(ch);
+                    separator(&mut cleaned);
                 }
             }
         }
     }
-    out
+    cleaned
 }
 
-/// The cleaned whitespace tokens of `text` (the same tokens the normalizer's phase-2 tokenizer
-/// sees). Used to register an alias phrase's token sequence so it aligns with cleaned title text
-/// (ADR-061), mirroring `core.rs::alias_form_tokens`.
-#[must_use]
-pub fn clean_tokens(text: &str, punct: &PunctTable) -> Vec<String> {
-    clean(text, punct)
-        .split_whitespace()
-        .map(ToString::to_string)
-        .collect()
+fn separator(cleaned: &mut String) {
+    if !cleaned.is_empty() && !cleaned.ends_with(' ') {
+        cleaned.push(' ');
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn separators_are_never_first_or_repeated_even_around_markers() {
+        let punct = PunctTable::new();
+        assert_eq!(cleaned_text(" ,\t\n", &punct), "");
+        assert_eq!(cleaned_text(" , #  / a,, - b ", &punct), "# / a b ");
+        for class in [PunctClass::Keep, PunctClass::Marker] {
+            let mut punct = PunctTable::new();
+            punct.set(' ', class);
+            assert_eq!(cleaned_text("  a  #  b  ", &punct), "a # b ");
+        }
+    }
+
+    #[test]
+    fn the_complete_fold_table_and_ascii_case() {
+        let rows = [
+            ('a', "áàâäãåāąÁÀÂÄÃÅ"),
+            ('e', "éèêëēėęÉÈÊË"),
+            ('i', "íìîïīįÍÌÎÏ"),
+            ('o', "óòôöõøōÓÒÔÖÕ"),
+            ('u', "úùûüūÚÙÛÜ"),
+            ('n', "ñńÑ"),
+            ('c', "çćčÇĆČ"),
+            ('s', "šśŠŚ"),
+            ('z', "žźżŽŹŻ"),
+            ('y', "ýÿÝ"),
+            ('l', "łŁ"),
+        ];
+        for (letter, forms) in rows {
+            for ch in forms.chars() {
+                assert_eq!(
+                    clean_tokens(&ch.to_string(), &PunctTable::new()),
+                    [letter.to_string()]
+                );
+            }
+        }
+        assert_eq!(
+            clean_tokens("Café AZ09", &PunctTable::new()),
+            ["cafe", "az09"]
+        );
+        // Unlisted uppercase diacritics and decomposed combining marks do not fold.
+        assert_eq!(
+            clean_tokens("xĀy x中y x🙂y e\u{301}x", &PunctTable::new()),
+            ["x", "y", "x", "y", "x", "y", "e", "x"]
+        );
+    }
+
+    #[test]
+    fn default_classes_and_merged_separators() {
+        let punct = PunctTable::new();
+        assert_eq!(punct.class_of('.'), PunctClass::Keep);
+        for ch in ['#', '/'] {
+            assert_eq!(punct.class_of(ch), PunctClass::Marker);
+        }
+        for ch in [' ', '\t', '-', '中'] {
+            assert_eq!(punct.class_of(ch), PunctClass::Split);
+        }
+        for text in [
+            "north, star",
+            "north - star",
+            "north star",
+            "  north\t\nstar  ",
+        ] {
+            assert_eq!(clean_tokens(text, &punct), ["north", "star"]);
+        }
+        assert_eq!(
+            clean_tokens(" #1999///9.5... ", &punct),
+            ["#", "1999", "/", "/", "/", "9.5..."]
+        );
+        for text in ["", " ,\t\n🙂 "] {
+            assert!(clean_tokens(text, &punct).is_empty());
+        }
+    }
+
+    #[test]
+    fn overrides_apply_after_folding_and_can_be_replaced() {
+        let mut punct = PunctTable::new();
+        for ch in ['\'', '-', '’'] {
+            punct.set(ch, PunctClass::Fold);
+        }
+        for text in ["O'Brien", "O-Brien", "OBrien", "O’Brien"] {
+            assert_eq!(clean_tokens(text, &punct), ["obrien"]);
+        }
+        punct.set('-', PunctClass::Keep);
+        punct.set('@', PunctClass::Marker);
+        punct.set('.', PunctClass::Split);
+        punct.set('中', PunctClass::Keep);
+        punct.set('A', PunctClass::Split);
+        punct.set('é', PunctClass::Keep);
+        punct.set('e', PunctClass::Fold);
+        assert_eq!(clean_tokens("A-é@中.5", &punct), ["a-e", "@", "中", "5"]);
+        punct.set('Ā', PunctClass::Keep);
+        punct.set('🙂', PunctClass::Fold);
+        assert_eq!(clean_tokens("xĀY x🙂y", &punct), ["xĀy", "xy"]);
+    }
+
+    #[test]
+    fn only_literal_spaces_cut_the_cleaned_buffer() {
+        for class in [PunctClass::Split, PunctClass::Keep, PunctClass::Marker] {
+            let mut punct = PunctTable::new();
+            punct.set(' ', class);
+            assert_eq!(clean_tokens("  a  b  ", &punct), ["a", "b"]);
+        }
+        let mut punct = PunctTable::new();
+        punct.set(' ', PunctClass::Fold);
+        assert_eq!(clean_tokens(" a b ", &punct), ["ab"]);
+        assert_eq!(clean_tokens(" a # b ", &punct), ["a", "#", "b"]);
+        punct.set('\t', PunctClass::Keep);
+        assert_eq!(clean_tokens("a\tb", &punct), ["a\tb"]);
+        punct.set('\t', PunctClass::Marker);
+        assert_eq!(clean_tokens("a\tb", &punct), ["a", "\t", "b"]);
+    }
 }
