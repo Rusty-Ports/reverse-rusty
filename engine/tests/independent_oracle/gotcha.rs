@@ -465,3 +465,55 @@ fn a_kept_space_is_still_a_separator() {
         );
     }
 }
+
+/// Two statements of the normative front-end rules (`docs/design/normalization.md` §2.1)
+/// that review showed the text had got wrong, pinned here so the text and both
+/// implementations stay together.
+#[test]
+fn the_positive_phrase_graph_and_a_folded_space() {
+    use reverse_rusty::dict::FeatureKind;
+    use reverse_rusty::normalize::PunctClass;
+    // A title's positive graph keeps the arc a token has by itself inside a phrase that
+    // consumes it, with or without an alias in the vocabulary: `sale 1999` is the entity,
+    // and a quoted `"1999"` still finds the year there.
+    let offer_norm = || {
+        let mut b = NormalizerBuilder::new();
+        b.add_phrase(&["sale", "1999"], "entity:offer", FeatureKind::Entity);
+        b.build().expect("normalizer")
+    };
+    let offer_vocab =
+        || RefVocab::default_vocab().phrase("sale 1999", "entity:offer", PhraseMode::Collapse);
+    check(
+        offer_norm,
+        offer_vocab,
+        "\"1999\"",
+        &[("sale 1999", true), ("1999", true), ("sale 2001", false)],
+    );
+    // The bare query reads the title's flat view, where the phrase has consumed the year.
+    check(
+        offer_norm,
+        offer_vocab,
+        "1999",
+        &[("sale 1999", false), ("1999 sale", true)],
+    );
+
+    // A space that a vocabulary folds is deleted, like any folded character.
+    let joined_norm = || {
+        let mut b = NormalizerBuilder::new();
+        b.set_punct_class(' ', PunctClass::Fold);
+        b.build().expect("normalizer")
+    };
+    let joined_vocab = || {
+        let mut vocab = RefVocab::default_vocab();
+        vocab
+            .punct
+            .set(' ', reverse_rusty_ref_matcher::clean::PunctClass::Fold);
+        vocab
+    };
+    check(
+        joined_norm,
+        joined_vocab,
+        "northstar",
+        &[("north star", true), ("northstar", true), ("north", false)],
+    );
+}

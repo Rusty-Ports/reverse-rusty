@@ -158,8 +158,9 @@ table does not fold. A vocabulary may give single characters another class.
 
 A separator is never written twice in a row, and never first (ADR-218). So two `split`
 characters in a row leave one space, a `marker` after a space does not add another, and a text
-that begins with separators begins with its first token. The space character is always a
-separator, whatever class a vocabulary gives it.
+that begins with separators begins with its first token. A space that a vocabulary classes as
+`keep` or `marker` is still just a separator. Classed as `fold` it is deleted like any folded
+character, and the words on either side join.
 
 **Tokens (stage 2).** The cleaned text is cut at spaces. A token is a maximal run of
 characters that are not spaces; there are no empty tokens. Positions count tokens from 0. How
@@ -222,15 +223,24 @@ it analyzes, as a query, to exactly one feature. Groups with fewer than two such
 dropped, and groups that share a feature are merged.
 
 **A quoted clause (ADR-120)** is analyzed with positions. The text is cleaned and the stages
-run. Every emitted feature is an arc from the position of its first
-token to the position after its last; a phrase's arc spans its tokens. A position that no arc
-starts at and no arc passes over gets an arc `term:<token>` for the token there, markers
-included. On the query side, arcs with the same start and end are alternatives of one edge. A
-title's positive graph also has an arc `term:<token>` for every token that is not a marker and
-an arc for every phrase occurrence, overlapping ones included; its canonical graph does not. A
-quoted clause matches when its edges can be followed from its first position to its last along
-title arcs that carry one of each edge's alternatives and join end to start, beginning at any
-title position.
+run. Every emitted feature is an arc from the position of its first token to the position after
+its last; a phrase's arc spans its tokens. A position that no arc starts at and no arc passes
+over gets an arc `term:<token>` for the token there, markers included.
+
+- *The query's graph.* Arcs with the same start and end are alternatives of one edge. On a
+  required clause an edge's alternatives are widened by equivalence classes; on a forbidden
+  clause they are not.
+- *A title's canonical graph* is its arcs as above.
+- *A title's positive graph* is the union of the canonical graph's arcs; the arcs of the same
+  analysis with no phrase consuming its tokens, whatever its mode (so a number or a synonym
+  inside a phrase keeps the arc it would have by itself, and every phrase's own arc is
+  there); an arc `term:<token>` for every token that is not a marker; and an arc for every
+  phrase occurrence, overlapping ones included. This is so with or without an alias in the
+  vocabulary.
+- *Matching.* A quoted clause matches a graph when its edges can be followed from its first
+  position to its last along arcs that carry one of each edge's alternatives and join end to
+  start, beginning at any title position. A required clause is matched against the positive
+  graph and a forbidden clause against the canonical graph.
 
 **A clause that analyzes to nothing is dropped.** A quoted clause with no token, a bare term
 or an any-of member made only of `split` characters, and a group left with no member neither
