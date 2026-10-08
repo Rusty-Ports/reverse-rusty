@@ -9,6 +9,25 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — A cluster killed after a flush reopens
+
+- **A shard keeps the segment files it has replaced until its owner has committed**
+  ([ADR-214](decisions/adr-214-a-shard-keeps-what-it-replaced.md)). A shard's engine owns no
+  manifest, so its own commit is a no-op, and right after it the engine removed the files it had
+  just replaced (after a compaction, and after the rewrite of a segment that holds deletions).
+  The coordinator's manifest, or a shard node's checkpoint file, still named them until the next
+  checkpoint or seal.
+- **What that broke.** Remove stored queries, flush (the server does at shutdown, and
+  `POST /_flush` does at any time), and kill the process before the next checkpoint: the durable
+  cluster could not reopen (`attaching shard segments: No such file or directory`). A checkpoint
+  whose manifest write failed after a deletion did the same, and so did a shard node killed
+  between a rewrite and its checkpoint file.
+- **Now** the shard lists what it replaced, and the owner releases it once its commit is
+  durable: the coordinator after its manifest (replicas included), a shard node after its
+  checkpoint file. A failed commit releases nothing.
+- **For a deployment:** between a compaction and the next checkpoint, a shard's directory holds
+  the replaced files as well as their replacement. Allow disk for it. No format change.
+
 ## 2026-10-07 — A store whose log is gone no longer starts without it
 
 - **A lost log is refused, not recreated** ([ADR-213](decisions/adr-213-a-lost-log-is-refused.md)).
