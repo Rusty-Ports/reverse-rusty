@@ -156,3 +156,11 @@ longest.
 **See also:** ADR-058 (punctuation classes), ADR-061 (aliases, the two title views, and the
 boundary-aware selection), ADR-063 (the surface-noise property), ADR-120 (quoted clauses),
 ADR-187 (the previous compiler-semantics version).
+
+## Later outcome (2026-10-08, ADR-219)
+
+Decision 2 says the space is the separator "whatever class a vocabulary gives it". That holds
+for `keep` and `marker`. A vocabulary that classes the space as `fold` deletes it, as it
+deletes any folded character, and the words on either side join; no run of separators comes
+back that way either. The normative text ([`normalization.md`](../design/normalization.md)
+§2.1) says it exactly.

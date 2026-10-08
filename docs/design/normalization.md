@@ -122,6 +122,130 @@ overlapping alias paths so a positive requirement is not hidden by a longer left
 `N(T)` remains canonical so forbidden predicates are not accidentally widened. When quoted
 predicates exist, `match_phrase_views` also writes reusable position-arc buffers.
 
+### 2.1 The front-end rules, stated in full
+
+This section is normative. It says everything the analyzer does to a query or a title before
+features exist, completely enough to implement it without reading the engine. The independent
+reference matcher is checked against it (ADR-219), and a difference between the two is a defect in
+one of them or a gap here. Stage numbers match the list above.
+
+**Cleaning (stage 1).** The text is read one Unicode scalar at a time, in order.
+
+1. The scalar is folded by this table; any other scalar is left as it is.
+
+   | To | From |
+   |---|---|
+   | `a` | `á à â ä ã å ā ą Á À Â Ä Ã Å` |
+   | `e` | `é è ê ë ē ė ę É È Ê Ë` |
+   | `i` | `í ì î ï ī į Í Ì Î Ï` |
+   | `o` | `ó ò ô ö õ ø ō Ó Ò Ô Ö Õ` |
+   | `u` | `ú ù û ü ū Ú Ù Û Ü` |
+   | `n` | `ñ ń Ñ` |
+   | `c` | `ç ć č Ç Ć Č` |
+   | `s` | `š ś Š Ś` |
+   | `z` | `ž ź ż Ž Ź Ż` |
+   | `y` | `ý ÿ Ý` |
+   | `l` | `ł Ł` |
+
+2. If the result is an ASCII letter or digit, it is written in lower case.
+3. Otherwise its punctuation class decides what is written: `split` writes one space, `fold`
+   writes nothing, `keep` writes the character, and `marker` writes a space, the character and
+   a space.
+
+The default classes are: `.` is `keep`; `#` and `/` are `marker`; every other character is
+`split`. That covers all whitespace, all other punctuation, and every non-ASCII character the
+table does not fold. A vocabulary may give single characters another class.
+
+A separator is never written twice in a row, and never first (ADR-218). So two `split`
+characters in a row leave one space, a `marker` after a space does not add another, and a text
+that begins with separators begins with its first token. A space that a vocabulary classes as
+`keep` or `marker` is still just a separator. Classed as `fold` it is deleted like any folded
+character, and the words on either side join.
+
+**Tokens (stage 2).** The cleaned text is cut at spaces. A token is a maximal run of
+characters that are not spaces; there are no empty tokens. Positions count tokens from 0. How
+many separators stood between two tokens in the original text is not kept and changes nothing:
+`north, star`, `north - star` and `north star` are the same two tokens.
+
+**Phrases (stage 3).** A vocabulary phrase is a sequence of tokens (its declared form, cleaned
+and cut by the rules above under the same punctuation classes), a feature name, and a mode. A
+phrase with no tokens is ignored.
+
+- *An occurrence* of a phrase is a place where its tokens are consecutive tokens of the text.
+  (In the cleaned text: its tokens joined by single spaces, starting at the start of the text
+  or right after a space, and ending at the end of the text or right before a space.) A match
+  of the phrase's characters that starts or ends inside a token is not an occurrence.
+- *Selection* takes occurrences in order of start; of two that start together, the longer; and
+  drops any that starts before the end of one already taken. (Leftmost, then longest, never
+  overlapping.)
+- A selected occurrence emits the phrase's feature once, at the position of its first token.
+- The mode says what happens to the tokens inside it. `collapse`: they are consumed and emit
+  nothing else. `additive`: they go on through stage 4 as if no phrase were there. `alias`:
+  consumed on the query side, kept on the title side.
+
+**Each remaining token (stages 4 and 5),** by the first rule that applies:
+
+1. A token that is exactly `#` or `/` emits nothing. It still has a position.
+2. A *number* is a token of ASCII digits with at most one `.` and at least one digit.
+   - It emits `term:<token>` when the token before it is `#`; when the token before it or
+     after it is `/`; or when the token before it is one of the vocabulary's number-context
+     words (compared without regard to ASCII case). "Before" and "after" are by position,
+     whether or not a phrase consumed that neighbour.
+   - Otherwise, when it is exactly four digits and between 1900 and 2099, it emits
+     `year:<token>`.
+   - Otherwise it emits `term:<token>`.
+3. A token that a vocabulary synonym names emits that synonym's canonical feature name.
+4. Any other token emits `term:<token>`.
+
+One consequence of rule 2: `#1999` and `/1999` are the term `1999`, and a bare `1999` is the
+year `1999`. They are different features and do not match each other.
+
+**The two views of a title.** The canonical view `N(T)` is the set of features the stages above
+emit for the title. Forbidden clauses are checked against it. The positive view `P(T)` is what
+required clauses and any-of groups are checked against. Without a phrase in `alias` mode, `P(T)`
+is `N(T)`. With one, `P(T)` is the union of:
+
+- `N(T)`;
+- what the stages emit when no phrase consumes its tokens, whatever its mode;
+- `term:<token>` for every token of the cleaned title except `#` and `/`;
+- the feature of every phrase, in any mode, that has an occurrence in the title, overlapping
+  occurrences included;
+- the feature of an `alias` phrase whose form the title carries in pieces (ADR-205). The form's
+  tokens are cut, left to right, into pieces, and the title must carry every piece. A piece is
+  one token, carried as `term:<token>` or as any feature that token emits when analyzed by
+  itself as a title; or it is a vocabulary phrase of two or more tokens, shorter than the form,
+  carried as its feature. A feature is also carried when the title holds another feature of the
+  same equivalence class. A form found this way is itself carried and can be a piece of another
+  form, so the rule is applied until it adds nothing.
+
+**Equivalence classes.** A declared equivalence group lists forms. A form takes part only when
+it analyzes, as a query, to exactly one feature. Groups with fewer than two such features are
+dropped, and groups that share a feature are merged.
+
+**A quoted clause (ADR-120)** is analyzed with positions. The text is cleaned and the stages
+run. Every emitted feature is an arc from the position of its first token to the position after
+its last; a phrase's arc spans its tokens. A position that no arc starts at and no arc passes
+over gets an arc `term:<token>` for the token there, markers included.
+
+- *The query's graph.* Arcs with the same start and end are alternatives of one edge. On a
+  required clause an edge's alternatives are widened by equivalence classes; on a forbidden
+  clause they are not.
+- *A title's canonical graph* is its arcs as above.
+- *A title's positive graph* is the union of the canonical graph's arcs; the arcs of the same
+  analysis with no phrase consuming its tokens, whatever its mode (so a number or a synonym
+  inside a phrase keeps the arc it would have by itself, and every phrase's own arc is
+  there); an arc `term:<token>` for every token that is not a marker; and an arc for every
+  phrase occurrence, overlapping ones included. This is so with or without an alias in the
+  vocabulary.
+- *Matching.* A quoted clause matches a graph when its edges can be followed from its first
+  position to its last along arcs that carry one of each edge's alternatives and join end to
+  start, beginning at any title position. A required clause is matched against the positive
+  graph and a forbidden clause against the canonical graph.
+
+**A clause that analyzes to nothing is dropped.** A quoted clause with no token, a bare term
+or an any-of member made only of `split` characters, and a group left with no member neither
+require nor forbid anything.
+
 ---
 
 ## 3. Feature dictionary

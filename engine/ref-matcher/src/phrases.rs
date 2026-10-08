@@ -4,8 +4,9 @@
 //! uses linear substring scans instead. A test oracle optimizes for correctness + independence,
 //! not speed, and a second, structurally different implementation of leftmost-longest /
 //! overlapping selection is more likely to expose an integration bug than reusing the same
-//! automaton would be. Reproduces the selection semantics of `core.rs::emit` (phase 1) and
-//! `core/alias_overlap.rs` (`select_phrases` / `scan_overlapping`).
+//! automaton would be. The selection rules are ported from `core.rs::emit` (phase 1) and
+//! `core/alias_overlap.rs` (`select_phrases` / `scan_overlapping`); see the crate documentation
+//! for what "ported" means for the differential.
 
 use crate::vocab::RefPhrase;
 

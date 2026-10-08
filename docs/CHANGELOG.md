@@ -9,6 +9,21 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — The reference matcher says where it comes from
+
+- **The reference's provenance is stated, and checked**
+  ([ADR-219](decisions/adr-219-the-reference-says-where-it-comes-from.md)). The independent
+  reference matcher's documentation said it was written "purely from the spec". Its parser,
+  cleaner, normalizer and phrase selection were ported from the engine. The crate now says
+  which modules are ported and what that means: for them the differential finds a change one
+  side makes and the other does not, and not a reading of the language that both carry.
+- **The analyzer's and the parser's rules are written down in full**, as normative text
+  (`design/normalization.md` §2.1, "Parsing rules" in `reference/dsl.md`), so the ported
+  modules can be written again from them alone. Writing them is what found ADR-218.
+- **Two new gate lanes:** the reference's provenance (a module that cites engine code must be
+  on the ported list) and the reference's own unit tests, which no lane ran. No behaviour
+  change.
+
 ## 2026-10-08 — A phrase is found whatever separates its words
 
 - **A phrase is its words as consecutive tokens**

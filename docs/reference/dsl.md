@@ -108,6 +108,35 @@ This last query matches titles that contain: `vintage`, either `leather` or `sue
 > [`../design/README.md`](../design/README.md) §2); it's why an absent forbidden feature can never
 > drop a real match.
 
+## Parsing rules
+
+These are the rules a query string is read by, stated completely. A string that breaks one is
+rejected when it is stored; it is never stored as something else.
+
+- **Limits.** A query is at most 10,240 bytes and 256 clauses, and an any-of group has at most 64
+  members. (The limits are settings; these are the defaults.)
+- **Clauses** are separated by whitespace.
+- **A negation** is a `-` at the start of a clause. It must be followed at once by what it
+  negates: `-used` negates, while `- used`, `used -` and a `-` at the end are rejected.
+- **A group** starts at `(` and ends at the next `)`. Its members are separated by `,`. Inside a
+  member, any whitespace is a space; a member is trimmed, and an empty member is dropped. A
+  group with no member left, or with no `)`, is rejected. Groups do not nest, and a `"` inside a
+  group is an ordinary character.
+- **A quoted clause** starts at `"` and ends at the next `"`; its content is trimmed. One with
+  no closing `"` is rejected.
+- **A bare term** is anything else. It runs to the next whitespace, `(` or `"`, and may contain
+  `-`, `,` and `)`. So `wi-fi` is one bare term, and `a(b,c)` is the bare term `a` followed by
+  a group.
+- **What a clause means is decided after analysis.** A bare term is analyzed like a title, so
+  `wi-fi` requires the two tokens `wi` and `fi` under the default punctuation. Consecutive
+  positive bare terms are analyzed together, joined by spaces, as one run; a group, a quoted
+  clause or a negated clause ends the run. A negated bare term forbids all of its tokens
+  together: `-wi-fi` rejects a title that has both `wi` and `fi`, and not one that has only
+  `wi`.
+- **A clause with nothing in it is dropped.** A quoted clause with no token (`""`), a bare term
+  or a member made only of punctuation that splits, and a group left with no member neither
+  require nor forbid anything.
+
 ## Normalization
 
 Both queries and titles pass through the **same** normalization pipeline before matching — that

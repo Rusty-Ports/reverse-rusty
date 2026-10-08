@@ -17,6 +17,7 @@ Candidate retrieval, lossless signature cover, exact verification, broad-query h
 | [187](../adr-187-anyof-cover-and-visible-rebuilds.md) | Any-of cover and visible rebuilds | Anchors a top-64-required query on an any-of group with no top-64 member, keyed to the frozen mask, and keeps a default-visible query visible through every single-node rebuild. | Accepted |
 | [203](../adr-203-cluster-rebuilds-keep-visible-queries.md) | Cluster rebuilds keep visible queries | Replicates a default-visible query always-visible, in each shard's main lane, when a cluster vocabulary change, resize or compiler migration re-plans it as class C. | Accepted |
 | [217](../adr-217-random-queries-use-the-whole-grammar.md) | Random test queries use the whole grammar | Adds a generator of queries with every clause kind in any order and a title built to satisfy each, and drives four oracles with it: the independent reference, the built title retrieves its query, subset relations between a query and its edits, and an ungrouped twin as the reference for default-read visibility across the merges. | Accepted |
+| [219](../adr-219-the-reference-says-where-it-comes-from.md) | The reference matcher says where it comes from | Records that the reference's parser, cleaner, normalizer and phrase selection were ported from the engine, so the differential finds drift there and not a shared misreading; states the front-end rules in full as normative text; puts copied tables in one file; and adds gate lanes for the reference's provenance and its own tests. | Accepted |
 
 ---
 

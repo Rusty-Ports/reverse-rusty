@@ -6,8 +6,8 @@
 //! exactly the equality the engine's interned `FeatureId`s give (the synthetic-id path hashes
 //! the same name). Comparing by string is what frees this crate from the engine's dictionary.
 //!
-//! The constructors below reproduce the engine's canonical formats (`engine/src/normalize/core.rs`
-//! `emit_generic` and the inline `year:` builder).
+//! The constructors below write the canonical names the specification gives
+//! (`docs/design/normalization.md` §2.1): `term:<token>` and `year:<YYYY>`.
 
 /// A canonical feature name (e.g. `"term:wireless"`). Ordered + hashable so feature *sets* are cheap.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -28,7 +28,7 @@ impl Feature {
         Feature(format!("year:{yyyy}"))
     }
 
-    /// `term:<token>` — the generic fallback feature (`emit_generic`).
+    /// `term:<token>` — the generic fallback feature.
     #[must_use]
     pub fn term(token: &str) -> Self {
         Feature(format!("term:{token}"))
