@@ -69,12 +69,13 @@ impl ClusterEngine {
             new_vocab,
             new_generation,
             false,
-            lap.lap(),
+            Some(lap.lap()),
         )
     }
 
-    /// How long each part of the last rebuild took: a resize, a vocabulary change, or the
-    /// rebuild a start runs for an older compiler. `None` before the first one.
+    /// How long each part of the last resize or vocabulary change took. `None` before the
+    /// first one. The rebuild a start runs for an older compiler is not timed: its corpus
+    /// comes from the log, not from a gather, and nothing can ask before it has finished.
     #[must_use]
     pub fn last_rebuild(&self) -> Option<super::RebuildTimings> {
         *self
@@ -111,11 +112,12 @@ impl ClusterEngine {
         new_vocab: Option<Vocab>,
         new_generation: PlacementGeneration,
         append_missing_features: bool,
-        gather: std::time::Duration,
+        // How long the caller took to gather `live`, when the rebuild is one to keep times of.
+        gather: Option<std::time::Duration>,
     ) -> Result<(usize, Arc<Layout>), ShardError> {
         let mut lap = super::Lap::start();
         let mut timings = super::RebuildTimings {
-            gather,
+            gather: gather.unwrap_or_default(),
             ..super::RebuildTimings::default()
         };
         let current = change.current();
@@ -484,10 +486,12 @@ impl ClusterEngine {
         frozen.keep();
         timings.publish = lap.lap();
         timings.queries = rebuilt;
-        *self
-            .last_rebuild
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(timings);
+        if gather.is_some() {
+            *self
+                .last_rebuild
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(timings);
+        }
         Ok((rebuilt, next))
     }
 }

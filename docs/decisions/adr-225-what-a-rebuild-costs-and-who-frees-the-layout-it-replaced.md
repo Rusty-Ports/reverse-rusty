@@ -21,14 +21,16 @@ corpus.
 ## Decision
 
 1. **A rebuild keeps the time of each of its parts.** `ClusterEngine::last_rebuild` returns a
-   `RebuildTimings`: the queries rebuilt, and the time spent gathering the live corpus,
-   extracting, placing, building the new shards, publishing, and committing (the control
-   state, readers of the old layout finishing, the checkpoint).
+   `RebuildTimings` for the last resize or vocabulary change: the queries rebuilt, and the
+   time spent gathering the live corpus, extracting, placing, building the new shards,
+   publishing, and committing (the control state, readers of the old layout finishing, the
+   checkpoint). The rebuild a start runs for an older compiler is not timed.
 2. **`clusterbench rebuild` measures a rebuild on a serving coordinator.** It builds a durable
    in-process cluster and rebuilds it twice, to another shard count and under another
    vocabulary, with one thread searching and one thread writing beside each. It reports the
    parts above, search latency against the same searches with nothing else running, the
    longest search and when it happened, how long a write waited, and peak resident memory.
+   Only what begins after the rebuild has begun is counted.
 3. **A replaced layout is freed on a thread of its own.** When a layout is published, the one
    it replaces is handed to a thread that keeps a handle until nothing else holds it, and
    then lets go. A reader's handle is never the last, so a reader never frees a corpus. An
@@ -42,25 +44,28 @@ shards. Every number depends on the machine; the shape does not.
 
 | Queries | Rebuild | gather | extract | place | build | publish | commit | Longest write wait | Peak resident |
 |---|---|---|---|---|---|---|---|---|---|
-| 100k | 0.9 s | 0.03 | 0.16 | 0.05 | 0.41 | <0.001 | 0.24 | 0.9 s | 1.7x |
-| 500k | 2.7 s | 0.19 | 0.88 | 0.24 | 0.90 | 0.001 | 0.34 | 2.6 s | 2.4x |
-| 1M | 5.1 s | 0.51 | 1.79 | 0.68 | 1.54 | 0.001 | 0.46 | 5.0 s | 2.1x |
-| 2M | 11.7 s | 1.79 | 4.02 | 1.40 | 3.29 | 0.008 | 0.91 | 11.4 s | see below |
+| 100k | 1.2 s | 0.03 | 0.16 | 0.05 | 0.41 | <0.001 | 0.24 | 0.9 s | 237 MB (94 before) |
+| 500k | 2.7 s | 0.21 | 0.85 | 0.25 | 0.85 | 0.001 | 0.35 | 2.5 s | 1,062 MB (529 before) |
+| 1M | 5.0 s | 0.51 | 1.78 | 0.55 | 1.49 | 0.003 | 0.61 | 4.9 s | 1,698 MB (983 before) |
+| 2M | 10.8 s | 1.56 | 3.70 | 1.42 | 3.41 | 0.004 | 0.71 | 10.8 s | 2,841 MB (1,694 before) |
 
-(A resize; a vocabulary change is within a tenth of it, with more of the time in extract.)
+(A resize. A vocabulary change is within a tenth of it, with more of the time in extract and
+a higher peak: 2,349 MB at 1M. The rebuild's wall time includes waiting for the layout lock,
+which the parts do not.)
 
 - **Time is linear in the corpus,** about five seconds for a million queries here. Extracting
   every query again is the largest part, building the shards the second.
 - **Searches are not slowed.** The median and the 99th percentile beside a rebuild are those
-  of the same searches with nothing else running (1M: 50 µs and 153 µs against 49 µs and
-  140 µs).
+  of the same searches with nothing else running (1M: 50 µs and 163 µs against 50 µs and
+  143 µs; 2M: 55 µs and 240 µs against 55 µs and 234 µs).
 - **Writes wait for the whole rebuild.** The longest write waited as long as the rebuild
   took, at every size.
-- **Memory:** two corpora are resident while the new one is built. Peak resident memory was
-  1.7 to 2.4 times what the process held before the rebuild. At 2M the process still held
-  memory from building the corpus, and the ratio read 1.0 to 1.2; plan for 2.5 times.
+- **Memory:** two corpora are resident while the new one is built. From 500k up, peak
+  resident memory was 1.5 to 2.5 times what the process held before the rebuild; at 100k,
+  where fixed costs dominate, more. The reading before a rebuild depends on what the
+  allocator has kept, so the ratio moves between runs. Plan for 2.5 times.
 - **The longest search beside a 2M rebuild** was 205 to 293 ms before the third point of the
-  decision and 18 to 84 ms after it, and it no longer falls at the publication.
+  decision, right after the publication, and 18 to 84 ms after it.
 
 ## What changes for a deployment
 

@@ -20,7 +20,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - **A rebuild is measured.** `ClusterEngine::last_rebuild` gives the time of each part of the
   last one, and `clusterbench rebuild` runs one beside a searcher and a writer. On the
   reference machine: about five seconds for each million queries, searches not slowed, writes
-  waiting for the whole rebuild, up to 2.4 times the resident memory. Sizing guidance is in
+  waiting for the whole rebuild, 1.5 to 2.5 times the resident memory. Sizing guidance is in
   the cluster deployment guide.
 
 ## 2026-10-08 — A write is under way on every shard of a step at once

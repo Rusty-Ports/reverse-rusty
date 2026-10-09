@@ -559,7 +559,7 @@ impl ClusterEngine {
                 None,
                 next_generation,
                 true,
-                std::time::Duration::ZERO,
+                None,
             )?;
             engine
                 .control

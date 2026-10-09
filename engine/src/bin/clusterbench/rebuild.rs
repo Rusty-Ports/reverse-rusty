@@ -27,6 +27,10 @@ pub(crate) fn run(args: &[String]) {
     let shards_from = super::arg_usize(args, 4, 4);
     let shards_to = super::arg_usize(args, 5, 8);
     let seed = super::arg_u64(args, 6, 0x00C0_FFEE);
+    if num_titles == 0 || num_queries == 0 {
+        eprintln!("clusterbench rebuild: num_queries and num_titles must be at least 1");
+        std::process::exit(2);
+    }
 
     let data = generate(&GenConfig {
         num_queries,
@@ -144,22 +148,29 @@ fn beside(
     rebuild: impl FnOnce(),
 ) -> Beside {
     let done = Arc::new(AtomicBool::new(false));
+    // Raised when the rebuild begins: what the two threads do before that lets them settle
+    // and is not counted.
+    let measuring = Arc::new(AtomicBool::new(false));
     let origin = Instant::now();
     std::thread::scope(|scope| {
         let searcher = scope.spawn({
             let (cluster, titles, done) =
                 (Arc::clone(cluster), Arc::clone(titles), Arc::clone(&done));
+            let measuring = Arc::clone(&measuring);
             move || {
                 let (mut micros, mut longest) = (Vec::new(), (Duration::ZERO, origin));
                 'all: loop {
                     for title in titles.iter() {
+                        let counted = measuring.load(Ordering::Acquire);
                         let started = Instant::now();
                         cluster.percolate(title).expect("percolate");
                         let took = started.elapsed();
-                        if took > longest.0 {
-                            longest = (took, started);
+                        if counted {
+                            if took > longest.0 {
+                                longest = (took, started);
+                            }
+                            micros.push(took.as_secs_f64() * 1e6);
                         }
-                        micros.push(took.as_secs_f64() * 1e6);
                         if done.load(Ordering::Acquire) {
                             break 'all;
                         }
@@ -170,16 +181,20 @@ fn beside(
         });
         let writer = scope.spawn({
             let (cluster, done) = (Arc::clone(cluster), Arc::clone(&done));
+            let measuring = Arc::clone(&measuring);
             move || {
                 let (mut writes, mut longest) = (0usize, Duration::ZERO);
                 while !done.load(Ordering::Acquire) {
                     let id = next_id.fetch_add(1, Ordering::Relaxed);
+                    let counted = measuring.load(Ordering::Acquire);
                     let started = Instant::now();
                     cluster
                         .upsert_query(id, "zzbench rebuild writer", 1)
                         .expect("upsert");
-                    longest = longest.max(started.elapsed());
-                    writes += 1;
+                    if counted {
+                        longest = longest.max(started.elapsed());
+                        writes += 1;
+                    }
                 }
                 (writes, longest)
             }
@@ -197,6 +212,7 @@ fn beside(
         });
         // Let the two settle before the rebuild begins.
         std::thread::sleep(Duration::from_millis(300));
+        measuring.store(true, Ordering::Release);
         let started = Instant::now();
         rebuild();
         let wall = started.elapsed();
