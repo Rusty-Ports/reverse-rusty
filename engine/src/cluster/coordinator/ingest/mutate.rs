@@ -1,9 +1,10 @@
 use super::repair::Redrive;
 use super::{
-    extract_readonly, planned, AddOutcome, ClusterEngine, ClusterMutation, DurabilityOp,
+    extract_readonly, fanout, planned, AddOutcome, ClusterEngine, ClusterMutation, DurabilityOp,
     EngineEvent, Extracted, ShardError, Target,
 };
 use crate::cluster::coordinator::layout::Layout;
+use crate::cluster::shard::{Applied, FannedWrite};
 
 impl ClusterEngine {
     /// Add one query incrementally (lands in the target shard's memtable). Uses a
@@ -354,11 +355,22 @@ impl ClusterEngine {
         let mut applied = Vec::with_capacity(shards.len());
         let mut failed = Vec::new();
         let mut first_err: Option<ShardError> = None;
-        for &s in shards {
-            match layout.shards[s]
-                .insert_extracted_with_placement(ex, id, version, dsl, tags, placement)
-            {
-                Ok(_) => applied.push(s),
+        // On every placement shard at once (ADR-224).
+        let sent = FannedWrite::Insert {
+            ex,
+            logical: id,
+            version,
+            text: dsl,
+            tags,
+            placement,
+        };
+        for (s, answer) in fanout::on_each(&layout.shards, shards, &sent) {
+            match answer {
+                Ok(Applied::Inserted(_)) => applied.push(s),
+                Ok(other) => {
+                    failed.push(s);
+                    first_err.get_or_insert(fanout::answered(s, other, &sent));
+                }
                 Err(e) => {
                     failed.push(s);
                     first_err.get_or_insert(e);
@@ -478,9 +490,15 @@ impl ClusterEngine {
         let mut removed = 0usize;
         let mut failed = Vec::new();
         let mut first_err: Option<ShardError> = None;
-        for (s, shard) in layout.shards.iter().enumerate() {
-            match shard.delete_by_logical_id(id) {
-                Ok(n) => removed += n,
+        let every_shard: Vec<usize> = (0..layout.shards.len()).collect();
+        let sent = FannedWrite::Delete { logical: id };
+        for (s, answer) in fanout::on_each(&layout.shards, &every_shard, &sent) {
+            match answer {
+                Ok(Applied::Deleted(n)) => removed += n,
+                Ok(other) => {
+                    failed.push(s);
+                    first_err.get_or_insert(fanout::answered(s, other, &sent));
+                }
                 Err(e) => {
                     failed.push(s);
                     first_err.get_or_insert(e);

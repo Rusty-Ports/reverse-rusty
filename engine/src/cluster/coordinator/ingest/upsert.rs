@@ -25,10 +25,11 @@
 //! Live writes and log replay run this same funnel, so live and replayed application agree.
 
 use super::{
-    extract_readonly, planned, AddOutcome, ClusterEngine, ClusterMutation, ShardError, Target,
+    extract_readonly, fanout, planned, AddOutcome, ClusterEngine, ClusterMutation, ShardError,
+    Target,
 };
 use crate::cluster::coordinator::layout::Layout;
-use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus, Shard};
+use crate::cluster::shard::{Applied, FannedWrite, PlacedWrite, ReplaceMode, ReplaceStatus, Shard};
 
 /// Per-shard results of one upsert fan-out.
 #[derive(Default)]
@@ -47,50 +48,59 @@ impl Fanout {
         self.first_err.get_or_insert(error);
     }
 
-    /// Replace on `shard`, unless an earlier step already failed there (its repair
-    /// re-drives the whole upsert). Returns the status when the call succeeded.
+    /// Replace on each of `targets`, all at once (ADR-224), leaving out any shard where an
+    /// earlier step already failed (its repair re-drives the whole upsert). Returns the
+    /// status of every shard whose call succeeded, in the order of `targets`.
     fn replace(
         &mut self,
         shards: &[Box<dyn Shard>],
-        shard: usize,
+        targets: &[usize],
         write: &PlacedWrite<'_>,
         mode: ReplaceMode,
-    ) -> Option<ReplaceStatus> {
-        if self.failed.contains(&shard) {
-            return None;
-        }
-        match shards[shard].replace_placed(write, mode) {
-            Ok(status) => {
-                if let ReplaceStatus::Replaced { removed } = status {
-                    self.removed += removed;
+    ) -> Vec<(usize, ReplaceStatus)> {
+        let targets: Vec<usize> = targets
+            .iter()
+            .copied()
+            .filter(|shard| !self.failed.contains(shard))
+            .collect();
+        let sent = FannedWrite::Replace { write, mode };
+        let mut answered = Vec::with_capacity(targets.len());
+        for (shard, answer) in fanout::on_each(shards, &targets, &sent) {
+            match answer {
+                Ok(Applied::Replaced(status)) => {
+                    if let ReplaceStatus::Replaced { removed } = status {
+                        self.removed += removed;
+                    }
+                    if status.applied() {
+                        self.applied.push(shard);
+                    }
+                    answered.push((shard, status));
                 }
-                if status.applied() {
-                    self.applied.push(shard);
-                }
-                Some(status)
-            }
-            Err(error) => {
-                self.fail(shard, error);
-                None
+                Ok(other) => self.fail(shard, fanout::answered(shard, other, &sent)),
+                Err(error) => self.fail(shard, error),
             }
         }
+        answered
     }
 
     /// Tombstone any copy on every shard outside `placement_shards` (idempotent on a
-    /// shard that holds none). Only called once every placement shard holds the new
-    /// version: until then a copy elsewhere may be the only one a title can still reach.
+    /// shard that holds none), on all of them at once. Only called once every placement
+    /// shard holds the new version: until then a copy elsewhere may be the only one a
+    /// title can still reach.
     fn sweep(&mut self, shards: &[Box<dyn Shard>], placement_shards: &[usize], logical: u64) {
         debug_assert!(
             self.failed.is_empty(),
             "sweeping before the install finished"
         );
-        for (s, shard) in shards.iter().enumerate() {
-            if placement_shards.contains(&s) {
-                continue;
-            }
-            match shard.delete_by_logical_id(logical) {
-                Ok(removed) => self.removed += removed,
-                Err(error) => self.fail(s, error),
+        let elsewhere: Vec<usize> = (0..shards.len())
+            .filter(|shard| !placement_shards.contains(shard))
+            .collect();
+        let sent = FannedWrite::Delete { logical };
+        for (shard, answer) in fanout::on_each(shards, &elsewhere, &sent) {
+            match answer {
+                Ok(Applied::Deleted(removed)) => self.removed += removed,
+                Ok(other) => self.fail(shard, fanout::answered(shard, other, &sent)),
+                Err(error) => self.fail(shard, error),
             }
         }
     }
@@ -195,21 +205,30 @@ impl ClusterEngine {
         if known_absent {
             // No copy exists, so no reader can lose a version: place the new one. A shard
             // that nevertheless replaced a copy contradicts the directory.
-            for &s in &placement_shards {
-                let status = fan.replace(&layout.shards, s, &write, ReplaceMode::Unconditional);
-                if matches!(status, Some(ReplaceStatus::Replaced { .. })) {
-                    cleanup = Cleanup::Move;
-                }
+            let placed = fan.replace(
+                &layout.shards,
+                &placement_shards,
+                &write,
+                ReplaceMode::Unconditional,
+            );
+            if placed
+                .iter()
+                .any(|(_, status)| matches!(status, ReplaceStatus::Replaced { .. }))
+            {
+                cleanup = Cleanup::Move;
             }
         } else {
-            let mut declined: Vec<usize> = Vec::new();
-            for &s in &placement_shards {
-                if let Some(ReplaceStatus::Absent | ReplaceStatus::PlacementMismatch) =
-                    fan.replace(&layout.shards, s, &write, ReplaceMode::IfSamePlacement)
-                {
-                    declined.push(s);
-                }
-            }
+            let declined: Vec<usize> = fan
+                .replace(
+                    &layout.shards,
+                    &placement_shards,
+                    &write,
+                    ReplaceMode::IfSamePlacement,
+                )
+                .into_iter()
+                .filter(|(_, status)| !status.applied())
+                .map(|(shard, _)| shard)
+                .collect();
             if declined.is_empty() {
                 // Every placement shard that answered switched versions atomically.
                 if strays_possible {
@@ -219,9 +238,12 @@ impl ClusterEngine {
                 // The placement is moving (or the copies disagree). The declining shards
                 // changed nothing, so the whole rewrite still fits inside the fence.
                 moving = Some(self.move_fence.begin_move());
-                for &s in &declined {
-                    fan.replace(&layout.shards, s, &write, ReplaceMode::Unconditional);
-                }
+                fan.replace(
+                    &layout.shards,
+                    &declined,
+                    &write,
+                    ReplaceMode::Unconditional,
+                );
                 cleanup = Cleanup::Move;
             }
             if !fan.failed.is_empty() {

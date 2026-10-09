@@ -109,6 +109,68 @@ impl RemoteShard {
         Fut: Future<Output = Result<R, tonic::Status>> + Send,
         R: Send,
     {
+        let (deadline, max_retries) = self.limits(kind);
+        let started = Instant::now();
+        let first = self.block_on(run_with_retry(&mk, deadline, max_retries));
+        self.finish_call(method, deadline, max_retries, started, None, first, &mk)
+    }
+
+    /// [`call`](Self::call) in two halves (ADR-224): the request is sent now, as a task on
+    /// the RPC runtime, and the closure returned waits for it and does everything `call`
+    /// does with the outcome. Between the two the caller can start the same call on other
+    /// shards. The deadline runs from the send, in the task, so each call keeps its own.
+    pub(super) fn start_call<R, Fut, MkFut>(
+        &self,
+        method: RpcMethod,
+        kind: CallKind,
+        mk: MkFut,
+    ) -> impl FnOnce() -> Result<R, ShardError> + '_
+    where
+        MkFut: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<R, tonic::Status>> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (deadline, max_retries) = self.limits(kind);
+        let started = Instant::now();
+        let mk = Arc::new(mk);
+        let sent = {
+            let mk = Arc::clone(&mk);
+            self.handle.spawn(async move {
+                let outcome = run_with_retry(|| mk(), deadline, max_retries).await;
+                // Measured here: the caller may wait for other shards before this one.
+                (outcome, started.elapsed())
+            })
+        };
+        move || {
+            let (first, latency) = match self.block_on(sent) {
+                Ok(done) => done,
+                // The task did not run to its end, so what the shard did is not known.
+                Err(lost) => (
+                    (
+                        Err(tonic::Status::unknown(format!(
+                            "the rpc task did not finish: {lost}"
+                        ))),
+                        0,
+                        false,
+                    ),
+                    started.elapsed(),
+                ),
+            };
+            let mk = move || mk();
+            self.finish_call(
+                method,
+                deadline,
+                max_retries,
+                started,
+                Some(latency),
+                first,
+                &mk,
+            )
+        }
+    }
+
+    /// The per-call deadline and the retries a kind of call gets.
+    fn limits(&self, kind: CallKind) -> (Option<Duration>, u32) {
         let deadline = match kind {
             CallKind::Read => Some(self.transport.read_timeout),
             CallKind::Write => Some(self.transport.write_timeout),
@@ -123,9 +185,31 @@ impl RemoteShard {
             CallKind::Read => self.transport.read_retries,
             CallKind::Write | CallKind::Unbounded => 0,
         };
-        let started = Instant::now();
-        let (mut result, mut attempts, mut timed_out) =
-            self.block_on(run_with_retry(&mk, deadline, max_retries));
+        (deadline, max_retries)
+    }
+
+    /// What a call does with the outcome of its first run: reclaim the coordinator's lease
+    /// and run once more when the shard reports it gone, record the outcome and the latency,
+    /// and turn the status into the error the coordinator reads. `latency` is the first
+    /// run's own, when it was measured where it ran.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_call<R, Fut, MkFut>(
+        &self,
+        method: RpcMethod,
+        deadline: Option<Duration>,
+        max_retries: u32,
+        started: Instant,
+        latency: Option<Duration>,
+        first: (Result<R, tonic::Status>, u32, bool),
+        mk: &MkFut,
+    ) -> Result<R, ShardError>
+    where
+        MkFut: Fn() -> Fut + Send + Sync,
+        Fut: Future<Output = Result<R, tonic::Status>> + Send,
+        R: Send,
+    {
+        let (mut result, mut attempts, mut timed_out) = first;
+        let mut latency = latency;
         if result
             .as_ref()
             .err()
@@ -138,12 +222,13 @@ impl RemoteShard {
                 return Err(error);
             }
             let (retried, retry_attempts, retry_timed_out) =
-                self.block_on(run_with_retry(&mk, deadline, max_retries));
+                self.block_on(run_with_retry(mk, deadline, max_retries));
             result = retried;
             attempts = attempts.saturating_add(retry_attempts).saturating_add(1);
             timed_out = retry_timed_out;
+            latency = None;
         }
-        let latency = started.elapsed();
+        let latency = latency.unwrap_or_else(|| started.elapsed());
         let outcome = if result.is_ok() {
             RpcOutcome::Ok
         } else if timed_out {

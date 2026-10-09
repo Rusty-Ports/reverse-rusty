@@ -7,6 +7,9 @@ pub(super) enum WriteCall {
     /// An atomic per-shard replace (ADR-185), with whether it was conditional.
     Replace(u64, crate::cluster::shard::ReplaceMode),
     Delete(u64),
+    /// A shard that answers later was asked to start a write for this id (ADR-224). The
+    /// `Insert`, `Replace` or `Delete` that follows is recorded when its answer is waited for.
+    Sent(u64),
     Bulk,
     /// A checkpoint is about to seal this shard.
     Seal,
@@ -20,21 +23,40 @@ pub(super) enum WriteCall {
 pub(super) type WriteHook = Arc<dyn Fn(usize, WriteCall) -> Result<(), ShardError> + Send + Sync>;
 
 pub(super) fn instrument(cluster: &mut ClusterEngine, hook: WriteHook) {
+    wrap(cluster, hook, false);
+}
+
+/// [`instrument`], with shards that answer a started write only when they are waited for,
+/// as a shard on another machine does (ADR-224).
+pub(super) fn instrument_deferred(cluster: &mut ClusterEngine, hook: WriteHook) {
+    wrap(cluster, hook, true);
+}
+
+fn wrap(cluster: &mut ClusterEngine, hook: WriteHook, deferred: bool) {
     let shard_count = cluster.layout().shards.len();
     cluster.replace_shards(|shards| {
         shards
             .into_iter()
             .enumerate()
             .zip(std::iter::repeat_n(hook, shard_count))
-            .map(|((position, inner), hook)| {
-                Box::new(ObservedShard {
-                    inner,
-                    position,
-                    hook,
-                }) as Box<dyn Shard>
-            })
+            .map(|((position, inner), hook)| observed(inner, position, hook, deferred))
             .collect()
     });
+}
+
+/// One shard that reports its writes to `hook`.
+pub(super) fn observed(
+    inner: Box<dyn Shard>,
+    position: usize,
+    hook: WriteHook,
+    deferred: bool,
+) -> Box<dyn Shard> {
+    Box::new(ObservedShard {
+        inner,
+        position,
+        hook,
+        deferred,
+    })
 }
 
 pub(super) fn pause(gate: &FirstAppendGate) {
@@ -53,6 +75,8 @@ struct ObservedShard {
     inner: Box<dyn Shard>,
     position: usize,
     hook: WriteHook,
+    /// Whether a started write is applied when it is waited for, not when it is started.
+    deferred: bool,
 }
 
 impl Shard for ObservedShard {
@@ -189,6 +213,24 @@ impl Shard for ObservedShard {
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
         (self.hook)(self.position, WriteCall::Delete(logical))?;
         self.inner.delete_by_logical_id(logical)
+    }
+
+    fn start_write<'a>(
+        &'a self,
+        write: crate::cluster::shard::FannedWrite<'a>,
+    ) -> crate::cluster::shard::Started<'a> {
+        use crate::cluster::shard::{FannedWrite, Started};
+        if !self.deferred {
+            return Started::done(write.apply_to(self));
+        }
+        let logical = match write {
+            FannedWrite::Replace { write, .. } => write.logical,
+            FannedWrite::Delete { logical } | FannedWrite::Insert { logical, .. } => logical,
+        };
+        if let Err(refused) = (self.hook)(self.position, WriteCall::Sent(logical)) {
+            return Started::done(Err(refused));
+        }
+        Started::pending(move || write.apply_to(self))
     }
 
     fn flush(&self) -> Result<(), ShardError> {

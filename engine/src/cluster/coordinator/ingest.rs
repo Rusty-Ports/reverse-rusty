@@ -17,6 +17,7 @@ use super::{
 type TaggedEntry = (u64, u32, String, Vec<(String, String)>);
 
 mod bulk;
+pub(in crate::cluster::coordinator) mod fanout;
 mod mutate;
 mod placement;
 mod repair;

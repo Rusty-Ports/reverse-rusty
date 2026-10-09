@@ -53,6 +53,7 @@ pub(crate) use local::LocalShard;
 
 mod api;
 mod error;
+mod fanned;
 mod mutation;
 mod replace;
 
@@ -61,5 +62,6 @@ pub(crate) use api::{
     ShardRankedMatch, ShardRankedTitle,
 };
 pub use error::ShardError;
+pub(crate) use fanned::{Applied, FannedWrite, Started};
 pub(crate) use mutation::{apply_mutation, upsert_stores_at};
 pub(crate) use replace::{PlacedWrite, ReplaceMode, ReplaceStatus};

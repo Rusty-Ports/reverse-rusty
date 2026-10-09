@@ -350,6 +350,14 @@ query exactly once: never neither version, never both.
   failed serves the old version, and a failed tombstone can leave a stale copy that exact ranked
   reads refuse as a duplicate id.
 
+**How a write reaches its shards**
+([ADR-224](../decisions/adr-224-a-write-is-under-way-on-every-shard-of-a-step-at-once.md)). A
+mutation is made of steps: install on the placement shards, then remove copies elsewhere; or
+one delete on every shard. The coordinator starts a step on all its shards and then reads
+their answers in shard order. A remote shard sends its request when the step starts, so a step
+costs one round trip whatever the number of shards; a shard in the coordinator's process
+applies the write as it is started. A step is answered everywhere before the next one starts.
+
 `resync` snapshots queued IDs, then selects each current repair under its ID lock. A newer successful
 write can clear an entry while the pass handles another ID; a newer partial write can replace it.
 Repair therefore skips cleared entries and uses the latest remaining mutation and failed targets.

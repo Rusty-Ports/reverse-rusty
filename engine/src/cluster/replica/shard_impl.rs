@@ -6,8 +6,10 @@ use std::path::Path;
 use std::sync::{Arc, PoisonError};
 
 use crate::cluster::clog::{ClusterMutation, LogPos};
+use crate::cluster::shard::{
+    Applied, FannedWrite, PlacedWrite, ReplaceMode, ReplaceStatus, Started,
+};
 use crate::cluster::shard::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
-use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus};
 use crate::compile::Extracted;
 use crate::config::EngineConfig;
 use crate::dict::Dict;
@@ -389,11 +391,15 @@ impl Shard for ReplicatedShard {
         let out = self
             .primary
             .insert_extracted_with_placement(ex, logical, version, text, tags, placement)?;
-        self.fan_to_replicas(|shard| {
-            shard
-                .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
-                .map(|_| ())
-        });
+        let sent = FannedWrite::Insert {
+            ex,
+            logical,
+            version,
+            text,
+            tags,
+            placement,
+        };
+        self.mirror(sent, Applied::Inserted(out));
         Ok(out)
     }
 
@@ -404,23 +410,38 @@ impl Shard for ReplicatedShard {
     ) -> Result<ReplaceStatus, ShardError> {
         let _g = self.lock();
         let status = self.primary.replace_placed(write, mode)?;
-        // The primary decided; a replica mirrors what the primary did rather than
-        // re-evaluating the condition against its own copy.
-        if status.applied() {
-            self.fan_to_replicas(|shard| {
-                shard
-                    .replace_placed(write, ReplaceMode::Unconditional)
-                    .map(|_| ())
-            });
-        }
+        self.mirror(
+            FannedWrite::Replace { write, mode },
+            Applied::Replaced(status),
+        );
         Ok(status)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
         let _g = self.lock();
         let n = self.primary.delete_by_logical_id(logical)?;
-        self.fan_to_replicas(|s| s.delete_by_logical_id(logical).map(|_| ()));
+        self.mirror(FannedWrite::Delete { logical }, Applied::Deleted(n));
         Ok(n)
+    }
+
+    /// The primary starts the write and the lock is held until its answer is waited for,
+    /// when the replicas are sent it (ADR-224). A primary in this process has answered
+    /// already, and then this is the blocking form.
+    fn start_write<'a>(&'a self, write: FannedWrite<'a>) -> Started<'a> {
+        let guard = self.lock();
+        let primary = self.primary.start_write(write);
+        let answered = primary.is_done();
+        let finish = move || {
+            let answer = primary.wait()?;
+            self.mirror(write, answer);
+            drop(guard);
+            Ok(answer)
+        };
+        if answered {
+            Started::done(finish())
+        } else {
+            Started::pending(finish)
+        }
     }
 
     fn flush(&self) -> Result<(), ShardError> {

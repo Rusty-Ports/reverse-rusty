@@ -504,6 +504,19 @@ pub(crate) trait Shard: Send + Sync {
     /// Tombstone every live entry for `logical` (idempotent; a cheap no-op on a shard
     /// that doesn't hold it).
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError>;
+    /// Start one of the three writes above and return what finishes it (ADR-224). A shard
+    /// that answers over a network sends the request and returns without waiting, so a
+    /// coordinator can have a write under way on every shard of a step at once. The default
+    /// applies the write before it returns, which is all a shard in this process needs.
+    fn start_write<'a>(&'a self, write: super::FannedWrite<'a>) -> super::Started<'a> {
+        super::Started::done(write.apply_to(self))
+    }
+    /// The shard a write started now is sent to, for a wrapper whose backing shard can be
+    /// exchanged (ADR-224). The caller keeps it while the write is under way, as a blocking
+    /// call keeps the backing it loaded for as long as it runs. `None`: this shard itself.
+    fn write_target(&self) -> Option<Arc<Box<dyn Shard>>> {
+        None
+    }
     /// Seal the memtable into an immutable base segment.
     fn flush(&self) -> Result<(), ShardError>;
 
