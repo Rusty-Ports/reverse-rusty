@@ -102,6 +102,29 @@ impl Scope {
         self.plan(is_the_step, after, false);
     }
 
+    /// The planned step fails and so does every step after it, whatever it is: the device
+    /// takes nothing more. What is on disk afterwards is what a process that died at that
+    /// step leaves, because every durable change is a step. [`heal`](Self::heal) before
+    /// the store is opened again.
+    pub fn stop_at(&self, is_the_step: impl Fn(&Step) -> bool + Send + 'static, after: usize) {
+        let reached = std::sync::atomic::AtomicBool::new(false);
+        let passed = AtomicUsize::new(0);
+        self.plan(
+            move |taken| {
+                if reached.load(Ordering::SeqCst) {
+                    return true;
+                }
+                if is_the_step(taken) && passed.fetch_add(1, Ordering::SeqCst) == after {
+                    reached.store(true, Ordering::SeqCst);
+                    return true;
+                }
+                false
+            },
+            0,
+            true,
+        );
+    }
+
     /// Plan no fault. Steps are still recorded.
     pub fn heal(&self) {
         locked(&self.0.state).planned = None;
@@ -205,6 +228,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["create a.tmp", "rename shard_000/a"]
         );
+    }
+
+    #[test]
+    fn a_stop_fails_the_planned_step_and_every_step_after_it_until_it_is_healed() {
+        let root = dir("stop");
+        let scope = Scope::open(&root);
+        scope.stop_at(|taken| taken.name == "rename", 1);
+        on_step("create", &root.join("a.tmp")).expect("before the stop");
+        on_step("rename", &root.join("a")).expect("the first rename passes");
+        on_step("sync", &root.join("b.tmp")).expect("before the stop");
+        on_step("rename", &root.join("b")).expect_err("the second rename is the stop");
+        assert_eq!(
+            scope.failed().map(|step| step.to_string()),
+            Some("rename b".into())
+        );
+        on_step("create", &root.join("c.tmp")).expect_err("and nothing after it is taken");
+        on_step("remove", &root.join("a")).expect_err("whatever it is");
+        scope.heal();
+        on_step("create", &root.join("c.tmp")).expect("healed");
     }
 
     #[test]

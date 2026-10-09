@@ -103,12 +103,13 @@ restarted once more. Nothing else changes; release builds contain none of the fa
 
 ## Later stages
 
-1. The single-node engine's operations in the same matrix. Done for a write, a bulk load, a
-   flush with the merge it starts, a merge and a backup (see "Later outcome" below). Still to
-   do: a vocabulary rebuild and the rewrite of a segment that holds deletions.
+1. The single-node engine's operations in the same matrix. Done (see the two later outcomes
+   below).
 2. Process death at a named step: `crashwriter` built with the facility behind a cargo
    feature, a step chosen by an environment variable, `abort` there, reopen in the parent. The same markers give the
-   SIGKILL lane (ADR-088) a way to know where a kill landed.
+   SIGKILL lane (ADR-088) a way to know where a kill landed. The matrices now stop at every
+   step inside the test process (see "Later outcome — stopping at a step"), which leaves the
+   same files; a real process adds what an abort does to memory and to the kernel.
 3. A coordinator killed in the middle of a checkpoint or a resize, which ADR-088 deferred.
 4. Lost unsynced data: remember each file's length at its last sync and each directory's
    entries since its last sync, and on a crash truncate and undo, as LevelDB's and RocksDB's
@@ -154,6 +155,34 @@ What the first runs found:
    ([ADR-223](adr-223-the-commit-records-how-far-the-log-is-sealed.md)), which makes every
    position exact and replaces the row-by-row test for every manifest that records it. The
    matrix deletes by memtable position in its seed and after every failed step.
+
+## Later outcome — stopping at a step (2026-10-08)
+
+A failed step is not a dead process. When a step fails, the operation goes on to what it
+does about that: a flush whose checkpoint marker cannot be appended still resets the log, so
+no failed step leaves "the new manifest and the log untouched", which is what a process that
+dies right after its commit leaves. Three mutants showed the gap: each broke something that
+only matters in such a state, and each survived.
+
+`Scope::stop_at` fails the chosen step and every step after it, whatever it is. Every durable
+change is a step, so what is on disk afterwards is what a process that died at that step
+leaves. Both matrices run it as a fourth way for every step, and a cluster build runs each
+step both ways.
+
+The single-node matrix also gained two operations (the rewrite of segments that hold
+deletions, and a vocabulary rebuild: 133 steps) and three checks:
+
+- **The open skips no segment its manifest names.** The model only sees a skipped segment
+  when it held a live row.
+- **An id is one row.** The engine's count of live rows equals the model's count of live
+  ids. Two rows of one id with one text answer every title alike.
+- The seed keeps a live row in the segment whose other rows are deleted, so a rewrite has
+  something to lose.
+
+It found no new defect: 532 single-node cases and 1,596 cluster cases pass. The mutants are
+now caught: old files removed after a rewrite whose commit failed (16 cases), the log reset
+after a rebuild whose commit failed (42), a rebuild that does not seal the memtable (6, all
+of them stops between the commit and the log's checkpoint).
 
 ## Proven
 

@@ -87,6 +87,14 @@ impl Acknowledged {
         }
         Ok(Self(held))
     }
+
+    /// How many ids hold a row, in a model that has been settled.
+    pub(crate) fn live(&self) -> usize {
+        self.0
+            .values()
+            .filter(|allowed| matches!(allowed.as_slice(), [Some(_)]))
+            .count()
+    }
 }
 
 #[cfg(test)]

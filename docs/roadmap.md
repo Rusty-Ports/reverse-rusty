@@ -646,8 +646,8 @@ capture; microbenchmarks alone are not sufficient.
   documented surface grammar.
 - **The crash matrix, further.** Every step of every in-process cluster operation is failed in
   turn (ADR-221), and so is every step of a single-node engine's write, bulk load, flush,
-  merge and backup. Still to do, in this order: the single-node engine's vocabulary rebuild
-  and its rewrite of a segment that holds deletions; process death at a named step, with `crashwriter`
+  merge, rewrite, vocabulary rebuild and backup; each step is also stopped at inside the test
+  process. Still to do, in this order: process death at a named step in a real process, with `crashwriter`
   built with the facility behind a cargo feature, which also gives the SIGKILL lane a record
   of where a kill landed;
   a coordinator killed in the middle of a checkpoint or a resize; the loss of data that was

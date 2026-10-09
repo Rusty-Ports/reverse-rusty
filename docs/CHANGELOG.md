@@ -9,6 +9,17 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — The crash matrices stop at every step
+
+- **Both crash matrices now stop at each step as well as failing it**
+  ([ADR-221](decisions/adr-221-every-step-of-a-durable-operation-has-a-name.md), later
+  outcome). A failed step lets the operation go on to its next one, so no failed step leaves
+  what a process that died right after a commit leaves. `Scope::stop_at` fails the step and
+  every step after it. 532 single-node cases and 1,596 cluster cases pass; no new defect.
+- **The single-node matrix covers the rewrite of segments that hold deletions and a
+  vocabulary rebuild** (133 steps), requires that an open skips no segment its manifest
+  names, and compares the engine's count of live rows with the model's count of live ids.
+
 ## 2026-10-08 — The commit records how far the log is sealed
 
 - **A delete by memtable position names the same row after a restart**

@@ -82,9 +82,14 @@ impl Op {
 
 #[derive(Clone, Copy, Debug)]
 enum Then {
+    /// The step fails, the operation handles that, and the cluster is dropped.
     Crash,
     WriteThenCrash,
     RetryThenCrash,
+    /// The step and every step after it fail: on disk, the process died at the step. An
+    /// operation whose step fails goes on to what it does about that, so this is the only
+    /// way to stop between two steps.
+    Stop,
 }
 
 fn config(dir: &std::path::Path) -> ClusterConfig {
@@ -164,7 +169,12 @@ fn case(op: Op, steps: &[Step], nth: usize, then: Then) -> Result<(), String> {
     let scope = Scope::open(&dir);
     let (cluster, mut acked) = seeded(&dir);
     scope.reset();
-    scope.fail(step, earlier);
+    if matches!(then, Then::Stop) {
+        let planned = step.clone();
+        scope.stop_at(move |taken| *taken == planned, earlier);
+    } else {
+        scope.fail(step, earlier);
+    }
     let _failed_or_absorbed = op.run(&cluster, &mut acked);
     if scope.failed().as_ref() != Some(step) {
         return Err(
@@ -172,7 +182,7 @@ fn case(op: Op, steps: &[Step], nth: usize, then: Then) -> Result<(), String> {
         );
     }
     match then {
-        Then::Crash => {}
+        Then::Crash | Then::Stop => {}
         Then::WriteThenCrash => {
             // Each is acknowledged or refused; what was acknowledged has to survive.
             let writes = Writes(&cluster);
@@ -188,6 +198,7 @@ fn case(op: Op, steps: &[Step], nth: usize, then: Then) -> Result<(), String> {
         }
     }
     drop(cluster);
+    scope.heal();
     // The scope stays open with nothing planned: what follows is then not really synced.
     let outcome = reopens(&dir, &acked);
     drop(scope);
@@ -200,7 +211,12 @@ fn every_step_of(op: Op) -> Vec<String> {
     let steps = steps_of(op);
     let mut failures = Vec::new();
     for nth in 0..steps.len() {
-        for then in [Then::Crash, Then::WriteThenCrash, Then::RetryThenCrash] {
+        for then in [
+            Then::Crash,
+            Then::WriteThenCrash,
+            Then::RetryThenCrash,
+            Then::Stop,
+        ] {
             if let Err(what) = case(op, &steps, nth, then) {
                 failures.push(format!(
                     "{op:?}, fault at step {nth} `{}`, then {then:?}: {what}",
@@ -268,16 +284,27 @@ fn a_build_failed_at_any_step_can_be_started_again() {
     let acked = Acknowledged::of(&corpus);
     let steps = steps_of_a_build(&corpus);
     let mut failures = Vec::new();
-    for (nth, step) in steps.iter().enumerate() {
+    let each_way = steps
+        .iter()
+        .enumerate()
+        .flat_map(|step| [(step, false), (step, true)]);
+    for ((nth, step), stopped) in each_way {
         let earlier = steps[..nth].iter().filter(|other| *other == step).count();
-        let dir = fresh_dir(&format!("build_{nth}"));
+        let dir = fresh_dir(&format!("build_{nth}_{stopped}"));
         let scope = Scope::open(&dir);
-        scope.fail(step, earlier);
+        if stopped {
+            // The process died at the step: nothing after it reached the disk.
+            let planned = step.clone();
+            scope.stop_at(move |taken| *taken == planned, earlier);
+        } else {
+            scope.fail(step, earlier);
+        }
         drop(ClusterEngine::build(vocab(), &config(&dir), &corpus));
         let outcome = (|| -> Result<(), String> {
             if scope.failed().as_ref() != Some(step) {
                 return Err("the build did not reach the step".into());
             }
+            scope.heal();
             match ClusterEngine::build(vocab(), &config(&dir), &corpus) {
                 Ok(again) => drop(again),
                 Err(ShardError::Config(_)) if ClusterEngine::cluster_exists(&dir) => {}
@@ -286,7 +313,8 @@ fn a_build_failed_at_any_step_can_be_started_again() {
             reopens(&dir, &acked)
         })();
         if let Err(what) = outcome {
-            failures.push(format!("build, fault at step {nth} `{step}`: {what}"));
+            let way = if stopped { "stopped" } else { "fault" };
+            failures.push(format!("build, {way} at step {nth} `{step}`: {what}"));
         }
         drop(scope);
         let _ = std::fs::remove_dir_all(&dir);
