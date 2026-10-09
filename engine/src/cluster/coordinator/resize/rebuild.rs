@@ -59,6 +59,7 @@ impl ClusterEngine {
         // synthetic (which has no recoverable string) — stays valid and is carried verbatim to
         // the query's new shard (ADR-074). Untagged ⇒ every tag vec is empty ⇒ byte-identical to
         // the pre-tag rebuild.
+        let mut lap = super::Lap::start();
         let live = Self::live_corpus_tagged(&change.current())?;
         self.rebuild_from_corpus(
             change,
@@ -68,7 +69,30 @@ impl ClusterEngine {
             new_vocab,
             new_generation,
             false,
+            Some(lap.lap()),
         )
+    }
+
+    /// How long each part of the last resize or vocabulary change took. `None` before the
+    /// first one. The rebuild a start runs for an older compiler is not timed: its corpus
+    /// comes from the log, not from a gather, and nothing can ask before it has finished.
+    #[must_use]
+    pub fn last_rebuild(&self) -> Option<super::RebuildTimings> {
+        *self
+            .last_rebuild
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Add what followed the publication to the times of the rebuild that just ran.
+    pub(in crate::cluster::coordinator) fn note_rebuild_commit(&self, commit: std::time::Duration) {
+        let mut last = self
+            .last_rebuild
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(timings) = last.as_mut() {
+            timings.commit = commit;
+        }
     }
 
     /// Rebuild from an already-folded logical corpus. Recovery uses this seam to
@@ -88,7 +112,14 @@ impl ClusterEngine {
         new_vocab: Option<Vocab>,
         new_generation: PlacementGeneration,
         append_missing_features: bool,
+        // How long the caller took to gather `live`, when the rebuild is one to keep times of.
+        gather: Option<std::time::Duration>,
     ) -> Result<(usize, Arc<Layout>), ShardError> {
+        let mut lap = super::Lap::start();
+        let mut timings = super::RebuildTimings {
+            gather: gather.unwrap_or_default(),
+            ..super::RebuildTimings::default()
+        };
         let current = change.current();
         // Every write is waiting at the layout lock. From here the old shards' storage is
         // frozen as well, at the shards themselves, whoever asks.
@@ -259,6 +290,7 @@ impl ClusterEngine {
             Arc::new(dict)
         };
         let rebuilt = extracted.len();
+        timings.extract = lap.lap();
 
         // Pass B — re-place each query under the NEW dict + NEW ring and bucket per shard. Tags
         // travel with the query (`tag_ids`, the ADR-074 carry-through): a different shard count
@@ -342,6 +374,7 @@ impl ClusterEngine {
         //    `sources.dat` would shadow the green ingest), then build a fresh durable shard —
         //    exactly `build`'s path. The post-commit `remove_orphan_shard_dirs` keeps the
         //    invariant "a resize commit leaves exactly shard_000..shard_{K′-1} on disk".
+        timings.place = lap.lap();
         let old_num_shards = current.shards.len();
         let rf = self.replication_factor.max(1);
         let data_dir = self.data_dir.clone();
@@ -431,6 +464,7 @@ impl ClusterEngine {
         // keeping its reservation would 409 a re-add on the LIVE coordinator
         // while a REOPENED one accepts it (review finding). The write fence the
         // change holds makes this race-free with every per-ID writer.
+        timings.build = lap.lap();
         // One swap: no read observes a half-state. The normalizer is `new_norm` (the same
         // instance on a resize). The vocabulary is replaced only when a new one was supplied
         // (`set_vocab`); a resize passes `None` and keeps it. The logical-id directory changes
@@ -450,6 +484,14 @@ impl ClusterEngine {
             || self.replace_logical_ids(accepted_ids),
         )?;
         frozen.keep();
+        timings.publish = lap.lap();
+        timings.queries = rebuilt;
+        if gather.is_some() {
+            *self
+                .last_rebuild
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(timings);
+        }
         Ok((rebuilt, next))
     }
 }

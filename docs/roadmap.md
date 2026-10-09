@@ -359,26 +359,26 @@ writes when it is not, and treat a checkpoint that cannot read its log as a fail
 **Completion.** A test deletes the log of a running store and sees the next write refused and
 health change, for the single-node engine, the coordinator and a shard node.
 
-### Writes during a rebuild, and what a rebuild costs
+### Writes during a rebuild
 
-**Problem.** A vocabulary change or an in-process resize now serves searches and reads while it
+**Problem.** A vocabulary change or an in-process resize serves searches and reads while it
 rebuilds ([ADR-209](decisions/adr-209-only-a-search-runs-beside-a-layout-change.md),
 [ADR-210](decisions/adr-210-the-coordinator-serves-beside-a-rebuild.md)), but every write waits
-for the whole rebuild and its checkpoint. How long that is, and how much memory the two layouts
-need at their peak, has not been measured at scale.
+for the whole rebuild and its checkpoint. That is measured
+([ADR-225](decisions/adr-225-what-a-rebuild-costs-and-who-frees-the-layout-it-replaced.md)):
+about five seconds for each million queries on the reference machine, linear in the corpus.
+A deployment whose writers give up sooner than that has to schedule the change.
 
-**Direction.** Measure a rebuild's time and peak memory per phase at scale, and publish the
-numbers with sizing guidance. If the write pause is too long for real corpora, carry the writes
-that arrive during a rebuild into the new layout, so that only the swap pauses them. The
-established shape is the one online schema-change tools use (gh-ost, `CREATE INDEX
-CONCURRENTLY`): build beside from a snapshot, keep accepting writes and log them (the cluster
-log already orders them), replay the tail into the new layout, then pause writes only for the
-last of the tail and the swap. Give that pause a timeout that abandons the cut-over, so that a
-swap which cannot finish does not queue every writer behind it.
+**Direction.** Carry the writes that arrive during a rebuild into the new layout, so that
+only the swap pauses them. The established shape is the one online schema-change tools use
+(gh-ost, `CREATE INDEX CONCURRENTLY`): build beside from a snapshot, keep accepting writes and
+log them (the cluster log already orders them), replay the tail into the new layout, then
+pause writes only for the last of the tail and the swap. Give that pause a timeout that
+abandons the cut-over, so that a swap which cannot finish does not queue every writer behind
+it. Extracting every query again is the largest part of a rebuild; a resize does not change
+the feature model, so it could reuse the stored extraction.
 
-**Completion.** A measured capture of rebuild time and peak memory per phase is published, and
-either writes are accepted during a rebuild without losing an acknowledged query, or the
-measured pause is documented as acceptable with the corpus size at which it stops being so.
+**Completion.** Writes are accepted during a rebuild without losing an acknowledged query.
 
 ## Priority 4 — feature-model evolution and parity
 

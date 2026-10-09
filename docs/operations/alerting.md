@@ -98,7 +98,10 @@ restart the node; it starts from the manifest on disk with every acknowledged wr
 replica left the in-sync set (a replicated write to it failed, or it was not proven equal to its
 primary when the coordinator connected, ADR-195). No write was lost, but that position has less
 redundancy until the replica is recovered ([runbook §6](cluster-deployment.md), *Replica
-replacement*); `/_health` reports `out_of_sync_replicas`.
+replacement*); `/_health` reports `out_of_sync_replicas`. The `op="thread_start"` series is
+different too: the node could not start a thread and ran that work on the calling thread
+(ADR-225). No write was lost. The process is at its limit of threads or of memory: check
+`ulimit -u`, the container's pid limit and its memory.
 
 ### RRLogLossAccepted
 `log_loss_last_accepted_timestamp_seconds > 0` and less than seven days old — **page.** A store

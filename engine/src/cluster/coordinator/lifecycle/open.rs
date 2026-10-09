@@ -125,7 +125,10 @@ impl ClusterEngine {
             retired_layouts: Mutex::new(Vec::new()),
             #[cfg(test)]
             admission_hook: Mutex::new(None),
+            #[cfg(test)]
+            no_release_thread: std::sync::atomic::AtomicBool::new(false),
             rebuild_hook: Mutex::new(None),
+            last_rebuild: Mutex::new(None),
             pending_alias_import_manifest: Mutex::new(None),
             committed_placement_generation: AtomicU64::new(
                 durable
@@ -558,6 +561,7 @@ impl ClusterEngine {
                 None,
                 next_generation,
                 true,
+                None,
             )?;
             engine
                 .control

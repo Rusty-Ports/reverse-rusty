@@ -100,6 +100,8 @@ const LAYOUT_FREE: &[&str] = &[
     "ensure_resize_write_fence_open",
     // whether a layout change is running: a probe of the layout lock, which it does not hold
     "layout_change_in_progress",
+    // the times of the last rebuild: a record of its own, read whole
+    "last_rebuild",
     // test seams: the hook a rebuild calls, and the flag a remote resize raises
     "set_rebuild_hook_for_test",
     "set_resize_write_fence_for_test",

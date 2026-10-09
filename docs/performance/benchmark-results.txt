@@ -47,6 +47,9 @@ HOW TO RUN
   cargo run --release --bin snapbench -- 1000000 200 /tmp/snapbench-data
                                                             #   the same on mmap base segments
   cargo run --release --bin clusterbench -- 100000 5000 8 0.05  # CLUSTER fan-out + candidate structure
+  cargo run --release --bin clusterbench -- rebuild 1000000 5000 4 8
+                                                            # what a resize and a vocabulary change cost
+                                                            #   a serving coordinator (ADR-225)
   cargo run --release --bin rankbench -- 20000 500 8 275775489  # local/distributed bounded top-K + fetch
   cargo run --release --bin rankbench -- 20000 500 8 275775489 \
       ../deploy/ranking-profiles.example.json linear_v1        # selected CPU profile
@@ -63,6 +66,7 @@ HOW TO RUN
   tagbench args:     <num_queries> <num_titles> <segments> <broad_frac> <seed>
   snapbench args:    <num_queries> <iters> [data_dir]
   clusterbench args: <num_queries> <num_titles> <num_shards> <broad_frac> <seed>
+  clusterbench rebuild args: <num_queries> <num_titles> <shards_from> <shards_to> <seed>
   rankbench args:    <num_queries> <num_titles> <num_shards> <seed> [profile_file] [profile_name]
   Most seeds default to 0x00C0FFEE; tagbench defaults to 0x174. Budget: each is <~30s except the
   5M+ bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
@@ -519,6 +523,37 @@ CAPTURE LOG  (newest first — append a block per run; lead with the machine)
   segbench             : 53.48/55.11/56.67/57.68 cands/title;  717728/574005/327257/351379 titles/s/core
   oracle               : 109024 == 109024 matches, false_neg=0, false_pos=0
   updates              : ~730–825k/s/core, immediate (epoch) visibility
+
+[2026-10-08]  Apple M4 Max, 16-core, rustc 1.95.0 (release).  WHAT A REBUILD COSTS A SERVING
+              COORDINATOR (ADR-225; clusterbench rebuild <N> 5000 4 8; durable in-process
+              cluster, one thread searching and one writing beside each rebuild).
+  seconds; "write" is the longest any write waited; "peak" is peak resident memory in MB with the
+  resident memory when that rebuild began in brackets. Only searches and writes that began after
+  the rebuild began are counted.
+  RESIZE 4 -> 8
+    queries   rebuild  gather  extract  place  build  publish  commit   write    peak (began)
+    100k        1.02    0.03    0.16    0.05   0.42   0.000    0.24     0.90     254 (152)
+    500k        2.80    0.21    0.83    0.25   0.90   0.001    0.36     2.55    1039 (375)
+    1M          4.98    0.50    1.68    0.56   1.61   0.002    0.45     4.81    1762 (922)
+    2M         10.74    1.50    3.47    1.48   3.36   0.012    0.89    10.71    2365 (1505)
+  VOCABULARY CHANGE (one synonym added)
+    100k        1.09    0.03    0.21    0.05   0.47   0.000    0.26     1.01     306 (150)
+    500k        2.94    0.19    1.07    0.25   0.87   0.001    0.36     2.73    1318 (881)
+    1M          5.23    0.39    2.20    0.51   1.46   0.001    0.51     5.07    2134 (1068)
+    2M         10.94    1.27    4.71    1.06   3.11   0.007    0.78    10.94    2816 (2192)
+  search latency, microseconds (p50 / p99), nothing else running -> beside the resize:
+    100k  38 / 114 -> 37 / 114     500k  45 / 129 -> 44 / 136
+    1M    49 / 138 -> 50 / 152     2M    54 / 231 -> 57 / 241
+  the longest single search beside a rebuild: 4 ms (100k), 4-9 ms (500k), 6-42 ms (1M), 17-66 ms
+  (2M). Before a replaced layout was freed on a thread of its own, the longest at 2M was
+  205-293 ms and began right after the publication: that search dropped the last handle on the
+  old layout and freed its shards.
+  Reading it: time is linear in the corpus (about 5 s per million queries here), extract and
+  build are most of it, a write waits for the whole rebuild, and searches are not slowed. The
+  wall time includes waiting for the layout lock, which the parts do not. Resident memory when
+  a rebuild begins depends on what the allocator has kept, so the peak ratio moves between runs
+  (1.3x to 2.8x here); plan for 3x.
+  Throughput is machine-dependent; the shape is not.
 
 [2026-10-06]  Apple M4 Max, rustc 1.95.0 (release).  WRITE + PUBLISH WITH THE SNAPSHOT HELD (ADR-016
               later outcome; snapbench, 200 iterations per leg, automatic flush off, each leg

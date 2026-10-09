@@ -179,7 +179,7 @@ impl ClusterEngine {
                     Ok(h) => slots.push(Slot::Spawned(pos, h)),
                     Err(e) => {
                         self.emit(EngineEvent::DurabilityFailure {
-                            op: DurabilityOp::ReplicaDesync,
+                            op: DurabilityOp::ThreadStart,
                             detail: format!(
                                 "spawning a parallel-move thread for shard {pos} failed; running \
                                  the move inline (a narrower wave — same guarantees, less overlap)"
