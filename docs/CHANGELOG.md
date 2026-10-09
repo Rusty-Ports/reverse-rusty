@@ -9,6 +9,17 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — A write is under way on every shard of a step at once
+
+- **A coordinator of remote shards sends each step of a write to all its shards at once**
+  ([ADR-224](decisions/adr-224-a-write-is-under-way-on-every-shard-of-a-step-at-once.md)).
+  A delete, the removal of copies an upsert leaves elsewhere, and an insert on the broad lane
+  called one shard after the other, so a write cost a round trip for every shard it touched.
+  Over loopback gRPC a delete against 16 shards went from 874 µs to 181 µs and an upsert that
+  moves a query from 870 µs to 275 µs; between machines the difference is larger.
+- The order of a write's steps, the shards it reports as failed, the error it reports and
+  in-process clusters are unchanged.
+
 ## 2026-10-08 — The crash matrices stop at every step
 
 - **Both crash matrices now stop at each step as well as failing it**

@@ -34,7 +34,7 @@ fn record_writes(
     calls
 }
 
-fn shard_of(cluster: &ClusterEngine, dsl: &str) -> usize {
+pub(super) fn shard_of(cluster: &ClusterEngine, dsl: &str) -> usize {
     let ast = crate::dsl::parse(dsl).expect("dsl");
     let mut lc = String::new();
     let ex = crate::compile::extract_readonly(
@@ -56,7 +56,7 @@ fn shard_of(cluster: &ClusterEngine, dsl: &str) -> usize {
 }
 
 /// Two one-token bodies that live on different shards.
-fn two_homes(cluster: &ClusterEngine) -> (String, String) {
+pub(super) fn two_homes(cluster: &ClusterEngine) -> (String, String) {
     let tokens: Vec<String> = (0..64).map(|i| format!("zzfix{i}")).collect();
     let old = tokens[0].clone();
     let new = tokens

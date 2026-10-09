@@ -304,6 +304,48 @@ impl ReplicatedShard {
         }
     }
 
+    /// Send the in-sync replicas a write the primary has answered with `answer`. A replica
+    /// mirrors what the primary did and does not decide again: a replace whose condition the
+    /// primary declined is not sent, and one it applied is sent without the condition. Caller
+    /// holds [`Self::lock`].
+    fn mirror(
+        &self,
+        write: crate::cluster::shard::FannedWrite<'_>,
+        answer: crate::cluster::shard::Applied,
+    ) {
+        use crate::cluster::shard::{Applied, FannedWrite, ReplaceMode};
+        match (write, answer) {
+            (FannedWrite::Replace { write, .. }, Applied::Replaced(status)) => {
+                if status.applied() {
+                    self.fan_to_replicas(|shard| {
+                        shard
+                            .replace_placed(write, ReplaceMode::Unconditional)
+                            .map(|_| ())
+                    });
+                }
+            }
+            (FannedWrite::Replace { .. }, _) => {}
+            (FannedWrite::Delete { logical }, _) => {
+                self.fan_to_replicas(|shard| shard.delete_by_logical_id(logical).map(|_| ()));
+            }
+            (
+                FannedWrite::Insert {
+                    ex,
+                    logical,
+                    version,
+                    text,
+                    tags,
+                    placement,
+                },
+                _,
+            ) => self.fan_to_replicas(|shard| {
+                shard
+                    .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
+                    .map(|_| ())
+            }),
+        }
+    }
+
     /// Atomically promote a peer-recovered `replica` into the in-sync set under a brief write
     /// quiesce (ADR-040). Holding `write_lock` blocks every composite write/fan-out, so the final
     /// residual drain + the in-sync insertion happen with NO write able to slip between them (which

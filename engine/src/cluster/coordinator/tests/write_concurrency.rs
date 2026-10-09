@@ -2,11 +2,12 @@ use super::*;
 
 mod bench;
 mod checkpoint;
+mod fanned;
 mod harness;
 mod layout_change;
 mod upsert_repair;
 mod visibility;
-use harness::{instrument, pause, WriteCall};
+use harness::{instrument, instrument_deferred, observed, pause, WriteCall};
 
 #[test]
 fn formerly_colliding_write_proceeds_during_failed_log_append() {

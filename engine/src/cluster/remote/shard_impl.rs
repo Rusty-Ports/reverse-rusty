@@ -5,7 +5,7 @@ use super::{
     RpcMethod, RpcOutcome, Shard, ShardBatchRankedMatch, ShardError, ShardRankedMatch,
     ShardRankedTitle, TagPredicate,
 };
-use crate::cluster::shard::{PlacedWrite, ReplaceMode, ReplaceStatus};
+use crate::cluster::shard::{FannedWrite, PlacedWrite, ReplaceMode, ReplaceStatus, Started};
 
 impl Shard for RemoteShard {
     fn percolate_filtered(
@@ -880,17 +880,7 @@ impl Shard for RemoteShard {
         tags: &[(String, String)],
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<Option<u32>, ShardError> {
-        placement.validate_for_shard(self.shard_id, self.placement_generation, self.num_shards)?;
-        let req = proto::InsertRequest {
-            item: Some(proto::AddItem {
-                logical_id: logical,
-                dsl: text.to_string(),
-                version,
-                tags: proto::tags_to_proto(tags),
-                placement: Some(proto::placement_to_proto(placement)),
-            }),
-            shard_id: self.shard_id,
-        };
+        let req = self.insert_request(logical, version, text, tags, placement)?;
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Insert, CallKind::Write, move || {
             let mut client = client.clone();
@@ -910,22 +900,7 @@ impl Shard for RemoteShard {
         write: &PlacedWrite<'_>,
         mode: ReplaceMode,
     ) -> Result<ReplaceStatus, ShardError> {
-        write.placement.validate_for_shard(
-            self.shard_id,
-            self.placement_generation,
-            self.num_shards,
-        )?;
-        let req = proto::ReplaceRequest {
-            item: Some(proto::AddItem {
-                logical_id: write.logical,
-                dsl: write.text.to_string(),
-                version: write.version,
-                tags: proto::tags_to_proto(write.tags),
-                placement: Some(proto::placement_to_proto(write.placement)),
-            }),
-            shard_id: self.shard_id,
-            only_if_same_placement: mode == ReplaceMode::IfSamePlacement,
-        };
+        let req = self.replace_request(write, mode)?;
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Replace, CallKind::Write, move || {
             let mut client = client.clone();
@@ -937,38 +912,21 @@ impl Shard for RemoteShard {
                     .map(tonic::Response::into_inner)
             }
         })?;
-        let conditional = mode == ReplaceMode::IfSamePlacement;
-        match proto::ReplaceStatus::try_from(reply.status) {
-            Ok(proto::ReplaceStatus::Replaced) => Ok(ReplaceStatus::Replaced {
-                removed: reply.removed as usize,
-            }),
-            Ok(proto::ReplaceStatus::Inserted) => Ok(ReplaceStatus::Inserted),
-            Ok(proto::ReplaceStatus::Rejected) => Ok(ReplaceStatus::Rejected),
-            // A declined condition is only an honest answer to a conditional request.
-            Ok(proto::ReplaceStatus::Absent) if conditional => Ok(ReplaceStatus::Absent),
-            Ok(proto::ReplaceStatus::PlacementMismatch) if conditional => {
-                Ok(ReplaceStatus::PlacementMismatch)
-            }
-            _ => Err(ShardError::Protocol(format!(
-                "shard {} returned replace status {} for logical {}",
-                self.shard_id, reply.status, write.logical
-            ))),
-        }
+        self.replace_status(&reply, mode, write.logical)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
-        let req = proto::DeleteRequest {
-            logical_id: logical,
-            shard_id: self.shard_id,
-            placement_generation: self.placement_generation.get(),
-            num_shards: self.num_shards,
-        };
+        let req = self.delete_request(logical);
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Delete, CallKind::Write, move || {
             let mut client = client.clone();
             async move { client.delete(req).await.map(tonic::Response::into_inner) }
         })?;
         Ok(reply.removed as usize)
+    }
+
+    fn start_write<'a>(&'a self, write: FannedWrite<'a>) -> Started<'a> {
+        self.start_fanned(write)
     }
 
     fn flush(&self) -> Result<(), ShardError> {

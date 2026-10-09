@@ -187,6 +187,7 @@ mod adopt;
 mod bulk_load;
 mod call;
 mod connect;
+mod fanned;
 mod ingest_chunks;
 mod live_sources;
 mod logical_ids;

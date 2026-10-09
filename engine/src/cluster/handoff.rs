@@ -410,6 +410,14 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().delete_by_logical_id(logical)
     }
 
+    // `start_write` keeps its default, which applies the write through the forwards above:
+    // what it returns borrows the shard that started it, and the backing here is only
+    // loaded. A coordinator that wants the write under way on several shards asks for the
+    // backing with `write_target` and starts it there.
+    fn write_target(&self) -> Option<Arc<Box<dyn Shard>>> {
+        Some(self.current.load_full())
+    }
+
     fn flush(&self) -> Result<(), ShardError> {
         self.current.load().flush()
     }

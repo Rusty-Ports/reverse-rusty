@@ -311,6 +311,11 @@ fn forwards_defaulted_methods_to_backing() {
         Some("http://recording:1".to_string()),
         "live_primary_endpoint must preserve ownership instead of deriving it from keep-set order"
     );
+
+    // A write that is to be started is started on the backing (ADR-224): the wrapper names
+    // it, where the trait default says "this shard itself".
+    let target = h.write_target().expect("the wrapper names its backing");
+    assert_eq!(target.num_queries().expect("num_queries"), 42);
 }
 
 /// A real write through the wrapper reaches the backing (not a no-op): insert lands and is
