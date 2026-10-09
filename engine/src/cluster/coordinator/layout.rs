@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::dict::Dict;
+use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
 use crate::ownership::PlacementGeneration;
 use crate::vocab::Vocab;
@@ -319,7 +320,29 @@ impl super::ClusterEngine {
         retired.retain(|layout| layout.strong_count() > 0);
         retired.push(Arc::downgrade(&previous));
         drop(retired);
-        release_off_the_readers(previous);
+        let started = release_off_the_readers(previous, |release| {
+            #[cfg(test)]
+            if self
+                .no_release_thread
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(std::io::Error::other("no thread can be started"));
+            }
+            std::thread::Builder::new()
+                .name(RELEASE_THREAD.into())
+                .spawn(release)
+                .map(drop)
+        });
+        if let Err(error) = started {
+            self.emit(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::ThreadStart,
+                detail: format!(
+                    "starting {RELEASE_THREAD} failed; the layout that was replaced is freed by \
+                     its last holder, and a search that is the last may take as long as that takes"
+                ),
+                error: error.to_string(),
+            });
+        }
         next
     }
 
@@ -415,28 +438,38 @@ impl super::ClusterEngine {
     }
 }
 
-/// Free a replaced layout on a thread of its own, once nothing else holds it.
+/// The thread a replaced layout is freed on.
+const RELEASE_THREAD: &str = "rr-layout-release";
+
+/// How long that thread waits for the operations still reading the layout. It is longer than
+/// any search should run; what holds the layout longer becomes its last holder.
+const RELEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What that thread runs.
+type Release = Box<dyn FnOnce() + Send>;
+
+/// Free a replaced layout once nothing else holds it, on a thread that `start` starts.
 ///
 /// Whoever drops the last handle on a layout frees it, and with it every shard of the
 /// corpus it served. A search loads the layout for one title, so without this the last
 /// handle is often a search's, and that one search pays for the whole teardown: hundreds of
-/// milliseconds at two million queries. A reader does not reclaim (the rule of RCU): this
+/// milliseconds at two million queries. A reader does not reclaim (the rule of RCU): the
 /// thread keeps a handle until the readers are done and is then the one that lets go.
 ///
-/// An operation that holds the old layout past the grace period becomes its last holder, as
-/// before; it is long-running already.
-fn release_off_the_readers(replaced: Arc<Layout>) {
-    let release = move || {
-        let deadline = std::time::Instant::now() + RETIRED_LAYOUT_GRACE;
+/// An operation that holds the old layout longer than the thread waits becomes its last
+/// holder, as it was before there was a thread; it is long-running already.
+///
+/// When the thread cannot be started its handle goes with what it was to run, the layout is
+/// freed by its last holder as it was before, and the error is returned to be reported.
+fn release_off_the_readers(
+    replaced: Arc<Layout>,
+    start: impl FnOnce(Release) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    start(Box::new(move || {
+        let deadline = std::time::Instant::now() + RELEASE_PATIENCE;
         while Arc::strong_count(&replaced) > 1 && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         drop(replaced);
-    };
-    let started = std::thread::Builder::new()
-        .name("rr-layout-release".into())
-        .spawn(release);
-    // A thread that could not be started has dropped the closure, and the handle with it,
-    // on this thread: the layout is released as it was before there was one.
-    drop(started);
+    }))
 }

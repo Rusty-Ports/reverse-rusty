@@ -33,9 +33,15 @@ corpus.
    Only what begins after the rebuild has begun is counted.
 3. **A replaced layout is freed on a thread of its own.** When a layout is published, the one
    it replaces is handed to a thread that keeps a handle until nothing else holds it, and
-   then lets go. A reader's handle is never the last, so a reader never frees a corpus. An
-   operation that holds the old layout longer than the grace period becomes its last holder
-   as before; it is long-running already.
+   then lets go. A reader's handle is never the last, so a reader never frees a corpus. The
+   thread waits thirty seconds, which is longer than any search should run; an operation that
+   holds the old layout longer becomes its last holder as before.
+4. **A thread that cannot be started is reported.** The layout is then freed by its last
+   holder, as it was before there was a thread, and the coordinator raises a durability event
+   with a new operation, `thread_start`, which is not data at risk. The move of several
+   shards at once (ADR-095) already ran a move on the calling thread when it could not start
+   one for it, and reported that as `replica_desync`, which names something else; it reports
+   `thread_start` now.
 
 ## What was measured
 
@@ -72,6 +78,10 @@ the parts do not.)
   vocabulary change.
 - A search no longer stalls when a rebuild publishes. Each rebuild starts one short-lived
   thread, `rr-layout-release`.
+- `durability_failures_total` has a new `op`, `thread_start`: a thread the engine starts to
+  keep work off its callers could not be started and the work ran on the caller. Nothing is
+  lost. The shipped alert on that counter fires for it, as it does for every `op`: a process
+  that cannot start a thread is at a limit an operator should know of.
 - Operators have numbers to plan a resize or a vocabulary change by:
   [cluster deployment, scaling](../operations/cluster-deployment.md).
 
@@ -96,10 +106,15 @@ second.
 
 ## Proven
 
-- `layout_change::a_reader_is_not_the_one_that_frees_a_replaced_layout`: after a resize, a
+- `layout_release::a_reader_is_not_the_one_that_frees_a_replaced_layout`: after a resize, a
   handle taken as a search takes one is not the only one left on the replaced layout, and
   the layout is freed after that handle is dropped. Without the release thread the test
   fails.
+- `layout_release::a_release_thread_that_cannot_be_started_is_reported`: the change still
+  publishes, one `thread_start` failure is reported, and the layout is freed by its last
+  holder. Fails when nothing is reported.
+- `layout_release::replaced_layouts_are_forgotten_once_released`: once the release threads
+  have let go, the next change remembers only the layout it replaced.
 - `layout_change::a_rebuild_keeps_the_time_of_each_of_its_parts`: a resize and a vocabulary
   change are timed, the commit of a durable cluster is counted, the record is of the last
   rebuild, and a resize that rebuilds nothing leaves it.

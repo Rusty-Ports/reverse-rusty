@@ -380,6 +380,9 @@ pub struct ClusterEngine {
     /// Called between the two steps of a mutation's admission, by a test of their order.
     #[cfg(test)]
     admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Set by a test of what a layout change does when its release thread cannot be started.
+    #[cfg(test)]
+    no_release_thread: std::sync::atomic::AtomicBool,
     /// Called by a rebuild once it holds the layout lock alone and has frozen the shards it
     /// replaces. A test outside this crate stops a rebuild there to show what answers beside
     /// it. Never set in production.

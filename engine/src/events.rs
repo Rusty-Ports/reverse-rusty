@@ -102,6 +102,11 @@ pub enum DurabilityOp {
     /// ([`ACCEPTED_LOG_LOSSES_FILE`](crate::storage::ACCEPTED_LOG_LOSSES_FILE)), which is
     /// what a later start reports; this event is raised by the start that accepts it.
     LogLost,
+    /// A thread the engine starts to keep work off its callers could not be started, and the
+    /// work ran on the calling thread instead. Nothing is lost and nothing is skipped: the
+    /// cost is the caller's time, and the detail says whose. NOT data at risk. It usually
+    /// means the process is at its limit of threads or of memory.
+    ThreadStart,
 }
 
 impl DurabilityOp {
@@ -128,6 +133,7 @@ impl DurabilityOp {
             DurabilityOp::ClusterPartialApply => "cluster_partial_apply",
             DurabilityOp::LogicalIdDirectory => "logical_id_directory",
             DurabilityOp::LogLost => "log_lost",
+            DurabilityOp::ThreadStart => "thread_start",
         }
     }
 
@@ -155,7 +161,8 @@ impl DurabilityOp {
             | DurabilityOp::WalTornTail
             | DurabilityOp::Compaction
             | DurabilityOp::ReplicaDesync
-            | DurabilityOp::LogicalIdDirectory => false,
+            | DurabilityOp::LogicalIdDirectory
+            | DurabilityOp::ThreadStart => false,
         }
     }
 }

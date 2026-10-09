@@ -375,6 +375,7 @@ mod exhaustive;
 mod interrupted_build;
 mod layout_change;
 mod layout_discipline;
+mod layout_release;
 mod log_creation;
 mod repair;
 mod replaced_segments;

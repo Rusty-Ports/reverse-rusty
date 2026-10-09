@@ -9,7 +9,7 @@ fn corpus(count: u64) -> Vec<(u64, String)> {
         .collect()
 }
 
-fn in_memory(shards: usize, count: u64) -> ClusterEngine {
+pub(super) fn in_memory(shards: usize, count: u64) -> ClusterEngine {
     let cfg = ClusterConfig {
         num_shards: shards,
         include_broad: true,
@@ -538,44 +538,6 @@ fn a_layout_change_in_progress_can_be_seen_without_waiting_for_it() {
         !beside_an_operation,
         "an operation in flight was taken for one"
     );
-}
-
-/// An in-memory engine never runs the cleanup that forgets the layouts it has replaced.
-#[test]
-fn replaced_layouts_are_forgotten_once_released() {
-    let cluster = in_memory(3, 50);
-    for shards in [4, 5, 6, 3, 4, 5, 6, 3] {
-        cluster.resize(shards).expect("resize");
-    }
-    let remembered = cluster.retired_layouts.lock().expect("retired").len();
-    assert!(
-        remembered <= 1,
-        "{remembered} replaced layouts are still remembered after they were released"
-    );
-}
-
-/// Whoever drops the last handle on a replaced layout frees every shard it held. A search
-/// holds a layout for one title, so its handle must not be the last: after a layout is
-/// replaced, something other than the reader keeps it until the readers are done, and frees
-/// it then.
-#[test]
-fn a_reader_is_not_the_one_that_frees_a_replaced_layout() {
-    let cluster = in_memory(2, 200);
-    let read_by_a_search = cluster.layout();
-    let replaced = Arc::downgrade(&read_by_a_search);
-
-    cluster.resize(3).expect("resize");
-    assert!(
-        replaced.strong_count() >= 2,
-        "the search's handle is the only one left on the layout it reads"
-    );
-    drop(read_by_a_search);
-    // The other holder lets go once the reader has, and the layout is freed there.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while replaced.strong_count() > 0 && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert_eq!(replaced.strong_count(), 0, "the replaced layout was freed");
 }
 
 /// A rebuild keeps the time each of its parts took: for a resize and for a vocabulary
