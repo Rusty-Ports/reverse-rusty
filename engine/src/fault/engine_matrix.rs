@@ -2,8 +2,10 @@
 //!
 //! The same matrix as the cluster's (`cluster/coordinator/tests/crash_matrix.rs`), for one
 //! engine: learn the steps an operation takes, then fail each of them and crash at once,
-//! after more writes, or after a retry. What reopens must hold every acknowledged write and
-//! no acknowledged delete, take a write and a flush, and reopen the same again.
+//! after more writes, or after a retry, and stop at each of them (that step and every step
+//! after it fail, which leaves on disk what a process that died there leaves). What reopens
+//! must hold every acknowledged write and no acknowledged delete, skip no segment its
+//! manifest names, take a write and a flush, and reopen the same again.
 //!
 //! Two operations have one more rule. A commit whose manifest was renamed and whose
 //! directory sync failed has two outcomes, and both are opened: the manifest that a restart
@@ -49,8 +51,16 @@ fn matched(engine: &Engine, title: &str) -> Vec<u64> {
     out
 }
 
+/// The model's check, and one of its own: an id is one row. Two rows of one id with the
+/// same text answer every title alike, so the model cannot tell them from one, and the
+/// engine's count of live rows can.
 fn settle(acked: &Acknowledged, engine: &Engine) -> Result<Acknowledged, String> {
-    acked.settle(|title| Ok(matched(engine, title)))
+    let settled = acked.settle(|title| Ok(matched(engine, title)))?;
+    let (rows, ids) = (engine.num_live_queries(), settled.live());
+    if rows != ids {
+        return Err(format!("{rows} live rows for {ids} live ids"));
+    }
+    Ok(settled)
 }
 
 fn insert(engine: &mut Engine, acked: &mut Acknowledged, id: u64, text: &str) -> bool {
@@ -91,17 +101,21 @@ enum Op {
     BulkLoad,
     Flush,
     Compact,
+    Reseal,
+    Rebuild,
     Backup,
 }
 
 impl Op {
-    const ALL: [Op; 7] = [
+    const ALL: [Op; 9] = [
         Op::Insert,
         Op::Upsert,
         Op::Delete,
         Op::BulkLoad,
         Op::Flush,
         Op::Compact,
+        Op::Reseal,
+        Op::Rebuild,
         Op::Backup,
     ];
 
@@ -124,21 +138,54 @@ impl Op {
                 engine.compact_all();
                 true
             }
+            // The rewrite of each segment that holds deletions, without the rows deleted.
+            Op::Reseal => {
+                engine.reseal_tombstoned_segments();
+                true
+            }
+            // A vocabulary change and the recompile of every row under it. The vocabulary
+            // is one under which every text here matches as it did.
+            Op::Rebuild => {
+                if engine.set_vocab(crate::vocab::Vocab::default()).is_ok() {
+                    engine.recompile_stale_segments();
+                }
+                true
+            }
             Op::Backup => engine.backup_to(&root.join("backup")).is_ok(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Then {
+    /// The step fails, the operation handles that, and the engine is dropped.
     Crash,
     WriteThenCrash,
     RetryThenCrash,
+    /// The step and every step after it fail: on disk, the process died at the step. A
+    /// failed step lets the operation go on to its next one (a flush whose checkpoint
+    /// marker fails still resets the log), so this is the only way to stop between two.
+    Stop,
+}
+
+impl Then {
+    const ALL: [Then; 4] = [
+        Then::Crash,
+        Then::WriteThenCrash,
+        Then::RetryThenCrash,
+        Then::Stop,
+    ];
 }
 
 /// A durable engine with two segments on disk and a tail of every kind of write in its log.
 fn seeded(root: &Path) -> (Engine, Acknowledged) {
-    let corpus = [(1, TEXTS[0].to_string()), (2, TEXTS[1].to_string())];
+    // Ids 1 and 2 are replaced and deleted below. Id 13 stays live beside them, so a rewrite
+    // of their segment has a row to keep.
+    let corpus = [
+        (1, TEXTS[0].to_string()),
+        (2, TEXTS[1].to_string()),
+        (13, "copper kettle".to_string()),
+    ];
     let mut engine = Engine::with_config(norm(), config(&root.join("data")));
     engine.try_bulk_ingest(&corpus).expect("seed bulk load");
     let mut acked = Acknowledged::of(&corpus);
@@ -199,6 +246,13 @@ fn steps_of(op: Op) -> Vec<Step> {
 fn reopens(root: &Path, acked: &Acknowledged) -> Result<(), String> {
     let data = root.join("data");
     let mut engine = Engine::open(norm(), config(&data)).map_err(|e| format!("open: {e}"))?;
+    // A manifest names only what is there to load, whatever was lost.
+    let skipped = engine.snapshot().skipped_segments();
+    if skipped != 0 {
+        return Err(format!(
+            "the open skipped {skipped} segment(s) its manifest names"
+        ));
+    }
     // From here on every id has one state: the one this open found.
     let mut acked = settle(acked, &engine)?;
     if !insert(&mut engine, &mut acked, 90, "silver spoon") {
@@ -287,15 +341,17 @@ fn case(op: Op, steps: &[Step], nth: usize, then: Then) -> Result<(), String> {
         std::sync::Arc::clone(&replaced),
         root.join("data").join("manifest.bin"),
     );
-    scope.fail_where(
-        move |taken| {
-            if taken.name == "rename" && taken.path == "data/manifest.bin" {
-                *at_the_rename.lock().expect("lock") = std::fs::read(&manifest).ok();
-            }
-            same_step(taken, &planned)
-        },
-        earlier,
-    );
+    let is_the_step = move |taken: &Step| {
+        if taken.name == "rename" && taken.path == "data/manifest.bin" {
+            *at_the_rename.lock().expect("lock") = std::fs::read(&manifest).ok();
+        }
+        same_step(taken, &planned)
+    };
+    if then == Then::Stop {
+        scope.stop_at(is_the_step, earlier);
+    } else {
+        scope.fail_where(is_the_step, earlier);
+    }
     let at_the_op = acked.clone();
     let succeeded = op.run(&mut engine, &mut acked, &root);
     if !scope
@@ -306,11 +362,15 @@ fn case(op: Op, steps: &[Step], nth: usize, then: Then) -> Result<(), String> {
             "the operation did not reach the step: its steps are not the same twice".into(),
         );
     }
+    if then == Then::Stop {
+        // The process is gone; what looks at the disk next is another one.
+        scope.heal();
+    }
     if op == Op::Backup {
         the_backup_is_whole_or_absent(&root, succeeded, &at_the_op)?;
     }
     match then {
-        Then::Crash => {}
+        Then::Crash | Then::Stop => {}
         Then::WriteThenCrash => {
             // Each is acknowledged or refused; what was acknowledged has to survive.
             insert(&mut engine, &mut acked, 5, "copper kettle");
@@ -328,12 +388,17 @@ fn case(op: Op, steps: &[Step], nth: usize, then: Then) -> Result<(), String> {
             settle(&acked, &engine).map_err(|e| format!("before the crash: {e}"))?;
         }
         Then::RetryThenCrash => {
-            op.run(&mut engine, &mut acked, &root);
+            // An insert and a bulk load add a row: one that was acknowledged is not sent
+            // again (a bulk load can be acknowledged and the merge after it fail).
+            if !(succeeded && matches!(op, Op::Insert | Op::BulkLoad)) {
+                op.run(&mut engine, &mut acked, &root);
+            }
             settle(&acked, &engine)
                 .map_err(|e| format!("before the crash, after the retry: {e}"))?;
         }
     }
     drop(engine);
+    scope.heal();
     // The scope stays open with nothing planned: what follows is then not really synced.
     let manifest_not_synced = step.name == "sync_dir" && step.path == "data/manifest.bin";
     let outcome = if manifest_not_synced {
@@ -353,7 +418,7 @@ fn every_step_of(op: Op) -> Vec<String> {
     let steps = steps_of(op);
     let mut failures = Vec::new();
     for nth in 0..steps.len() {
-        for then in [Then::Crash, Then::WriteThenCrash, Then::RetryThenCrash] {
+        for then in Then::ALL {
             if let Err(what) = case(op, &steps, nth, then) {
                 failures.push(format!(
                     "{op:?}, fault at step {nth} `{}`, then {then:?}: {what}",
@@ -394,6 +459,16 @@ fn a_flush_failed_at_any_step_loses_nothing_acknowledged() {
 #[test]
 fn a_compaction_failed_at_any_step_loses_nothing_acknowledged() {
     assert_none(&every_step_of(Op::Compact));
+}
+
+#[test]
+fn a_rewrite_of_segments_that_hold_deletions_failed_at_any_step_loses_nothing_acknowledged() {
+    assert_none(&every_step_of(Op::Reseal));
+}
+
+#[test]
+fn a_vocabulary_rebuild_failed_at_any_step_loses_nothing_acknowledged() {
+    assert_none(&every_step_of(Op::Rebuild));
 }
 
 #[test]
