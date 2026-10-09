@@ -215,6 +215,21 @@ cooldown, and growth stops when a resize fails to relieve the hottest shard. Aut
 only grows; shrink explicitly. Flag details are in
 [coordinator mode](../reference/api/server/coordinator-mode.md).
 
+**What a resize or a vocabulary change costs**
+([ADR-225](../decisions/adr-225-what-a-rebuild-costs-and-who-frees-the-layout-it-replaced.md)).
+Both rebuild the whole corpus beside the one that is serving. Plan for three things:
+
+- **Time, linear in the corpus.** On the reference development machine a rebuild takes about
+  five seconds for each million queries (11 to 12 s at two million). Measure yours with
+  `clusterbench rebuild <queries> 5000 <shards> <new shards>`.
+- **Writes wait for all of it.** Searches go on at their usual latency; every `PUT`, `DELETE`
+  and `_bulk` that arrives waits until the rebuild has committed. If your writers give up
+  sooner than a rebuild takes at your corpus size (a 30 s client timeout is reached near six
+  million queries at the rate above), run the change when writes are quiet, or raise the
+  timeout for its duration.
+- **Memory for two corpora.** Peak resident memory during a rebuild was up to 2.4 times the
+  resident memory before it. Leave room for 2.5 times.
+
 **A resolve-only remote coordinator** resizes online onto fresh nodes (ADR-180). Start the new
 shard servers empty (their own volumes and certificates whose SANs cover their names), then pass
 them as `targets`:

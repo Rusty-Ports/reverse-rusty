@@ -1,6 +1,10 @@
 //! Cluster fan-out benchmark.
 //!
 //! Usage: clusterbench [num_queries] [num_titles] [num_shards] [broad_frac] [seed]
+//!        clusterbench rebuild [num_queries] [num_titles] [shards_from] [shards_to] [seed]
+//!
+//! The second form measures what a resize and a vocabulary change cost a serving
+//! coordinator; see `clusterbench/rebuild.rs`.
 //!
 //! Builds an in-process multi-shard `ClusterEngine` over a seeded corpus and reports the
 //! *structural* cluster metrics that are fixed by the data + the ring (NOT the CPU, so they
@@ -18,8 +22,15 @@ use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::Normalizer;
 use std::time::Instant;
 
+#[path = "clusterbench/rebuild.rs"]
+mod rebuild;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|mode| mode == "rebuild") {
+        rebuild::run(&args);
+        return;
+    }
     let num_queries = arg_usize(&args, 1, 100_000);
     let num_titles = arg_usize(&args, 2, 5_000);
     let num_shards = arg_usize(&args, 3, 8);

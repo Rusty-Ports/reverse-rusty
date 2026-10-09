@@ -9,6 +9,20 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
+## 2026-10-08 — What a rebuild costs, and who frees the layout it replaced
+
+- **A search no longer stalls when a resize or a vocabulary change publishes its layout**
+  ([ADR-225](decisions/adr-225-what-a-rebuild-costs-and-who-frees-the-layout-it-replaced.md)).
+  The layout that was replaced was freed by whoever dropped the last handle on it, which was
+  often a search, and that one search freed every shard of the old corpus: 205 to 293 ms
+  beside a rebuild of two million queries. It is freed on a thread of its own now, and the
+  longest search there is 18 to 84 ms.
+- **A rebuild is measured.** `ClusterEngine::last_rebuild` gives the time of each part of the
+  last one, and `clusterbench rebuild` runs one beside a searcher and a writer. On the
+  reference machine: about five seconds for each million queries, searches not slowed, writes
+  waiting for the whole rebuild, up to 2.4 times the resident memory. Sizing guidance is in
+  the cluster deployment guide.
+
 ## 2026-10-08 — A write is under way on every shard of a step at once
 
 - **A coordinator of remote shards sends each step of a write to all its shards at once**

@@ -553,3 +553,77 @@ fn replaced_layouts_are_forgotten_once_released() {
         "{remembered} replaced layouts are still remembered after they were released"
     );
 }
+
+/// Whoever drops the last handle on a replaced layout frees every shard it held. A search
+/// holds a layout for one title, so its handle must not be the last: after a layout is
+/// replaced, something other than the reader keeps it until the readers are done, and frees
+/// it then.
+#[test]
+fn a_reader_is_not_the_one_that_frees_a_replaced_layout() {
+    let cluster = in_memory(2, 200);
+    let read_by_a_search = cluster.layout();
+    let replaced = Arc::downgrade(&read_by_a_search);
+
+    cluster.resize(3).expect("resize");
+    assert!(
+        replaced.strong_count() >= 2,
+        "the search's handle is the only one left on the layout it reads"
+    );
+    drop(read_by_a_search);
+    // The other holder lets go once the reader has, and the layout is freed there.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while replaced.strong_count() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(replaced.strong_count(), 0, "the replaced layout was freed");
+}
+
+/// A rebuild keeps the time each of its parts took: for a resize and for a vocabulary
+/// change, with the commit of a durable cluster counted, and replaced by the next rebuild.
+#[test]
+fn a_rebuild_keeps_the_time_of_each_of_its_parts() {
+    let dir = std::env::temp_dir().join(format!("rr_rebuild_timings_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = ClusterConfig {
+        num_shards: 2,
+        include_broad: true,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let cluster = ClusterEngine::build(vocab(), &cfg, &corpus(300)).expect("cluster");
+    assert_eq!(cluster.last_rebuild(), None, "no rebuild has run");
+
+    assert_eq!(cluster.resize(3).expect("resize"), 300);
+    let resized = cluster.last_rebuild().expect("the resize was timed");
+    assert_eq!(resized.queries, 300);
+    assert!(resized.build > Duration::ZERO && resized.extract > Duration::ZERO);
+    assert!(
+        resized.commit > Duration::ZERO,
+        "a durable cluster checkpoints"
+    );
+    assert_eq!(
+        resized.total(),
+        resized.gather
+            + resized.extract
+            + resized.place
+            + resized.build
+            + resized.publish
+            + resized.commit
+    );
+
+    cluster
+        .set_vocab(crate::vocab::Vocab::default())
+        .expect("a vocabulary");
+    let changed = cluster
+        .last_rebuild()
+        .expect("the vocabulary change was timed");
+    assert_eq!(changed.queries, 300);
+    assert!(changed.commit > Duration::ZERO);
+    assert_ne!(changed, resized, "the record is of the last rebuild");
+
+    // A resize to the count the cluster has rebuilds nothing, and the record stays.
+    assert_eq!(cluster.resize(3).expect("no-op"), 0);
+    assert_eq!(cluster.last_rebuild(), Some(changed));
+    drop(cluster);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -68,7 +68,7 @@ pub use pit::ClusterPitError;
 pub use published::PublishedLayout;
 pub use ranked::{ClusterRankedError, ClusterRankedHit, ClusterRankedMatch};
 pub use ranked_batch::{ClusterBatchRankedMatch, ClusterRankedTitle};
-pub use resize::recommended_shard_count;
+pub use resize::{recommended_shard_count, RebuildTimings};
 pub use target::AddOutcome;
 use target::{placement_of, planned, Target};
 pub use topology::{resolve_topology, route_topology, seed_position_preserving, ShardEndpoints};
@@ -384,6 +384,8 @@ pub struct ClusterEngine {
     /// replaces. A test outside this crate stops a rebuild there to show what answers beside
     /// it. Never set in production.
     rebuild_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// How long each part of the last rebuild took. See [`Self::last_rebuild`].
+    last_rebuild: Mutex<Option<resize::RebuildTimings>>,
     /// Exact manifest a pending alias-import checkpoint attempted to publish.
     /// This is populated before the atomic write so a retry can distinguish a
     /// completed rename whose parent-directory sync failed from any divergent

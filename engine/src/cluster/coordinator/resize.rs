@@ -44,7 +44,11 @@ use crate::cluster::coordinator::layout::LayoutChange;
 
 mod control;
 mod rebuild;
+mod timings;
 mod visibility;
+
+pub(in crate::cluster::coordinator) use timings::Lap;
+pub use timings::RebuildTimings;
 
 impl ClusterEngine {
     /// Resize the cluster to `new_num_shards` positions (ADR-078) — a blue/green rebuild of
@@ -138,6 +142,7 @@ impl ClusterEngine {
         drop(before);
         let (rebuilt, after) =
             self.rebuild_from_live(change, new_norm, new_ring, None, next_generation)?;
+        let mut lap = Lap::start();
 
         // Keep the cluster-state document consistent with the new shard count so `collect_load`
         // / `assignment_for` (introspection + the autoscaler) see K′ positions, not a stale K.
@@ -161,6 +166,7 @@ impl ClusterEngine {
             self.await_retired_layouts();
             self.checkpoint_quiesced(&after)?;
         }
+        self.note_rebuild_commit(lap.lap());
         Ok(rebuilt)
     }
 

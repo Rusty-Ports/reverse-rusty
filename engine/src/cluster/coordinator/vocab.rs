@@ -135,6 +135,7 @@ impl ClusterEngine {
         drop(before);
         let (rebuilt, after) =
             self.rebuild_from_live(change, new_norm, ring, Some(vocab), next_generation)?;
+        let mut lap = super::resize::Lap::start();
 
         self.propose_layout_change(
             &after,
@@ -152,6 +153,7 @@ impl ClusterEngine {
             self.await_retired_layouts();
             self.checkpoint_quiesced(&after)?;
         }
+        self.note_rebuild_commit(lap.lap());
         Ok(rebuilt)
     }
 

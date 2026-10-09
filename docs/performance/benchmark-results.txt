@@ -47,6 +47,9 @@ HOW TO RUN
   cargo run --release --bin snapbench -- 1000000 200 /tmp/snapbench-data
                                                             #   the same on mmap base segments
   cargo run --release --bin clusterbench -- 100000 5000 8 0.05  # CLUSTER fan-out + candidate structure
+  cargo run --release --bin clusterbench -- rebuild 1000000 5000 4 8
+                                                            # what a resize and a vocabulary change cost
+                                                            #   a serving coordinator (ADR-225)
   cargo run --release --bin rankbench -- 20000 500 8 275775489  # local/distributed bounded top-K + fetch
   cargo run --release --bin rankbench -- 20000 500 8 275775489 \
       ../deploy/ranking-profiles.example.json linear_v1        # selected CPU profile
@@ -63,6 +66,7 @@ HOW TO RUN
   tagbench args:     <num_queries> <num_titles> <segments> <broad_frac> <seed>
   snapbench args:    <num_queries> <iters> [data_dir]
   clusterbench args: <num_queries> <num_titles> <num_shards> <broad_frac> <seed>
+  clusterbench rebuild args: <num_queries> <num_titles> <shards_from> <shards_to> <seed>
   rankbench args:    <num_queries> <num_titles> <num_shards> <seed> [profile_file] [profile_name]
   Most seeds default to 0x00C0FFEE; tagbench defaults to 0x174. Budget: each is <~30s except the
   5M+ bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
@@ -519,6 +523,35 @@ CAPTURE LOG  (newest first — append a block per run; lead with the machine)
   segbench             : 53.48/55.11/56.67/57.68 cands/title;  717728/574005/327257/351379 titles/s/core
   oracle               : 109024 == 109024 matches, false_neg=0, false_pos=0
   updates              : ~730–825k/s/core, immediate (epoch) visibility
+
+[2026-10-08]  Apple M4 Max, 16-core, rustc 1.95.0 (release).  WHAT A REBUILD COSTS A SERVING
+              COORDINATOR (ADR-225; clusterbench rebuild <N> 5000 4 8; durable in-process
+              cluster, one thread searching and one writing beside each rebuild).
+  seconds; "write" is the longest any write waited; "peak" is peak resident memory against the
+  resident memory before the rebuild.
+  RESIZE 4 -> 8
+    queries   rebuild  gather  extract  place  build  publish  commit   write    peak
+    100k        0.93    0.03    0.16    0.05   0.41   0.000    0.24     0.88    1.68x
+    500k        2.65    0.19    0.88    0.24   0.90   0.001    0.34     2.56    2.37x
+    1M          5.13    0.51    1.79    0.68   1.54   0.001    0.46     4.99    2.07x
+    2M         11.67    1.79    4.02    1.40   3.29   0.008    0.91    11.42    (1.02x)
+  VOCABULARY CHANGE (one synonym added)
+    100k        1.10    0.05    0.20    0.05   0.44   0.000    0.25     1.00    1.83x
+    500k        2.76    0.17    1.06    0.24   0.84   0.001    0.35     2.67    2.43x
+    1M          5.60    0.43    2.16    0.50   1.57   0.004    0.51     5.18    2.04x
+    2M         11.05    1.34    4.55    1.04   3.11   0.005    0.78    10.83    (1.18x)
+  search latency, microseconds (p50 / p99), nothing else running -> beside the resize:
+    100k  37 / 115 -> 35 / 107     500k  44 / 124 -> 44 / 131
+    1M    49 / 140 -> 50 / 153     2M    56 / 313 -> 57 / 336
+  the longest single search beside a rebuild: 4 ms (100k), 14 ms (500k), 35 ms (1M), 21-84 ms (2M).
+  Before a replaced layout was freed on a thread of its own, the longest at 2M was 205-293 ms and
+  began right after the publication: that search dropped the last handle on the old layout and
+  freed its shards.
+  Reading it: time is linear in the corpus (about 5 s per million queries here), extract and
+  build are most of it, a write waits for the whole rebuild, and searches are not slowed. The 2M
+  peak ratio is in brackets because the process still held memory from building the corpus when
+  "before" was read; plan for 2.5x.
+  Throughput is machine-dependent; the shape is not.
 
 [2026-10-06]  Apple M4 Max, rustc 1.95.0 (release).  WRITE + PUBLISH WITH THE SNAPSHOT HELD (ADR-016
               later outcome; snapbench, 200 iterations per leg, automatic flush off, each leg

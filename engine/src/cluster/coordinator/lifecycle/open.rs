@@ -126,6 +126,7 @@ impl ClusterEngine {
             #[cfg(test)]
             admission_hook: Mutex::new(None),
             rebuild_hook: Mutex::new(None),
+            last_rebuild: Mutex::new(None),
             pending_alias_import_manifest: Mutex::new(None),
             committed_placement_generation: AtomicU64::new(
                 durable
@@ -558,6 +559,7 @@ impl ClusterEngine {
                 None,
                 next_generation,
                 true,
+                std::time::Duration::ZERO,
             )?;
             engine
                 .control

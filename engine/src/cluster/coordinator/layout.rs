@@ -318,6 +318,8 @@ impl super::ClusterEngine {
         // An in-memory engine never runs the cleanup that would drop the ones already gone.
         retired.retain(|layout| layout.strong_count() > 0);
         retired.push(Arc::downgrade(&previous));
+        drop(retired);
+        release_off_the_readers(previous);
         next
     }
 
@@ -411,4 +413,30 @@ impl super::ClusterEngine {
             hook();
         }
     }
+}
+
+/// Free a replaced layout on a thread of its own, once nothing else holds it.
+///
+/// Whoever drops the last handle on a layout frees it, and with it every shard of the
+/// corpus it served. A search loads the layout for one title, so without this the last
+/// handle is often a search's, and that one search pays for the whole teardown: hundreds of
+/// milliseconds at two million queries. A reader does not reclaim (the rule of RCU): this
+/// thread keeps a handle until the readers are done and is then the one that lets go.
+///
+/// An operation that holds the old layout past the grace period becomes its last holder, as
+/// before; it is long-running already.
+fn release_off_the_readers(replaced: Arc<Layout>) {
+    let release = move || {
+        let deadline = std::time::Instant::now() + RETIRED_LAYOUT_GRACE;
+        while Arc::strong_count(&replaced) > 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        drop(replaced);
+    };
+    let started = std::thread::Builder::new()
+        .name("rr-layout-release".into())
+        .spawn(release);
+    // A thread that could not be started has dropped the closure, and the handle with it,
+    // on this thread: the layout is released as it was before there was one.
+    drop(started);
 }
