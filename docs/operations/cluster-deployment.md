@@ -227,8 +227,8 @@ Both rebuild the whole corpus beside the one that is serving. Plan for three thi
   sooner than a rebuild takes at your corpus size (a 30 s client timeout is reached near six
   million queries at the rate above), run the change when writes are quiet, or raise the
   timeout for its duration.
-- **Memory for two corpora.** From half a million queries up, peak resident memory during a
-  rebuild was 1.5 to 2.5 times the resident memory before it. Leave room for 2.5 times.
+- **Memory for two corpora.** Peak resident memory during a rebuild was 1.3 to 2.8 times the
+  resident memory when it began. Leave room for three times.
 
 **A resolve-only remote coordinator** resizes online onto fresh nodes (ADR-180). Start the new
 shard servers empty (their own volumes and certificates whose SANs cover their names), then pass

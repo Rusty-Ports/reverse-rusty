@@ -76,7 +76,6 @@ pub(crate) fn run(args: &[String]) {
         &beside(&cluster, &titles, &next_id, || {
             cluster.resize(shards_to).expect("resize");
         }),
-        resident,
     );
     let mut vocabulary = Vocab::default();
     vocabulary.add_synonym("zzbenchalias", "zzbenchcanonical", FeatureKind::Generic);
@@ -85,7 +84,6 @@ pub(crate) fn run(args: &[String]) {
         &beside(&cluster, &titles, &next_id, || {
             cluster.set_vocab(vocabulary).expect("set_vocab");
         }),
-        resident,
     );
     drop(cluster);
     let _ = std::fs::remove_dir_all(&dir);
@@ -137,6 +135,8 @@ struct Beside {
     longest_search_at: Duration,
     writes: usize,
     longest_write: Duration,
+    /// Resident memory when this rebuild began, and the most it reached while it ran.
+    resident_before_mb: f64,
     peak_mb: f64,
 }
 
@@ -212,6 +212,7 @@ fn beside(
         });
         // Let the two settle before the rebuild begins.
         std::thread::sleep(Duration::from_millis(300));
+        let resident_before_mb = rss_mb();
         measuring.store(true, Ordering::Release);
         let started = Instant::now();
         rebuild();
@@ -227,12 +228,13 @@ fn beside(
             longest_search_at: longest_at.saturating_duration_since(started),
             writes,
             longest_write,
+            resident_before_mb,
             peak_mb: sampler.join().expect("sampler"),
         }
     })
 }
 
-fn report(what: &str, ran: &Beside, resident_before: f64) {
+fn report(what: &str, ran: &Beside) {
     let t = &ran.timings;
     let secs = |d: Duration| d.as_secs_f64();
     println!("---------------- {what} ----------------");
@@ -265,9 +267,10 @@ fn report(what: &str, ran: &Beside, resident_before: f64) {
         secs(ran.longest_write)
     );
     println!(
-        "peak resident       : {:.0} MB  ({:.2}x the {resident_before:.0} MB before)",
+        "peak resident       : {:.0} MB  ({:.2}x the {:.0} MB when it began)",
         ran.peak_mb,
-        ran.peak_mb / resident_before.max(1.0)
+        ran.peak_mb / ran.resident_before_mb.max(1.0),
+        ran.resident_before_mb
     );
 }
 

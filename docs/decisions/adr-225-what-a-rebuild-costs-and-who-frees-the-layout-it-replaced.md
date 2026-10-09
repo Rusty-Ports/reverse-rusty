@@ -44,28 +44,27 @@ shards. Every number depends on the machine; the shape does not.
 
 | Queries | Rebuild | gather | extract | place | build | publish | commit | Longest write wait | Peak resident |
 |---|---|---|---|---|---|---|---|---|---|
-| 100k | 1.2 s | 0.03 | 0.16 | 0.05 | 0.41 | <0.001 | 0.24 | 0.9 s | 237 MB (94 before) |
-| 500k | 2.7 s | 0.21 | 0.85 | 0.25 | 0.85 | 0.001 | 0.35 | 2.5 s | 1,062 MB (529 before) |
-| 1M | 5.0 s | 0.51 | 1.78 | 0.55 | 1.49 | 0.003 | 0.61 | 4.9 s | 1,698 MB (983 before) |
-| 2M | 10.8 s | 1.56 | 3.70 | 1.42 | 3.41 | 0.004 | 0.71 | 10.8 s | 2,841 MB (1,694 before) |
+| 100k | 1.0 s | 0.03 | 0.16 | 0.05 | 0.42 | <0.001 | 0.24 | 0.9 s | 254 MB (152 when it began) |
+| 500k | 2.8 s | 0.21 | 0.83 | 0.25 | 0.90 | 0.001 | 0.36 | 2.6 s | 1,039 MB (375) |
+| 1M | 5.0 s | 0.50 | 1.68 | 0.56 | 1.61 | 0.002 | 0.45 | 4.8 s | 1,762 MB (922) |
+| 2M | 10.7 s | 1.50 | 3.47 | 1.48 | 3.36 | 0.012 | 0.89 | 10.7 s | 2,365 MB (1,505) |
 
-(A resize. A vocabulary change is within a tenth of it, with more of the time in extract and
-a higher peak: 2,349 MB at 1M. The rebuild's wall time includes waiting for the layout lock,
-which the parts do not.)
+(A resize. A vocabulary change is within a tenth of it, with more of the time in extract:
+2.20 s of 5.2 s at 1M. The rebuild's wall time includes waiting for the layout lock, which
+the parts do not.)
 
 - **Time is linear in the corpus,** about five seconds for a million queries here. Extracting
   every query again is the largest part, building the shards the second.
 - **Searches are not slowed.** The median and the 99th percentile beside a rebuild are those
-  of the same searches with nothing else running (1M: 50 µs and 163 µs against 50 µs and
-  143 µs; 2M: 55 µs and 240 µs against 55 µs and 234 µs).
+  of the same searches with nothing else running (1M: 50 µs and 152 µs against 49 µs and
+  138 µs; 2M: 57 µs and 241 µs against 54 µs and 231 µs).
 - **Writes wait for the whole rebuild.** The longest write waited as long as the rebuild
   took, at every size.
-- **Memory:** two corpora are resident while the new one is built. From 500k up, peak
-  resident memory was 1.5 to 2.5 times what the process held before the rebuild; at 100k,
-  where fixed costs dominate, more. The reading before a rebuild depends on what the
-  allocator has kept, so the ratio moves between runs. Plan for 2.5 times.
+- **Memory:** two corpora are resident while the new one is built. Peak resident memory was
+  1.3 to 2.8 times what the process held when the rebuild began. That reading depends on
+  what the allocator has kept, so the ratio moves between runs. Plan for three times.
 - **The longest search beside a 2M rebuild** was 205 to 293 ms before the third point of the
-  decision, right after the publication, and 18 to 84 ms after it.
+  decision, right after the publication, and 17 to 84 ms after it.
 
 ## What changes for a deployment
 
